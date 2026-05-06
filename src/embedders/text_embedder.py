@@ -7,14 +7,13 @@ from typing import Iterator, Sequence, TypedDict
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
+from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.file.data_loader import (
     iter_document_chunks,
     iter_plain_text_chunks,
     normalize_file_kind,
     MAX_INPUT_CHARS,
 )
-
-_FIX_EMBEDDING_DIMENSION = 1536
 
 
 class TextEmbeddingResult(TypedDict):
@@ -28,14 +27,14 @@ class TextChunkEmbedding(TypedDict):
 
 
 def pad_embedding_to_storage_dim(raw: list[float]) -> list[float]:
-    """모델 출력 벡터를 DB ``vector(1536)`` 저장 형식으로 맞춘다."""
+    """모델 출력 벡터를 DB ``vector(FIX_EMBEDDING_DIMENSION)`` 저장 형식으로 맞춘다."""
     vec = np.asarray(raw, dtype=np.float32)
     if vec.size == 0:
-        vec = np.zeros((_FIX_EMBEDDING_DIMENSION,), dtype=np.float32)
-    if vec.shape[0] < _FIX_EMBEDDING_DIMENSION:
+        vec = np.zeros((FIX_EMBEDDING_DIMENSION,), dtype=np.float32)
+    if vec.shape[0] < FIX_EMBEDDING_DIMENSION:
         vec = np.pad(
             vec,
-            (0, _FIX_EMBEDDING_DIMENSION - vec.shape[0]),
+            (0, FIX_EMBEDDING_DIMENSION - vec.shape[0]),
             mode="constant",
             constant_values=0.0,
         )

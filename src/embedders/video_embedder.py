@@ -6,6 +6,7 @@ from typing import Sequence, TypedDict
 import numpy as np
 from PIL import Image
 
+from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
 from src.embedders.image_embedder import (
     clip_image_embedding_normalized,
     clip_image_row_to_embedding_1536,
@@ -45,7 +46,7 @@ def _scene_weights(items: Sequence[KeyframeBytesResult]) -> list[float]:
 def embed_video_keyframes_clip(
     frame_items: list[KeyframeBytesResult],
     *,
-    model_name: str = "openai/clip-vit-base-patch32",
+    model_name: str = DEFAULT_CLIP_MODEL_NAME,
     korean_labels_per_frame: list[list[str]] | None = None,
     text_template: str = "사진 속 {label}",
 ) -> VideoClipEmbeddingsResult:

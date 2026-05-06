@@ -10,10 +10,8 @@ from PIL import Image
 from torch import nn
 from transformers import CLIPModel, CLIPProcessor
 
+from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME, FIX_EMBEDDING_DIMENSION
 from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
-
-
-CLIP_IMAGE_EMBED_DIM = 1536
 
 
 class ZeroShotKoTagResult(TypedDict):
@@ -45,12 +43,12 @@ def pad_or_truncate_1d(vec: np.ndarray, target_dim: int) -> np.ndarray:
 
 
 def clip_image_row_to_embedding_1536(image_row: torch.Tensor | np.ndarray) -> list[float]:
-    """CLIP 시각 행(배치 1행 또는 1차원 numpy)을 메타용 ``CLIP_IMAGE_EMBED_DIM`` 벡터로 패딩/절단."""
+    """CLIP 시각 행(배치 1행 또는 1차원 numpy)을 DB 저장 차원 벡터로 패딩/절단."""
     if isinstance(image_row, torch.Tensor):
         vec = image_row.detach().cpu().numpy().astype(np.float32)
     else:
         vec = np.asarray(image_row, dtype=np.float32).ravel()
-    vec = pad_or_truncate_1d(vec, CLIP_IMAGE_EMBED_DIM)
+    vec = pad_or_truncate_1d(vec, FIX_EMBEDDING_DIMENSION)
     return vec.tolist()
 
 
@@ -141,7 +139,7 @@ def clip_text_embeddings_normalized(
 def embed_clip_text_query_for_image_search(
     query: str,
     *,
-    model_name: str = "openai/clip-vit-base-patch32",
+    model_name: str = DEFAULT_CLIP_MODEL_NAME,
 ) -> list[float]:
     """
     DB에 저장된 CLIP 이미지 벡터(``clip_image_row_to_embedding_1536``)와 같은 공간의
@@ -206,7 +204,7 @@ def zero_shot_tag_rgb_korean_clip(
     rgb_img: Image.Image,
     korean_labels: list[str],
     *,
-    model_name: str = "openai/clip-vit-base-patch32",
+    model_name: str = DEFAULT_CLIP_MODEL_NAME,
     text_template: str = "사진 속 {label}",
 ) -> ZeroShotKoTagResult:
     """
@@ -231,7 +229,7 @@ def zero_shot_tag_image_korean_clip(
     file_path: str | Path,
     korean_labels: list[str],
     *,
-    model_name: str = "openai/clip-vit-base-patch32",
+    model_name: str = DEFAULT_CLIP_MODEL_NAME,
     text_template: str = "사진 속 {label}",
 ) -> ZeroShotKoTagResult:
     """
