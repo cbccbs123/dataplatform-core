@@ -24,6 +24,7 @@ class KeyframeClipEmbedding(TypedDict):
     frame_sec: float
     summary: dict[str, str | list[str]]
     labels: list[dict[str, float | str]] | None
+    clip_image_embedding: list[float]
 
 
 class VideoClipEmbeddingsResult(TypedDict):
@@ -90,8 +91,8 @@ def embed_video_keyframes_clip(
                 "end_sec": float(it["end_sec"]),
                 "frame_sec": float(it["frame_sec"]),
                 "summary": it["summary"],
-                #"clip_image_embedding": clip_image_row_to_embedding_1536(image_emb[0]),
                 "labels": labels_meta,
+                "clip_image_embedding": clip_image_row_to_embedding_1536(image_emb[0]),
             }
         )
 

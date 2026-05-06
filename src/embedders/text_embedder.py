@@ -6,9 +6,10 @@ from typing import Iterator, Sequence, TypedDict
 
 from sentence_transformers import SentenceTransformer
 import numpy as np
-from src.embedders.text_embedding_normalize import normalize_text_for_embedding
+from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 from src.file.data_loader import (
     iter_document_chunks,
+    iter_plain_text_chunks,
     normalize_file_kind,
     MAX_INPUT_CHARS,
 )
@@ -196,6 +197,53 @@ def embedding_text_chunks(
                 "embedding_vector": pad_embedding_to_storage_dim(chunk_vector),
             }
         )
+    if not out:
+        out.append(
+            {
+                "chunk_index": 0,
+                "content": "",
+                "embedding_vector": pad_embedding_to_storage_dim([]),
+            }
+        )
+    return out
+
+
+def embedding_plain_text_chunks(
+    text: str,
+    *,
+    chunk_size: int,
+    embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
+    normalize_embeddings: bool = True,
+    overlap_size: int = 0,
+    max_input_chars: int = MAX_INPUT_CHARS,
+) -> list[TextChunkEmbedding]:
+    """STT 등 단일 문자열을 청크 단위로 임베딩한다. ``media_chunks`` 저장용."""
+    out: list[TextChunkEmbedding] = []
+    chunk_index = 0
+    for chunk in iter_plain_text_chunks(
+        text,
+        chunk_size=chunk_size,
+        overlap_size=overlap_size,
+        max_input_chars=max_input_chars,
+    ):
+        if not chunk:
+            continue
+        clean = normalize_text_for_embedding(chunk)
+        if not clean.strip():
+            clean = " "
+        chunk_vector = embed_texts(
+            [clean],
+            model_name=embedding_model_name,
+            normalize_embeddings=normalize_embeddings,
+        )[0]
+        out.append(
+            {
+                "chunk_index": chunk_index,
+                "content": clean,
+                "embedding_vector": pad_embedding_to_storage_dim(chunk_vector),
+            }
+        )
+        chunk_index += 1
     if not out:
         out.append(
             {

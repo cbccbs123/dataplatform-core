@@ -16,10 +16,11 @@ from src.embedders.image_embedder import (
 from src.embedders.video_embedder import embed_video_keyframes_clip
 from src.embedders.text_embedder import (
     embed_texts,
+    embedding_plain_text_chunks,
     embedding_text_chunks,
     pad_embedding_to_storage_dim,
 )
-from src.embedders.text_embedding_normalize import normalize_text_for_embedding
+from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 from src.extractors.audio_meta_extractor import extract_audio_meta
 from src.extractors.image_meta_extractor import extract_image_meta
 from src.extractors.text_meta_extractor import extract_text_meta
@@ -30,7 +31,12 @@ from src.llm.image_summarizer import (
 from src.llm.text_summarizer import summarize_and_extract_keywords, summarize_and_extract_keywords_from_audio
 from src.llm.video_summarizer import summarize_video_from_scene_results
 from src.config.settings import get_current_settings
-from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
+from src.file.file_type_defs import (
+    ALLOWED_TEXT_META_FILE_KINDS,
+    MEDIA_TYPES_CLIP_CHUNK_SEARCH,
+    MEDIA_TYPES_ST_CHUNK_SEARCH,
+    MediaKind,
+)
 from src.file.file_type_detector import detect_file_kind
 from src.preprocess.stt import transcribe_audio_local
 from src.preprocess.video_keyframes import extract_video_basic_meta, extract_video_representative_frame_bytes
@@ -78,7 +84,7 @@ def embed_query_for_media_search(query: str) -> list[float]:
     )[0]
     return pad_embedding_to_storage_dim(row)
 
-def search_media_items(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+def search_media_text_items(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
     """
     pgvector 코사인 연산(`<=>`, 인덱스 `vector_cosine_ops`)으로 근접 순위를 매긴다.
 
@@ -86,7 +92,7 @@ def search_media_items(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
     쿼리와 가장 가까운 청크 기준(``MAX(1 - 거리)``)이다.
 
     쿼리 벡터는 SentenceTransformer 기반이므로 CLIP 이미지 청크와 섞이지 않게
-    ``ALLOWED_TEXT_META_FILE_KINDS``에 해당하는 ``media_type``만 조회한다.
+    ``MEDIA_TYPES_ST_CHUNK_SEARCH``(문서·오디오 STT 청크 등)만 조회한다.
     """
     db = PostgresUtil()
     query_vector = embed_query_for_media_search(query)
@@ -112,7 +118,7 @@ def search_media_items(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
                     """,
                     (
                         query_vector,
-                        list(ALLOWED_TEXT_META_FILE_KINDS),
+                        list(MEDIA_TYPES_ST_CHUNK_SEARCH),
                         _EMBEDDING_KIND_ST,
                         limit,
                     ),
@@ -129,7 +135,8 @@ def search_media_images_by_text(
     """
     CLIP 텍스트 인코더 쿼리와 ``media_chunks``의 CLIP 이미지 임베딩을 코사인으로 비교한다.
 
-    ``search_media_items``(SentenceTransformer)와 달리 ``media_type = image`` 만 대상이다.
+    ``search_media_items``(SentenceTransformer)와 달리 ``media_type`` 은
+    이미지·영상(키프레임 CLIP)만 대상이다.
     """
     db = PostgresUtil()
     query_vector = embed_clip_text_query_for_image_search(query, model_name=clip_model_name)
@@ -147,13 +154,18 @@ def search_media_images_by_text(
                     FROM media_items mi
                     JOIN media_chunks mc ON mi.id = mc.media_item_id
                     WHERE mc.embedding IS NOT NULL
-                      AND mi.media_type = %s
+                      AND mi.media_type = ANY(%s)
                       AND mc.embedding_kind = %s
                     GROUP BY mi.id, mi.file_uri, mi.media_type
                     ORDER BY similarity DESC
                     LIMIT %s
                     """,
-                    (query_vector, MediaKind.IMAGE.value, _EMBEDDING_KIND_CLIP, limit),
+                    (
+                        query_vector,
+                        list(MEDIA_TYPES_CLIP_CHUNK_SEARCH),
+                        _EMBEDDING_KIND_CLIP,
+                        limit,
+                    ),
                 )
                 return list(cur.fetchall())
 
@@ -194,13 +206,18 @@ def search_media_images_two_stage(
                     FROM media_items mi
                     JOIN media_chunks mc ON mi.id = mc.media_item_id
                     WHERE mc.embedding IS NOT NULL
-                      AND mi.media_type = %s
+                      AND mi.media_type = ANY(%s)
                       AND mc.embedding_kind = %s
                     GROUP BY mi.id, mi.file_uri, mi.media_type
                     ORDER BY s_text DESC
                     LIMIT %s
                     """,
-                    (text_q, MediaKind.IMAGE.value, _EMBEDDING_KIND_ST, stage1_limit),
+                    (
+                        text_q,
+                        list(MEDIA_TYPES_CLIP_CHUNK_SEARCH),
+                        _EMBEDDING_KIND_ST,
+                        stage1_limit,
+                    ),
                 )
                 stage1 = list(cur.fetchall())
 
@@ -231,12 +248,17 @@ def search_media_images_two_stage(
                     FROM media_items mi
                     JOIN media_chunks mc ON mi.id = mc.media_item_id
                     WHERE mc.embedding IS NOT NULL
-                      AND mi.media_type = %s
+                      AND mi.media_type = ANY(%s)
                       AND mc.embedding_kind = %s
                       AND mi.id = ANY(%s)
                     GROUP BY mi.id
                     """,
-                    (clip_q, MediaKind.IMAGE.value, _EMBEDDING_KIND_CLIP, ids),
+                    (
+                        clip_q,
+                        list(MEDIA_TYPES_CLIP_CHUNK_SEARCH),
+                        _EMBEDDING_KIND_CLIP,
+                        ids,
+                    ),
                 )
                 for row in cur.fetchall():
                     clip_by_id[int(row["id"])] = float(row["s_clip"])
@@ -444,14 +466,107 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                 )
                 for _it in result:
                     _it.pop("jpeg_bytes", None)
-                meta["keyframes"] = clip_ve["keyframes"]
+                meta["keyframes"] = [
+                    {k: v for k, v in kf.items() if k != "clip_image_embedding"}
+                    for kf in clip_ve["keyframes"]
+                ]
                 print("meta:", json.dumps(meta, ensure_ascii=False, indent=4))
+                pair_rows: list[tuple[int, str, list[float], str]] = []
+                for i, kf in enumerate(clip_ve["keyframes"]):
+                    summ = kf.get("summary") or {}
+                    if not isinstance(summ, dict):
+                        summ = {}
+                    frame_meta: dict[str, Any] = {
+                        "summary": str(summ.get("summary", "") or ""),
+                        "keywords": summ["keywords"]
+                        if isinstance(summ.get("keywords"), list)
+                        else [],
+                        "labels": kf.get("labels") or [],
+                    }
+                    chunk_content = build_image_vlm_text_for_embedding(frame_meta)
+                    if not chunk_content.strip():
+                        chunk_content = " "
+                    st_raw = embed_texts(
+                        [chunk_content],
+                        model_name=cfg.text_embedding_model,
+                        normalize_embeddings=cfg.text_embedding_normalize,
+                    )[0]
+                    st_vec = pad_embedding_to_storage_dim(st_raw)
+                    clip_vec = kf["clip_image_embedding"]
+                    pair_rows.append((2 * i, chunk_content, st_vec, _EMBEDDING_KIND_ST))
+                    pair_rows.append((2 * i + 1, chunk_content, clip_vec, _EMBEDDING_KIND_CLIP))
+                print("video_keyframe_chunk_pairs:", len(pair_rows) // 2)
+                with db.transaction() as conn:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO media_items (file_uri, media_type, metadata)
+                            VALUES (%s, %s, %s)
+                            RETURNING id
+                            """,
+                            (file, file_kind, json.dumps(meta)),
+                        )
+                        ins = cur.fetchone()
+                        if ins is None:
+                            raise RuntimeError("media_items INSERT did not return id")
+                        media_item_id = ins["id"]
+                        if pair_rows:
+                            cur.executemany(
+                                f"""
+                                INSERT INTO media_chunks (
+                                    media_item_id, chunk_index, content, embedding, embedding_kind
+                                ) VALUES (%s, %s, %s, %s::vector({_FIX_EMBEDDING_DIMENSION}), %s)
+                                """,
+                                [
+                                    (media_item_id, idx, content, emb, kind)
+                                    for (idx, content, emb, kind) in pair_rows
+                                ],
+                            )
             elif file_kind == MediaKind.AUDIO.value:
                 stt_result = transcribe_audio_local(file_path=file)
                 meta = extract_audio_meta(file_path=file)
                 summary = summarize_and_extract_keywords_from_audio(text=stt_result["text"])
                 meta = meta | summary
+                cfg = get_current_settings()
+                chunks = embedding_plain_text_chunks(
+                    stt_result["text"],
+                    chunk_size=cfg.text_embedding_chunk_size,
+                    embedding_model_name=cfg.text_embedding_model,
+                    normalize_embeddings=cfg.text_embedding_normalize,
+                )
                 print("meta:", json.dumps(meta, ensure_ascii=False, indent=4))
+                print("audio_stt_chunks:", len(chunks))
+                with db.transaction() as conn:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO media_items (file_uri, media_type, metadata)
+                            VALUES (%s, %s, %s)
+                            RETURNING id
+                            """,
+                            (file, file_kind, json.dumps(meta)),
+                        )
+                        row = cur.fetchone()
+                        if row is None:
+                            raise RuntimeError("media_items INSERT did not return id")
+                        media_item_id = row["id"]
+                        cur.executemany(
+                            f"""
+                            INSERT INTO media_chunks (
+                                media_item_id, chunk_index, content, embedding, embedding_kind
+                            ) VALUES (%s, %s, %s, %s::vector({_FIX_EMBEDDING_DIMENSION}), %s)
+                            """,
+                            [
+                                (
+                                    media_item_id,
+                                    c["chunk_index"],
+                                    c["content"],
+                                    c["embedding_vector"],
+                                    _EMBEDDING_KIND_ST,
+                                )
+                                for c in chunks
+                            ],
+                        )
             else:
                 raise ValueError(f"파일 종류: {file_kind}는 지원하지 않습니다.")
         except ValueError as e:

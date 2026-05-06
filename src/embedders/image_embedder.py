@@ -10,7 +10,7 @@ from PIL import Image
 from torch import nn
 from transformers import CLIPModel, CLIPProcessor
 
-from src.embedders.text_embedding_normalize import normalize_text_for_embedding
+from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 
 
 CLIP_IMAGE_EMBED_DIM = 1536

@@ -227,6 +227,31 @@ def _iter_document_chunks(
     )
 
 
+def iter_plain_text_chunks(
+    text: str,
+    *,
+    chunk_size: int,
+    overlap_size: int = 0,
+    max_input_chars: int = _MAX_INPUT_CHARS,
+) -> Iterator[str]:
+    """
+    파일 없이 문자열만 받아 ``_chunk_from_segments`` 규칙으로 나눈다.
+
+    STT 전체 텍스트 등을 ``iter_document_chunks``와 같은 크기·오버랩 정책으로
+    잘라 임베딩할 때 사용한다.
+    """
+    if overlap_size < 0:
+        raise ValueError("overlap_size는 0 이상이어야 합니다.")
+    if overlap_size >= chunk_size:
+        raise ValueError("overlap_size는 chunk_size보다 작아야 합니다.")
+    if max_input_chars <= 0:
+        return
+    if text is None or not str(text).strip():
+        return
+    limited = _limit_segments(iter([str(text)]), max_input_chars)
+    yield from _apply_overlap(_chunk_from_segments(limited, chunk_size), overlap_size)
+
+
 # Public API (recommended)
 normalize_file_kind = _normalize_file_kind
 choose_encoding = _choose_encoding
@@ -243,6 +268,7 @@ __all__ = [
     "MAX_INPUT_CHARS",
     "choose_encoding",
     "iter_document_chunks",
+    "iter_plain_text_chunks",
     "normalize_file_kind",
 ]
 

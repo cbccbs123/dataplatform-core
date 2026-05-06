@@ -64,22 +64,7 @@ def embed_texts(
         normalize_embeddings=normalize_embeddings,
     )
     return vectors.tolist()
-
-
-# def _detect_language(text: str) -> str:
-#     if not text.strip():
-#         return "unknown"
-#     hangul_count = len(re.findall(r"[가-힣]", text))
-#     latin_count = len(re.findall(r"[A-Za-z]", text))
-#     total_letters = hangul_count + latin_count
-#     if total_letters == 0:
-#         return "unknown"
-#     if (hangul_count / total_letters) >= 0.3:
-#         return "ko"
-#     if (latin_count / total_letters) >= 0.5:
-#         return "en"
-#     return "unknown"
-
+    
 
 def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:
     total_letters = hangul_count + latin_count
