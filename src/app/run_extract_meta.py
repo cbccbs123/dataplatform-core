@@ -1,3 +1,5 @@
+"""미디어별 메타 추출·청크 임베딩 적재·``media_items.search_vector``(FTS 평문) 생성."""
+
 from __future__ import annotations
 
 import json
@@ -19,6 +21,7 @@ from src.embedders.text_embedder import (
     embedding_text_chunks,
     pad_embedding_to_storage_dim,
 )
+from src.preprocess.media_item_search_text import build_media_item_fts_plain
 from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.search.media_search import (
@@ -40,13 +43,18 @@ from src.file.file_type_detector import detect_file_kind
 from src.preprocess.stt import transcribe_audio_local
 from src.preprocess.video_keyframes import extract_video_basic_meta, extract_video_representative_frame_bytes
 
-def run_extract_meta(file_list: Iterable[str]) -> None:
+
+def run_extract_meta(file_list: Iterable[str]) -> int:
+    """파일별 메타 추출·적재. 실패한 파일 개수를 반환한다(0이면 전부 성공)."""
+    files = list(file_list)
+    failed_paths: list[str] = []
+
     db = PostgresUtil()
     with db:
         print("Connected:", db.server_version())
         print("Health:", db.health_check())
 
-    for file in file_list:
+    for file in files:
         start_time = time.time()
         file_kind = detect_file_kind(file)
         print(f"파일 경로: {file} / 파일명: {file.split('/')[-1]} / 파일 종류: {file_kind}")
@@ -65,6 +73,7 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     file_kind=file_kind
                 )
                 meta = meta | summary
+                fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta)
                 chunks = embedding_text_chunks(
                     file,
                     file_kind=file_kind,
@@ -74,16 +83,19 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     normalize_embeddings=cfg.text_embedding_normalize,
                 )
                 print("meta:", json.dumps(meta, ensure_ascii=False, indent=4))
-                print("text_chunks:", len(chunks))
                 with db.transaction() as conn:
                     with conn.cursor(row_factory=dict_row) as cur:
                         cur.execute(
                             """
-                            INSERT INTO media_items (file_uri, media_type, metadata)
-                            VALUES (%s, %s, %s)
+                            INSERT INTO media_items (
+                                file_uri, media_type, metadata, search_vector
+                            ) VALUES (
+                                %s, %s, %s::jsonb,
+                                to_tsvector('simple', coalesce(%s, ''))
+                            )
                             RETURNING id
                             """,
-                            (file, file_kind, json.dumps(meta)),
+                            (file, file_kind, json.dumps(meta), fts_plain),
                         )
                         row = cur.fetchone()
                         if row is None:
@@ -92,14 +104,13 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                         cur.executemany(
                             f"""
                             INSERT INTO media_chunks (
-                                media_item_id, chunk_index, content, embedding, embedding_kind
-                            ) VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
+                                media_item_id, chunk_index, embedding, embedding_kind
+                            ) VALUES (%s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
                             """,
                             [
                                 (
                                     media_item_id,
                                     c["chunk_index"],
-                                    c["content"],
                                     c["embedding_vector"],
                                     EMBEDDING_KIND_ST,
                                 )
@@ -113,7 +124,7 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                 summary = summarize_image_caption_keywords_objects(file_path=file)
                 objects = summary.get("objects") or []
                 meta = meta | summary
-                meta.pop("objects", None)
+                meta_for_fts = dict(meta)
                 # 3) CLIP: 이미지 임베딩 1회(1536) + 한글 라벨·제로샷 점수 → clip_zero_shot_ko
                 obj_list = [str(o) for o in objects] if isinstance(objects, list) else []
                 zs = zero_shot_tag_image_korean_clip(
@@ -122,9 +133,18 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                 )
                 meta = meta #| {"clip_image_embedding": zs["clip_image_embedding"]}
                 if zs["label_scores"]:
-                    meta = meta | {
-                        "labels": clip_zero_shot_ko_meta_items(zs["label_scores"]),
-                    }
+                    labels_all = clip_zero_shot_ko_meta_items(zs["label_scores"])
+                    # 메타 저장용: score 하한 + top-k만 남긴다.
+                    cfg_img = get_current_settings()
+                    labels = [
+                        it
+                        for it in labels_all
+                        if float(it.get("score") or 0.0) >= cfg_img.labels_score_min
+                    ][: cfg_img.image_labels_meta_top_k]
+                    meta = meta | {"labels": labels}
+                    meta_for_fts = meta_for_fts | {"labels": labels}
+                fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta_for_fts)
+                meta.pop("objects", None)
                 print("meta:", json.dumps(meta, ensure_ascii=False, indent=4))
                 clip_vec = zs["clip_image_embedding"]
                 cfg_img = get_current_settings()
@@ -141,11 +161,15 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     with conn.cursor(row_factory=dict_row) as cur:
                         cur.execute(
                             """
-                            INSERT INTO media_items (file_uri, media_type, metadata)
-                            VALUES (%s, %s, %s)
+                            INSERT INTO media_items (
+                                file_uri, media_type, metadata, search_vector
+                            ) VALUES (
+                                %s, %s, %s::jsonb,
+                                to_tsvector('simple', coalesce(%s, ''))
+                            )
                             RETURNING id
                             """,
-                            (file, file_kind, json.dumps(meta)),
+                            (file, file_kind, json.dumps(meta), fts_plain),
                         )
                         row = cur.fetchone()
                         if row is None:
@@ -154,24 +178,12 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                         cur.executemany(
                             f"""
                             INSERT INTO media_chunks (
-                                media_item_id, chunk_index, content, embedding, embedding_kind
-                            ) VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
+                                media_item_id, chunk_index, embedding, embedding_kind
+                            ) VALUES (%s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
                             """,
                             [
-                                (
-                                    media_item_id,
-                                    0,
-                                    chunk_content,
-                                    st_vec,
-                                    EMBEDDING_KIND_ST,
-                                ),
-                                (
-                                    media_item_id,
-                                    1,
-                                    chunk_content,
-                                    clip_vec,
-                                    EMBEDDING_KIND_CLIP,
-                                ),
+                                (media_item_id, 0, st_vec, EMBEDDING_KIND_ST),
+                                (media_item_id, 1, clip_vec, EMBEDDING_KIND_CLIP),
                             ],
                         )
             elif file_kind == MediaKind.VIDEO.value:
@@ -205,6 +217,14 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     result,
                     korean_labels_per_frame=korean_labels_per_frame,
                 )
+                # 메타 저장용: 키프레임 라벨 score 하한 + top-k만 남긴다.
+                for kf in clip_ve.get("keyframes") or []:
+                    labels_all = kf.get("labels") or []
+                    kf["labels"] = [
+                        it
+                        for it in labels_all
+                        if float(it.get("score") or 0.0) >= cfg.labels_score_min
+                    ][: cfg.video_keyframe_labels_meta_top_k]
                 for _it in result:
                     _it.pop("jpeg_bytes", None)
                 meta["keyframes"] = [
@@ -212,7 +232,8 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     for kf in clip_ve["keyframes"]
                 ]
                 print("meta:", json.dumps(meta, ensure_ascii=False, indent=4))
-                pair_rows: list[tuple[int, str, list[float], str]] = []
+                fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta)
+                pair_rows: list[tuple[int, list[float], str]] = []
                 for i, kf in enumerate(clip_ve["keyframes"]):
                     summ = kf.get("summary") or {}
                     if not isinstance(summ, dict):
@@ -234,18 +255,22 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     )[0]
                     st_vec = pad_embedding_to_storage_dim(st_raw)
                     clip_vec = kf["clip_image_embedding"]
-                    pair_rows.append((2 * i, chunk_content, st_vec, EMBEDDING_KIND_ST))
-                    pair_rows.append((2 * i + 1, chunk_content, clip_vec, EMBEDDING_KIND_CLIP))
+                    pair_rows.append((2 * i, st_vec, EMBEDDING_KIND_ST))
+                    pair_rows.append((2 * i + 1, clip_vec, EMBEDDING_KIND_CLIP))
                 print("video_keyframe_chunk_pairs:", len(pair_rows) // 2)
                 with db.transaction() as conn:
                     with conn.cursor(row_factory=dict_row) as cur:
                         cur.execute(
                             """
-                            INSERT INTO media_items (file_uri, media_type, metadata)
-                            VALUES (%s, %s, %s)
+                            INSERT INTO media_items (
+                                file_uri, media_type, metadata, search_vector
+                            ) VALUES (
+                                %s, %s, %s::jsonb,
+                                to_tsvector('simple', coalesce(%s, ''))
+                            )
                             RETURNING id
                             """,
-                            (file, file_kind, json.dumps(meta)),
+                            (file, file_kind, json.dumps(meta), fts_plain),
                         )
                         ins = cur.fetchone()
                         if ins is None:
@@ -255,12 +280,12 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                             cur.executemany(
                                 f"""
                                 INSERT INTO media_chunks (
-                                    media_item_id, chunk_index, content, embedding, embedding_kind
-                                ) VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
+                                    media_item_id, chunk_index, embedding, embedding_kind
+                                ) VALUES (%s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
                                 """,
                                 [
-                                    (media_item_id, idx, content, emb, kind)
-                                    for (idx, content, emb, kind) in pair_rows
+                                    (media_item_id, idx, emb, kind)
+                                    for (idx, emb, kind) in pair_rows
                                 ],
                             )
             elif file_kind == MediaKind.AUDIO.value:
@@ -268,6 +293,7 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                 meta = extract_audio_meta(file_path=file)
                 summary = summarize_and_extract_keywords_from_audio(text=stt_result["text"])
                 meta = meta | summary
+                fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta)
                 cfg = get_current_settings()
                 chunks = embedding_plain_text_chunks(
                     stt_result["text"],
@@ -281,11 +307,15 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                     with conn.cursor(row_factory=dict_row) as cur:
                         cur.execute(
                             """
-                            INSERT INTO media_items (file_uri, media_type, metadata)
-                            VALUES (%s, %s, %s)
+                            INSERT INTO media_items (
+                                file_uri, media_type, metadata, search_vector
+                            ) VALUES (
+                                %s, %s, %s::jsonb,
+                                to_tsvector('simple', coalesce(%s, ''))
+                            )
                             RETURNING id
                             """,
-                            (file, file_kind, json.dumps(meta)),
+                            (file, file_kind, json.dumps(meta), fts_plain),
                         )
                         row = cur.fetchone()
                         if row is None:
@@ -294,14 +324,13 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                         cur.executemany(
                             f"""
                             INSERT INTO media_chunks (
-                                media_item_id, chunk_index, content, embedding, embedding_kind
-                            ) VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
+                                media_item_id, chunk_index, embedding, embedding_kind
+                            ) VALUES (%s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
                             """,
                             [
                                 (
                                     media_item_id,
                                     c["chunk_index"],
-                                    c["content"],
                                     c["embedding_vector"],
                                     EMBEDDING_KIND_ST,
                                 )
@@ -312,12 +341,20 @@ def run_extract_meta(file_list: Iterable[str]) -> None:
                 raise ValueError(f"파일 종류: {file_kind}는 지원하지 않습니다.")
         except ValueError as e:
             print(f"파일 요약 추출 오류: {e}")
+            failed_paths.append(file)
             continue
         except Exception as e:
             print(f"예외 발생: {e}")
             print(traceback.format_exc())
+            failed_paths.append(file)
             continue
         finally:
             elapsed_time = time.time() - start_time
             print(f"소요 시간: {elapsed_time:.2f}초")
             print("-" * 150)
+
+    if failed_paths:
+        print(f"실패 {len(failed_paths)}/{len(files)}건:")
+        for p in failed_paths:
+            print(f"  - {p}")
+    return len(failed_paths)

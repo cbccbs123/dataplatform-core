@@ -22,7 +22,6 @@ class TextEmbeddingResult(TypedDict):
 
 class TextChunkEmbedding(TypedDict):
     chunk_index: int
-    content: str
     embedding_vector: list[float]
 
 
@@ -169,7 +168,7 @@ def embedding_text_chunks(
     embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
     normalize_embeddings: bool = True,
 ) -> list[TextChunkEmbedding]:
-    """문서를 청크 단위로 임베딩한다. ``media_chunks`` 테이블 저장용."""
+    """문서를 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문 텍스트는 DB에 저장하지 않음)."""
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -192,7 +191,6 @@ def embedding_text_chunks(
         out.append(
             {
                 "chunk_index": chunk_index,
-                "content": clean,
                 "embedding_vector": pad_embedding_to_storage_dim(chunk_vector),
             }
         )
@@ -200,7 +198,6 @@ def embedding_text_chunks(
         out.append(
             {
                 "chunk_index": 0,
-                "content": "",
                 "embedding_vector": pad_embedding_to_storage_dim([]),
             }
         )
@@ -216,7 +213,7 @@ def embedding_plain_text_chunks(
     overlap_size: int = 0,
     max_input_chars: int = MAX_INPUT_CHARS,
 ) -> list[TextChunkEmbedding]:
-    """STT 등 단일 문자열을 청크 단위로 임베딩한다. ``media_chunks`` 저장용."""
+    """STT 등 단일 문자열을 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문은 DB 미저장)."""
     out: list[TextChunkEmbedding] = []
     chunk_index = 0
     for chunk in iter_plain_text_chunks(
@@ -238,7 +235,6 @@ def embedding_plain_text_chunks(
         out.append(
             {
                 "chunk_index": chunk_index,
-                "content": clean,
                 "embedding_vector": pad_embedding_to_storage_dim(chunk_vector),
             }
         )
@@ -247,7 +243,6 @@ def embedding_plain_text_chunks(
         out.append(
             {
                 "chunk_index": 0,
-                "content": "",
                 "embedding_vector": pad_embedding_to_storage_dim([]),
             }
         )

@@ -1,5 +1,13 @@
 """
-PostgreSQL 17+ compatible utility module.
+PostgreSQL utility module (default: require server_version_num >= 170000 / PG17).
+
+Connection when ``PostgresUtil()`` is called with no arguments:
+
+- ``DATABASE_URL`` or ``POSTGRES_DSN`` if set, else
+- ``PostgresConfig.from_env()`` (``POSTGRES_HOST``, ``POSTGRES_PORT``, ``POSTGRES_DB`` or
+  ``POSTGRES_DBNAME``, ``POSTGRES_USER``, ``POSTGRES_PASSWORD``).
+
+Override minimum version with ``POSTGRES_MIN_SERVER_VERSION_NUM`` (e.g. ``160000`` for PG16).
 
 Features:
 - Connection pool support (psycopg_pool)
@@ -13,6 +21,7 @@ Features:
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from contextlib import contextmanager
@@ -26,6 +35,8 @@ from psycopg.rows import dict_row
 
 
 PG17_NUMERIC_VERSION = 170000
+
+_POSTGRES_MIN_VER_ENV = "POSTGRES_MIN_SERVER_VERSION_NUM"
 
 
 class PostgreSQLVersionError(RuntimeError):
@@ -42,7 +53,7 @@ class PostgresConfig:
     port: int = 5432
     dbname: str = "postgres"
     user: str = "postgres"
-    password: str = "cbccbs"
+    password: str = ""
     connect_timeout: int = 10
     sslmode: str = "prefer"
     min_pool_size: int = 1
@@ -66,10 +77,41 @@ class PostgresConfig:
     retry_exclude_sqlstates: tuple[str, ...] = ()
 
     @classmethod
+    def from_env(cls) -> PostgresConfig:
+        """Build config from env (used when neither ``PostgresUtil(dsn=...)`` nor explicit config is given)."""
+        port_raw = os.getenv("POSTGRES_PORT", "5432")
+        try:
+            port = int(str(port_raw).strip())
+        except ValueError as e:
+            raise PostgresConfigError(f"Invalid POSTGRES_PORT: {port_raw!r}") from e
+        db = os.getenv("POSTGRES_DB") or os.getenv("POSTGRES_DBNAME") or "postgres"
+        return cls(
+            host=str(os.getenv("POSTGRES_HOST", "localhost")).strip() or "localhost",
+            port=port,
+            dbname=str(db).strip() or "postgres",
+            user=str(os.getenv("POSTGRES_USER", "postgres")).strip() or "postgres",
+            password=os.getenv("POSTGRES_PASSWORD", ""),
+        )
+
+    @classmethod
     def from_dsn(cls, dsn: str) -> "PostgresConfig":
         """Optional helper when caller prefers DSN parsing externally."""
         # Keep config simple; DSN can be passed directly to PostgresUtil.
         raise NotImplementedError("Use PostgresUtil(dsn=...) directly.")
+
+
+def _resolve_min_server_version(explicit: int | None) -> int:
+    if explicit is not None:
+        return explicit
+    raw = os.getenv(_POSTGRES_MIN_VER_ENV)
+    if raw is None or not str(raw).strip():
+        return PG17_NUMERIC_VERSION
+    try:
+        return int(str(raw).strip())
+    except ValueError as e:
+        raise PostgresConfigError(
+            f"Invalid {_POSTGRES_MIN_VER_ENV}: {raw!r} (expected integer server_version_num)"
+        ) from e
 
 
 class PostgresUtil:
@@ -80,18 +122,22 @@ class PostgresUtil:
         *,
         config: PostgresConfig | None = None,
         dsn: str | None = None,
-        min_server_version: int = PG17_NUMERIC_VERSION,
+        min_server_version: int | None = None,
         logger: logging.Logger | None = None,
         on_retry: Callable[[Mapping[str, Any]], None] | None = None,
         on_failure: Callable[[Mapping[str, Any]], None] | None = None,
         on_success: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         if not config and not dsn:
-            config = PostgresConfig()
+            env_dsn = (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_DSN") or "").strip()
+            if env_dsn:
+                dsn = env_dsn
+            else:
+                config = PostgresConfig.from_env()
 
         self.config = config
         self.dsn = dsn
-        self.min_server_version = min_server_version
+        self.min_server_version = _resolve_min_server_version(min_server_version)
         self.logger = logger or logging.getLogger(__name__)
         self._conn: Connection[Any] | None = None
         self._pool: Any = None

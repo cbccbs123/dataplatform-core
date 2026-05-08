@@ -1,3 +1,5 @@
+"""``.env.*`` 파이프라인 설정(임베딩, CLIP 라벨 상한 등). ``init_settings`` 후 ``get_current_settings`` 로 조회."""
+
 from __future__ import annotations
 
 import os
@@ -19,6 +21,11 @@ class PipelineSettings:
     text_embedding_chunk_size: int
     text_embedding_normalize: bool
     video_max_keyframes: int
+    image_labels_search_top_k: int
+    video_keyframe_labels_search_top_k: int
+    image_labels_meta_top_k: int
+    video_keyframe_labels_meta_top_k: int
+    labels_score_min: float
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -58,6 +65,16 @@ def _env_int_default(name: str, default: int) -> int:
         raise ValueError(f"정수 환경변수 형식 오류: {name}={raw!r}") from e
 
 
+def _env_float_default(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError as e:
+        raise ValueError(f"실수 환경변수 형식 오류: {name}={raw!r}") from e
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -75,6 +92,15 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         video_max_keyframes=(
             48 if (vk := _env_int_default("VIDEO_MAX_KEYFRAMES", 48)) <= 0 else vk
         ),
+        image_labels_search_top_k=_env_int_default("IMAGE_LABELS_SEARCH_TOP_K", 5),
+        video_keyframe_labels_search_top_k=_env_int_default(
+            "VIDEO_KEYFRAME_LABELS_SEARCH_TOP_K", 3
+        ),
+        image_labels_meta_top_k=_env_int_default("IMAGE_LABELS_META_TOP_K", 10),
+        video_keyframe_labels_meta_top_k=_env_int_default(
+            "VIDEO_KEYFRAME_LABELS_META_TOP_K", 5
+        ),
+        labels_score_min=_env_float_default("LABELS_SCORE_MIN", 0.1),
     )
 
 

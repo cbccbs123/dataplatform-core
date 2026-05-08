@@ -58,13 +58,8 @@ def extract_image_meta(
 
     Returns
     -------
-    {
-      "width": int,
-      "height": int,
-      "color_mode": "RGB" | "L" | ...,
-      "file_format": "JPEG" | "PNG" | ...,
-      "dominant_colors": [{"rgb": (r,g,b), "hex": "#rrggbb", "ratio": 0.x}]
-    }
+    ImageMeta
+        ``width``, ``height``, ``color_mode``, ``file_format``, ``dominant_colors``(hex 문자열 리스트).
     """
     path = Path(file_path)
     if not path.is_file():

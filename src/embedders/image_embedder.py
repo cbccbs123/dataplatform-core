@@ -143,7 +143,9 @@ def embed_clip_text_query_for_image_search(
 ) -> list[float]:
     """
     DB에 저장된 CLIP 이미지 벡터(``clip_image_row_to_embedding_1536``)와 같은 공간의
-    **CLIP 텍스트 인코더** 쿼리 벡터. 이미지 인덱싱 시 쓴 ``model_name`` 과 같아야 한다.
+    **CLIP 텍스트 인코더** 쿼리 벡터. 인덱싱 시 ``model_name`` 과 같아야 한다.
+
+    검색 단계에서는 ``media_search`` 가 이 벡터와 ``media_items.search_vector`` FTS를 함께 쓴다.
     """
     raw = (query or "").strip() or " "
     q = normalize_text_for_embedding(raw)

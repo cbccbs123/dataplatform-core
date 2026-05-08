@@ -72,7 +72,7 @@ def _collapse_whitespace(s: str) -> str:
 
 def normalize_text_for_embedding(text: str | None) -> str:
     """
-    임베딩·청크 ``content`` 저장·검색 쿼리에 동일하게 사용한다.
+    임베딩 입력·검색 쿼리 전처리에 동일하게 사용한다.
 
     처리 요약: NFKC → 제어/무음 문자 제거 → 동그라미·괄호·딩뱃 숫자 치환 → 공백·빈 줄 정리.
     """

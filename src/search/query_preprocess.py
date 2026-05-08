@@ -1,8 +1,7 @@
 """
-사용자 질의를 검색용 구조화 JSON으로 바꾸는 샘플.
+사용자 질의를 검색용 구조화 JSON(keywords, semantic_query 등)으로 바꾼다.
 
-  python test.py "어제 공장 CCTV에서 안전모 안 쓴 사람"
-  python test.py --env prod --query "..."
+``scripts/run_pipeline.py`` 의 ``--search`` / ``--search-images`` 에서 사용한다.
 
 필요: 프로젝트 루트의 ``.env.dev`` / ``.env.prod`` (OPENAI_BASE_URL, OPENAI_API_KEY, META_MODEL 등)
 """
@@ -46,7 +45,7 @@ STRUCTURE_PROMPT_HEAD = """당신은 미디어 검색 시스템용 쿼리 분석
 
 
 STRUCTURE_PROMPT_SCHEMA = """스키마:
-- keywords: 문자열 배열. BM25/전문검색용 짧은 토큰(한글 가능). 없으면 []
+- keywords: 문자열 배열. 질의에서 뽑은 짧은 토큰(한글 가능); 검색 코드는 주로 넘긴 **전체 질의 문자열**로 FTS를 구성하므로 간접 참고용. 없으면 []
 - keywords_en: 문자열 배열. keywords를 영어 검색·CLIP 보강용으로 짧게 번역한 토큰. 없으면 []
 - semantic_query: 문자열. 보존하되, 벡터 검색에 적합하도록 1문장 요약 형태로 재작성.  
     - "검색/찾아줘/보여줘/추천" 같은 검색 지시어를 절대 넣지 마라.
@@ -110,33 +109,3 @@ def structure_user_query(
     except json.JSONDecodeError:
         return {**empty, "semantic_query": raw}
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="질의 구조화 샘플 (Gemma/OpenAI 호환 게이트웨이)")
-    parser.add_argument("query", nargs="?", help="사용자 질의 (한국어)")
-    parser.add_argument("--query", "-q", dest="query_opt", help="질의 (--query 로만 줄 때)")
-    parser.add_argument(
-        "--env",
-        choices=["dev", "prod"],
-        default="dev",
-        help=".env.{dev|prod} 로드",
-    )
-    parser.add_argument(
-        "--tz",
-        default=DEFAULT_TZ,
-        metavar="ZONE",
-        help="상대 날짜 해석용 타임존 (기본 Asia/Seoul)",
-    )
-    args = parser.parse_args()
-
-    text = (args.query or args.query_opt or "").strip()
-    if not text:
-        parser.error("질의를 인자로 주거나 --query 로 지정하세요.")
-
-    init_settings(args.env)
-    cfg = get_current_settings()
-
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
-    structured = structure_user_query(text, client=client, model=cfg.meta_model, tz_name=args.tz)
-
-    print(json.dumps(structured, ensure_ascii=False, indent=2))
