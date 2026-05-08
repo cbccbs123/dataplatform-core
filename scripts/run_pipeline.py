@@ -107,13 +107,28 @@ if __name__ == "__main__":
     if args.search is not None:
         if not str(args.search).strip():
             parser.error("--search QUERY에 빈 문자열을 쓸 수 없습니다.")
-        grouped = search_media_all_grouped(
-            str(args.search),
-            limit_per_bucket=20,
-            image_search_alpha=args.image_search_alpha,
-            debug=args.search_debug,
-        )
-        print(json.dumps(grouped, indent=2, ensure_ascii=False))
+
+        def run_grouped_search_once(query: str) -> None:
+            grouped = search_media_all_grouped(
+                query,
+                limit_per_bucket=20,
+                image_search_alpha=args.image_search_alpha,
+                debug=args.search_debug,
+            )
+            print(json.dumps(grouped, indent=2, ensure_ascii=False))
+
+        run_grouped_search_once(str(args.search))
+        print("\n반복 검색 모드입니다. 종료하려면 빈 입력/exit/quit를 입력하세요.")
+        while True:
+            try:
+                next_query = input("\nsearch> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n종료합니다.")
+                break
+            if not next_query or next_query.lower() in {"exit", "quit"}:
+                print("종료합니다.")
+                break
+            run_grouped_search_once(next_query)
     elif args.search_images is not None:
         if not str(args.search_images).strip():
             parser.error("--search-images QUERY에 빈 문자열을 쓸 수 없습니다.")
