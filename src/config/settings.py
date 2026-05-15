@@ -26,6 +26,7 @@ class PipelineSettings:
     image_labels_meta_top_k: int
     video_keyframe_labels_meta_top_k: int
     labels_score_min: float
+    relation_top_k: int
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -101,6 +102,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
             "VIDEO_KEYFRAME_LABELS_META_TOP_K", 5
         ),
         labels_score_min=_env_float_default("LABELS_SCORE_MIN", 0.1),
+        relation_top_k=_env_int_default("RELATION_TOP_K", 10),
     )
 
 
