@@ -1,0 +1,65 @@
+-- =============================================================================
+-- F-4.1 통합 스키마 — 운영 3 테이블 + 옵션 B content_cluster 1 테이블
+-- =============================================================================
+-- review_queue(HITL 대기), unresolved_pool(미해소 풀), er_policy(정책 버전).
+-- content_cluster 는 옵션 B-4(HDBSCAN 콘텐츠 클러스터) 저장소.
+-- 적용 순서: 120 은 110(medical_er) 이후(review_queue 가 match_decision 을 참조).
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- review_queue: HITL 검토 대기. 매치 결정쌍(decision_id) 또는 애매한 분류 자산(asset_id) 모두 수용.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS review_queue (
+    queue_id       BIGSERIAL PRIMARY KEY,
+    decision_id    BIGINT REFERENCES match_decision (decision_id) ON DELETE CASCADE,
+    asset_id       BIGINT REFERENCES asset (asset_id) ON DELETE CASCADE,
+    priority_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    status         VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_review', 'resolved')),
+    payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at    TIMESTAMPTZ
+);
+
+-- ---------------------------------------------------------------------------
+-- unresolved_pool: non_match·미지원 모달리티·저신뢰 자산. 신규 자산/정책 갱신 시 재블로킹 대상.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS unresolved_pool (
+    pool_id       BIGSERIAL PRIMARY KEY,
+    asset_id      BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    reason        VARCHAR(100) NOT NULL,
+    reblock_after TIMESTAMPTZ,
+    payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_unresolved_pool_asset UNIQUE (asset_id)
+);
+
+-- ---------------------------------------------------------------------------
+-- er_policy: ER 정책 버전 스냅샷(threshold_v). T_match=10.0, T_review=4.0 기본.
+-- mu_config 는 비교기별 고정 m·u, extra 는 Negative Override·time_window 등.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS er_policy (
+    policy_id   BIGSERIAL PRIMARY KEY,
+    threshold_v VARCHAR(50) NOT NULL UNIQUE,
+    t_match     DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+    t_review    DOUBLE PRECISION NOT NULL DEFAULT 4.0,
+    mu_config   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    extra       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status      VARCHAR(20) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'inactive')),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- content_cluster: 옵션 B-4 HDBSCAN 클러스터 id(채널별). cluster_id=-1 은 noise.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS content_cluster (
+    cluster_row_id BIGSERIAL PRIMARY KEY,
+    asset_id       BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    channel        VARCHAR(20) NOT NULL
+        CHECK (channel IN ('visual', 'text')),
+    cluster_id     INTEGER NOT NULL,
+    model_name     VARCHAR(200),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_content_cluster_asset_channel UNIQUE (asset_id, channel)
+);
