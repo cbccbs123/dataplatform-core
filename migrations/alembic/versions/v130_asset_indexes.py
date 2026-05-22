@@ -17,7 +17,7 @@ depends_on = None
 
 # downgrade 시 제거할 인덱스(테이블 DROP 으로 함께 사라지지만, 인덱스만 되돌릴 때를 위해 명시).
 _INDEXES = (
-    "idx_asset_embedding_vec_ivfflat",
+    "idx_asset_embedding_vec_hnsw",
     "idx_access_log_occurred_at_brin",
     "idx_asset_lineage_occurred_at_brin",
     "idx_asset_created_at_brin",

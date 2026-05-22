@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -200,10 +201,13 @@ def main() -> int:
             _LOG.info("원본 무변경 확인 OK (fingerprint 동일)")
 
             if args.dry_run:
+                # psycopg.Rollback 은 conn.transaction() 블록이 조용히 롤백·흡수하므로
+                # 트레이스백 없이 정상 흐름으로 빠져나온다(적재만 취소).
                 _LOG.info("--dry-run: 트랜잭션 롤백(적재 취소)")
-                raise _Rollback()
+                raise psycopg.Rollback()
 
     print(json.dumps({
+        "dry_run": args.dry_run,
         "source_before": before_src,
         "target_before": before_tgt,
         "inserted": inserted,
@@ -213,14 +217,5 @@ def main() -> int:
     return 0
 
 
-class _Rollback(Exception):
-    """--dry-run 트랜잭션 롤백용 신호."""
-
-
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except _Rollback:
-        # dry-run 정상 종료(트랜잭션은 컨텍스트 매니저가 롤백).
-        print(json.dumps({"dry_run": True, "rolled_back": True}, ensure_ascii=False))
-        sys.exit(0)
+    sys.exit(main())

@@ -53,6 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_asset_lineage_occurred_at_brin
 CREATE INDEX IF NOT EXISTS idx_access_log_occurred_at_brin
     ON access_log USING BRIN (occurred_at);
 
--- ---- IVFFlat: 1536D 임베딩 코사인 유사도 (lists=200) ----------------------
-CREATE INDEX IF NOT EXISTS idx_asset_embedding_vec_ivfflat
-    ON asset_embedding USING ivfflat (embedding vector_cosine_ops) WITH (lists = 200);
+-- ---- HNSW: 1536D 임베딩 코사인 유사도 ------------------------------------
+-- IVFFlat 대신 HNSW 사용: 빈 테이블에서도 학습이 필요 없어 생성 순서에 무관하고
+-- lists 튜닝도 불필요하다. 기존 media_chunks 의 hnsw 인덱스와도 일관.
+-- 기본 파라미터(m=16, ef_construction=64).
+CREATE INDEX IF NOT EXISTS idx_asset_embedding_vec_hnsw
+    ON asset_embedding USING hnsw (embedding vector_cosine_ops);
