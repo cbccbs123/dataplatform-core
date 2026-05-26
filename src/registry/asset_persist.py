@@ -19,11 +19,23 @@ import uuid
 from typing import Any
 
 from psycopg import Connection
+from psycopg.rows import dict_row
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.database.ids import uuid7
 from src.dispatch.types import AssetRecord
 from src.ingest.status import AssetStatus, set_status
+
+
+def find_registered_asset_by_hash(conn: Connection[Any], file_hash: str) -> uuid.UUID | None:
+    """동일 내용(file_hash)으로 이미 ``registered`` 된 자산의 asset_id. 없으면 None(중복 적재 방지용)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT asset_id FROM asset WHERE file_hash = %s AND status = 'registered' LIMIT 1",
+            (file_hash,),
+        )
+        row = cur.fetchone()
+    return row["asset_id"] if row else None
 
 
 def create_asset(

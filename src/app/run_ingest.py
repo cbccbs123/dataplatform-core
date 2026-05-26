@@ -25,9 +25,12 @@ from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.dispatch.dispatcher import dispatch_extract
 from src.dispatch.types import AssetRecord, ExtractContext
+from src.file.hashing import file_hash_and_size
 from src.ingest.router import REASON_MISSING, route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed, set_status
-from src.registry.asset_persist import create_asset, finalize_asset
+from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
+
+REASON_DUPLICATE = "duplicate"
 
 _LOG = logging.getLogger("meta_extract.run_ingest")
 
@@ -68,10 +71,24 @@ def run_ingest(
                 result["skipped"].append((path, route.reason))
                 continue
 
+            # 1.5) 내용 해시 기반 중복 방지: 동일 file_hash 가 이미 registered 면 skip
+            file_hash, file_size = file_hash_and_size(path)
+            with db.transaction() as conn:
+                dup = find_registered_asset_by_hash(conn, file_hash)
+            if dup is not None:
+                _LOG.info("skip(duplicate of %s): %s", dup, path)
+                result["skipped"].append((path, f"{REASON_DUPLICATE}:{dup}"))
+                continue
+
             # 2) 조기 INSERT (received) — 자체 트랜잭션
             with db.transaction() as conn:
                 asset_id = create_asset(
-                    conn, fs_path=path, modality=route.modality, domain=route.domain
+                    conn,
+                    fs_path=path,
+                    modality=route.modality,
+                    domain=route.domain,
+                    file_hash=file_hash,
+                    file_size=file_size,
                 )
 
             # 3) routing → classifying (단계별 커밋)
