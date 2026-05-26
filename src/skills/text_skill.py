@@ -1,13 +1,60 @@
-"""F-3.1 텍스트/문서 추출 함수(디스패처가 호출). 구현은 T1-6.
+"""F-3.1 텍스트/문서 추출 함수(디스패처가 호출).
 
-기존 ``extract_text_meta``·``summarize_and_extract_keywords``·``embedding_text_chunks``·
-``build_media_item_fts_plain`` 를 재사용해 ``AssetRecord`` 로 매핑할 예정.
+기존 추출/요약/임베딩/FTS 함수를 재사용해 ``AssetRecord`` 로 매핑한다
+(``run_extract_meta.py`` 의 텍스트 분기와 동일 로직, 출력만 AssetRecord).
 """
 
 from __future__ import annotations
 
-from src.dispatch.types import AssetRecord, ExtractContext
+from src.config.settings import get_current_settings
+from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
+from src.embedders.text_embedder import embedding_text_chunks
+from src.extractors.text_meta_extractor import extract_text_meta
+from src.llm.text_summarizer import summarize_and_extract_keywords
+from src.preprocess.media_item_search_text import build_media_item_fts_plain
+from src.skills.meta_split import split_core_ext
+
+_CHANNEL_ST = "st"
 
 
 def extract_text(ctx: ExtractContext) -> AssetRecord:
-    raise NotImplementedError("F-3.1(T1-6)에서 구현 예정")
+    cfg = ctx.settings or get_current_settings()
+    file_kind = ctx.modality
+
+    meta = extract_text_meta(
+        file_path=ctx.file_path,
+        file_kind=file_kind,
+        encoding=cfg.encoding,
+        chunk_size=cfg.text_embedding_chunk_size,
+        embedding_model_name=cfg.text_embedding_model,
+    )
+    summary = summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)
+    meta = meta | summary
+    fts_plain = build_media_item_fts_plain(file_uri=ctx.file_path, meta=meta)
+
+    chunks = embedding_text_chunks(
+        ctx.file_path,
+        file_kind=file_kind,
+        encoding=cfg.encoding,
+        chunk_size=cfg.text_embedding_chunk_size,
+        embedding_model_name=cfg.text_embedding_model,
+        normalize_embeddings=cfg.text_embedding_normalize,
+    )
+
+    core_meta, ext_meta = split_core_ext(meta)
+    embeddings = [
+        EmbeddingItem(
+            channel=_CHANNEL_ST,
+            vector=c["embedding_vector"],
+            model_name=cfg.text_embedding_model,
+            chunk_index=int(c["chunk_index"]),
+        )
+        for c in chunks
+    ]
+    return AssetRecord(
+        core_meta=core_meta,
+        ext_meta=ext_meta,
+        tags=[],
+        fts_plain=fts_plain,
+        embeddings=embeddings,
+    )
