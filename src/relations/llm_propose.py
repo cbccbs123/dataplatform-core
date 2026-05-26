@@ -147,23 +147,21 @@ def parse_and_normalize_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
     LLM 루트 ``dict`` → ``sync_relation_catalog_from_llm_edges`` 가 순회할 **엣지 dict** 리스트.
 
     제외
-        - ``target_media_item_id`` 없음 또는 비정수
+        - ``target_media_item_id`` 없음(빈 값 포함)
     정규화
+        - ``target_media_item_id``: 원본 식별자(asset_id UUID 문자열)를 문자열로 보존.
+          유효성(UUID·후보 집합 소속)은 ``sync_asset_relation_edges`` 가 검증한다.
         - ``relation_type_code``: ``normalize_relation_type_code``
         - 토피: ``extract_topic_fields_from_edge`` (키 별칭·길이·맵은 그 함수 체인)
     """
     out: list[dict[str, Any]] = []
     for edge in parse_llm_edges(data):
         tid = edge.get("target_media_item_id")
-        if tid is None:
-            continue
-        try:
-            tid_int = int(tid)
-        except (TypeError, ValueError):
+        if tid is None or str(tid).strip() == "":
             continue
         tk, sk, ten, sen = extract_topic_fields_from_edge(edge)
         row = {
-            "target_media_item_id": tid_int,
+            "target_media_item_id": str(tid).strip(),
             "relation_type_code": normalize_relation_type_code(
                 edge.get("relation_type_code")
             ),

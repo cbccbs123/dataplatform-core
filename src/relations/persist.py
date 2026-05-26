@@ -1,6 +1,7 @@
 """LLM 엣지에서 **관계 카탈로그**와 동일 트랜잭션에서 쓰일 ``relation_type`` 행을 동기화한다.
 
-MVP 확장: ``media_relation`` 엣지는 ``entry.propose_relations_for_item`` 이 ``sync_media_relation_edges`` 로 따로 기록한다.
+엣지 자체(``asset_relation``)는 ``asset_entry.propose_relations_for_asset`` 이 ``sync_asset_relation_edges`` 로 따로 기록한다.
+이 함수는 카탈로그만 동기화하므로 소스 식별자(``source_media_item_id``)는 시그니처 호환용일 뿐 본문에서 쓰지 않는다.
 
 처리(엣지별)
     1. 토피 튜플 정규화 후 ``relation_subtopic_id`` 확보(대주제·서브토픽 2단 테이블).
