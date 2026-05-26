@@ -69,3 +69,47 @@ CREATE TABLE IF NOT EXISTS asset_relation (
 CREATE INDEX IF NOT EXISTS idx_asset_relation_source ON asset_relation (source_asset_id);
 CREATE INDEX IF NOT EXISTS idx_asset_relation_target ON asset_relation (target_asset_id);
 CREATE INDEX IF NOT EXISTS idx_asset_relation_type   ON asset_relation (relation_type_id);
+
+-- =============================================================================
+-- 테이블·컬럼 설명 (COMMENT)
+-- =============================================================================
+
+COMMENT ON TABLE relation_kind IS '관계 종류 카탈로그(same_domain, duplicate_near 등). 도메인 무관 공유.';
+COMMENT ON COLUMN relation_kind.relation_kind_id IS 'PK.';
+COMMENT ON COLUMN relation_kind.kind_code        IS '관계 코드(유니크).';
+COMMENT ON COLUMN relation_kind.kind_name_ko     IS '한글 이름.';
+COMMENT ON COLUMN relation_kind.description       IS '설명.';
+COMMENT ON COLUMN relation_kind.is_symmetric     IS '대칭 관계 여부.';
+COMMENT ON COLUMN relation_kind.status           IS '활성 상태: active|inactive.';
+COMMENT ON COLUMN relation_kind.created_at       IS '생성 시각.';
+
+COMMENT ON TABLE relation_topic_parent IS '관계 대주제(topic) 카탈로그.';
+COMMENT ON COLUMN relation_topic_parent.topic_id   IS 'PK.';
+COMMENT ON COLUMN relation_topic_parent.topic_ko   IS '대주제(한글).';
+COMMENT ON COLUMN relation_topic_parent.topic_en   IS '대주제(영문).';
+COMMENT ON COLUMN relation_topic_parent.created_at IS '생성 시각.';
+
+COMMENT ON TABLE relation_subtopic IS '관계 세부주제(subtopic) 카탈로그.';
+COMMENT ON COLUMN relation_subtopic.subtopic_id IS 'PK.';
+COMMENT ON COLUMN relation_subtopic.topic_id    IS 'FK→relation_topic_parent.';
+COMMENT ON COLUMN relation_subtopic.subtopic_ko IS '세부주제(한글).';
+COMMENT ON COLUMN relation_subtopic.subtopic_en IS '세부주제(영문).';
+COMMENT ON COLUMN relation_subtopic.created_at  IS '생성 시각.';
+
+COMMENT ON TABLE relation_type IS '관계 타입(kind×subtopic 조합). 엣지가 참조하는 단위.';
+COMMENT ON COLUMN relation_type.relation_type_id     IS 'PK.';
+COMMENT ON COLUMN relation_type.relation_kind_id     IS 'FK→relation_kind.';
+COMMENT ON COLUMN relation_type.relation_subtopic_id IS 'FK→relation_subtopic.';
+COMMENT ON COLUMN relation_type.status               IS '활성 상태: active|inactive(LLM 프롬프트 카탈로그는 active 만).';
+COMMENT ON COLUMN relation_type.created_at           IS '생성 시각.';
+
+COMMENT ON TABLE asset_relation IS '자산 간 관계 엣지(media_relation 의 asset FK 버전).';
+COMMENT ON COLUMN asset_relation.relation_id      IS 'PK.';
+COMMENT ON COLUMN asset_relation.source_asset_id  IS 'FK→asset(출발).';
+COMMENT ON COLUMN asset_relation.target_asset_id  IS 'FK→asset(도착).';
+COMMENT ON COLUMN asset_relation.relation_type_id IS 'FK→relation_type(공유 카탈로그).';
+COMMENT ON COLUMN asset_relation.confidence       IS '관계 신뢰도.';
+COMMENT ON COLUMN asset_relation.reason           IS '근거/사유.';
+COMMENT ON COLUMN asset_relation.status           IS '상태: active|superseded|rejected.';
+COMMENT ON COLUMN asset_relation.created_at       IS '생성 시각.';
+COMMENT ON COLUMN asset_relation.updated_at       IS '마지막 갱신 시각.';

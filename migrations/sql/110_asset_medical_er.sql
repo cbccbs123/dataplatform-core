@@ -99,3 +99,63 @@ CREATE TABLE IF NOT EXISTS match_evidence (
     weight      DOUBLE PRECISION,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- =============================================================================
+-- 테이블·컬럼 설명 (COMMENT) — 의료 ER (S-4~S-7, 적재 로직은 7~8월)
+-- =============================================================================
+
+COMMENT ON TABLE entity IS '의료 엔티티(9종 + 옵션 B case). ER 해소 결과의 정규 엔티티.';
+COMMENT ON COLUMN entity.entity_id   IS 'PK.';
+COMMENT ON COLUMN entity.entity_type IS '엔티티 종류: patient/visit/order/study/series/image/report/lab/diagnosis/case.';
+COMMENT ON COLUMN entity.entity_uid  IS '정규화된 식별자 또는 hash(path+arrival)(case).';
+COMMENT ON COLUMN entity.attributes  IS '엔티티 속성(jsonb).';
+COMMENT ON COLUMN entity.promoted_to IS '옵션 B-7 승격 대상 entity_id(case→patient). 승격 시 채움.';
+COMMENT ON COLUMN entity.promoted_at IS '승격 시각.';
+COMMENT ON COLUMN entity.created_at  IS '생성 시각.';
+
+COMMENT ON TABLE asset_entity_link IS '자산↔엔티티 N:N 연결. decision=match 시 적재.';
+COMMENT ON COLUMN asset_entity_link.link_id    IS 'PK.';
+COMMENT ON COLUMN asset_entity_link.asset_id   IS 'FK→asset.';
+COMMENT ON COLUMN asset_entity_link.entity_id  IS 'FK→entity.';
+COMMENT ON COLUMN asset_entity_link.role       IS '연결 역할.';
+COMMENT ON COLUMN asset_entity_link.confidence IS '연결 신뢰도.';
+COMMENT ON COLUMN asset_entity_link.created_at IS '생성 시각.';
+
+COMMENT ON TABLE entity_edge IS '엔티티 간 관계 엣지(9종: HAS_VISIT … HAS_STUDY).';
+COMMENT ON COLUMN entity_edge.edge_id          IS 'PK.';
+COMMENT ON COLUMN entity_edge.source_entity_id IS 'FK→entity(출발).';
+COMMENT ON COLUMN entity_edge.target_entity_id IS 'FK→entity(도착).';
+COMMENT ON COLUMN entity_edge.edge_type        IS '엣지 종류: has_visit/has_order/orders_study/has_series/has_image/has_report/has_lab/has_diagnosis/has_study.';
+COMMENT ON COLUMN entity_edge.confidence       IS '엣지 신뢰도.';
+COMMENT ON COLUMN entity_edge.evidence_id      IS 'match_evidence 참조(느슨한 연결, FK 미설정).';
+COMMENT ON COLUMN entity_edge.created_at       IS '생성 시각.';
+
+COMMENT ON TABLE match_candidate IS 'S-4 블로킹 결과 후보쌍(FS 스코어링 전).';
+COMMENT ON COLUMN match_candidate.candidate_id   IS 'PK.';
+COMMENT ON COLUMN match_candidate.left_asset_id  IS 'FK→asset(좌).';
+COMMENT ON COLUMN match_candidate.right_asset_id IS 'FK→asset(우).';
+COMMENT ON COLUMN match_candidate.blocking_key   IS '묶인 블로킹 키(5종 중).';
+COMMENT ON COLUMN match_candidate.created_at     IS '생성 시각.';
+
+COMMENT ON TABLE match_decision IS 'S-6 매칭 결정(score + match/review/non_match) + 정책 스냅샷.';
+COMMENT ON COLUMN match_decision.decision_id       IS 'PK.';
+COMMENT ON COLUMN match_decision.left_asset_id     IS 'FK→asset(좌).';
+COMMENT ON COLUMN match_decision.right_asset_id    IS 'FK→asset(우).';
+COMMENT ON COLUMN match_decision.score             IS 'Fellegi-Sunter 가중합 점수.';
+COMMENT ON COLUMN match_decision.decision          IS '결정: match|review|non_match.';
+COMMENT ON COLUMN match_decision.negative_override IS 'Negative Override 발동 여부(강한 불일치 거부).';
+COMMENT ON COLUMN match_decision.policy_version    IS 'er_policy.threshold_v 스냅샷.';
+COMMENT ON COLUMN match_decision.decided_by        IS '결정 주체: auto|hitl.';
+COMMENT ON COLUMN match_decision.reviewer_id       IS 'HITL 검토자 식별.';
+COMMENT ON COLUMN match_decision.decided_at        IS '결정 시각.';
+
+COMMENT ON TABLE match_evidence IS 'S-5 필드별 비교 증거(재현성 핵심).';
+COMMENT ON COLUMN match_evidence.evidence_id IS 'PK.';
+COMMENT ON COLUMN match_evidence.decision_id IS 'FK→match_decision.';
+COMMENT ON COLUMN match_evidence.field_name  IS '비교 필드명.';
+COMMENT ON COLUMN match_evidence.comparator  IS '비교기: exact/jaro_winkler/embedding_cosine 등.';
+COMMENT ON COLUMN match_evidence.similarity  IS '유사도 값.';
+COMMENT ON COLUMN match_evidence.m_prob      IS 'Fellegi-Sunter m 확률(일치 시).';
+COMMENT ON COLUMN match_evidence.u_prob      IS 'Fellegi-Sunter u 확률(우연 일치).';
+COMMENT ON COLUMN match_evidence.weight      IS '필드 가중치 log(m/u).';
+COMMENT ON COLUMN match_evidence.created_at  IS '생성 시각.';

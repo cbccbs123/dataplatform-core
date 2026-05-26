@@ -63,3 +63,43 @@ CREATE TABLE IF NOT EXISTS content_cluster (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_content_cluster_asset_channel UNIQUE (asset_id, channel)
 );
+
+-- =============================================================================
+-- 테이블·컬럼 설명 (COMMENT)
+-- =============================================================================
+
+COMMENT ON TABLE review_queue IS 'HITL 검토 대기열. 매칭 결정쌍 또는 애매한 자산.';
+COMMENT ON COLUMN review_queue.queue_id       IS 'PK.';
+COMMENT ON COLUMN review_queue.decision_id    IS 'FK→match_decision(매칭 검토 시).';
+COMMENT ON COLUMN review_queue.asset_id        IS 'FK→asset(자산 단위 검토 시).';
+COMMENT ON COLUMN review_queue.priority_score IS '우선순위 점수(높을수록 먼저).';
+COMMENT ON COLUMN review_queue.status         IS '상태: pending|in_review|resolved.';
+COMMENT ON COLUMN review_queue.payload        IS '검토 부가 정보(jsonb).';
+COMMENT ON COLUMN review_queue.created_at     IS '생성 시각.';
+COMMENT ON COLUMN review_queue.resolved_at    IS '해결 시각.';
+
+COMMENT ON TABLE unresolved_pool IS '미해소 풀. non_match/미지원 모달리티/저신뢰 자산. 재블로킹 대상.';
+COMMENT ON COLUMN unresolved_pool.pool_id       IS 'PK.';
+COMMENT ON COLUMN unresolved_pool.asset_id      IS 'FK→asset(유니크).';
+COMMENT ON COLUMN unresolved_pool.reason        IS '사유: non_match/unknown_modality/low_confidence 등.';
+COMMENT ON COLUMN unresolved_pool.reblock_after IS '재블로킹 트리거 시점(선택).';
+COMMENT ON COLUMN unresolved_pool.payload       IS '부가 정보(jsonb).';
+COMMENT ON COLUMN unresolved_pool.created_at    IS '생성 시각.';
+
+COMMENT ON TABLE er_policy IS 'ER 정책 버전 스냅샷. 결정 재현성 보장.';
+COMMENT ON COLUMN er_policy.policy_id   IS 'PK.';
+COMMENT ON COLUMN er_policy.threshold_v IS '정책 버전 식별자(유니크).';
+COMMENT ON COLUMN er_policy.t_match     IS 'T_match 임계(기본 10.0).';
+COMMENT ON COLUMN er_policy.t_review    IS 'T_review 임계(기본 4.0).';
+COMMENT ON COLUMN er_policy.mu_config   IS '비교기별 고정 m·u(jsonb).';
+COMMENT ON COLUMN er_policy.extra       IS 'Negative Override·time_window 등(jsonb).';
+COMMENT ON COLUMN er_policy.status      IS '활성 상태: active|inactive.';
+COMMENT ON COLUMN er_policy.created_at  IS '생성 시각.';
+
+COMMENT ON TABLE content_cluster IS '옵션 B-4 HDBSCAN 콘텐츠 클러스터(채널별).';
+COMMENT ON COLUMN content_cluster.cluster_row_id IS 'PK.';
+COMMENT ON COLUMN content_cluster.asset_id       IS 'FK→asset.';
+COMMENT ON COLUMN content_cluster.channel        IS '채널: visual|text.';
+COMMENT ON COLUMN content_cluster.cluster_id     IS 'HDBSCAN 클러스터 id(-1=noise).';
+COMMENT ON COLUMN content_cluster.model_name     IS '클러스터링 사용 모델명.';
+COMMENT ON COLUMN content_cluster.created_at     IS '생성 시각.';
