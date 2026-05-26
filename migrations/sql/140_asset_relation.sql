@@ -14,7 +14,7 @@
 -- (seed 행은 권위 소스인 레거시 004 가 담당; 여기서는 시드하지 않는다.)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS relation_kind (
-    relation_kind_id BIGSERIAL PRIMARY KEY,
+    relation_kind_id UUID PRIMARY KEY,
     kind_code        VARCHAR(100) NOT NULL UNIQUE,
     kind_name_ko     VARCHAR(255) NOT NULL,
     description      TEXT,
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS relation_kind (
 );
 
 CREATE TABLE IF NOT EXISTS relation_topic_parent (
-    topic_id   BIGSERIAL PRIMARY KEY,
+    topic_id   UUID PRIMARY KEY,
     topic_ko   VARCHAR(200) NOT NULL DEFAULT '',
     topic_en   VARCHAR(200) NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS relation_topic_parent (
 );
 
 CREATE TABLE IF NOT EXISTS relation_subtopic (
-    subtopic_id BIGSERIAL PRIMARY KEY,
-    topic_id    BIGINT NOT NULL REFERENCES relation_topic_parent (topic_id) ON DELETE RESTRICT,
+    subtopic_id UUID PRIMARY KEY,
+    topic_id    UUID NOT NULL REFERENCES relation_topic_parent (topic_id) ON DELETE RESTRICT,
     subtopic_ko VARCHAR(200) NOT NULL DEFAULT '',
     subtopic_en VARCHAR(200) NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -42,9 +42,9 @@ CREATE TABLE IF NOT EXISTS relation_subtopic (
 );
 
 CREATE TABLE IF NOT EXISTS relation_type (
-    relation_type_id     BIGSERIAL PRIMARY KEY,
-    relation_kind_id     BIGINT NOT NULL REFERENCES relation_kind (relation_kind_id) ON DELETE RESTRICT,
-    relation_subtopic_id BIGINT NOT NULL REFERENCES relation_subtopic (subtopic_id) ON DELETE RESTRICT,
+    relation_type_id     UUID PRIMARY KEY,
+    relation_kind_id     UUID NOT NULL REFERENCES relation_kind (relation_kind_id) ON DELETE RESTRICT,
+    relation_subtopic_id UUID NOT NULL REFERENCES relation_subtopic (subtopic_id) ON DELETE RESTRICT,
     status               VARCHAR(20) NOT NULL DEFAULT 'inactive'
         CHECK (status IN ('active', 'inactive')),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -52,10 +52,10 @@ CREATE TABLE IF NOT EXISTS relation_type (
 );
 
 CREATE TABLE IF NOT EXISTS asset_relation (
-    relation_id      BIGSERIAL PRIMARY KEY,
-    source_asset_id  BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
-    target_asset_id  BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
-    relation_type_id BIGINT NOT NULL REFERENCES relation_type (relation_type_id) ON DELETE RESTRICT,
+    relation_id      UUID PRIMARY KEY,
+    source_asset_id  UUID NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    target_asset_id  UUID NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    relation_type_id UUID NOT NULL REFERENCES relation_type (relation_type_id) ON DELETE RESTRICT,
     confidence       DOUBLE PRECISION,
     reason           TEXT,
     status           VARCHAR(20) NOT NULL DEFAULT 'active'

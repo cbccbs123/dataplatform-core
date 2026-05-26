@@ -7,10 +7,13 @@ study_uid / MRN 등 그룹 키로 ``asset_group`` 을 upsert 하고 ``group_id``
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
+
+from src.database.ids import uuid7
 
 # core_meta 에서 그룹 키로 시도할 (group_kind, meta_key) 우선순위.
 _GROUP_KEY_CANDIDATES: tuple[tuple[str, str], ...] = (
@@ -19,25 +22,28 @@ _GROUP_KEY_CANDIDATES: tuple[tuple[str, str], ...] = (
 )
 
 
-def upsert_group(conn: Connection[Any], *, group_kind: str, group_key: str) -> int:
-    """(group_kind, group_key) 로 ``asset_group`` 을 보장하고 ``group_id`` 반환."""
+def upsert_group(conn: Connection[Any], *, group_kind: str, group_key: str) -> uuid.UUID:
+    """(group_kind, group_key) 로 ``asset_group`` 을 보장하고 group_id(UUIDv7) 반환.
+
+    신규면 생성한 UUIDv7 을, 이미 있으면 기존 group_id 를 반환(RETURNING).
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            INSERT INTO asset_group (group_kind, group_key)
-            VALUES (%s, %s)
+            INSERT INTO asset_group (group_id, group_kind, group_key)
+            VALUES (%s, %s, %s)
             ON CONFLICT (group_kind, group_key) DO UPDATE SET group_kind = EXCLUDED.group_kind
             RETURNING group_id
             """,
-            (group_kind, group_key),
+            (uuid7(), group_kind, group_key),
         )
         row = cur.fetchone()
     if row is None:
         raise RuntimeError("asset_group upsert 가 group_id 를 반환하지 않았습니다.")
-    return int(row["group_id"])
+    return row["group_id"]
 
 
-def resolve_group_id(conn: Connection[Any], core_meta: dict[str, Any]) -> int | None:
+def resolve_group_id(conn: Connection[Any], core_meta: dict[str, Any]) -> uuid.UUID | None:
     """core_meta 에서 그룹 키(study_uid/mrn)를 찾아 ``asset_group`` upsert. 없으면 None."""
     for group_kind, meta_key in _GROUP_KEY_CANDIDATES:
         val = core_meta.get(meta_key)

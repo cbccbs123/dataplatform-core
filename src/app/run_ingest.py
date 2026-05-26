@@ -18,6 +18,7 @@ UnsupportedModalityError 를 6번에서 흡수한다(asset.status='failed').
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Callable
 
 from src.config.settings import get_current_settings
@@ -59,7 +60,7 @@ def run_ingest(
 
     for path in files:
         # 파일 단위 격리: 한 파일의 어떤 실패도 배치를 멈추지 않는다.
-        asset_id: int | None = None
+        asset_id: uuid.UUID | None = None
         try:
             route = route_file(path)
             if not route.routable and route.reason == REASON_MISSING:

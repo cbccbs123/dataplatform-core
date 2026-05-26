@@ -12,7 +12,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- asset_group: study_uid / MRN 등 그룹 키로 묶는 자산 묶음 (asset 보다 먼저 생성)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asset_group (
-    group_id   BIGSERIAL PRIMARY KEY,
+    group_id   UUID PRIMARY KEY,
     group_key  VARCHAR(255) NOT NULL,
     group_kind VARCHAR(50) NOT NULL DEFAULT 'general'
         CHECK (group_kind IN ('general', 'study_uid', 'mrn', 'manual')),
@@ -25,8 +25,8 @@ CREATE TABLE IF NOT EXISTS asset_group (
 -- status 는 F-1.4 상태 머신: received → routing → classifying → extracting → registered (실패 시 failed)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asset (
-    asset_id          BIGSERIAL PRIMARY KEY,
-    group_id          BIGINT REFERENCES asset_group (group_id) ON DELETE SET NULL,
+    asset_id          UUID PRIMARY KEY,
+    group_id          UUID REFERENCES asset_group (group_id) ON DELETE SET NULL,
     modality          VARCHAR(20) NOT NULL
         CHECK (modality IN ('txt', 'pdf', 'json', 'word', 'excel', 'powerpoint',
                             'image', 'video', 'audio', 'unknown')),
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS asset (
 -- search_vector 는 FTS 평문(media_item_search_text.build_media_item_fts_plain 결과) 기반.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asset_metadata (
-    asset_id      BIGINT PRIMARY KEY REFERENCES asset (asset_id) ON DELETE CASCADE,
+    asset_id      UUID PRIMARY KEY REFERENCES asset (asset_id) ON DELETE CASCADE,
     core_meta     JSONB NOT NULL DEFAULT '{}'::jsonb,
     ext_meta      JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags          TEXT[] NOT NULL DEFAULT '{}',
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS asset_metadata (
 -- asset_embedding: 채널(st/clip/…)·청크별 1536D 벡터. 텍스트 다청크·영상 키프레임 다건을 수용하려 chunk_index 포함.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asset_embedding (
-    asset_id      BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    asset_id      UUID NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
     channel       VARCHAR(20) NOT NULL,
     chunk_index   INTEGER NOT NULL DEFAULT 0,
     embedding     VECTOR(1536) NOT NULL,
@@ -76,8 +76,8 @@ CREATE TABLE IF NOT EXISTS asset_embedding (
 -- asset_lineage: PROV-DM(W3C 2013) Entity-Activity-Agent 활동 로그. 결정 재현성·계보 추적.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asset_lineage (
-    lineage_id  BIGSERIAL PRIMARY KEY,
-    asset_id    BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    lineage_id  UUID PRIMARY KEY,
+    asset_id    UUID NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
     activity    VARCHAR(100) NOT NULL,
     agent       VARCHAR(100) NOT NULL,
     used        JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -90,8 +90,8 @@ CREATE TABLE IF NOT EXISTS asset_lineage (
 -- access_log: 모든 API 호출 이력(F-4.6).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS access_log (
-    access_id   BIGSERIAL PRIMARY KEY,
-    asset_id    BIGINT REFERENCES asset (asset_id) ON DELETE SET NULL,
+    access_id   UUID PRIMARY KEY,
+    asset_id    UUID REFERENCES asset (asset_id) ON DELETE SET NULL,
     user_id     VARCHAR(100),
     action      VARCHAR(50) NOT NULL,
     detail      JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS access_log (
 -- schema_registry: 도메인별 ext_meta 키 정의 + JSON Schema 검증 규칙.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS schema_registry (
-    schema_id   BIGSERIAL PRIMARY KEY,
+    schema_id   UUID PRIMARY KEY,
     domain      VARCHAR(50) NOT NULL,
     meta_key    VARCHAR(100) NOT NULL,
     json_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -117,8 +117,8 @@ CREATE TABLE IF NOT EXISTS schema_registry (
 -- asset_classification: F-5.1 3-stage cascade 분류 결과(단계별 점수 + 최종 라벨).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asset_classification (
-    classification_id BIGSERIAL PRIMARY KEY,
-    asset_id          BIGINT NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
+    classification_id UUID PRIMARY KEY,
+    asset_id          UUID NOT NULL REFERENCES asset (asset_id) ON DELETE CASCADE,
     stage1_scores     JSONB NOT NULL DEFAULT '{}'::jsonb,
     stage2_scores     JSONB NOT NULL DEFAULT '{}'::jsonb,
     stage3_scores     JSONB NOT NULL DEFAULT '{}'::jsonb,

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import uuid
 from enum import Enum
 from typing import Any
 
@@ -58,7 +59,7 @@ def validate_transition(current: AssetStatus | str, target: AssetStatus | str) -
         raise InvalidTransitionError(f"{cur.value} → {tgt.value} 전이는 허용되지 않습니다.")
 
 
-def fetch_status(conn: Connection[Any], asset_id: int) -> AssetStatus:
+def fetch_status(conn: Connection[Any], asset_id: uuid.UUID) -> AssetStatus:
     """``asset.status`` 조회. 없으면 ``LookupError``."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT status FROM asset WHERE asset_id = %s", (asset_id,))
@@ -70,7 +71,7 @@ def fetch_status(conn: Connection[Any], asset_id: int) -> AssetStatus:
 
 def set_status(
     conn: Connection[Any],
-    asset_id: int,
+    asset_id: uuid.UUID,
     target: AssetStatus | str,
     *,
     reason: str | None = None,
@@ -89,6 +90,6 @@ def set_status(
         )
 
 
-def mark_failed(conn: Connection[Any], asset_id: int, reason: str) -> None:
+def mark_failed(conn: Connection[Any], asset_id: uuid.UUID, reason: str) -> None:
     """현재 단계에서 ``failed`` 로 전이하고 사유를 남긴다(디스패처 예외 등 흡수용)."""
     set_status(conn, asset_id, AssetStatus.FAILED, reason=reason)

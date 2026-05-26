@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from psycopg import Connection
-from psycopg.rows import dict_row
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+from src.database.ids import uuid7
 from src.dispatch.types import AssetRecord
 from src.ingest.status import AssetStatus, set_status
 
@@ -31,27 +32,27 @@ def create_asset(
     fs_path: str,
     modality: str,
     domain: str = "general",
-    group_id: int | None = None,
+    group_id: uuid.UUID | None = None,
     file_hash: str | None = None,
     file_size: int | None = None,
-) -> int:
-    """``asset`` 행을 ``received`` 상태로 INSERT 하고 ``asset_id`` 반환(모델 A 조기 INSERT)."""
-    with conn.cursor(row_factory=dict_row) as cur:
+) -> uuid.UUID:
+    """``asset`` 행을 ``received`` 상태로 INSERT 하고 asset_id(UUIDv7) 반환(모델 A 조기 INSERT).
+
+    식별자는 앱에서 UUIDv7 로 생성해 명시적으로 INSERT 한다(PG17 네이티브 uuidv7() 부재).
+    """
+    asset_id = uuid7()
+    with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO asset (group_id, modality, fs_path, file_hash, file_size, domain_label, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'received')
-            RETURNING asset_id
+            INSERT INTO asset (asset_id, group_id, modality, fs_path, file_hash, file_size, domain_label, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'received')
             """,
-            (group_id, modality, fs_path, file_hash, file_size, domain),
+            (asset_id, group_id, modality, fs_path, file_hash, file_size, domain),
         )
-        row = cur.fetchone()
-    if row is None:
-        raise RuntimeError("asset INSERT 가 asset_id 를 반환하지 않았습니다.")
-    return int(row["asset_id"])
+    return asset_id
 
 
-def finalize_asset(conn: Connection[Any], asset_id: int, record: AssetRecord) -> None:
+def finalize_asset(conn: Connection[Any], asset_id: uuid.UUID, record: AssetRecord) -> None:
     """``AssetRecord`` 의 메타·임베딩을 적재하고 상태를 ``registered`` 로 전이한다.
 
     ``asset_metadata`` 1행(core/ext jsonb, tags, search_vector) + ``asset_embedding`` N행.
