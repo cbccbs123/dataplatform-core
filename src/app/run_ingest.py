@@ -21,6 +21,8 @@ import logging
 import uuid
 from typing import Any, Callable
 
+from src.classify import cascade
+from src.classify.types import ClassificationResult
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.dispatch.dispatcher import dispatch_extract
@@ -29,13 +31,14 @@ from src.file.hashing import file_hash_and_size
 from src.ingest.router import REASON_MISSING, route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed, set_status
 from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
+from src.registry.classification_persist import record_classification
 
 REASON_DUPLICATE = "duplicate"
 
 _LOG = logging.getLogger("meta_extract.run_ingest")
 
 ExtractFn = Callable[[ExtractContext], AssetRecord]
-ClassifyFn = Callable[[str, str], str]  # (file_path, modality) -> domain
+ClassifyFn = Callable[[str, str], ClassificationResult]  # (file_path, modality) -> 분류 결과
 
 
 def _configure_logging() -> None:
@@ -53,7 +56,7 @@ def run_ingest(
     *,
     db: PostgresUtil,
     extract_fn: ExtractFn = dispatch_extract,
-    classify_fn: ClassifyFn | None = None,
+    classify_fn: ClassifyFn = cascade.classify,
     settings: Any = None,
 ) -> dict[str, list[Any]]:
     """파일 리스트를 적재. 반환: {'registered': [asset_id], 'failed': [(asset_id,err)], 'skipped': [(path,reason)]}."""
@@ -96,7 +99,11 @@ def run_ingest(
                 set_status(conn, asset_id, AssetStatus.ROUTING)
                 set_status(conn, asset_id, AssetStatus.CLASSIFYING)
 
-            domain = classify_fn(path, route.modality) if classify_fn else route.domain
+            # 3.5) F-5.1 도메인 분류(트랜잭션 밖 — 시그니처/어휘/온프레미스 LLM) → 결과 영속화
+            classification = classify_fn(path, route.modality)
+            with db.transaction() as conn:
+                record_classification(conn, asset_id, classification)
+            domain = classification.final_label
 
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.EXTRACTING)

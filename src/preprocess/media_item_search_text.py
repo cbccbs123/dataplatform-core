@@ -149,5 +149,4 @@ def build_media_item_fts_plain(
     plain = normalize_search_text("\n".join(p for p in parts if p))
     if len(plain) > max_plain_chars:
         plain = plain[:max_plain_chars]
-    print(f"CBC TEST : file_name: {file_name}, summary: {summary}, plain: {plain}")
     return plain

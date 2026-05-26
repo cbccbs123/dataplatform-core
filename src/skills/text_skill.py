@@ -15,6 +15,7 @@ _CHANNEL_ST = "st"
 
 def extract_text(ctx: ExtractContext) -> AssetRecord:
     # 무거운 import(임베더/요약/추출)는 함수 내부 — 디스패처 import 시 미로딩.
+    # 모든 LLM 은 설정된 단일 온프레미스 엔드포인트(cfg.openai_*)를 사용한다(외부 LLM 미사용).
     from src.embedders.text_embedder import embedding_text_chunks
     from src.extractors.text_meta_extractor import extract_text_meta
     from src.llm.text_summarizer import summarize_and_extract_keywords

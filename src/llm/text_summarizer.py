@@ -64,8 +64,9 @@ def _summarize_chunk_only_openai(
 def summarize_and_extract_keywords(
     file_path: str | Path,
     *,
-    file_kind: str
+    file_kind: str,
 ) -> SummaryKeywords:
+    """문서 요약·키워드 추출. LLM 은 설정된 단일 온프레미스 엔드포인트(cfg.openai_*)를 사용한다."""
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -75,6 +76,7 @@ def summarize_and_extract_keywords(
         raise ValueError("file_kind는 필수입니다.")
 
     cfg = get_current_settings()
+    model = cfg.meta_model
 
     client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
 
@@ -93,7 +95,7 @@ def summarize_and_extract_keywords(
         s = _summarize_chunk_only_openai(
             ch,
             client=client,
-            model=cfg.meta_model,
+            model=model,
             summary_max_chars=cfg.summary_max_chars,
         )
         if s:
@@ -112,7 +114,7 @@ def summarize_and_extract_keywords(
         f"청크 요약 목록:\n{merged}"
         "개수/비율/합계 같은 통계 표현 금지."
     )
-    data = _call_openai_json(client, model=cfg.meta_model, prompt=final_prompt)
+    data = _call_openai_json(client, model=model, prompt=final_prompt)
 
     summary = str(data.get("summary", "")).strip()
     keywords_raw = data.get("keywords", [])
