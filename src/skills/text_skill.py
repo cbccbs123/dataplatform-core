@@ -8,16 +8,18 @@ from __future__ import annotations
 
 from src.config.settings import get_current_settings
 from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
-from src.embedders.text_embedder import embedding_text_chunks
-from src.extractors.text_meta_extractor import extract_text_meta
-from src.llm.text_summarizer import summarize_and_extract_keywords
-from src.preprocess.media_item_search_text import build_media_item_fts_plain
 from src.skills.meta_split import split_core_ext
 
 _CHANNEL_ST = "st"
 
 
 def extract_text(ctx: ExtractContext) -> AssetRecord:
+    # 무거운 import(임베더/요약/추출)는 함수 내부 — 디스패처 import 시 미로딩.
+    from src.embedders.text_embedder import embedding_text_chunks
+    from src.extractors.text_meta_extractor import extract_text_meta
+    from src.llm.text_summarizer import summarize_and_extract_keywords
+    from src.preprocess.media_item_search_text import build_media_item_fts_plain
+
     cfg = ctx.settings or get_current_settings()
     file_kind = ctx.modality
 
