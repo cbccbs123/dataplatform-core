@@ -1,7 +1,7 @@
 """
 사용자 질의를 검색용 구조화 JSON(keywords, semantic_query 등)으로 바꾼다.
 
-``scripts/run_pipeline.py`` 의 ``--search`` / ``--search-images`` 에서 사용한다.
+``src/search/media_search.py`` 의 하이브리드 검색에서 사용한다(검색 API는 Phase 2에서 asset_* 로 재배선 예정).
 
 필요: 프로젝트 루트의 ``.env.dev`` / ``.env.prod`` (OPENAI_BASE_URL, OPENAI_API_KEY, META_MODEL 등)
 """
