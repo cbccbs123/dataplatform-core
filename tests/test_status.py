@@ -33,8 +33,16 @@ class TestEnumAndMap(unittest.TestCase):
     def test_status_values_match_db_check(self) -> None:
         self.assertEqual(
             {s.value for s in AssetStatus},
-            {"received", "routing", "classifying", "extracting", "registered", "failed"},
+            {"received", "routing", "classifying", "extracting", "registered", "failed", "deferred"},
         )
+
+    def test_classifying_to_deferred_allowed(self) -> None:
+        validate_transition("classifying", "deferred")  # 예외 없어야
+
+    def test_deferred_is_terminal(self) -> None:
+        self.assertEqual(ALLOWED_TRANSITIONS[AssetStatus.DEFERRED], frozenset())
+        with self.assertRaises(InvalidTransitionError):
+            validate_transition("deferred", "extracting")
 
     def test_terminal_states_have_no_outgoing(self) -> None:
         for s in TERMINAL:

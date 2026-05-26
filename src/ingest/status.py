@@ -31,19 +31,23 @@ class AssetStatus(str, Enum):
     EXTRACTING = "extracting"
     REGISTERED = "registered"
     FAILED = "failed"
+    DEFERRED = "deferred"  # 의료 표준 포맷(DICOM/HL7/FHIR) 추출 보류 — 실패 아님
 
 
 # 종료 상태(더 이상 전이 없음).
-TERMINAL: frozenset[AssetStatus] = frozenset({AssetStatus.REGISTERED, AssetStatus.FAILED})
+TERMINAL: frozenset[AssetStatus] = frozenset(
+    {AssetStatus.REGISTERED, AssetStatus.FAILED, AssetStatus.DEFERRED}
+)
 
-# 정상 진행 경로 + 임의 비종료 단계에서 failed 로 전이 가능.
+# 정상 진행 경로 + 임의 비종료 단계에서 failed 로 전이 가능. classifying 에서 deferred(추출 보류) 가능.
 ALLOWED_TRANSITIONS: dict[AssetStatus, frozenset[AssetStatus]] = {
     AssetStatus.RECEIVED: frozenset({AssetStatus.ROUTING, AssetStatus.FAILED}),
     AssetStatus.ROUTING: frozenset({AssetStatus.CLASSIFYING, AssetStatus.FAILED}),
-    AssetStatus.CLASSIFYING: frozenset({AssetStatus.EXTRACTING, AssetStatus.FAILED}),
+    AssetStatus.CLASSIFYING: frozenset({AssetStatus.EXTRACTING, AssetStatus.DEFERRED, AssetStatus.FAILED}),
     AssetStatus.EXTRACTING: frozenset({AssetStatus.REGISTERED, AssetStatus.FAILED}),
     AssetStatus.REGISTERED: frozenset(),
     AssetStatus.FAILED: frozenset(),
+    AssetStatus.DEFERRED: frozenset(),
 }
 
 

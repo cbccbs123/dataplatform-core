@@ -83,6 +83,28 @@ class TestRunIngest(unittest.TestCase):
         self.assertTrue(res["skipped"][0][1].startswith(ri.REASON_DUPLICATE))
         m["create_asset"].assert_not_called()
 
+    def test_medical_standard_format_deferred(self) -> None:
+        # DICOM 등 stage1 시그니처 → 추출 보류(deferred), 실패 아님, 추출 미호출.
+        called = {"extract": False}
+
+        def extract(ctx):
+            called["extract"] = True
+            return AssetRecord()
+
+        cls = ClassificationResult(
+            final_label="medical", confidence=1.0, decided_stage=1, stage1_scores={"signature": "dicom"}
+        )
+        res, m = self._ingest(
+            ["/d/scan.dcm"], _route(modality="unknown", routable=False, reason="unknown_modality"),
+            extract_fn=extract, classify=cls,
+        )
+        self.assertEqual(res["deferred"], [1])
+        self.assertEqual(res["registered"], [])
+        self.assertFalse(called["extract"])
+        m["finalize_asset"].assert_not_called()
+        m["mark_failed"].assert_not_called()
+        m["record_classification"].assert_called_once()
+
     def test_classification_medical_sets_domain(self) -> None:
         seen = {}
 

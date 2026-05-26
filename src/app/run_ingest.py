@@ -62,7 +62,7 @@ def run_ingest(
     """파일 리스트를 적재. 반환: {'registered': [asset_id], 'failed': [(asset_id,err)], 'skipped': [(path,reason)]}."""
     _configure_logging()
     cfg = settings or get_current_settings()
-    result: dict[str, list[Any]] = {"registered": [], "failed": [], "skipped": []}
+    result: dict[str, list[Any]] = {"registered": [], "failed": [], "skipped": [], "deferred": []}
 
     for path in files:
         # 파일 단위 격리: 한 파일의 어떤 실패도 배치를 멈추지 않는다.
@@ -105,6 +105,16 @@ def run_ingest(
                 record_classification(conn, asset_id, classification)
             domain = classification.final_label
 
+            # 의료 표준 포맷(DICOM/HL7/FHIR, stage1 시그니처)은 일반 추출기 대상이 아님.
+            # 의료 어댑터(후속 단계)에서 추출하므로 여기선 보류(deferred) — 실패 아님.
+            signature = classification.stage1_scores.get("signature")
+            if signature:
+                with db.transaction() as conn:
+                    set_status(conn, asset_id, AssetStatus.DEFERRED, reason=f"medical_format:{signature}")
+                _LOG.info("deferred(medical %s): asset_id=%s %s", signature, asset_id, path)
+                result["deferred"].append(asset_id)
+                continue
+
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.EXTRACTING)
 
@@ -136,10 +146,11 @@ def run_ingest(
                 result["failed"].append((asset_id, reason))
 
     _LOG.info(
-        "ingest done: registered=%s failed=%s skipped=%s",
+        "ingest done: registered=%s failed=%s skipped=%s deferred=%s",
         len(result["registered"]),
         len(result["failed"]),
         len(result["skipped"]),
+        len(result["deferred"]),
     )
     return result
 
