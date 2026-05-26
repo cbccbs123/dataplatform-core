@@ -58,19 +58,21 @@ def run_ingest(
     result: dict[str, list[Any]] = {"registered": [], "failed": [], "skipped": []}
 
     for path in files:
-        route = route_file(path)
-        if not route.routable and route.reason == REASON_MISSING:
-            _LOG.info("skip(missing): %s", path)
-            result["skipped"].append((path, route.reason))
-            continue
-
-        # 2) 조기 INSERT (received) — 자체 트랜잭션
-        with db.transaction() as conn:
-            asset_id = create_asset(
-                conn, fs_path=path, modality=route.modality, domain=route.domain
-            )
-
+        # 파일 단위 격리: 한 파일의 어떤 실패도 배치를 멈추지 않는다.
+        asset_id: int | None = None
         try:
+            route = route_file(path)
+            if not route.routable and route.reason == REASON_MISSING:
+                _LOG.info("skip(missing): %s", path)
+                result["skipped"].append((path, route.reason))
+                continue
+
+            # 2) 조기 INSERT (received) — 자체 트랜잭션
+            with db.transaction() as conn:
+                asset_id = create_asset(
+                    conn, fs_path=path, modality=route.modality, domain=route.domain
+                )
+
             # 3) routing → classifying (단계별 커밋)
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.ROUTING)
@@ -93,16 +95,20 @@ def run_ingest(
 
             _LOG.info("registered: asset_id=%s %s", asset_id, path)
             result["registered"].append(asset_id)
-        except Exception as exc:  # noqa: BLE001 — 디스패처/추출/DB 모든 실패 흡수
+        except Exception as exc:  # noqa: BLE001 — route/create/추출/적재 모든 실패 흡수
             reason = f"{type(exc).__name__}: {exc}"
             _LOG.warning("failed: asset_id=%s %s (%s)", asset_id, path, reason)
-            # 6) fresh 트랜잭션으로 실패 기록(이전 트랜잭션 abort 가능성 격리)
-            with db.transaction() as conn:
-                try:
-                    mark_failed(conn, asset_id, reason)
-                except InvalidTransitionError:
-                    pass  # 이미 종료 상태면 무시
-            result["failed"].append((asset_id, reason))
+            if asset_id is None:
+                # asset 생성 전(route_file/create_asset) 실패 → 경로 기준 기록
+                result["failed"].append((None, f"{path}: {reason}"))
+            else:
+                # 6) fresh 트랜잭션으로 실패 기록(이전 트랜잭션 abort 가능성 격리)
+                with db.transaction() as conn:
+                    try:
+                        mark_failed(conn, asset_id, reason)
+                    except InvalidTransitionError:
+                        pass  # 이미 종료 상태면 무시
+                result["failed"].append((asset_id, reason))
 
     _LOG.info(
         "ingest done: registered=%s failed=%s skipped=%s",

@@ -92,6 +92,36 @@ class TestRunIngest(unittest.TestCase):
         m["mark_failed"].assert_called_once()
         self.assertEqual(len(res["failed"]), 1)
 
+    def test_create_asset_failure_isolated(self) -> None:
+        # asset 생성 단계 실패 → 배치 중단 없이 failed(None) 로 기록.
+        p_route, p_create, p_set, p_final, p_fail = _patches(_route())
+        with p_route, p_create as create_asset, p_set, p_final as finalize_asset, p_fail as mark_failed:
+            create_asset.side_effect = RuntimeError("DB down")
+            res = ri.run_ingest(["/d/a.txt"], db=self.db, extract_fn=lambda ctx: AssetRecord(), settings=self.settings)
+        self.assertEqual(res["registered"], [])
+        self.assertEqual(len(res["failed"]), 1)
+        self.assertIsNone(res["failed"][0][0])  # asset_id 없음
+        finalize_asset.assert_not_called()
+        mark_failed.assert_not_called()  # asset 없으니 mark_failed 호출 안 함
+
+    def test_batch_continues_after_one_failure(self) -> None:
+        # 첫 파일 추출 실패해도 둘째 파일은 정상 등록(격리).
+        calls = {"n": 0}
+
+        def extract(ctx):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("첫 파일 실패")
+            return AssetRecord()
+
+        p_route, p_create, p_set, p_final, p_fail = _patches(_route())
+        with p_route, p_create as create_asset, p_set, p_final, p_fail:
+            create_asset.side_effect = [1, 2]
+            res = ri.run_ingest(["/d/a.txt", "/d/b.txt"], db=self.db, extract_fn=extract, settings=self.settings)
+        self.assertEqual(res["registered"], [2])
+        self.assertEqual(len(res["failed"]), 1)
+        self.assertEqual(res["failed"][0][0], 1)
+
     def test_classify_fn_sets_domain_on_context(self) -> None:
         seen = {}
 
