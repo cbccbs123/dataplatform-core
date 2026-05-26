@@ -95,6 +95,19 @@ class TestStage2(unittest.TestCase):
         label, _ = stage2_zeroshot.score("Patient DIAGNOSIS summary")
         self.assertEqual(label, DOMAIN_MEDICAL)
 
+    def test_latin_substring_false_positive_avoided(self) -> None:
+        # 'ct' 가 'contact'/'factory' 안에 있어도 의료로 오탐하면 안 됨(단어 경계).
+        label, sig = stage2_zeroshot.score("Please contact the factory product team")
+        self.assertEqual(label, DOMAIN_GENERAL)
+        self.assertEqual(sig["medical_term_hits"], 0)
+
+    def test_latin_word_boundary_match(self) -> None:
+        # 단어로 등장하면 매칭.
+        label, sig = stage2_zeroshot.score("CT scan and MRI ordered")
+        self.assertEqual(label, DOMAIN_MEDICAL)
+        self.assertIn("ct", sig["terms"])
+        self.assertIn("mri", sig["terms"])
+
 
 class TestStage3(unittest.TestCase):
     def test_onprem_llm_medical(self) -> None:
