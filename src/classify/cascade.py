@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Callable
 
@@ -22,6 +23,13 @@ from src.classify import domains as _domains  # noqa: F401 — 기본 도메인 
 _HEAD_BYTES = 8192
 _HIT_THRESHOLD = 2  # top 도메인 확정 최소 hit
 _MARGIN = 1         # top 과 2위의 최소 격차
+
+_CONF_S1 = 1.0            # Stage 1 시그니처 확정
+_CONF_S2_CONFIRMED = 0.9  # Stage 2 어휘 단독 확정
+_CONF_S2_GENERAL = 0.7    # Stage 2 hit 0 → general 폴백
+_CONF_S3 = 0.6            # Stage 3 LLM 판정
+
+_log = logging.getLogger(__name__)
 
 
 def _read_head(file_path: str, n: int = _HEAD_BYTES) -> bytes:
@@ -61,8 +69,10 @@ def classify(
     if len(s1_scores) == 1:
         domain = next(iter(s1_scores))
         return ClassificationResult(
-            final_label=domain, confidence=1.0, decided_stage=1, stage1_scores=s1_scores
+            final_label=domain, confidence=_CONF_S1, decided_stage=1, stage1_scores=s1_scores
         )
+    if len(s1_scores) > 1:
+        _log.warning("Stage 1 시그니처 충돌 — 다수 도메인 매칭, Stage 2 로 위임: %s", sorted(s1_scores))
 
     # Stage 2 — 어휘: 도메인별 hit, top hit≥임계 & margin → 확정 / 0 → general / 그 외 → Stage 3.
     scan = _build_scan_text(file_path, modality)
@@ -77,19 +87,19 @@ def classify(
 
     if top_hits == 0:
         return ClassificationResult(
-            final_label=DOMAIN_GENERAL, confidence=0.7, decided_stage=2,
+            final_label=DOMAIN_GENERAL, confidence=_CONF_S2_GENERAL, decided_stage=2,
             stage1_scores=s1_scores, stage2_scores=s2_scores,
         )
     if top_hits >= _HIT_THRESHOLD and (top_hits - second_hits) >= _MARGIN:
         return ClassificationResult(
-            final_label=ranked[0].domain, confidence=0.9, decided_stage=2,
+            final_label=ranked[0].domain, confidence=_CONF_S2_CONFIRMED, decided_stage=2,
             stage1_scores=s1_scores, stage2_scores=s2_scores,
         )
 
     # Stage 3 — 온프레미스 LLM(모호 케이스만), 라벨 = 등록 도메인 + general.
     labels = [p.domain for p in profiles] + [DOMAIN_GENERAL]
     s3_label, s3 = _llm_classify(scan, labels)
-    conf = 0.6 if s3_label != "review" else 0.0
+    conf = _CONF_S3 if s3_label != "review" else 0.0
     return ClassificationResult(
         final_label=s3_label, confidence=conf, decided_stage=3,
         stage1_scores=s1_scores, stage2_scores=s2_scores, stage3_scores=s3,
