@@ -10,12 +10,12 @@
 
 from __future__ import annotations
 
-from src.dispatch.types import AssetRecord, ExtractContext
+from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
-from src.skills.audio_skill import extract_audio
-from src.skills.image_skill import extract_image
-from src.skills.text_skill import extract_text
-from src.skills.video_skill import extract_video
+from src.skills.audio_skill import _embed_audio, _extract_audio_meta, extract_audio
+from src.skills.image_skill import _embed_image, _extract_image_meta, extract_image
+from src.skills.text_skill import _embed_text, _extract_text_meta, extract_text
+from src.skills.video_skill import _embed_video, _extract_video_meta, extract_video
 
 
 class UnsupportedModalityError(ValueError):
@@ -33,4 +33,32 @@ def dispatch_extract(ctx: ExtractContext) -> AssetRecord:
         return extract_video(ctx)
     if modality == MediaKind.AUDIO.value:
         return extract_audio(ctx)
+    raise UnsupportedModalityError(f"지원하지 않는 modality: {modality!r}")
+
+
+def dispatch_extract_meta(ctx: ExtractContext) -> AssetRecord:
+    """``ctx.modality`` 에 맞는 메타 추출 함수(_extract_*_meta)를 호출(임베딩 제외)."""
+    modality = ctx.modality
+    if modality in ALLOWED_TEXT_META_FILE_KINDS:
+        return _extract_text_meta(ctx)
+    if modality == MediaKind.IMAGE.value:
+        return _extract_image_meta(ctx)
+    if modality == MediaKind.VIDEO.value:
+        return _extract_video_meta(ctx)
+    if modality == MediaKind.AUDIO.value:
+        return _extract_audio_meta(ctx)
+    raise UnsupportedModalityError(f"지원하지 않는 modality: {modality!r}")
+
+
+def dispatch_embed(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
+    """``ctx.modality`` 에 맞는 임베딩 함수(_embed_*)를 호출."""
+    modality = ctx.modality
+    if modality in ALLOWED_TEXT_META_FILE_KINDS:
+        return _embed_text(ctx, rec)
+    if modality == MediaKind.IMAGE.value:
+        return _embed_image(ctx, rec)
+    if modality == MediaKind.VIDEO.value:
+        return _embed_video(ctx, rec)
+    if modality == MediaKind.AUDIO.value:
+        return _embed_audio(ctx, rec)
     raise UnsupportedModalityError(f"지원하지 않는 modality: {modality!r}")

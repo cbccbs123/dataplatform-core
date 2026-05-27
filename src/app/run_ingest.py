@@ -32,6 +32,10 @@ from src.ingest.router import REASON_MISSING, route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed, set_status
 from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
 from src.registry.classification_persist import record_classification
+from src.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
+from src.pipeline.packs import for_domain
+from src.pipeline.policy import validate as policy_validate
+from src.pipeline.registry import DEFAULT_REGISTRY
 
 REASON_DUPLICATE = "duplicate"
 
@@ -55,8 +59,9 @@ def run_ingest(
     files: list[str],
     *,
     db: PostgresUtil,
-    extract_fn: ExtractFn = dispatch_extract,
-    classify_fn: ClassifyFn = cascade.classify,
+    extract_fn: ExtractFn | None = None,
+    classify_fn: ClassifyFn | None = None,
+    registry=DEFAULT_REGISTRY,
     settings: Any = None,
 ) -> dict[str, list[Any]]:
     """파일 리스트를 적재. 반환: {'registered': [asset_id], 'failed': [(asset_id,err)], 'skipped': [(path,reason)]}."""
@@ -99,14 +104,20 @@ def run_ingest(
                 set_status(conn, asset_id, AssetStatus.ROUTING)
                 set_status(conn, asset_id, AssetStatus.CLASSIFYING)
 
-            # 3.5) F-5.1 도메인 분류(트랜잭션 밖 — 시그니처/어휘/온프레미스 LLM) → 결과 영속화
-            classification = classify_fn(path, route.modality)
+            # 3.5) 도메인 분류: override 우선, 없으면 레지스트리 기본 분류기(ctx 기반)
+            ctx = ExtractContext(
+                file_path=path, modality=route.modality, domain=route.domain, settings=cfg, db=db
+            )
+            if classify_fn is not None:
+                classification = classify_fn(path, route.modality)
+            else:
+                classification = registry.resolve("classify", "cascade_v1")(ctx)
             with db.transaction() as conn:
                 record_classification(conn, asset_id, classification)
             domain = classification.final_label
+            ctx.domain = domain
 
-            # 의료 표준 포맷(DICOM/HL7/FHIR, stage1 시그니처)은 일반 추출기 대상이 아님.
-            # 의료 어댑터(후속 단계)에서 추출하므로 여기선 보류(deferred) — 실패 아님.
+            # 의료 표준 포맷(DICOM/HL7/FHIR, stage1 시그니처)은 일반 추출 대상이 아님 — 보류(deferred)
             signature = classification.stage1_scores.get("signature")
             if signature:
                 with db.transaction() as conn:
@@ -115,14 +126,21 @@ def run_ingest(
                 result["deferred"].append(asset_id)
                 continue
 
+            # 도메인 팩 선택 + 정책 검증(컴포지션 시점)
+            pack = for_domain(domain)
+            policy_validate(pack, registry)
+
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.EXTRACTING)
 
-            # 4) 추출 — 트랜잭션 밖(LLM/IO). 미지원 modality 면 여기서 예외.
-            ctx = ExtractContext(
-                file_path=path, modality=route.modality, domain=domain, settings=cfg, db=db
-            )
-            record = extract_fn(ctx)
+            # 4) 추출/임베딩 — override(full record) 또는 팩 경로(extract_meta + embed)
+            if extract_fn is not None:
+                record = extract_fn(ctx)
+            else:
+                extract = registry.resolve("extract", pack.per_asset["extract"])
+                embed = registry.resolve("embed", pack.per_asset["embed"])
+                record = extract(ctx)
+                record.embeddings = embed(ctx, record)
 
             # 5) 적재 + registered — 한 트랜잭션
             with db.transaction() as conn:
