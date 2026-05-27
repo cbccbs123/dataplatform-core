@@ -75,10 +75,3 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=0),
         EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0),
     ]
-
-
-def extract_image(ctx: ExtractContext) -> AssetRecord:
-    """기존 시그니처 보존 래퍼 = 메타 추출(+clip 벡터 stash) + 임베딩 합성(동작 불변)."""
-    rec = _extract_image_meta(ctx)
-    rec.embeddings = _embed_image(ctx, rec)
-    return rec

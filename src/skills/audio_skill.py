@@ -50,10 +50,3 @@ def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         )
         for c in chunks
     ]
-
-
-def extract_audio(ctx: ExtractContext) -> AssetRecord:
-    """기존 시그니처 보존 래퍼 = STT/메타(+stt 텍스트 stash) + 임베딩 합성(동작 불변)."""
-    rec = _extract_audio_meta(ctx)
-    rec.embeddings = _embed_audio(ctx, rec)
-    return rec

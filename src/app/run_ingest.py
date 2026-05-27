@@ -21,11 +21,9 @@ import logging
 import uuid
 from typing import Any, Callable
 
-from src.classify import cascade
 from src.classify.types import ClassificationResult
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
-from src.dispatch.dispatcher import dispatch_extract
 from src.dispatch.types import AssetRecord, ExtractContext
 from src.file.hashing import file_hash_and_size
 from src.ingest.router import REASON_MISSING, route_file

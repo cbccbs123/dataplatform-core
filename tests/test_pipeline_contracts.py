@@ -24,8 +24,8 @@ class TestStageContracts(unittest.TestCase):
             self.assertTrue(hasattr(C, name), name)
 
     def test_existing_extract_fn_is_callable_extract_stage(self) -> None:
-        from src.skills.text_skill import extract_text
-        self.assertTrue(callable(extract_text))  # ExtractStage 구조(=__call__) 충족
+        from src.skills.text_skill import _extract_text_meta
+        self.assertTrue(callable(_extract_text_meta))  # ExtractStage 구조(=__call__) 충족
 
 
 class TestCrossTypes(unittest.TestCase):

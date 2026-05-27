@@ -106,10 +106,3 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         embeddings.append(EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=i))
         embeddings.append(EmbeddingItem(channel=_CHANNEL_CLIP, vector=kf["clip_vec"], model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i))
     return embeddings
-
-
-def extract_video(ctx: ExtractContext) -> AssetRecord:
-    """기존 시그니처 보존 래퍼 = 키프레임/메타(+벡터 stash) + 임베딩 합성(동작 불변)."""
-    rec = _extract_video_meta(ctx)
-    rec.embeddings = _embed_video(ctx, rec)
-    return rec

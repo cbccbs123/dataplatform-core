@@ -6,7 +6,7 @@
     3. ``parse_and_normalize_edges`` / ``schema``: LLM 출력 정규화(관계 코드·토피 필드).
     4. ``sync_relation_catalog_from_llm_edges``: 허용 코드·sanitize 규칙으로 카탈로그(``relation_kind`` /
        ``relation_topic_parent`` / ``relation_subtopic`` / ``relation_type``)를 갱신한 뒤,
-       ``sync_asset_relation_edges`` 로 ``asset_relation`` 엣지를 upsert 한다. 진입점은 ``propose_relations_for_asset``.
+       ``sync_graph_edges`` 로 ``graph_edge`` 엣지를 upsert 한다. 진입점은 ``propose_relations_for_asset``.
 
 의존성
     ``psycopg``, OpenAI 클라이언트 등 **무거운 의존성**은 ``asset_entry``·``persist``·``llm_propose`` 쪽에만 두고,

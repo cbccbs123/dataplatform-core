@@ -12,28 +12,14 @@ from __future__ import annotations
 
 from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
-from src.skills.audio_skill import _embed_audio, _extract_audio_meta, extract_audio
-from src.skills.image_skill import _embed_image, _extract_image_meta, extract_image
-from src.skills.text_skill import _embed_text, _extract_text_meta, extract_text
-from src.skills.video_skill import _embed_video, _extract_video_meta, extract_video
+from src.skills.audio_skill import _embed_audio, _extract_audio_meta
+from src.skills.image_skill import _embed_image, _extract_image_meta
+from src.skills.text_skill import _embed_text, _extract_text_meta
+from src.skills.video_skill import _embed_video, _extract_video_meta
 
 
 class UnsupportedModalityError(ValueError):
     """디스패처가 처리할 수 없는 modality."""
-
-
-def dispatch_extract(ctx: ExtractContext) -> AssetRecord:
-    """``ctx.modality`` 에 맞는 추출 함수를 호출해 ``AssetRecord`` 를 반환한다."""
-    modality = ctx.modality
-    if modality in ALLOWED_TEXT_META_FILE_KINDS:  # txt/pdf/json/word/excel/powerpoint
-        return extract_text(ctx)
-    if modality == MediaKind.IMAGE.value:
-        return extract_image(ctx)
-    if modality == MediaKind.VIDEO.value:
-        return extract_video(ctx)
-    if modality == MediaKind.AUDIO.value:
-        return extract_audio(ctx)
-    raise UnsupportedModalityError(f"지원하지 않는 modality: {modality!r}")
 
 
 def dispatch_extract_meta(ctx: ExtractContext) -> AssetRecord:

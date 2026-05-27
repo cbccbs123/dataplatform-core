@@ -56,10 +56,3 @@ def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         )
         for c in chunks
     ]
-
-
-def extract_text(ctx: ExtractContext) -> AssetRecord:
-    """기존 시그니처 보존 래퍼 = 메타 추출 + 임베딩 합성(동작 불변)."""
-    rec = _extract_text_meta(ctx)
-    rec.embeddings = _embed_text(ctx, rec)
-    return rec
