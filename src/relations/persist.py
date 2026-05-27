@@ -38,7 +38,7 @@ from src.relations.schema import (
 def sync_relation_catalog_from_llm_edges(
     conn: Connection[Any],
     *,
-    source_media_item_id: int,
+    source_media_item_id: str,
     edges: list[dict[str, Any]],
     llm_prompt_type_codes: frozenset[str],
 ) -> tuple[int, int]:

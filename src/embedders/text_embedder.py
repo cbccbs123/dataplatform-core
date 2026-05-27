@@ -127,10 +127,7 @@ def embedding_text_meta(
     else:
         embedding_vector = (weighted_sum / total_weight).tolist()
 
-    print("embedding_vector Length:", len(embedding_vector))
-
     padded_embedding = pad_embedding_to_storage_dim(embedding_vector)
-    print("padded_embeddings Length:", len(padded_embedding))
     return {"embedding_vector": padded_embedding}
 
 

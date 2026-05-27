@@ -91,7 +91,6 @@ def summarize_and_extract_keywords(
             max_input_chars=MAX_INPUT_CHARS,
         )
     ):
-        print(f"chunk {i}: {i * cfg.chunk_size}")
         s = _summarize_chunk_only_openai(
             ch,
             client=client,

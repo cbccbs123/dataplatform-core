@@ -35,8 +35,11 @@ def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     from src.embedders.text_embedder import embedding_plain_text_chunks
 
     cfg = ctx.settings or get_current_settings()
+    stt_text = ctx.scratch.get("stt_text")
+    if stt_text is None:
+        raise RuntimeError("_embed_audio: ctx.scratch['stt_text'] 없음 — _extract_audio_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     chunks = embedding_plain_text_chunks(
-        ctx.scratch["stt_text"],
+        stt_text,
         chunk_size=cfg.text_embedding_chunk_size,
         embedding_model_name=cfg.text_embedding_model,
         normalize_embeddings=cfg.text_embedding_normalize,

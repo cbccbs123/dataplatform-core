@@ -70,7 +70,9 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         normalize_embeddings=cfg.text_embedding_normalize,
     )[0]
     st_vec = pad_embedding_to_storage_dim(st_raw)
-    clip_vec = ctx.scratch["clip_vec"]
+    clip_vec = ctx.scratch.get("clip_vec")
+    if clip_vec is None:
+        raise RuntimeError("_embed_image: ctx.scratch['clip_vec'] 없음 — _extract_image_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     return [
         EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=0),
         EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0),

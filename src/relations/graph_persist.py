@@ -34,11 +34,24 @@ def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
         if row is not None:
             return str(row[0])
         nid = uuid7_str()
+        # 동시성 안전: 부분 유니크 인덱스(uq_node_asset)와 ON CONFLICT 로 경쟁 INSERT 흡수.
         cur.execute(
-            "INSERT INTO node (node_id, node_kind, asset_id) VALUES (%s, 'asset', %s)",
+            """
+            INSERT INTO node (node_id, node_kind, asset_id) VALUES (%s, 'asset', %s)
+            ON CONFLICT (asset_id) WHERE node_kind = 'asset' DO NOTHING
+            RETURNING node_id
+            """,
             (nid, asset_id),
         )
-        return nid
+        inserted = cur.fetchone()
+        if inserted is not None:
+            return str(inserted[0])
+        # 다른 트랜잭션이 먼저 INSERT(충돌) → 기존 노드 재조회
+        cur.execute(
+            "SELECT node_id FROM node WHERE node_kind = 'asset' AND asset_id = %s LIMIT 1",
+            (asset_id,),
+        )
+        return str(cur.fetchone()[0])
 
 
 def sync_graph_edges(

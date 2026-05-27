@@ -90,8 +90,11 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
+    keyframes = ctx.scratch.get("keyframes")
+    if keyframes is None:
+        raise RuntimeError("_embed_video: ctx.scratch['keyframes'] 없음 — _extract_video_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     embeddings: list[EmbeddingItem] = []
-    for i, kf in enumerate(ctx.scratch["keyframes"]):
+    for i, kf in enumerate(keyframes):
         frame_meta = {"summary": kf["summary"], "keywords": kf["keywords"], "labels": kf["labels"]}
         chunk_content = build_image_vlm_text_for_embedding(frame_meta)
         if not chunk_content.strip():
