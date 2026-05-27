@@ -66,6 +66,39 @@ class TestRunIngestPackPath(unittest.TestCase):
                           settings=object())
         self.assertNotIn("embed_called", captured)      # override 경로는 embed 슬롯 미호출
 
+    def test_stage1_signature_defers_medical_format(self) -> None:
+        """cascade stage1 중첩 구조({domain: {signature}})로 DICOM 파일이 deferred 처리되어야 한다.
+
+        회귀: 평면 .get("signature")는 중첩 구조에서 항상 None → deferred 누락.
+        """
+        captured: dict = {}
+        reg = _fake_registry(captured)
+
+        # 새 중첩 형태의 stage1 단락 결과
+        stage1_medical_fn = lambda p, m: ClassificationResult(
+            final_label="medical",
+            confidence=1.0,
+            decided_stage=1,
+            stage1_scores={"medical": {"signature": "dicom"}},
+        )
+
+        with contextlib.ExitStack() as stack:
+            self._patch(stack)
+            stack.enter_context(mock.patch.object(ri, "record_lineage"))
+            res = ri.run_ingest(
+                ["/d/a.dcm"],
+                db=mock.MagicMock(),
+                registry=reg,
+                settings=object(),
+                classify_fn=stage1_medical_fn,
+            )
+
+        # deferred 에 asset_id 가 들어가야 하고 registered 는 비어 있어야 한다
+        self.assertEqual(len(res["deferred"]), 1, "DICOM 파일은 deferred 로 분류돼야 함")
+        self.assertEqual(len(res["registered"]), 0, "registered 는 비어 있어야 함")
+        # extract/embed 슬롯이 호출되지 않아야 한다
+        self.assertNotIn("embed_called", captured, "deferred 분기에서 embed 슬롯이 호출되면 안 됨")
+
 
 if __name__ == "__main__":
     unittest.main()

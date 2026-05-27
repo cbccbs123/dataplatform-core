@@ -94,7 +94,8 @@ class TestRunIngest(unittest.TestCase):
             return AssetRecord()
 
         cls = ClassificationResult(
-            final_label="medical", confidence=1.0, decided_stage=1, stage1_scores={"signature": "dicom"}
+            final_label="medical", confidence=1.0, decided_stage=1,
+            stage1_scores={"medical": {"signature": "dicom"}},
         )
         res, m = self._ingest(
             ["/d/scan.dcm"], _route(modality="unknown", routable=False, reason="unknown_modality"),

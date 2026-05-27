@@ -127,7 +127,10 @@ def run_ingest(
             ctx.domain = domain
 
             # 의료 표준 포맷(DICOM/HL7/FHIR, stage1 시그니처)은 일반 추출 대상이 아님 — 보류(deferred)
-            signature = classification.stage1_scores.get("signature")
+            # cascade v2 이후 stage1_scores 는 {domain: {signature, ...}} 중첩 구조
+            signature = None
+            if classification.decided_stage == 1:
+                signature = classification.stage1_scores.get(domain, {}).get("signature")
             if signature:
                 with db.transaction() as conn:
                     set_status(conn, asset_id, AssetStatus.DEFERRED, reason=f"medical_format:{signature}")
