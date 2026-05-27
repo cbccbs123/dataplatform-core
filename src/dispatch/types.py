@@ -31,6 +31,7 @@ class ExtractContext:
     domain: str = "general"  # 'general' | 'medical' | 'review'
     settings: Any = None  # PipelineSettings (선택)
     db: Any = None  # PostgresUtil (선택)
+    scratch: dict[str, Any] = field(default_factory=dict)  # 스테이지 간 중간 산출물 핸드오프(재계산 방지)
 
 
 @dataclass

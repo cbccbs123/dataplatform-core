@@ -13,17 +13,15 @@ from src.skills.meta_split import split_core_ext
 _CHANNEL_ST = "st"
 
 
-def extract_text(ctx: ExtractContext) -> AssetRecord:
-    # 무거운 import(임베더/요약/추출)는 함수 내부 — 디스패처 import 시 미로딩.
-    # 모든 LLM 은 설정된 단일 온프레미스 엔드포인트(cfg.openai_*)를 사용한다(외부 LLM 미사용).
-    from src.embedders.text_embedder import embedding_text_chunks
+def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
+    # 무거운 import(추출/요약)는 함수 내부 — 디스패처 import 시 미로딩.
+    # 모든 LLM 은 설정된 단일 온프레미스 엔드포인트를 사용한다(외부 LLM 미사용).
     from src.extractors.text_meta_extractor import extract_text_meta
     from src.llm.text_summarizer import summarize_and_extract_keywords
     from src.preprocess.media_item_search_text import build_media_item_fts_plain
 
     cfg = ctx.settings or get_current_settings()
     file_kind = ctx.modality
-
     meta = extract_text_meta(
         file_path=ctx.file_path,
         file_kind=file_kind,
@@ -31,21 +29,25 @@ def extract_text(ctx: ExtractContext) -> AssetRecord:
         chunk_size=cfg.text_embedding_chunk_size,
         embedding_model_name=cfg.text_embedding_model,
     )
-    summary = summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)
-    meta = meta | summary
+    meta = meta | summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)
     fts_plain = build_media_item_fts_plain(file_uri=ctx.file_path, meta=meta)
+    core_meta, ext_meta = split_core_ext(meta)
+    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
 
+
+def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
+    from src.embedders.text_embedder import embedding_text_chunks
+
+    cfg = ctx.settings or get_current_settings()
     chunks = embedding_text_chunks(
         ctx.file_path,
-        file_kind=file_kind,
+        file_kind=ctx.modality,
         encoding=cfg.encoding,
         chunk_size=cfg.text_embedding_chunk_size,
         embedding_model_name=cfg.text_embedding_model,
         normalize_embeddings=cfg.text_embedding_normalize,
     )
-
-    core_meta, ext_meta = split_core_ext(meta)
-    embeddings = [
+    return [
         EmbeddingItem(
             channel=_CHANNEL_ST,
             vector=c["embedding_vector"],
@@ -54,10 +56,10 @@ def extract_text(ctx: ExtractContext) -> AssetRecord:
         )
         for c in chunks
     ]
-    return AssetRecord(
-        core_meta=core_meta,
-        ext_meta=ext_meta,
-        tags=[],
-        fts_plain=fts_plain,
-        embeddings=embeddings,
-    )
+
+
+def extract_text(ctx: ExtractContext) -> AssetRecord:
+    """기존 시그니처 보존 래퍼 = 메타 추출 + 임베딩 합성(동작 불변)."""
+    rec = _extract_text_meta(ctx)
+    rec.embeddings = _embed_text(ctx, rec)
+    return rec

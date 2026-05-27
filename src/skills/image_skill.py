@@ -14,17 +14,14 @@ _CHANNEL_ST = "st"
 _CHANNEL_CLIP = "clip"
 
 
-def extract_image(ctx: ExtractContext) -> AssetRecord:
-    from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
+def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     from src.embedders.image_embedder import (
         clip_zero_shot_ko_meta_items,
         zero_shot_tag_image_korean_clip,
     )
-    from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
     from src.extractors.image_meta_extractor import extract_image_meta
     from src.llm.image_summarizer import summarize_image_caption_keywords_objects
     from src.preprocess.media_item_search_text import build_media_item_fts_plain
-    from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
     file = ctx.file_path
@@ -50,7 +47,20 @@ def extract_image(ctx: ExtractContext) -> AssetRecord:
     fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta_for_fts)
     meta.pop("objects", None)  # objects 는 CLIP 후보용일 뿐 최종 meta 에서 제외
 
-    clip_vec = zs["clip_image_embedding"]
+    # 임베딩 슬롯이 재계산 없이 쓰도록 clip 이미지 벡터를 핸드오프
+    ctx.scratch["clip_vec"] = zs["clip_image_embedding"]
+
+    core_meta, ext_meta = split_core_ext(meta)
+    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
+
+
+def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
+    from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
+    from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
+    from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
+
+    cfg = ctx.settings or get_current_settings()
+    meta = dict(rec.core_meta) | dict(rec.ext_meta)
     chunk_content = build_image_vlm_text_for_embedding(meta)
     if not chunk_content.strip():
         chunk_content = " "
@@ -60,10 +70,15 @@ def extract_image(ctx: ExtractContext) -> AssetRecord:
         normalize_embeddings=cfg.text_embedding_normalize,
     )[0]
     st_vec = pad_embedding_to_storage_dim(st_raw)
-
-    core_meta, ext_meta = split_core_ext(meta)
-    embeddings = [
+    clip_vec = ctx.scratch["clip_vec"]
+    return [
         EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=0),
         EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0),
     ]
-    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=embeddings)
+
+
+def extract_image(ctx: ExtractContext) -> AssetRecord:
+    """기존 시그니처 보존 래퍼 = 메타 추출(+clip 벡터 stash) + 임베딩 합성(동작 불변)."""
+    rec = _extract_image_meta(ctx)
+    rec.embeddings = _embed_image(ctx, rec)
+    return rec
