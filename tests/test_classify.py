@@ -1,33 +1,19 @@
-"""F-5.1 의료 분류 cascade 단위 테스트.
+"""분류 cascade 단위 테스트(도메인-불가지). 외부 모델/네트워크/DB 불필요.
 
-stage1(시그니처)·stage2(어휘) 는 결정적이라 실데이터 픽스처로, stage3(온프레미스 LLM)·cascade 단축은
-mock 으로 검증한다. 외부 모델/네트워크 불필요.
+- 프로파일/provider: test_classify_profiles.py
+- 시그니처 능력/의료 프로파일: test_domain_medical.py
+- 본 파일: count_hits · stage3 동적 라벨 · cascade 엔진(기본 RegistryProvider 포함) 행동.
 """
-
 from __future__ import annotations
 
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
-
-def _fake_cfg():
-    return SimpleNamespace(openai_base_url="http://onprem/v1", openai_api_key="EMPTY", meta_model="gemma")
-
-
-def _fake_openai_client(content: str):
-    """chat.completions.create 가 content 를 반환하는 mock OpenAI 클라이언트."""
-    choice = mock.MagicMock()
-    choice.message.content = content
-    resp = mock.MagicMock()
-    resp.choices = [choice]
-    client = mock.MagicMock()
-    client.chat.completions.create.return_value = resp
-    return client
-
-from src.classify import cascade, stage1_magic, stage2_zeroshot, stage3_gemma
+from src.classify import cascade, stage3_gemma
+from src.classify.medical_terms import MEDICAL_TERMS
+from src.classify.profiles import DomainProfile, SigHit
+from src.classify.stage2_zeroshot import count_hits
 from src.classify.types import DOMAIN_GENERAL, DOMAIN_MEDICAL, DOMAIN_REVIEW
 
 
@@ -45,121 +31,164 @@ class TmpBase(unittest.TestCase):
         return str(p)
 
 
-class TestStage1(TmpBase):
-    def test_dicom_signature(self) -> None:
-        path = self._write("a.dcm", b"\x00" * 128 + b"DICM" + b"\x00" * 100)
-        label, sig = stage1_magic.detect(path)
-        self.assertEqual(label, DOMAIN_MEDICAL)
-        self.assertEqual(sig["signature"], "dicom")
+class TestCountHits(unittest.TestCase):
+    def test_korean_substring(self) -> None:
+        n, terms = count_hits("환자 진단 처방", MEDICAL_TERMS)
+        self.assertGreaterEqual(n, 2)
+        self.assertIn("환자", terms)
 
-    def test_hl7v2_signature(self) -> None:
-        path = self._write("a.hl7", b"MSH|^~\\&|HIS|HOSP|...\r")
-        label, sig = stage1_magic.detect(path)
-        self.assertEqual(label, DOMAIN_MEDICAL)
-        self.assertEqual(sig["signature"], "hl7v2")
+    def test_latin_word_boundary(self) -> None:
+        _, terms = count_hits("CT scan and MRI ordered", MEDICAL_TERMS)
+        self.assertIn("ct", terms)
+        self.assertIn("mri", terms)
 
-    def test_fhir_signature(self) -> None:
-        path = self._write("a.json", b'{"resourceType": "Patient", "id": "123"}')
-        label, sig = stage1_magic.detect(path)
-        self.assertEqual(label, DOMAIN_MEDICAL)
-        self.assertEqual(sig["resourceType"], "Patient")
+    def test_latin_substring_not_matched(self) -> None:
+        n, _ = count_hits("Please contact the factory team", MEDICAL_TERMS)
+        self.assertEqual(n, 0)
 
-    def test_non_medical_none(self) -> None:
-        path = self._write("a.txt", "오늘 날씨가 좋네요 hello world".encode("utf-8"))
-        label, _ = stage1_magic.detect(path)
-        self.assertIsNone(label)
+    def test_zero_hits(self) -> None:
+        n, terms = count_hits("주식 시장 동향", MEDICAL_TERMS)
+        self.assertEqual(n, 0)
+        self.assertEqual(terms, [])
 
-    def test_fhir_unknown_resourcetype_none(self) -> None:
-        path = self._write("a.json", b'{"resourceType": "Widget"}')
-        label, _ = stage1_magic.detect(path)
-        self.assertIsNone(label)
+    def test_arbitrary_lexicon(self) -> None:
+        n, _ = count_hits("이번 계약 소송 건", frozenset({"계약", "소송"}))
+        self.assertEqual(n, 2)
 
-
-class TestStage2(unittest.TestCase):
-    def test_two_or_more_hits_medical(self) -> None:
-        label, sig = stage2_zeroshot.score("환자 진단 결과 보고서")
-        self.assertEqual(label, DOMAIN_MEDICAL)
-        self.assertGreaterEqual(sig["medical_term_hits"], 2)
-
-    def test_zero_hits_general(self) -> None:
-        label, sig = stage2_zeroshot.score("주식 시장 동향 분석")
-        self.assertEqual(label, DOMAIN_GENERAL)
-        self.assertEqual(sig["medical_term_hits"], 0)
-
-    def test_one_hit_ambiguous(self) -> None:
-        label, sig = stage2_zeroshot.score("환자 대기실 안내")
-        self.assertIsNone(label)
-        self.assertEqual(sig["medical_term_hits"], 1)
-
-    def test_english_terms_case_insensitive(self) -> None:
-        label, _ = stage2_zeroshot.score("Patient DIAGNOSIS summary")
-        self.assertEqual(label, DOMAIN_MEDICAL)
-
-    def test_latin_substring_false_positive_avoided(self) -> None:
-        # 'ct' 가 'contact'/'factory' 안에 있어도 의료로 오탐하면 안 됨(단어 경계).
-        label, sig = stage2_zeroshot.score("Please contact the factory product team")
-        self.assertEqual(label, DOMAIN_GENERAL)
-        self.assertEqual(sig["medical_term_hits"], 0)
-
-    def test_latin_word_boundary_match(self) -> None:
-        # 단어로 등장하면 매칭.
-        label, sig = stage2_zeroshot.score("CT scan and MRI ordered")
-        self.assertEqual(label, DOMAIN_MEDICAL)
-        self.assertIn("ct", sig["terms"])
-        self.assertIn("mri", sig["terms"])
+    def test_empty_lexicon(self) -> None:
+        n, _ = count_hits("anything", frozenset())
+        self.assertEqual(n, 0)
 
 
 class TestStage3(unittest.TestCase):
-    def test_onprem_llm_medical(self) -> None:
-        with mock.patch("src.config.settings.get_current_settings", return_value=_fake_cfg()), \
-                mock.patch("openai.OpenAI", return_value=_fake_openai_client('{"label": "medical"}')):
-            label, sig = stage3_gemma.classify("환자 진단")
+    def test_label_in_allowed(self) -> None:
+        label, sig = stage3_gemma.classify(
+            "환자 진단", ["medical", "general"], complete=lambda p: '{"label": "medical"}'
+        )
         self.assertEqual(label, DOMAIN_MEDICAL)
         self.assertEqual(sig["stage3"], "llm")
 
-    def test_onprem_unclear_returns_review(self) -> None:
-        with mock.patch("src.config.settings.get_current_settings", return_value=_fake_cfg()), \
-                mock.patch("openai.OpenAI", return_value=_fake_openai_client('{"label": "blah"}')):
-            label, sig = stage3_gemma.classify("애매한 텍스트")
+    def test_dynamic_label_legal(self) -> None:
+        label, _ = stage3_gemma.classify(
+            "계약", ["medical", "legal", "general"], complete=lambda p: '{"label": "legal"}'
+        )
+        self.assertEqual(label, "legal")
+
+    def test_not_allowed_returns_review(self) -> None:
+        label, sig = stage3_gemma.classify(
+            "x", ["medical", "general"], complete=lambda p: '{"label": "blah"}'
+        )
         self.assertEqual(label, DOMAIN_REVIEW)
         self.assertEqual(sig["stage3"], "llm_unclear")
 
-    def test_error_returns_review(self) -> None:
-        with mock.patch("src.config.settings.get_current_settings", side_effect=RuntimeError("not init")):
-            label, sig = stage3_gemma.classify("환자")
+    def test_complete_raises_review(self) -> None:
+        def boom(_p: str) -> str:
+            raise RuntimeError("no endpoint")
+        label, sig = stage3_gemma.classify("x", ["medical", "general"], complete=boom)
         self.assertEqual(label, DOMAIN_REVIEW)
         self.assertEqual(sig["stage3"], "error")
 
+    def test_prompt_lists_labels(self) -> None:
+        seen: dict[str, str] = {}
+        def cap(p: str) -> str:
+            seen["p"] = p
+            return '{"label": "general"}'
+        stage3_gemma.classify("본문", ["medical", "legal", "general"], complete=cap)
+        self.assertIn("medical", seen["p"])
+        self.assertIn("legal", seen["p"])
 
-class TestCascade(TmpBase):
-    def test_stage1_short_circuit_medical(self) -> None:
+
+# --- cascade 엔진: 주입 provider 로 다도메인 ---
+
+def _dicom(head: bytes) -> SigHit | None:
+    return SigHit("dicom") if len(head) >= 132 and head[128:132] == b"DICM" else None
+
+
+class _Provider:
+    def __init__(self, profiles: list[DomainProfile]) -> None:
+        self._p = profiles
+
+    def all_profiles(self) -> list[DomainProfile]:
+        return list(self._p)
+
+
+_MED = DomainProfile("medical", frozenset({"환자", "진단", "처방"}), "medical", (_dicom,))
+_LEGAL = DomainProfile("legal", frozenset({"계약", "소송", "판결"}), "legal", ())
+
+
+class TestCascadeEngine(TmpBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.provider = _Provider([_MED, _LEGAL])
+
+    def test_stage1_unique_signature(self) -> None:
         path = self._write("a.dcm", b"\x00" * 128 + b"DICM")
-        r = cascade.classify(path, "unknown")
+        r = cascade.classify(path, "unknown", provider=self.provider)
         self.assertEqual(r.final_label, DOMAIN_MEDICAL)
         self.assertEqual(r.decided_stage, 1)
         self.assertEqual(r.confidence, 1.0)
 
-    def test_stage2_medical_from_text_content(self) -> None:
+    def test_stage2_top_confirmed(self) -> None:
+        path = self._write("n.txt", "환자 진단 처방".encode("utf-8"))
+        r = cascade.classify(path, "txt", provider=self.provider)
+        self.assertEqual(r.final_label, DOMAIN_MEDICAL)
+        self.assertEqual(r.decided_stage, 2)
+        self.assertEqual(r.stage2_scores["medical"]["hits"], 3)
+
+    def test_stage2_other_domain(self) -> None:
+        path = self._write("n.txt", "계약 소송 판결".encode("utf-8"))
+        r = cascade.classify(path, "txt", provider=self.provider)
+        self.assertEqual(r.final_label, "legal")
+        self.assertEqual(r.decided_stage, 2)
+
+    def test_stage2_general(self) -> None:
+        path = self._write("n.txt", "여행 후기와 맛집".encode("utf-8"))
+        r = cascade.classify(path, "txt", provider=self.provider)
+        self.assertEqual(r.final_label, DOMAIN_GENERAL)
+        self.assertEqual(r.decided_stage, 2)
+
+    def test_ambiguous_to_stage3(self) -> None:
+        # 1 hit < _HIT_THRESHOLD(2) → 모호 → Stage 3.
+        path = self._write("n.txt", "환자 대기실 안내".encode("utf-8"))
+        calls: dict[str, list[str]] = {}
+        def fake_s3(text: str, labels: list[str], **kw: object):
+            calls["labels"] = labels
+            return DOMAIN_GENERAL, {"stage3": "llm"}
+        r = cascade.classify(path, "txt", provider=self.provider, _llm_classify=fake_s3)
+        self.assertEqual(r.decided_stage, 3)
+        self.assertEqual(r.final_label, DOMAIN_GENERAL)
+        self.assertIn("medical", calls["labels"])
+        self.assertIn("legal", calls["labels"])
+        self.assertIn(DOMAIN_GENERAL, calls["labels"])
+
+    def test_stage1_conflict_falls_through(self) -> None:
+        also = DomainProfile("imaging", frozenset(), "imaging", (_dicom,))
+        prov = _Provider([_MED, also])
+        path = self._write("a.dcm", b"\x00" * 128 + b"DICM")
+        r = cascade.classify(path, "unknown", provider=prov)
+        self.assertNotEqual(r.decided_stage, 1)
+
+
+class TestCascadeDefaultProvider(TmpBase):
+    """provider 미지정 → RegistryProvider(등록된 의료 프로파일) 기본 경로."""
+
+    def test_default_dicom_medical(self) -> None:
+        path = self._write("a.dcm", b"\x00" * 128 + b"DICM")
+        r = cascade.classify(path, "unknown")
+        self.assertEqual(r.final_label, DOMAIN_MEDICAL)
+        self.assertEqual(r.decided_stage, 1)
+
+    def test_default_medical_text(self) -> None:
         path = self._write("note.txt", "환자 진단 처방 내역".encode("utf-8"))
         r = cascade.classify(path, "txt")
         self.assertEqual(r.final_label, DOMAIN_MEDICAL)
         self.assertEqual(r.decided_stage, 2)
 
-    def test_stage2_general(self) -> None:
+    def test_default_general_text(self) -> None:
         path = self._write("note.txt", "여행 후기와 맛집 추천".encode("utf-8"))
         r = cascade.classify(path, "txt")
         self.assertEqual(r.final_label, DOMAIN_GENERAL)
         self.assertEqual(r.decided_stage, 2)
-
-    def test_ambiguous_goes_to_stage3(self) -> None:
-        # stage1 None, stage2 모호(None) → stage3 호출.
-        with mock.patch.object(cascade.stage1_magic, "detect", return_value=(None, {})), \
-                mock.patch.object(cascade.stage2_zeroshot, "score", return_value=(None, {"medical_term_hits": 1})), \
-                mock.patch.object(cascade.stage3_gemma, "classify", return_value=(DOMAIN_GENERAL, {"stage3": "llm"})) as s3:
-            r = cascade.classify("/x/y.bin", "image")
-        s3.assert_called_once()
-        self.assertEqual(r.decided_stage, 3)
-        self.assertEqual(r.final_label, DOMAIN_GENERAL)
 
 
 if __name__ == "__main__":
