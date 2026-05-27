@@ -22,7 +22,7 @@ from psycopg.rows import dict_row
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.relations.asset_candidates import EmbeddingKindFilter, find_embedding_candidates
-from src.relations.asset_relation_persist import sync_asset_relation_edges
+from src.relations.graph_persist import sync_graph_edges
 from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
 from src.relations.persist import sync_relation_catalog_from_llm_edges
 from src.relations.prompt import build_relation_proposal_prompt
@@ -108,7 +108,7 @@ def propose_relations_for_asset(
             edges=edges,
             llm_prompt_type_codes=allowed,
         )
-        edges_upserted, edges_skipped = sync_asset_relation_edges(
+        edges_upserted, edges_skipped = sync_graph_edges(
             conn,
             source_asset_id=source_asset_id,
             edges=edges,
