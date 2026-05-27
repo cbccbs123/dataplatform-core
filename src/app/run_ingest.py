@@ -30,6 +30,8 @@ from src.ingest.router import REASON_MISSING, route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed, set_status
 from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
 from src.registry.classification_persist import record_classification
+from src.registry.lineage_persist import record_lineage
+from src.registry.schema_registry import validate_ext_meta
 from src.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
 from src.pipeline.packs import for_domain
 from src.pipeline.policy import validate as policy_validate
@@ -96,11 +98,15 @@ def run_ingest(
                     file_hash=file_hash,
                     file_size=file_size,
                 )
+                record_lineage(conn, asset_id, activity="ingest.received.v1", agent="run_ingest",
+                               generated={"modality": route.modality}, payload={"fs_path": path})
 
             # 3) routing → classifying (단계별 커밋)
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.ROUTING)
+                record_lineage(conn, asset_id, activity="ingest.routing.v1", agent="run_ingest")
                 set_status(conn, asset_id, AssetStatus.CLASSIFYING)
+                record_lineage(conn, asset_id, activity="ingest.classifying.v1", agent="run_ingest")
 
             # 3.5) 도메인 분류: override 우선, 없으면 레지스트리 기본 분류기(ctx 기반)
             ctx = ExtractContext(
@@ -112,6 +118,11 @@ def run_ingest(
                 classification = registry.resolve("classify", "cascade_v1")(ctx)
             with db.transaction() as conn:
                 record_classification(conn, asset_id, classification)
+                record_lineage(conn, asset_id, activity="ingest.classified.v1",
+                               agent=("classify_fn" if classify_fn is not None else "cascade_v1"),
+                               generated={"final_label": classification.final_label,
+                                          "decided_stage": classification.decided_stage,
+                                          "confidence": classification.confidence})
             domain = classification.final_label
             ctx.domain = domain
 
@@ -120,6 +131,8 @@ def run_ingest(
             if signature:
                 with db.transaction() as conn:
                     set_status(conn, asset_id, AssetStatus.DEFERRED, reason=f"medical_format:{signature}")
+                    record_lineage(conn, asset_id, activity="ingest.deferred.v1", agent="run_ingest",
+                                   payload={"signature": signature})
                 _LOG.info("deferred(medical %s): asset_id=%s %s", signature, asset_id, path)
                 result["deferred"].append(asset_id)
                 continue
@@ -130,6 +143,7 @@ def run_ingest(
 
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.EXTRACTING)
+                record_lineage(conn, asset_id, activity="ingest.extracting.v1", agent="run_ingest")
 
             # 4) 추출/임베딩 — override(full record) 또는 팩 경로(extract_meta + embed)
             if extract_fn is not None:
@@ -140,9 +154,15 @@ def run_ingest(
                 record = extract(ctx)
                 record.embeddings = embed(ctx, record)
 
-            # 5) 적재 + registered — 한 트랜잭션
+            # 5) 검증 + 적재 + registered — 한 트랜잭션
             with db.transaction() as conn:
+                validate_ext_meta(conn, domain, record.ext_meta)
                 finalize_asset(conn, asset_id, record)
+                record_lineage(conn, asset_id, activity="ingest.registered.v1",
+                               agent=("extract_fn" if extract_fn is not None else pack.per_asset["extract"]),
+                               generated={"channels": sorted({e.channel for e in record.embeddings}),
+                                          "n_embeddings": len(record.embeddings),
+                                          "models": sorted({e.model_name for e in record.embeddings})})
 
             _LOG.info("registered: asset_id=%s %s", asset_id, path)
             result["registered"].append(asset_id)
@@ -157,6 +177,8 @@ def run_ingest(
                 with db.transaction() as conn:
                     try:
                         mark_failed(conn, asset_id, reason)
+                        record_lineage(conn, asset_id, activity="ingest.failed.v1", agent="run_ingest",
+                                       payload={"reason": reason})
                     except InvalidTransitionError:
                         pass  # 이미 종료 상태면 무시
                 result["failed"].append((asset_id, reason))

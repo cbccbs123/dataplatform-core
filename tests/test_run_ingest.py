@@ -39,6 +39,8 @@ def _patch_all(stack: contextlib.ExitStack, route_result, *, dup=None) -> dict:
         "set_status": mock.patch.object(ri, "set_status"),
         "finalize_asset": mock.patch.object(ri, "finalize_asset"),
         "mark_failed": mock.patch.object(ri, "mark_failed"),
+        "record_lineage": mock.patch.object(ri, "record_lineage"),
+        "validate_ext_meta": mock.patch.object(ri, "validate_ext_meta"),
     }
     return {k: stack.enter_context(p) for k, p in specs.items()}
 

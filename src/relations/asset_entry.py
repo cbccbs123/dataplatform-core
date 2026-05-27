@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Callable
 
 from psycopg import Connection
@@ -22,6 +23,7 @@ from psycopg.rows import dict_row
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.relations.asset_candidates import EmbeddingKindFilter, find_embedding_candidates
+from src.registry.lineage_persist import record_lineage
 from src.relations.graph_persist import sync_graph_edges
 from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
 from src.relations.persist import sync_relation_catalog_from_llm_edges
@@ -113,6 +115,15 @@ def propose_relations_for_asset(
             source_asset_id=source_asset_id,
             edges=edges,
             allowed_target_ids=candidate_ids,
+        )
+        record_lineage(
+            conn,
+            uuid.UUID(source_asset_id),
+            activity="relations.proposed.v1",
+            agent="llm_propose",
+            generated={"edges_upserted": edges_upserted, "edges_skipped": edges_skipped,
+                       "catalog_synced": catalog_synced},
+            payload={"top_k": k, "embedding_kind": embedding_kind},
         )
         return catalog_synced, catalog_skipped, edges_upserted, edges_skipped
 
