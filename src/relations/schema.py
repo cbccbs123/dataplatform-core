@@ -2,7 +2,7 @@
 
 필드 모델
     - ``relation_type_code``: 관계 **종류**(``relation_kind.kind_code`` 와 동일한 snake_case). 프롬프트 허용 목록과 대조.
-    - ``topic_ko`` / ``topic_en`` / ``subtopic_*``: ``relation_topic_parent`` + ``relation_subtopic`` 로 들어갈 값.
+    - ``topic_ko`` / ``topic_en`` / ``subtopic_*``: 엣지 ``graph_edge.topic`` jsonb 로 들어갈 값.
       토피는 **한글 첫 어절·영어 최대 2토큰(3토큰 이상이면 첫 토큰만)** 등으로 짧게 잘라 DB 행 폭주를 완화한다(하드코드 동의어 맵 없음).
 
 신규 코드

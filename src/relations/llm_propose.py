@@ -104,7 +104,7 @@ def normalize_type_ko_labels_from_llm_response(
 
 def parse_and_normalize_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    LLM 루트 ``dict`` → ``sync_relation_catalog_from_llm_edges`` 가 순회할 **엣지 dict** 리스트.
+    LLM 루트 ``dict`` → ``register_new_relation_kinds`` / ``sync_graph_edges`` 가 순회할 **엣지 dict** 리스트.
 
     제외
         - ``target_media_item_id`` 없음(빈 값 포함)

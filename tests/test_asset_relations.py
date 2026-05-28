@@ -43,7 +43,8 @@ class TestFindCandidates(unittest.TestCase):
         params = cur.execute.call_args.args[1]
         self.assertEqual(params[0], _SRC)
         self.assertEqual(set(params[1]), {"st", "clip"})
-        self.assertEqual(params[3], 5)
+        self.assertEqual(params[3], 0.0)  # min_sim 기본값
+        self.assertEqual(params[4], 5)    # top_k
 
 
 if __name__ == "__main__":

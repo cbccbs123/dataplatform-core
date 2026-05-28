@@ -18,7 +18,7 @@ def _reg(extract_tags=()):
 
 
 def _pack(policy):
-    return DomainPack("d", {"classify": "c", "extract": "x", "embed": "e", "persist": "p"}, policy)
+    return DomainPack("d", {"classify": "c", "extract": "x", "embed": "e", "persist": "p"}, {}, policy)
 
 
 class TestPolicy(unittest.TestCase):
