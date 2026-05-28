@@ -10,6 +10,9 @@ from src.dispatch.dispatcher import dispatch_embed, dispatch_extract_meta
 from src.dispatch.types import ExtractContext
 from src.pipeline.registry import DEFAULT_REGISTRY, StrategyRegistry
 from src.registry.asset_persist import finalize_asset
+from src.relations.asset_candidates import find_embedding_candidates
+from src.relations.graph_persist import sync_graph_edges
+from src.relations.llm_propose import propose_edges_json
 
 
 def _classify_cascade_v1(ctx: ExtractContext):
@@ -22,6 +25,13 @@ def register_defaults(registry: StrategyRegistry) -> None:
     registry.register("extract", "by_modality", dispatch_extract_meta, tags={"onprem_llm"})
     registry.register("embed", "by_modality", dispatch_embed, tags={"deterministic"})
     registry.register("persist", "asset_upsert", finalize_asset)
+
+    # cross-asset(관계) 전략 — 팩 seam 의 resolve 대상으로 등록만 한다.
+    # 현재 run_relations 는 propose_relations_for_asset 로 묶음 위임하고, 슬롯별 개별 resolve 는
+    # 단계 D 의료 전략 분기에서 도입한다. 'decide'(confidence) 는 propose 내부 auto_approve 임계로 처리.
+    registry.register("candidates", "embedding_topk", find_embedding_candidates, tags={"deterministic"})
+    registry.register("score", "llm_propose", propose_edges_json, tags={"onprem_llm"})
+    registry.register("persist_edges", "graph_upsert", sync_graph_edges)
 
 
 register_defaults(DEFAULT_REGISTRY)

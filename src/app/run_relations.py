@@ -1,4 +1,4 @@
-"""F-3.5 관계 제안 배치 CLI — registered 자산에 대해 ``asset_relation`` 엣지를 생성한다.
+"""F-3.5 관계 제안 배치 CLI — registered 자산에 대해 ``graph_edge`` 엣지를 생성한다(관계 카탈로그는 relation_kind).
 
 수집/추출(run_ingest)과 분리된 후속 배치다. 임베딩이 있는 ``status='registered'`` 자산만 대상으로
 ``propose_relations_for_asset`` 을 호출한다(온프레미스 LLM). 자산 단위 격리(한 건 실패가 배치를 멈추지 않음).
@@ -16,10 +16,23 @@ from typing import Any
 from psycopg import Connection
 
 from src.database.postgres_util import PostgresUtil
+from src.pipeline.packs import GENERAL_PACK, for_domain
 from src.relations.asset_candidates import EmbeddingKindFilter
 from src.relations.asset_entry import propose_relations_for_asset
 
 _LOG = logging.getLogger("meta_extract.run_relations")
+
+
+def _fetch_domain_label(db: PostgresUtil, asset_id: str) -> str:
+    """자산의 domain_label(분류 결과). 없으면 'general'."""
+
+    def _run(conn: Connection[Any]) -> str:
+        with conn.cursor() as cur:
+            cur.execute("SELECT domain_label FROM asset WHERE asset_id = %s LIMIT 1", (asset_id,))
+            row = cur.fetchone()
+        return str(row[0]) if row and row[0] else "general"
+
+    return db.execute_in_transaction(_run, idempotent=True)
 
 
 def _fetch_registered_asset_ids(db: PostgresUtil) -> list[str]:
@@ -52,12 +65,17 @@ def run_relations(
     result: dict[str, list[Any]] = {"done": [], "failed": []}
     for aid in asset_ids:
         try:
+            domain = _fetch_domain_label(db, aid)
+            pack = for_domain(domain)
+            # MVP: 등록된 cross_asset 전략은 일반 묶음뿐. 의료 전용 전략은 단계 D 에서 이 분기에 추가.
+            if pack.cross_asset != GENERAL_PACK.cross_asset:
+                raise NotImplementedError(f"cross_asset 전략 미구현(도메인 {pack.name})")
             cat_s, cat_k, edges_u, edges_k = propose_relations_for_asset(
                 db, aid, top_k=top_k, embedding_kind=embedding_kind
             )
             result["done"].append((aid, edges_u, edges_k))
             _LOG.info(
-                "relations %s: catalog=%s/%s edges=%s/%s", aid, cat_s, cat_k, edges_u, edges_k
+                "relations %s: kinds=%s/%s edges=%s/%s", aid, cat_s, cat_k, edges_u, edges_k
             )
         except Exception as exc:  # noqa: BLE001 — 자산 단위 격리
             _LOG.warning("relations failed %s: %s", aid, exc)
