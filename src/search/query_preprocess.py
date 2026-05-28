@@ -8,14 +8,10 @@
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
-
-from src.config.settings import init_settings
 
 DEFAULT_TZ = "Asia/Seoul"
 
