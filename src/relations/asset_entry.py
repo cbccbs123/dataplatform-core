@@ -72,12 +72,15 @@ def propose_relations_for_asset(
     def _run(conn: Connection[Any]) -> tuple[int, int, int, int]:
         src = _fetch_source_row(conn, source_asset_id)
         if src is None:
+            # asset 테이블에 없는 ID — 조용히 (0,0,0,0) 반환(호출자 로그에서 확인).
             return 0, 0, 0, 0
         summary = str(src.get("summary") or "")
         candidates = find_embedding_candidates(
             conn, source_asset_id=source_asset_id, top_k=k,
             embedding_kind=embedding_kind, min_sim=cfg.relation_min_sim,
         )
+        # 활성 relation_kind 목록을 프롬프트에 포함시켜 LLM이 통제 어휘 안에서 코드를 선택하게 한다.
+        # 동시에 active_codes 집합을 만들어 신규 kind 등록 여부 판단에 재사용한다.
         kinds = fetch_active_relation_kinds(conn)
         prompt = build_relation_proposal_prompt(
             source_summary=summary,
@@ -87,14 +90,20 @@ def propose_relations_for_asset(
         )
         raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)
+        # active_codes: LLM이 반환한 kind 중 이미 카탈로그에 있는 것을 구분하는 기준.
         active_codes = frozenset(str(r["type_code"]) for r in kinds)
+        # candidate_ids: 후보 집합 밖 target을 LLM 환각으로 간주해 sync_graph_edges에서 차단.
         candidate_ids = frozenset(str(c["id"]) for c in candidates)
 
+        # 신규 kind는 inactive로 먼저 등록 — 검토자가 active로 승인하기 전까지 그래프에 반영 안 됨.
         kinds_registered, kinds_skipped = register_new_relation_kinds(
             conn, edges=edges, active_kind_codes=active_codes)
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
             allowed_target_ids=candidate_ids, auto_approve_min=cfg.relation_auto_approve_min)
+        # 계보 기록: 이 자산에 대해 관계 제안이 실행되었음을 asset_lineage에 남긴다.
+        # run_relations.py 가 재실행될 때 이중 기록이 생길 수 있으나, idempotent=False로
+        # 트랜잭션 실패 시 롤백되어 반쪽 기록은 남지 않는다.
         record_lineage(
             conn,
             uuid.UUID(source_asset_id),

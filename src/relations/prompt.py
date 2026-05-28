@@ -9,6 +9,10 @@
 
 출력 규격
     LLM 은 **JSON 객체 하나**만 반환하도록 지시한다(코드 펜스 금지).
+
+C+ 변경사항 (dedup 블록·정규화 topic 필드 제거)
+    과거에는 dedup 블록과 카탈로그 정규화 topic 을 포함했으나, C+ 슬림화로 topic 은
+    엣지 jsonb 로 이동했고 LLM 이 자유 기입한다. 중복 제거는 schema.parse_llm_edges 에서 처리.
 """
 
 from __future__ import annotations
@@ -32,6 +36,11 @@ def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
     카탈로그에 등장하는 ``type_code`` 마다 한 줄 힌트(또는 DB 설명)를 붙인 Markdown 블록.
 
     ``duplicate_near`` 와 ``same_domain`` 이 동시에 있으면 혼동 방지 문구를 추가한다.
+
+    힌트 우선순위
+        ``RELATION_KIND_HINTS_KO`` 에 정의된 5종 통제어휘는 미리 작성된 한국어 힌트를 쓴다.
+        그 외 DB 에 직접 추가된 kind 는 description 첫 200자를 보조 설명으로 표시한다.
+        따라서 새 통제어휘를 추가할 때 ``RELATION_KIND_HINTS_KO`` 에도 등록하면 프롬프트 품질이 올라간다.
     """
     codes = sorted({str(r.get("type_code", "")).strip() for r in catalog if str(r.get("type_code", "")).strip()})
     if not codes:
@@ -112,6 +121,9 @@ def build_relation_proposal_prompt(
     else:
         catalog_rules = "현재 DB에 프롬프트용 활성 relation_kind 이 없다. 이 경우 엣지를 비우거나 ``edges``: [] 로 반환해도 된다."
 
+    # 출력 예시(JSON 샘플)에 쓸 relation_type_code 를 실제 카탈로그에서 고른다.
+    # same_domain → duplicate_near → 알파벳 첫 코드 → 하드코드 폴백 순으로 선택한다.
+    # 이렇게 하면 카탈로그가 바뀌어도 예시가 항상 유효한 코드를 가리킨다.
     example_codes = {str(r.get("type_code", "")) for r in relation_kinds_catalog} if relation_kinds_catalog else set()
     if "same_domain" in example_codes:
         example_relation_type = "same_domain"

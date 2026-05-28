@@ -17,6 +17,8 @@ from src.relations.schema import coerce_topic_fields_mvp
 
 
 def _as_uuid_str(value: Any) -> str | None:
+    # LLM이 반환한 target_media_item_id가 문자열이 아닌 타입일 수 있으므로 방어적 변환.
+    # 유효하지 않은 UUID면 None을 돌려 호출자가 엣지를 skip할 수 있게 한다.
     try:
         return str(uuid.UUID(str(value)))
     except (TypeError, ValueError, AttributeError):
@@ -24,14 +26,30 @@ def _as_uuid_str(value: Any) -> str | None:
 
 
 def _canonical_pair(src: str, dst: str, *, symmetric: bool) -> tuple[str, str]:
-    """대칭 kind 면 (min,max) 로 정렬해 무방향 쌍을 1행으로 모은다. 비대칭은 방향 유지."""
+    """대칭 kind 면 (min,max) 로 정렬해 무방향 쌍을 1행으로 모은다. 비대칭은 방향 유지.
+
+    설계 의도: relation_kind.is_symmetric=True 인 kind(예: '유사', '관련')는
+    A→B 와 B→A 가 의미상 동일하다. 두 자산이 각각 소스로 처리될 때 같은 엣지가
+    (src=A,dst=B) 와 (src=B,dst=A) 로 이중 삽입되는 것을 막기 위해 node_id 의
+    문자열 대소 비교로 항상 작은 쪽을 src 로 고정한다.
+    이 순서가 uq_graph_edge_kind(src_node, dst_node, relation_kind_id) 유니크 제약과
+    맞물려 ON CONFLICT 1행 수렴을 보장한다.
+    """
     if symmetric and dst < src:
         return dst, src
     return src, dst
 
 
 def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
-    """asset_id 의 asset-노드를 보장하고 node_id(UUID str) 반환."""
+    """asset_id 의 asset-노드를 보장하고 node_id(UUID str) 반환.
+
+    node 테이블은 asset 과 entity(단계 D 의료 ER)를 함께 수용하는 통합 노드 테이블이다.
+    자산당 1개 asset-노드는 uq_node_asset 부분 유니크(node_kind='asset')로 강제된다.
+
+    READ-then-INSERT 패턴 이유: 대부분의 호출은 이미 노드가 존재하는 경우이므로
+    SELECT로 먼저 확인해 불필요한 INSERT 왕복을 줄인다. 동시 삽입 경쟁은
+    ON CONFLICT DO NOTHING + 재조회로 처리해 중복 없이 항상 확정된 node_id를 반환한다.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT node_id FROM node WHERE node_kind = 'asset' AND asset_id = %s LIMIT 1",
@@ -52,6 +70,8 @@ def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
         inserted = cur.fetchone()
         if inserted is not None:
             return str(inserted[0])
+        # RETURNING 이 빈 경우 = 동시 삽입 경쟁에서 다른 트랜잭션이 먼저 커밋.
+        # 재조회로 그 행을 가져온다.
         cur.execute(
             "SELECT node_id FROM node WHERE node_kind = 'asset' AND asset_id = %s LIMIT 1",
             (asset_id,),
@@ -78,6 +98,8 @@ def sync_graph_edges(
     src_node = ensure_asset_node(conn, source_asset_id)
     for edge in edges:
         tid = _as_uuid_str(edge.get("target_media_item_id"))
+        # 후보 집합 밖 타깃은 LLM 환각으로 간주해 엣지 생성 거부.
+        # 자기 자신 참조도 루프 엣지가 되므로 차단한다.
         if tid is None or tid not in allowed or tid == source_asset_id:
             skipped += 1
             continue
@@ -86,6 +108,9 @@ def sync_graph_edges(
             skipped += 1
             continue
         kind_code = str(code).strip().lower()
+        # active 상태인 kind만 허용 — 미검토(inactive) kind가 그래프에 섞이는 것을 방지.
+        # register_new_relation_kinds 가 신규 kind를 inactive로 등록하므로,
+        # 같은 사이클 내에서 방금 등록된 kind는 여기서 걸러져 다음 검토 사이클 이후에야 엣지화된다.
         kind = fetch_relation_kind(conn, kind_code=kind_code, status="active")
         if kind is None:  # 비활성/미등록 kind 는 엣지로 만들지 않음(검토 대기)
             skipped += 1
@@ -93,6 +118,8 @@ def sync_graph_edges(
         kind_id = str(kind["relation_kind_id"])
         symmetric = bool(kind["is_symmetric"])
 
+        # topic은 C+ 슬림화 설계에 따라 graph_edge.topic jsonb에 비정규화 저장.
+        # relation_type / relation_subtopic / relation_topic_parent 3테이블은 v210에서 드랍됨.
         topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
         import json as _json
         topic_json = _json.dumps(
@@ -106,6 +133,8 @@ def sync_graph_edges(
         except (TypeError, ValueError):
             conf_f = None
         reason = str(edge.get("reason") or "").strip() or None
+        # auto_approve_min 기본값 1.01 = 신뢰도가 1.0을 초과할 수 없으므로 사실상 자동승인 없음.
+        # 운영에서 임계를 낮추면(예: 0.85) 해당 구간 이상 엣지는 HITL 없이 바로 'active'.
         status_val = "active" if (conf_f is not None and conf_f >= auto_approve_min) else "proposed"
 
         dst_node = ensure_asset_node(conn, tid)
@@ -122,6 +151,10 @@ def sync_graph_edges(
                         COALESCE(graph_edge.confidence, 0), COALESCE(EXCLUDED.confidence, 0)),
                     updated_at = now()
                 """,
+                # ON CONFLICT 시 confidence만 GREATEST로 화해하고
+                # status·reason·topic은 갱신하지 않는다.
+                # 이유: 대칭 엣지를 양방향에서 재제안할 때 신뢰도 불일치가 발생할 수 있고,
+                # 사람이 한 번 내린 검토 결정(특히 rejected)을 LLM 재제안이 덮어쓰면 안 된다.
                 (uuid7_str(), a_node, b_node, kind_id, conf_f, reason, topic_json, status_val),
             )
         upserted += 1

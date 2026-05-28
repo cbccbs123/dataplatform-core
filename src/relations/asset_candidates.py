@@ -36,7 +36,11 @@ class EmbeddingCandidate(TypedDict):
 
 
 def _channels_param(kind: EmbeddingKindFilter) -> list[str]:
-    """필터 문자열 → ``asset_embedding.channel`` 에 넣을 값 목록."""
+    """필터 문자열 → ``asset_embedding.channel`` 에 넣을 값 목록.
+
+    채널 간 벡터는 공간이 달라 코사인 비교가 무의미하므로, SQL에서 channel로 조인해
+    같은 채널끼리만 유사도를 계산한다. "both"는 채널별 독립 비교 후 자산 단위 MAX로 합산된다.
+    """
     if kind == "st":
         return [EMBEDDING_KIND_ST]
     if kind == "clip":
@@ -65,6 +69,7 @@ def find_embedding_candidates(
     channels = _channels_param(embedding_kind)
     sql = """
         WITH src_vecs AS (
+            -- 소스 자산의 채널별 임베딩 벡터. 청크/키프레임이 여러 개일 수 있다.
             SELECT channel, embedding
             FROM asset_embedding
             WHERE asset_id = %s
@@ -72,6 +77,8 @@ def find_embedding_candidates(
               AND channel = ANY(%s)
         ),
         cand AS (
+            -- 타 자산과 소스 벡터를 channel로 inner join → 같은 공간끼리만 비교.
+            -- <=> 는 pgvector 코사인 거리(0=동일, 2=반대). 1에서 빼 유사도로 변환.
             SELECT ae.asset_id AS id,
                    (1 - (ae.embedding <=> sv.embedding)) AS sim
             FROM asset_embedding ae
@@ -80,6 +87,8 @@ def find_embedding_candidates(
               AND ae.embedding IS NOT NULL
         ),
         per_item AS (
+            -- 한 자산에 청크/키프레임이 여러 개일 때 가장 가까운 쌍 1개만 대표값으로 사용.
+            -- HAVING으로 min_sim 하한 적용 — 노이즈 후보를 LLM에 넘기지 않아 토큰 낭비 방지.
             SELECT id, MAX(sim) AS best_sim
             FROM cand
             GROUP BY id
@@ -93,10 +102,13 @@ def find_embedding_candidates(
         FROM per_item p
         INNER JOIN asset a ON a.asset_id = p.id
         LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
+        -- registered 상태만 포함 — received/deferred 자산은 관계 대상에서 제외.
         WHERE a.status = 'registered'
         ORDER BY p.best_sim DESC
         LIMIT %s
     """
+    # 파라미터 순서: src_vecs의 asset_id, channels, cand의 asset_id(self 제외), min_sim, top_k.
+    # source_asset_id가 두 번 등장하므로 순서 오류 주의.
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, (source_asset_id, channels, source_asset_id, min_sim, top_k))
         rows = cur.fetchall()

@@ -29,13 +29,21 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
         chunk_size=cfg.text_embedding_chunk_size,
         embedding_model_name=cfg.text_embedding_model,
     )
+    # | 연산자로 dict 머지 — 오른쪽(요약)이 같은 키를 덮어쓴다.
     meta = meta | summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)
     fts_plain = build_media_item_fts_plain(file_uri=ctx.file_path, meta=meta)
     core_meta, ext_meta = split_core_ext(meta)
+    # embeddings=[] — embed 슬롯은 _embed_text 가 별도로 채운다(분리 설계).
     return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
 
 
 def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
+    """텍스트 문서를 청크 단위로 임베딩해 EmbeddingItem 목록을 반환한다.
+
+    텍스트는 미디어(이미지/영상/오디오)와 달리 scratch 핸드오프 없이
+    파일에서 직접 청크를 재생성한다 — extract 단계에서 공유 계산이 없기 때문이다.
+    chunk_index 는 0-based 순번으로, DB persist 시 channel='st' 와 함께 청크를 식별한다.
+    """
     from src.embedders.text_embedder import embedding_text_chunks
 
     cfg = ctx.settings or get_current_settings()

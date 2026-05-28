@@ -23,7 +23,11 @@ from psycopg.rows import dict_row
 
 
 class AssetStatus(str, Enum):
-    """``asset.status`` CHECK 제약과 동일한 값."""
+    """``asset.status`` CHECK 제약과 동일한 값.
+
+    DB CHECK 제약(v160 마이그레이션)과 반드시 동기화해야 한다.
+    새 상태를 추가할 때는 DDL CHECK 와 ALLOWED_TRANSITIONS 를 함께 갱신할 것.
+    """
 
     RECEIVED = "received"
     ROUTING = "routing"
@@ -31,15 +35,20 @@ class AssetStatus(str, Enum):
     EXTRACTING = "extracting"
     REGISTERED = "registered"
     FAILED = "failed"
-    DEFERRED = "deferred"  # 의료 표준 포맷(DICOM/HL7/FHIR) 추출 보류 — 실패 아님
+    # DEFERRED: 의료 표준 포맷(DICOM/HL7/FHIR) 감지 시 classifying 단계에서 진입.
+    # 추출 실패가 아니라 단계 D 의료 어댑터 완성 전까지의 계획적 보류.
+    # 일반 임베딩 stopgap 이 적용될 수 있음(docs/memory 참조).
+    DEFERRED = "deferred"
 
 
-# 종료 상태(더 이상 전이 없음).
+# 불변식: TERMINAL 상태는 ALLOWED_TRANSITIONS 에서 빈 집합을 가져야 한다.
 TERMINAL: frozenset[AssetStatus] = frozenset(
     {AssetStatus.REGISTERED, AssetStatus.FAILED, AssetStatus.DEFERRED}
 )
 
-# 정상 진행 경로 + 임의 비종료 단계에서 failed 로 전이 가능. classifying 에서 deferred(추출 보류) 가능.
+# 정상 진행 경로 + 임의 비종료 단계에서 failed 로 전이 가능.
+# classifying → deferred: 의료 표준 포맷 감지 시 추출 보류.
+# classifying → extracting: 일반 도메인 및 의료 비표준 포맷(현 stopgap 경로).
 ALLOWED_TRANSITIONS: dict[AssetStatus, frozenset[AssetStatus]] = {
     AssetStatus.RECEIVED: frozenset({AssetStatus.ROUTING, AssetStatus.FAILED}),
     AssetStatus.ROUTING: frozenset({AssetStatus.CLASSIFYING, AssetStatus.FAILED}),

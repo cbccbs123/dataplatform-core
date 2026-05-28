@@ -8,6 +8,12 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class PipelineSettings:
+    """파이프라인 실행 설정. ``init_settings(profile)`` 이 한 번만 생성하며 이후 변경 불가(frozen).
+
+    ``_require_env*`` 로 읽는 필드는 누락 시 즉시 ValueError — 필수 환경변수.
+    ``_env_*_default`` 로 읽는 필드는 미설정 시 하드코드 기본값 사용 — 선택 환경변수.
+    """
+
     profile: Literal["dev", "prod"]
     meta_model: str
     openai_base_url: str
@@ -27,8 +33,9 @@ class PipelineSettings:
     video_keyframe_labels_meta_top_k: int
     labels_score_min: float
     relation_top_k: int
-    relation_min_sim: float
-    relation_auto_approve_min: float
+    # 아래 두 필드는 이번 브랜치(relations-catalog-slim)에서 추가된 관계 제안 품질 게이트.
+    relation_min_sim: float       # 후보 코사인 유사도 하한 — 이 미만은 LLM 에 넣지 않음 (기본 0.2)
+    relation_auto_approve_min: float  # 이 이상이면 HITL 없이 자동 승인 (기본 0.9)
 
 
 _SETTINGS: PipelineSettings | None = None

@@ -21,7 +21,10 @@ class ExtMetaValidationError(ValueError):
 
 
 def fetch_allowed_ext_keys(conn: Connection[Any], domain: str) -> set[str]:
-    """``domain`` 의 활성 ext_meta 허용 키 집합."""
+    """``domain`` 의 활성(status='active') ext_meta 허용 키 집합.
+
+    deprecated 키는 DB 에 남아도 결과에서 제외된다.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT meta_key FROM schema_registry WHERE domain = %s AND status = 'active'",
@@ -33,10 +36,14 @@ def fetch_allowed_ext_keys(conn: Connection[Any], domain: str) -> set[str]:
 def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, Any] | None) -> None:
     """``ext_meta`` 키가 도메인 허용 집합 안인지 검증. 위반 시 ``ExtMetaValidationError``.
 
-    도메인 정의가 0개면 skip(통과).
+    **함정**: 허용 키가 0개면 검증을 skip 한다(통과). 이는 새 도메인 시드 누락 시
+    무조건 실패하는 부작용을 막기 위한 의도적 설계다. general 도메인은 v220
+    마이그레이션에서 시드되므로 정상 게이트로 동작한다. 새 도메인 키를 추가하지 않으면
+    게이트가 무력화됨에 주의.
     """
     allowed = fetch_allowed_ext_keys(conn, domain)
     if not allowed:
+        # 시드 미등록 도메인은 검증 생략 — 의도적 방어 설계(위 docstring 참조)
         return
     violations = sorted(k for k in (ext_meta or {}) if k not in allowed)
     if violations:

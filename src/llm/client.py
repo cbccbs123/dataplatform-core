@@ -15,7 +15,12 @@ from src.config.settings import get_current_settings
 
 
 def get_llm_client() -> OpenAI:
-    """현재 설정의 온프레미스 OpenAI 호환 클라이언트."""
+    """현재 설정의 온프레미스 OpenAI 호환 클라이언트.
+
+    ``cfg.openai_base_url``은 내부 LLM 서버(Ollama / vLLM 등) 엔드포인트.
+    외부 OpenAI SaaS가 아닌 온프레미스 서버를 가리키는 것이 과제 정책 요건이다.
+    테스트에서는 직접 이 함수를 호출하지 않고 ``client=`` 인자로 모의 클라이언트를 주입한다.
+    """
     cfg = get_current_settings()
     return OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
 
@@ -41,7 +46,14 @@ def complete_text(
     temperature: float = 0.0,
     client: OpenAI | None = None,
 ) -> str:
-    """JSON-mode 호출 후 원문 문자열 반환('' if 빈응답). 호출부가 직접 파싱할 때."""
+    """JSON-mode 호출 후 원문 문자열 반환('' if 빈응답). 호출부가 직접 파싱할 때.
+
+    ``response_format=json_object`` 를 강제해 LLM 이 마크다운 코드블록 없이
+    순수 JSON 만 출력하도록 유도한다. 단, 내용 보장은 아니므로 파싱은 호출부 책임.
+
+    ``temperature=0.0`` 기본값은 결정 재현성 100% 보장(과제 요건)을 위한 것이다.
+    변경이 필요하면 명시적으로 전달해야 하며, 의료 경로에서는 절대 0 이상으로 올리지 말 것.
+    """
     client = client or get_llm_client()
     resp = client.chat.completions.create(
         model=_model_or_default(model),
@@ -53,6 +65,11 @@ def complete_text(
 
 
 def _parse_json_or_empty(raw: str) -> dict[str, Any]:
+    """LLM 응답 원문을 dict 로 변환한다.
+
+    JSON 배열·문자열·파싱 실패 등 비객체 응답은 모두 ``{}`` 로 정규화해
+    호출부가 ``.get()`` 으로 안전하게 접근하도록 한다.
+    """
     if not raw:
         return {}
     try:
@@ -83,7 +100,14 @@ def complete_vision_json(
     temperature: float = 0.0,
     client: OpenAI | None = None,
 ) -> dict[str, Any]:
-    """이미지+텍스트 비전 호출 → JSON dict(빈/파싱실패 → ``{}``)."""
+    """이미지+텍스트 비전 호출 → JSON dict(빈/파싱실패 → ``{}``).
+
+    ``image_data_url`` 은 ``data:image/jpeg;base64,...`` 형태여야 한다.
+    이미지 summarizer 가 PIL 로 리사이즈 + JPEG 재인코딩 후 전달하므로
+    여기서는 포맷 검증 없이 그대로 사용한다.
+    비전 모델은 ``complete_text`` / ``complete_json`` 과 같은 온프레미스 엔드포인트를 공유한다
+    (다른 모델명이 필요하면 ``model=`` 으로 명시).
+    """
     client = client or get_llm_client()
     resp = client.chat.completions.create(
         model=_model_or_default(model),

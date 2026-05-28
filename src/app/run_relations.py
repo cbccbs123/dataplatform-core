@@ -24,7 +24,10 @@ _LOG = logging.getLogger("meta_extract.run_relations")
 
 
 def _fetch_domain_label(db: PostgresUtil, asset_id: str) -> str:
-    """자산의 domain_label(분류 결과). 없으면 'general'."""
+    """자산의 domain_label(분류 결과). 없으면 'general'.
+
+    NULL 이나 자산 미존재는 모두 'general' 로 폴백한다. for_domain 의 보수적 폴백 정책과 일치.
+    """
 
     def _run(conn: Connection[Any]) -> str:
         with conn.cursor() as cur:
@@ -36,7 +39,12 @@ def _fetch_domain_label(db: PostgresUtil, asset_id: str) -> str:
 
 
 def _fetch_registered_asset_ids(db: PostgresUtil) -> list[str]:
-    """임베딩을 가진 ``registered`` 자산 id 전부(생성순)."""
+    """임베딩을 가진 ``registered`` 자산 id 전부(생성순).
+
+    **필터 조건**: status='registered' + asset_embedding 존재.
+    임베딩이 없으면 candidates 단계에서 후보 자체가 나오지 않아 관계 제안이 무의미하므로 제외한다.
+    deferred/failed 상태 자산은 임베딩 미적재이므로 이 조건으로 자연히 걸러진다.
+    """
 
     def _run(conn: Connection[Any]) -> list[str]:
         with conn.cursor() as cur:
@@ -61,13 +69,21 @@ def run_relations(
     top_k: int | None = None,
     embedding_kind: EmbeddingKindFilter = "both",
 ) -> dict[str, list[Any]]:
-    """자산 리스트 순회하며 관계 제안. 자산 단위 예외 흡수."""
+    """자산 리스트 순회하며 관계 제안. 자산 단위 예외 흡수.
+
+    반환값 구조: {"done": [(aid, edges_upserted, edges_kept), ...], "failed": [(aid, msg), ...]}.
+    배치 전체 성공 여부는 ``failed`` 리스트가 비어있는지로 판별한다(main 의 종료코드 참조).
+    """
     result: dict[str, list[Any]] = {"done": [], "failed": []}
     for aid in asset_ids:
         try:
             domain = _fetch_domain_label(db, aid)
             pack = for_domain(domain)
-            # MVP: 등록된 cross_asset 전략은 일반 묶음뿐. 의료 전용 전략은 단계 D 에서 이 분기에 추가.
+            # 일반 묶음(_GENERAL_CROSS)을 가리키는 팩은 propose_relations_for_asset 로 위임한다.
+            # 의료도 현재 동일 묶음이라 위임됨(stopgap: 의료 자산은 일반 추출/임베딩 경로 사용).
+            # **내용 비교가 의도**다 — 단계 D 에서 의료가 전용 cross_asset 묶음을 갖게 되면 이 비교가
+            # 트립되어 슬롯별 전략 배선을 강제한다(미배선 방지 forward 가드). 팩 이름 비교로 바꾸면
+            # 일반 묶음을 쓰는 다른 도메인까지 잘못 막으므로 안 된다.
             if pack.cross_asset != GENERAL_PACK.cross_asset:
                 raise NotImplementedError(f"cross_asset 전략 미구현(도메인 {pack.name})")
             cat_s, cat_k, edges_u, edges_k = propose_relations_for_asset(

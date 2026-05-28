@@ -24,14 +24,20 @@ class EmbeddingItem:
 
 @dataclass
 class ExtractContext:
-    """추출 함수에 넘기는 입력 컨텍스트."""
+    """추출 함수에 넘기는 입력 컨텍스트.
+
+    **불변식**: ``dispatch_extract_meta`` 와 ``dispatch_embed`` 는 동일한 ctx 인스턴스를 공유해야 한다.
+    extract 단계가 ``scratch`` 에 기록한 중간 산출물(CLIP 벡터, STT 결과, 키프레임 경로 등)을
+    embed 단계가 읽어 재계산을 피한다.
+    """
 
     file_path: str
     modality: str  # MediaKind/OfficeKind 값 (txt/pdf/json/word/excel/powerpoint/image/video/audio)
     domain: str = "general"  # 'general' | 'medical' | 'review'
     settings: Any = None  # PipelineSettings (선택)
     db: Any = None  # PostgresUtil (선택)
-    scratch: dict[str, Any] = field(default_factory=dict)  # 스테이지 간 중간 산출물 핸드오프(재계산 방지)
+    # extract → embed 핸드오프 버퍼. skill 이 고비용 중간 산출물을 키 이름으로 저장한다.
+    scratch: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

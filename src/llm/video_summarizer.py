@@ -7,6 +7,12 @@ from src.llm.client import complete_json
 
 
 class VideoSummaryResult(TypedDict):
+    """영상 전체 요약 결과.
+
+    ``objects`` 는 영상 전반에 걸쳐 등장한 주요 객체를 중복 없이 나열한 것이다.
+    이미지 ImageSummaryResult 와 동일한 구조를 공유해 skill 레이어에서 일관되게 처리된다.
+    """
+
     summary: str
     keywords: list[str]
     objects: list[str]
@@ -15,12 +21,15 @@ class VideoSummaryResult(TypedDict):
 def summarize_video_from_scene_results(
     scene_results: list[dict],
 ) -> VideoSummaryResult:
-    """
-    장면별 이미지 요약 결과를 종합해 영상 전체 요약을 생성한다.
+    """장면별 이미지 요약 결과를 종합해 영상 전체 요약을 생성한다.
 
     scene_results 각 항목은 최소한 아래 키를 포함해야 한다.
     - scene_index, start_sec, end_sec, frame_sec
     - summary: {"summary": str, "keywords": list[str], "objects": list[str]}
+
+    각 장면을 타임라인 텍스트로 직렬화한 뒤 단일 LLM 호출로 reduce 한다.
+    장면 순서(시간 흐름)를 반영한 요약을 위해 timeline_lines 는 scene_results 순서를 보존한다.
+    ``jpeg_bytes`` 는 이미 extract 단계에서 제거되어 있어야 하며, 여기서는 참조하지 않는다.
     """
     cfg = get_current_settings()
     if not scene_results:

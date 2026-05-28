@@ -15,7 +15,7 @@ from src.llm.client import complete_json
 class SummaryKeywords(TypedDict):
     summary: str
     keywords: list[str]
-    stt: str
+    stt: str  # 오디오 전용 필드. 텍스트/이미지/영상 경로에서는 채우지 않는다.
 
 
 def _summarize_chunk_only(
@@ -41,7 +41,15 @@ def summarize_and_extract_keywords(
     *,
     file_kind: str,
 ) -> SummaryKeywords:
-    """문서 요약·키워드 추출. LLM 은 설정된 단일 온프레미스 엔드포인트(cfg.openai_*)를 사용한다."""
+    """문서 요약·키워드 추출. LLM 은 설정된 단일 온프레미스 엔드포인트(cfg.openai_*)를 사용한다.
+
+    청크별 요약을 먼저 생성(map)한 뒤, 합쳐서 최종 요약·키워드를 추출(reduce)하는 2단계 방식.
+    문서가 청크 하나에 수렴하더라도 map→reduce 경로를 동일하게 밟으므로
+    긴 문서와 짧은 문서 모두 동일한 코드 경로를 따른다.
+
+    반환값은 ``SummaryKeywords`` TypedDict 이지만 ``stt`` 필드를 채우지 않는다.
+    오디오 경로는 ``summarize_and_extract_keywords_from_audio`` 를 사용할 것.
+    """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -101,6 +109,12 @@ def summarize_and_extract_keywords(
 def summarize_and_extract_keywords_from_audio(
     text: str,
 ) -> SummaryKeywords:
+    """STT 전사 텍스트를 받아 요약·키워드를 추출하고 ``stt`` 필드도 채워 반환한다.
+
+    오디오 skill 에서 Whisper STT 결과 전문(full transcript)을 그대로 넘기면
+    하나의 프롬프트로 처리된다(청크 분할 없음 — 긴 STT 의 경우 max_input_chars 주의).
+    ``stt`` 필드에는 원본 전사 텍스트를 그대로 보존해 embed 슬롯이 재사용할 수 있도록 한다.
+    """
     cfg = get_current_settings()
 
     final_prompt = (

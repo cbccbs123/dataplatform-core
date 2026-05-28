@@ -7,6 +7,12 @@
 
 신규 코드
     ``sanitize_llm_proposed_type_code``: 카탈로그에 없는 제안을 DB에 **inactive** 로 넣기 전 형식·레거시 검사.
+
+호출 순서 (파이프라인 내 위치)
+    1. ``parse_llm_edges`` — LLM 응답 루트 파싱
+    2. ``normalize_relation_type_code`` — 코드 소문자·trim
+    3. ``sanitize_llm_proposed_type_code`` — 형식·레거시 필터(카탈로그 밖 코드만 통과 필요)
+    4. ``coerce_topic_fields_mvp`` — topic 폴백 보정 후 graph_edge.topic jsonb 에 적재
 """
 
 from __future__ import annotations
@@ -37,6 +43,8 @@ def _collapse_whitespace(s: str) -> str:
 
 def _strip_edge_punctuation(s: str) -> str:
     """앞뒤 잡음 공백·구두점만 제거(본문 의미는 유지)."""
+    # 정규식 한 번으로 제거되지 않는 중첩 패턴(예: " , " + " . ")에 대응하기 위해
+    # 변경이 없을 때까지 반복한다. 일반 입력에서는 1~2회로 수렴한다.
     prev = None
     while prev != s:
         prev = s
@@ -52,6 +60,9 @@ def parse_llm_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
         - ``{"edges": [ {...}, ... ]}``
         - ``{"items": [ ... ]}`` (별칭)
         - 단일 엣지 객체(``target_media_item_id`` 키가 있으면 한 원소 리스트로 감쌈)
+
+    주의: LLM 이 ``edges`` 키를 빠뜨리고 객체를 직접 반환하는 경우를 단일 엣지 폴백으로 처리한다.
+    dict 가 아닌 원소(문자열 등)는 묵시적으로 버린다.
     """
     raw = data.get("edges")
     if raw is None and isinstance(data.get("items"), list):
@@ -187,13 +198,24 @@ def coerce_topic_fields_mvp(edge: dict[str, Any]) -> tuple[str, str, str, str, b
 
     Returns:
         ``(topic_ko, subtopic_ko, topic_en, subtopic_en, mvp_topic_auto)`` — 마지막 bool 은 자동 보정 여부.
+
+    설계 의도
+        ``validate_topic_fields`` 실패(topic_ko 없음) 시 엣지를 버리지 않고 여기서 보정해
+        DB 에 저장한다. ``mvp_topic_auto=True`` 는 나중에 재검토·재정제가 필요한 행을 식별하는 마커.
+
+    auto 변수 초기화 패턴
+        ``auto = False`` 로 시작하고 1번 분기에서 조기 반환(``False`` 하드코드)하므로
+        ``auto`` 가 True 로 바뀌는 경로는 2·3번 폴백 경로뿐이다.
+        이 패턴은 분기 추가 시 ``auto`` 를 빠뜨려 잘못된 False 가 반환될 위험을 내포하므로 주의.
     """
     topic_ko, subtopic_ko, topic_en, subtopic_en = extract_topic_fields_from_edge(edge)
     auto = False
     if topic_ko.strip():
+        # topic_ko 가 유효한 정상 경로 — auto 는 False 로 조기 반환
         if not topic_en.strip():
             topic_en = _TOPIC_DEFAULT_EN
         return topic_ko, subtopic_ko, topic_en, subtopic_en, False
+    # 이 아래는 모두 폴백 경로: auto = True 로 반환
     reason = str(edge.get("reason") or "").strip()
     if reason:
         first = reason.split("\n")[0].strip()

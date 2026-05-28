@@ -26,7 +26,14 @@ class TextChunkEmbedding(TypedDict):
 
 
 def pad_embedding_to_storage_dim(raw: list[float]) -> list[float]:
-    """모델 출력 벡터를 DB ``vector(FIX_EMBEDDING_DIMENSION)`` 저장 형식으로 맞춘다."""
+    """모델 출력 벡터를 DB ``vector(FIX_EMBEDDING_DIMENSION)`` 저장 형식으로 맞춘다.
+
+    - 빈 리스트(추출 실패 fallback) → 전체 zero 벡터.
+    - 모델 차원 < 1536 → 뒤를 0 으로 패딩(다른 체크포인트 전환 시 주의).
+    - 모델 차원 == 1536 → 그대로 반환(정상 경로).
+    패딩된 벡터는 코사인 유사도에서 방향 왜곡을 일으킬 수 있으므로,
+    체크포인트는 실제 1536D 모델로 고정하는 것이 원칙이다(``embedding_constants.py`` 참조).
+    """
     vec = np.asarray(raw, dtype=np.float32)
     if vec.size == 0:
         vec = np.zeros((FIX_EMBEDDING_DIMENSION,), dtype=np.float32)
@@ -42,6 +49,8 @@ def pad_embedding_to_storage_dim(raw: list[float]) -> list[float]:
 
 @lru_cache(maxsize=4)
 def get_embedding_model(model_name: str) -> SentenceTransformer:
+    # 프로세스 내 최대 4개 체크포인트까지 캐싱 — 대부분 단일 모델 사용이므로 메모리 부담 없음.
+    # 인덱싱/검색 시 동일 체크포인트를 써야 벡터 공간이 일치한다(embedding_constants.py 참조).
     return SentenceTransformer(model_name)
 
 

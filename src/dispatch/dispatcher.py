@@ -4,7 +4,11 @@
 출력은 항상 ``AssetRecord`` 로 통일되어 영속화가 단일 경로로 처리한다.
 새 modality 는 분기 한 줄 추가. 확장이 커지면 그때 레지스트리로 리팩터한다.
 
-의료 도메인(``ctx.domain == 'medical'``)도 6월 단계에서는 modality 기준으로 동일 분기한다.
+**extract/embed 분리 이유**: 미디어 skill 은 CLIP 벡터·STT 텍스트·키프레임 같은 고비용 중간 산출물을
+``ExtractContext.scratch`` 에 남긴다. ``dispatch_embed`` 는 같은 ctx 를 받아 scratch 에서 꺼내
+재계산 없이 임베딩에 재사용한다. 두 함수는 항상 같은 ctx 인스턴스로 쌍으로 호출해야 한다.
+
+의료 도메인(``ctx.domain == 'medical'``)도 현 단계에서는 modality 기준으로 동일 분기한다.
 의료 표준 포맷(DICOM/HL7/FHIR) 전용 추출은 후속(F-5.2/5.3)에서 분기를 추가한다.
 """
 

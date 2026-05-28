@@ -1,5 +1,13 @@
 """관계 HITL 검토 CLI — proposed 엣지 큐 조회·승인/반려 + relation_kind 승격.
 
+**HITL(Human-In-The-Loop) 흐름**:
+run_relations(LLM 제안) → graph_edge.status='proposed' 적재 →
+이 CLI 로 사람이 검토 → approved(active) 또는 rejected 전환.
+자동 승인(auto_approve) 임계를 통과한 엣지는 이미 'active' 상태이므로 --list 에 나타나지 않는다.
+
+**동작별 트랜잭션 범위**: 각 동작(--approve/--reject/--promote-kind)은 단일 트랜잭션으로 처리된다.
+idempotent=False — 동일 edge_id 를 두 번 approve 하면 두 번째는 ok=False 를 반환한다.
+
 예)
     python -m src.app.run_relations_review --env dev --list
     python -m src.app.run_relations_review --env dev --approve <edge_id> --reviewer bc
@@ -33,8 +41,9 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="관계 HITL 검토 (proposed 엣지 승인/반려·kind 승격)")
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
-    parser.add_argument("--reviewer", default="cli")
+    parser.add_argument("--reviewer", default="cli")  # 감사 로그용 검토자 식별자
     parser.add_argument("--limit", type=int, default=100, help="--list 출력 상한")
+    # 동작은 상호 배타(하나만 지정 가능).
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--list", action="store_true", help="proposed 엣지 큐 출력")
     group.add_argument("--approve", metavar="EDGE_ID", help="엣지 승인(active)")

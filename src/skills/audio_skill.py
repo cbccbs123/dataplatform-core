@@ -14,6 +14,13 @@ _CHANNEL_ST = "st"
 
 
 def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
+    """오디오 파일의 메타데이터를 추출하고 STT 전사 텍스트를 scratch 에 저장한다.
+
+    처리 순서: STT(faster-whisper) → 오디오 속성 메타 → LLM 요약·키워드.
+    STT 결과는 요약 LLM 입력으로 쓰이고, 동시에 ctx.scratch["stt_text"] 에 보존해
+    _embed_audio 가 whisper 를 재실행하지 않고 청크 임베딩에 재사용한다.
+    계약: _embed_audio 는 반드시 같은 ctx 로 이 함수 실행 후 호출되어야 한다.
+    """
     from src.extractors.audio_meta_extractor import extract_audio_meta
     from src.llm.text_summarizer import summarize_and_extract_keywords_from_audio
     from src.preprocess.media_item_search_text import build_media_item_fts_plain
@@ -32,9 +39,17 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
+    """STT 전사 텍스트를 청크 단위로 임베딩해 EmbeddingItem 목록을 반환한다.
+
+    텍스트 skill 과 동일한 ST(SentenceTransformer) 채널 단일 임베딩 방식이다.
+    CLIP 채널이 없는 이유: 오디오는 시각 정보가 없으므로 이미지/영상과 달리 ST 만 생성한다.
+    STT 전사 텍스트는 ctx.scratch["stt_text"] 에서 꺼내므로 whisper 를 재실행하지 않는다.
+    계약 위반(extract 없이 단독 호출) 시 RuntimeError 로 즉시 탐지된다.
+    """
     from src.embedders.text_embedder import embedding_plain_text_chunks
 
     cfg = ctx.settings or get_current_settings()
+    # 계약 위반 즉시 탐지: extract 없이 embed 만 단독 호출하면 RuntimeError.
     stt_text = ctx.scratch.get("stt_text")
     if stt_text is None:
         raise RuntimeError("_embed_audio: ctx.scratch['stt_text'] 없음 — _extract_audio_meta 를 같은 ctx 로 먼저 실행해야 합니다.")

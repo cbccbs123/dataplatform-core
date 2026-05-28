@@ -31,7 +31,11 @@ def _encode_image_as_jpeg_data_url(
     max_side: int = 1024,
     jpeg_quality: int = 85,
 ) -> str:
-    """비전 API 호환을 위해 RGB JPEG로 인코딩한 data URL을 반환한다."""
+    """비전 API 호환을 위해 RGB JPEG로 인코딩한 data URL을 반환한다.
+
+    RGBA/팔레트 모드를 ``convert("RGB")`` 로 강제 변환해 JPEG 포맷 제약을 우회한다.
+    ``thumbnail`` 은 비율을 유지하면서 max_side 이하로 축소한다(이미 작으면 무동작).
+    """
     with Image.open(image_path) as img:
         rgb = img.convert("RGB")
         rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
@@ -93,6 +97,13 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     *,
     image_data_url: str,
 ) -> ImageSummaryResult:
+    """data URL 형태의 이미지에서 캡션·키워드·객체를 LLM 비전으로 추출한다.
+
+    공개 API 인 ``summarize_image_caption_keywords_objects`` 와
+    ``summarize_image_caption_keywords_objects_from_jpeg_bytes`` 가
+    인코딩 방식만 다를 뿐 이 함수로 수렴한다 — 비전 프롬프트와 후처리 로직이 한 곳에만 존재한다.
+    ``objects`` 는 CLIP 제로샷 라벨 후보로 쓰인 후 최종 메타에서는 제거된다(→ image_skill 참고).
+    """
     cfg = get_current_settings()
 
     prompt = (

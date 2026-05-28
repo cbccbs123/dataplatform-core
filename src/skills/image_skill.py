@@ -15,6 +15,14 @@ _CHANNEL_CLIP = "clip"
 
 
 def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
+    """이미지 파일의 메타데이터를 추출하고 CLIP 벡터를 scratch 에 저장한다.
+
+    처리 순서:
+    1) 파일·이미지 속성 메타(EXIF 등)  2) VLM 캡션·키워드·객체  3) CLIP 제로샷 라벨
+    objects(VLM 출력)는 CLIP 제로샷의 한국어 후보 레이블로 활용된 뒤 최종 메타에서 제거된다.
+    CLIP 이미지 벡터를 ``ctx.scratch["clip_vec"]`` 에 저장해 _embed_image 에서 재사용한다
+    — CLIP 추론을 두 번 실행하지 않기 위한 핸드오프 계약이다.
+    """
     from src.embedders.image_embedder import (
         clip_zero_shot_ko_meta_items,
         zero_shot_tag_image_korean_clip,
@@ -34,10 +42,12 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     meta_for_fts = dict(meta)
 
     # 3) CLIP 이미지 임베딩 + 한글 라벨 제로샷
+    # VLM 이 추출한 objects 를 CLIP 제로샷 후보로 전달 — 빈 리스트면 제로샷 미수행.
     obj_list = [str(o) for o in objects] if isinstance(objects, list) else []
     zs = zero_shot_tag_image_korean_clip(file_path=file, korean_labels=obj_list)
     if zs["label_scores"]:
         labels_all = clip_zero_shot_ko_meta_items(zs["label_scores"])
+        # score 하한 필터 + top-k — 설정값 초과 레이블은 메타에 포함하지 않는다.
         labels = [
             it for it in labels_all if float(it.get("score") or 0.0) >= cfg.labels_score_min
         ][: cfg.image_labels_meta_top_k]
@@ -47,7 +57,7 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta_for_fts)
     meta.pop("objects", None)  # objects 는 CLIP 후보용일 뿐 최종 meta 에서 제외
 
-    # 임베딩 슬롯이 재계산 없이 쓰도록 clip 이미지 벡터를 핸드오프
+    # 계약: _embed_image 는 반드시 같은 ctx 로 이 함수 실행 후 호출되어야 한다.
     ctx.scratch["clip_vec"] = zs["clip_image_embedding"]
 
     core_meta, ext_meta = split_core_ext(meta)
@@ -55,6 +65,14 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
+    """이미지 임베딩 2채널(ST·CLIP)을 생성해 반환한다.
+
+    ST(SentenceTransformer): VLM 이 생성한 캡션+키워드+라벨을 텍스트로 직렬화해 임베딩.
+    CLIP: _extract_image_meta 에서 저장한 벡터를 ctx.scratch["clip_vec"] 로 재사용.
+
+    ``chunk_content`` 가 공백뿐이면 " " 로 대체 — pad 후 영벡터에 가깝지만 DB 삽입은 성공한다.
+    1536D 통일은 ``pad_embedding_to_storage_dim`` 이 담당한다(CLIP 벡터는 이미 1536D 패딩됨).
+    """
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
     from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
@@ -70,9 +88,11 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         normalize_embeddings=cfg.text_embedding_normalize,
     )[0]
     st_vec = pad_embedding_to_storage_dim(st_raw)
+    # 계약 위반 즉시 탐지: extract 없이 embed 만 단독 호출하면 RuntimeError.
     clip_vec = ctx.scratch.get("clip_vec")
     if clip_vec is None:
         raise RuntimeError("_embed_image: ctx.scratch['clip_vec'] 없음 — _extract_image_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
+    # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
     return [
         EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=0),
         EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0),

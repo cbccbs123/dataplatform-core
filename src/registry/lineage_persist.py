@@ -26,7 +26,18 @@ def record_lineage(
     generated: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> uuid.UUID:
-    """``asset_lineage`` 에 활동 1건을 기록하고 lineage_id 반환. 호출자가 트랜잭션 경계를 제어."""
+    """``asset_lineage`` 에 활동 1건을 기록하고 lineage_id 반환. 호출자가 트랜잭션 경계를 제어.
+
+    PROV-DM(W3C 2013) 매핑:
+    - ``activity``: 일어난 처리 단계 이름 (예: "extract_text", "embed_text")
+    - ``agent``    : 수행 주체 식별자 (예: "run_ingest", "dispatcher")
+    - ``used``     : 입력 자원 기술 (파일 경로·체크섬 등)
+    - ``generated``: 출력 자원 기술 (메타 키 목록, 임베딩 채널 등)
+    - ``payload``  : 위에 맞지 않는 부가 정보 (자유형 jsonb)
+
+    ``occurred_at`` 은 DB 서버 ``now()`` 로 기록된다(DDL DEFAULT). 앱 시계와 무관해
+    시간대·NTP 편차 없이 일관된 순서를 보장한다.
+    """
     lineage_id = uuid7()
     with conn.cursor() as cur:
         cur.execute(

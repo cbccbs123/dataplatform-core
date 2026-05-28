@@ -28,7 +28,11 @@ from src.ingest.status import AssetStatus, set_status
 
 
 def find_registered_asset_by_hash(conn: Connection[Any], file_hash: str) -> uuid.UUID | None:
-    """동일 내용(file_hash)으로 이미 ``registered`` 된 자산의 asset_id. 없으면 None(중복 적재 방지용)."""
+    """동일 내용(file_hash)으로 이미 ``registered`` 된 자산의 asset_id. 없으면 None(중복 적재 방지용).
+
+    run_ingest 가 파일 픽업 직후 이 함수로 중복을 검사해, 기존 자산이 있으면 파이프라인을 건너뛴다.
+    ``failed``/``deferred`` 상태의 같은 해시는 중복으로 보지 않아 재처리를 허용한다.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT asset_id FROM asset WHERE file_hash = %s AND status = 'registered' LIMIT 1",
@@ -67,8 +71,12 @@ def create_asset(
 def finalize_asset(conn: Connection[Any], asset_id: uuid.UUID, record: AssetRecord) -> None:
     """``AssetRecord`` 의 메타·임베딩을 적재하고 상태를 ``registered`` 로 전이한다.
 
-    ``asset_metadata`` 1행(core/ext jsonb, tags, search_vector) + ``asset_embedding`` N행.
-    마지막에 ``set_status(..., REGISTERED)`` (현재 상태가 ``extracting`` 이어야 함).
+    ``asset_metadata`` 1행(core/ext jsonb, tags, search_vector) + ``asset_embedding`` N행을 삽입.
+    마지막에 ``set_status(..., REGISTERED)`` — 현재 상태가 ``extracting`` 이어야 한다(상태 머신 검증).
+
+    임베딩이 없을 때(record.embeddings 빈 리스트) executemany 를 건너뛴다.
+    벡터는 항상 ``FIX_EMBEDDING_DIMENSION``(1536D) ::vector 캐스트로 저장 — DB CHECK 제약과 일치해야 한다.
+    search_vector 는 'simple' 사전으로 FTS 인덱스 생성(언어 무관 토크나이징).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -85,6 +93,7 @@ def finalize_asset(conn: Connection[Any], asset_id: uuid.UUID, record: AssetReco
             ),
         )
         if record.embeddings:
+            # 채널(st/clip)·청크별 1행씩 bulk INSERT — 같은 트랜잭션 안에서 메타와 함께 커밋
             cur.executemany(
                 f"""
                 INSERT INTO asset_embedding (asset_id, channel, chunk_index, embedding, model_name, model_version)
