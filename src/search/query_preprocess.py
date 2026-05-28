@@ -15,10 +15,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from openai import OpenAI
-
-
-from src.config.settings import get_current_settings, init_settings
+from src.config.settings import init_settings
 
 DEFAULT_TZ = "Asia/Seoul"
 
@@ -74,26 +71,22 @@ def build_user_message(user_text: str, *, tz_name: str = DEFAULT_TZ) -> str:
 def structure_user_query(
     user_text: str,
     *,
-    client: OpenAI | None = None,
+    client: Any | None = None,
     model: str | None = None,
     tz_name: str = DEFAULT_TZ,
 ) -> dict[str, Any]:
-    """``client``·``model`` 생략 시 ``init_settings`` 이후 현재 설정으로 OpenAI 클라이언트를 만든다."""
-    if client is None or model is None:
-        cfg = get_current_settings()
-        if client is None:
-            client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
-        if model is None:
-            model = cfg.meta_model
+    """사용자 질의를 검색용 구조화 JSON으로 변환한다.
+
+    ``client``·``model`` 생략 시 공통 seam(``src.llm.client.complete_text``)이
+    현재 설정의 온프레미스 LLM 클라이언트를 사용한다.
+    ``client``/``model``을 주입하면 그대로 전달되어 테스트에서 네트워크 없이 동작한다.
+    LLM 응답이 비어있으면 기본 empty dict를 반환하고,
+    JSON 파싱 실패 시 ``semantic_query``에 원문을 넣어 반환한다(폴백).
+    """
+    from src.llm.client import complete_text
 
     msg = build_user_message(user_text, tz_name=tz_name)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": msg}],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    raw = (resp.choices[0].message.content or "").strip()
+    raw = complete_text(msg, model=model, client=client)
     empty = {
         "keywords": [],
         "keywords_en": [],
