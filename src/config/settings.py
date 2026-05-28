@@ -27,6 +27,8 @@ class PipelineSettings:
     video_keyframe_labels_meta_top_k: int
     labels_score_min: float
     relation_top_k: int
+    relation_min_sim: float
+    relation_auto_approve_min: float
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -103,6 +105,8 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         ),
         labels_score_min=_env_float_default("LABELS_SCORE_MIN", 0.1),
         relation_top_k=_env_int_default("RELATION_TOP_K", 10),
+        relation_min_sim=_env_float_default("RELATION_MIN_SIM", 0.2),
+        relation_auto_approve_min=_env_float_default("RELATION_AUTO_APPROVE_MIN", 0.9),
     )
 
 

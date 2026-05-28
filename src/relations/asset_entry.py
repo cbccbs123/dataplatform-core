@@ -3,13 +3,12 @@
 한 사이클
     1. ``asset`` + ``asset_metadata`` 에서 소스 요약(ext_meta.summary)·modality 로드.
     2. ``find_embedding_candidates`` 로 임베딩 후보 asset_id 집합 확보.
-    3. DB에서 **활성 relation_type** 카탈로그·dedup용 전체 목록을 읽어 프롬프트 구성.
-    4. LLM JSON 파싱 후, DB **활성** 프롬프트 카탈로그에 나온 ``type_code`` 집합으로 **허용 관계 코드**를 만들고
-       ``sync_relation_catalog_from_llm_edges`` 로 **카탈로그**를 갱신한 뒤,
-       ``sync_asset_relation_edges`` 로 **``asset_relation`` 엣지**를 upsert 한다.
+    3. DB에서 **활성 relation_kind** 카탈로그를 읽어 프롬프트 구성.
+    4. LLM JSON 파싱 후, 신규 kind 만 inactive 등록(register_new_relation_kinds),
+       ``sync_graph_edges`` 로 ``graph_edge`` 엣지를 upsert 한다.
 
 트랜잭션
-    ``PostgresUtil.execute_in_transaction`` 으로 후보 조회부터 카탈로그·엣지 기록까지 한 트랜잭션에서 처리한다.
+    ``PostgresUtil.execute_in_transaction`` 으로 후보 조회부터 kind 등록·엣지 기록까지 한 트랜잭션에서 처리한다.
 """
 
 from __future__ import annotations
@@ -26,12 +25,9 @@ from src.relations.asset_candidates import EmbeddingKindFilter, find_embedding_c
 from src.registry.lineage_persist import record_lineage
 from src.relations.graph_persist import sync_graph_edges
 from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
-from src.relations.persist import sync_relation_catalog_from_llm_edges
+from src.relations.persist import register_new_relation_kinds
 from src.relations.prompt import build_relation_proposal_prompt
-from src.relations.relation_type_catalog import (
-    fetch_llm_prompt_relation_types,
-    fetch_relation_types_for_prompt_dedup,
-)
+from src.relations.relation_type_catalog import fetch_active_relation_kinds
 
 
 def _fetch_source_row(conn: Connection[Any], asset_id: str) -> dict[str, Any] | None:
@@ -63,12 +59,12 @@ def propose_relations_for_asset(
     llm_fn: Callable[[str], dict[str, Any]] | None = None,
 ) -> tuple[int, int, int, int]:
     """
-    후보 검색 → LLM JSON → 카탈로그 동기화 → ``asset_relation`` upsert.
+    후보 검색 → LLM JSON → 신규 kind inactive 등록 → ``graph_edge`` upsert.
 
     ``llm_fn`` 이 있으면 네트워크 대신 해당 함수로 프롬프트 문자열을 JSON으로 바꾼다(테스트용).
 
     Returns:
-        (``catalog_synced``, ``catalog_skipped``, ``edges_upserted``, ``edges_skipped``)
+        (``kinds_registered``, ``kinds_skipped``, ``edges_upserted``, ``edges_skipped``)
     """
     cfg = get_current_settings()
     k = top_k if top_k is not None else cfg.relation_top_k
@@ -78,53 +74,36 @@ def propose_relations_for_asset(
         if src is None:
             return 0, 0, 0, 0
         summary = str(src.get("summary") or "")
-        # 임베딩 후보: LLM에 넣을 target 목록이자, 이후 "후보 집합 안의 id만 확정" 검증에 사용된다.
         candidates = find_embedding_candidates(
-            conn,
-            source_asset_id=source_asset_id,
-            top_k=k,
-            embedding_kind=embedding_kind,
+            conn, source_asset_id=source_asset_id, top_k=k,
+            embedding_kind=embedding_kind, min_sim=cfg.relation_min_sim,
         )
-        # 활성 relation_type 만 카탈로그 JSON에 넣음. dedup 블록은 비활성 포함(중복 코드 재제안 방지).
-        catalog = fetch_llm_prompt_relation_types(conn)
-        type_registry = fetch_relation_types_for_prompt_dedup(conn)
+        kinds = fetch_active_relation_kinds(conn)
         prompt = build_relation_proposal_prompt(
             source_summary=summary,
             source_media_type=str(src.get("modality") or ""),
             candidates=candidates,
-            relation_types_catalog=catalog,
-            existing_type_registry=type_registry,
+            relation_kinds_catalog=kinds,
         )
-        if llm_fn is not None:
-            raw = llm_fn(prompt)
-        else:
-            raw = propose_edges_json(prompt)
+        raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)
-        # 프롬프트에 실린 활성 카탈로그 type_code 집합 → persist 가 기존 kind 경로로 처리할 코드.
-        allowed = frozenset(str(r["type_code"]) for r in catalog)
+        active_codes = frozenset(str(r["type_code"]) for r in kinds)
         candidate_ids = frozenset(str(c["id"]) for c in candidates)
 
-        catalog_synced, catalog_skipped = sync_relation_catalog_from_llm_edges(
-            conn,
-            source_media_item_id=source_asset_id,
-            edges=edges,
-            llm_prompt_type_codes=allowed,
-        )
+        kinds_registered, kinds_skipped = register_new_relation_kinds(
+            conn, edges=edges, active_kind_codes=active_codes)
         edges_upserted, edges_skipped = sync_graph_edges(
-            conn,
-            source_asset_id=source_asset_id,
-            edges=edges,
-            allowed_target_ids=candidate_ids,
-        )
+            conn, source_asset_id=source_asset_id, edges=edges,
+            allowed_target_ids=candidate_ids, auto_approve_min=cfg.relation_auto_approve_min)
         record_lineage(
             conn,
             uuid.UUID(source_asset_id),
             activity="relations.proposed.v1",
             agent="llm_propose",
             generated={"edges_upserted": edges_upserted, "edges_skipped": edges_skipped,
-                       "catalog_synced": catalog_synced},
+                       "kinds_registered": kinds_registered},
             payload={"top_k": k, "embedding_kind": embedding_kind},
         )
-        return catalog_synced, catalog_skipped, edges_upserted, edges_skipped
+        return kinds_registered, kinds_skipped, edges_upserted, edges_skipped
 
     return db.execute_in_transaction(_run, idempotent=False)

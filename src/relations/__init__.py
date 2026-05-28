@@ -4,9 +4,8 @@
     1. ``find_embedding_candidates``: 소스 자산과 채널이 맞는 ``asset_embedding`` 끼리 pgvector 유사도 상위 k 후보.
     2. ``build_relation_proposal_prompt`` + ``propose_edges_json``: DB 카탈로그·후보 메타를 LLM에 넘겨 JSON 엣지 수신.
     3. ``parse_and_normalize_edges`` / ``schema``: LLM 출력 정규화(관계 코드·토피 필드).
-    4. ``sync_relation_catalog_from_llm_edges``: 허용 코드·sanitize 규칙으로 카탈로그(``relation_kind`` /
-       ``relation_topic_parent`` / ``relation_subtopic`` / ``relation_type``)를 갱신한 뒤,
-       ``sync_graph_edges`` 로 ``graph_edge`` 엣지를 upsert 한다. 진입점은 ``propose_relations_for_asset``.
+    4. 신규 kind 만 inactive 등록(``register_new_relation_kinds``) 후 ``sync_graph_edges`` 로 ``graph_edge`` upsert.
+       진입점은 ``propose_relations_for_asset``.
 
 의존성
     ``psycopg``, OpenAI 클라이언트 등 **무거운 의존성**은 ``asset_entry``·``persist``·``llm_propose`` 쪽에만 두고,
@@ -26,7 +25,7 @@ __all__ = [
     "build_relation_proposal_prompt",
     "parse_and_normalize_edges",
     "propose_edges_json",
-    "sync_relation_catalog_from_llm_edges",
+    "register_new_relation_kinds",
     "resolve_relation_type_code",
 ]
 
@@ -53,8 +52,8 @@ def __getattr__(name: str) -> Any:
         from src.relations.llm_propose import propose_edges_json as fn
 
         return fn
-    if name == "sync_relation_catalog_from_llm_edges":
-        from src.relations.persist import sync_relation_catalog_from_llm_edges as fn
+    if name == "register_new_relation_kinds":
+        from src.relations.persist import register_new_relation_kinds as fn
 
         return fn
     if name == "resolve_relation_type_code":
