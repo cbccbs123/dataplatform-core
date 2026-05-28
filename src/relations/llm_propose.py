@@ -1,7 +1,7 @@
-"""OpenAI 호환 API로 **관계 엣지 JSON** 을 받아 파싱·정규화한다.
+"""온프레미스 LLM으로 **관계 엣지 JSON** 을 받아 파싱·정규화한다.
 
 흐름
-    1. ``propose_edges_json``: 설정의 ``meta_model`` 로 ``response_format=json_object`` 호출.
+    1. ``propose_edges_json``: 공통 seam ``src.llm.client.complete_json`` 으로 LLM 호출.
     2. ``parse_and_normalize_edges``: 응답 dict → ``persist`` 가 기대하는 엣지 dict 리스트(토피 정규화 포함).
 
 보조
@@ -16,7 +16,6 @@ import logging
 import sys
 from typing import Any
 
-from src.config.settings import get_current_settings
 from src.relations.schema import (
     extract_topic_fields_from_edge,
     normalize_relation_type_code,
@@ -37,51 +36,14 @@ def _configure_llm_logging() -> None:
     _LLM_LOG.propagate = False
 
 
-def _call_openai_json(
-    client: Any,
-    *,
-    model: str,
-    prompt: str,
-    temperature: float = 0.0,
-) -> dict[str, Any]:
-    """
-    Chat Completions 로 JSON 객체 한 개를 받아 ``dict`` 로 파싱.
-
-    빈 응답·JSON 파싱 실패 시 ``{}`` 반환(호출부에서 엣지 없음 처리).
-    """
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        response_format={"type": "json_object"},
-    )
-    _configure_llm_logging()
-    # _LLM_LOG.info("request model=%s temperature=%s", model, temperature)
-    # _LLM_LOG.info("request_prompt_begin\n%s\nrequest_prompt_end", prompt)
-    raw = (resp.choices[0].message.content or "").strip()
-    # _LLM_LOG.info("response_raw_begin\n%s\nresponse_raw_end", raw)
-    if not raw:
-        return {}
-    try:
-        out = json.loads(raw)
-        _LLM_LOG.info("response_json=%s", json.dumps(out, ensure_ascii=False))
-        return out
-    except json.JSONDecodeError:
-        _LLM_LOG.exception("response_json_decode_failed")
-        return {}
-
-
 def propose_edges_json(prompt: str) -> dict[str, Any]:
-    """
-    ``build_relation_proposal_prompt`` 로 만든 문자열을 OpenAI API에 넘겨 JSON dict 반환.
+    """관계 제안 프롬프트를 온프레미스 LLM에 넘겨 JSON dict 반환."""
+    from src.llm.client import complete_json
 
-    ``get_current_settings()`` 의 ``openai_base_url``, ``openai_api_key``, ``meta_model`` 사용.
-    """
-    from openai import OpenAI
-
-    cfg = get_current_settings()
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
-    return _call_openai_json(client, model=cfg.meta_model, prompt=prompt)
+    out = complete_json(prompt)
+    _configure_llm_logging()
+    _LLM_LOG.info("response_json=%s", json.dumps(out, ensure_ascii=False))
+    return out
 
 
 def build_new_relation_type_ko_labels_prompt(*, type_code: str, edge_reason: str) -> str:
@@ -108,12 +70,10 @@ type_code: {type_code}
 
 def propose_new_relation_type_ko_labels(type_code: str, edge_reason: str = "") -> dict[str, Any]:
     """신규 ``type_code`` 에 대한 한글 라벨·설명을 LLM JSON으로 받는다(주로 ``relation_kind`` 보강용)."""
-    from openai import OpenAI
+    from src.llm.client import complete_json
 
-    cfg = get_current_settings()
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
     prompt = build_new_relation_type_ko_labels_prompt(type_code=type_code, edge_reason=edge_reason)
-    return _call_openai_json(client, model=cfg.meta_model, prompt=prompt)
+    return complete_json(prompt)
 
 
 def normalize_type_ko_labels_from_llm_response(
