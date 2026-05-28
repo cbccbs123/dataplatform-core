@@ -22,6 +22,17 @@ _T2 = "018f0000-0000-7000-8000-000000000008"
 
 
 # ── 순수 단위(mock conn) — DB 불필요 ────────────────────────────────────────
+class TestCanonicalOrdering(unittest.TestCase):
+    def test_symmetric_kind_orders_pair(self):
+        from src.relations.graph_persist import _canonical_pair
+        a, b = "018f0000-0000-7000-8000-000000000006", "018f0000-0000-7000-8000-000000000005"
+        # 대칭: 항상 (min, max)
+        self.assertEqual(_canonical_pair(a, b, symmetric=True), (b, a))
+        self.assertEqual(_canonical_pair(b, a, symmetric=True), (b, a))
+        # 비대칭: 입력 방향 유지
+        self.assertEqual(_canonical_pair(a, b, symmetric=False), (a, b))
+
+
 class TestSyncGraphEdgesUnit(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = mock.MagicMock()
@@ -33,10 +44,12 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
         e.update(kw)
         return e
 
-    def _run(self, edges, rtid="rtid-1"):
+    def _run(self, edges, kind=("k1", True)):
+        """kind=(relation_kind_id, is_symmetric) 또는 None(미해소 kind)."""
         from src.relations import graph_persist
+        kdict = None if kind is None else {"relation_kind_id": kind[0], "is_symmetric": kind[1]}
         with mock.patch.object(graph_persist, "ensure_asset_node", side_effect=lambda conn, aid: "n_" + aid), \
-             mock.patch.object(graph_persist, "fetch_relation_type_id_for_normalized_edge", return_value=rtid):
+             mock.patch.object(graph_persist, "fetch_relation_kind", return_value=kdict):
             return graph_persist.sync_graph_edges(
                 self.conn, source_asset_id=_SRC, edges=edges, allowed_target_ids=self.allowed
             )
@@ -59,8 +72,8 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
     def test_missing_relation_code_skipped(self) -> None:
         self.assertEqual(self._run([self._edge(relation_type_code="")]), (0, 1))
 
-    def test_unresolved_relation_type_skipped(self) -> None:
-        self.assertEqual(self._run([self._edge()], rtid=None), (0, 1))
+    def test_unresolved_relation_kind_skipped(self) -> None:
+        self.assertEqual(self._run([self._edge()], kind=None), (0, 1))
 
 
 # ── 실 DB 통합(RUN_DB_E2E=1) ────────────────────────────────────────────────

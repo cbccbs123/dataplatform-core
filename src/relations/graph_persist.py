@@ -1,8 +1,8 @@
-"""공용 그래프 영속화 — node(asset) 보장 + graph_edge upsert (asset_relation 흡수판).
+"""공용 그래프 영속화 — node(asset) 보장 + graph_edge upsert.
 
-엣지 종류는 기존 relation_type 카탈로그(relation_kind×subtopic)를 재사용한다.
-sync_asset_relation_edges 와 동일한 검증(후보 집합·자기참조·코드 정규화·relation_type 해소)을 따르되,
-양 끝 asset-노드를 보장하고 graph_edge 에 upsert 한다.
+엣지 종류는 relation_kind(통제 어휘)를 직접 참조하고, 주제는 graph_edge.topic jsonb 에 저장한다.
+대칭 kind 는 (src,dst) 캐논 순서로 1행만 저장하고, 신뢰도는 충돌 시 GREATEST 로 화해한다.
+후보 집합 안의 타깃만, active kind 만 적재(환각·미검토 kind 방지).
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 from psycopg import Connection
 
 from src.database.ids import uuid7_str
-from src.relations.relation_type_catalog import fetch_relation_type_id_for_normalized_edge
+from src.relations.relation_type_catalog import fetch_relation_kind
 from src.relations.schema import coerce_topic_fields_mvp
 
 
@@ -23,8 +23,15 @@ def _as_uuid_str(value: Any) -> str | None:
         return None
 
 
+def _canonical_pair(src: str, dst: str, *, symmetric: bool) -> tuple[str, str]:
+    """대칭 kind 면 (min,max) 로 정렬해 무방향 쌍을 1행으로 모은다. 비대칭은 방향 유지."""
+    if symmetric and dst < src:
+        return dst, src
+    return src, dst
+
+
 def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
-    """asset_id 의 asset-노드를 보장하고 node_id(UUID str) 반환(SELECT→없으면 INSERT)."""
+    """asset_id 의 asset-노드를 보장하고 node_id(UUID str) 반환."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT node_id FROM node WHERE node_kind = 'asset' AND asset_id = %s LIMIT 1",
@@ -34,7 +41,6 @@ def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
         if row is not None:
             return str(row[0])
         nid = uuid7_str()
-        # 동시성 안전: 부분 유니크 인덱스(uq_node_asset)와 ON CONFLICT 로 경쟁 INSERT 흡수.
         cur.execute(
             """
             INSERT INTO node (node_id, node_kind, asset_id) VALUES (%s, 'asset', %s)
@@ -46,7 +52,6 @@ def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
         inserted = cur.fetchone()
         if inserted is not None:
             return str(inserted[0])
-        # 다른 트랜잭션이 먼저 INSERT(충돌) → 기존 노드 재조회
         cur.execute(
             "SELECT node_id FROM node WHERE node_kind = 'asset' AND asset_id = %s LIMIT 1",
             (asset_id,),
@@ -60,8 +65,13 @@ def sync_graph_edges(
     source_asset_id: str,
     edges: list[dict[str, Any]],
     allowed_target_ids: frozenset[str],
+    auto_approve_min: float = 1.01,
 ) -> tuple[int, int]:
-    """후보 집합 안의 타깃만 graph_edge 에 기록(양 끝 asset-노드 보장). Returns (upserted, skipped)."""
+    """후보 집합 안 타깃·active kind 만 graph_edge 에 upsert. Returns (upserted, skipped).
+
+    신규 엣지 status: confidence >= auto_approve_min 이면 'active'(자동승인), 아니면 'proposed'(검토 대기).
+    기본 1.01 = 자동승인 없음(전부 proposed). 충돌 시 status 는 보존(사람 결정 유지), confidence 만 GREATEST.
+    """
     allowed = frozenset(str(t) for t in allowed_target_ids)
     upserted = 0
     skipped = 0
@@ -76,35 +86,43 @@ def sync_graph_edges(
             skipped += 1
             continue
         kind_code = str(code).strip().lower()
-        topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
-        rtid = fetch_relation_type_id_for_normalized_edge(
-            conn,
-            kind_code=kind_code,
-            topic_ko=topic_ko,
-            subtopic_ko=subtopic_ko,
-            topic_en=topic_en,
-            subtopic_en=subtopic_en,
-        )
-        if rtid is None:
+        kind = fetch_relation_kind(conn, kind_code=kind_code, status="active")
+        if kind is None:  # 비활성/미등록 kind 는 엣지로 만들지 않음(검토 대기)
             skipped += 1
             continue
+        kind_id = str(kind["relation_kind_id"])
+        symmetric = bool(kind["is_symmetric"])
+
+        topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
+        import json as _json
+        topic_json = _json.dumps(
+            {"topic_ko": topic_ko, "subtopic_ko": subtopic_ko,
+             "topic_en": topic_en, "subtopic_en": subtopic_en},
+            ensure_ascii=False,
+        )
         conf = edge.get("confidence")
         try:
             conf_f = float(conf) if conf is not None else None
         except (TypeError, ValueError):
             conf_f = None
         reason = str(edge.get("reason") or "").strip() or None
+        status_val = "active" if (conf_f is not None and conf_f >= auto_approve_min) else "proposed"
+
         dst_node = ensure_asset_node(conn, tid)
+        a_node, b_node = _canonical_pair(src_node, dst_node, symmetric=symmetric)
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO graph_edge (edge_id, src_node, dst_node, relation_type_id, confidence, reason, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'active')
-                ON CONFLICT (src_node, dst_node, relation_type_id)
-                DO UPDATE SET confidence = EXCLUDED.confidence, reason = EXCLUDED.reason,
-                              status = 'active', updated_at = now()
+                INSERT INTO graph_edge
+                    (edge_id, src_node, dst_node, relation_kind_id, confidence, reason, topic, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                ON CONFLICT (src_node, dst_node, relation_kind_id)
+                DO UPDATE SET
+                    confidence = GREATEST(
+                        COALESCE(graph_edge.confidence, 0), COALESCE(EXCLUDED.confidence, 0)),
+                    updated_at = now()
                 """,
-                (uuid7_str(), src_node, dst_node, rtid, conf_f, reason),
+                (uuid7_str(), a_node, b_node, kind_id, conf_f, reason, topic_json, status_val),
             )
         upserted += 1
     return upserted, skipped
