@@ -50,6 +50,7 @@ def find_embedding_candidates(
     source_asset_id: str,
     top_k: int,
     embedding_kind: EmbeddingKindFilter = "both",
+    min_sim: float = 0.0,
 ) -> list[EmbeddingCandidate]:
     """
     소스와 **같은 채널** 임베딩끼리만 비교하여, 자산별 최대 코사인 유사도로 정렬한 상위 ``top_k`` 후보.
@@ -58,6 +59,7 @@ def find_embedding_candidates(
         ``src_vecs``: 소스 자산의 (channel, embedding) 목록.
         ``cand``: 타 자산 임베딩과 소스 벡터를 channel 로 조인한 (id, sim) 행.
         ``per_item``: 자산 id 별 ``MAX(sim)`` — 한 자산에 청크/키프레임이 여러 개일 때 가장 가까운 쌍만 반영.
+                      ``HAVING MAX(sim) >= min_sim`` 로 유사도 하한 미만 후보 제거.
         최종: ``asset`` + ``asset_metadata`` 와 조인해 경로·modality·요약을 붙인다.
     """
     channels = _channels_param(embedding_kind)
@@ -81,6 +83,7 @@ def find_embedding_candidates(
             SELECT id, MAX(sim) AS best_sim
             FROM cand
             GROUP BY id
+            HAVING MAX(sim) >= %s
         )
         SELECT a.asset_id AS id,
                a.fs_path  AS file_uri,
@@ -95,7 +98,7 @@ def find_embedding_candidates(
         LIMIT %s
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, (source_asset_id, channels, source_asset_id, top_k))
+        cur.execute(sql, (source_asset_id, channels, source_asset_id, min_sim, top_k))
         rows = cur.fetchall()
     out: list[EmbeddingCandidate] = []
     for r in rows:
