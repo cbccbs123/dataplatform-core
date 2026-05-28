@@ -52,7 +52,7 @@ def _medical_signature(_path: str, _modality: str) -> ClassificationResult:
     """의료 표준 포맷(시그니처) → run_ingest 가 deferred 분기를 타야 한다."""
     return ClassificationResult(
         final_label="medical", confidence=1.0, decided_stage=1,
-        stage1_scores={"signature": "dicom"},
+        stage1_scores={"medical": {"signature": "dicom"}},  # cascade v2 중첩 구조 {domain: {signature}}
     )
 
 
