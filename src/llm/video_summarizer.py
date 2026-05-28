@@ -1,39 +1,15 @@
 from __future__ import annotations
 
-import json
 from typing import TypedDict
 
-from openai import OpenAI
-
 from src.config.settings import get_current_settings
+from src.llm.client import complete_json
 
 
 class VideoSummaryResult(TypedDict):
     summary: str
     keywords: list[str]
     objects: list[str]
-
-
-def _call_openai_json(
-    client: OpenAI,
-    *,
-    model: str,
-    prompt: str,
-    temperature: float = 0.0,
-) -> dict:
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        response_format={"type": "json_object"},
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"summary": raw, "keywords": [], "objects": []}
 
 
 def summarize_video_from_scene_results(
@@ -84,8 +60,7 @@ def summarize_video_from_scene_results(
         f"장면 결과:\n" + "\n".join(timeline_lines)
     )
 
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
-    data = _call_openai_json(client, model=cfg.meta_model, prompt=prompt)
+    data = complete_json(prompt)
 
     summary = str(data.get("summary", "")).strip()[: cfg.summary_max_chars]
 

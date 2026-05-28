@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TypedDict
-
-from openai import OpenAI
 
 from src.config.settings import get_current_settings
 from src.file.data_loader import (
@@ -12,6 +9,7 @@ from src.file.data_loader import (
     iter_document_chunks,
     normalize_file_kind,
 )
+from src.llm.client import complete_json
 
 
 class SummaryKeywords(TypedDict):
@@ -20,35 +18,12 @@ class SummaryKeywords(TypedDict):
     stt: str
 
 
-def _call_openai_json(
-    client: OpenAI,
-    *,
-    model: str,
-    prompt: str,
-    temperature: float = 0.0,
-) -> dict:
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        response_format={"type": "json_object"},
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"summary": raw, "keywords": []}
-
-
-def _summarize_chunk_only_openai(
+def _summarize_chunk_only(
     chunk_text: str,
     *,
-    client: OpenAI,
-    model: str,
     summary_max_chars: int,
 ) -> str:
+    """청크 하나를 요약해 문자열로 반환한다. 공통 seam(complete_json) 사용."""
     prompt = (
         "다음 텍스트를 간단히 요약해서 반드시 JSON만 출력해.\n"
         "형식:\n"
@@ -57,7 +32,7 @@ def _summarize_chunk_only_openai(
         f"텍스트:\n{chunk_text}"
         "개수/비율/합계 같은 통계 표현 금지."
     )
-    data = _call_openai_json(client, model=model, prompt=prompt)
+    data = complete_json(prompt)
     return str(data.get("summary", "")).strip()[:summary_max_chars]
 
 
@@ -76,9 +51,6 @@ def summarize_and_extract_keywords(
         raise ValueError("file_kind는 필수입니다.")
 
     cfg = get_current_settings()
-    model = cfg.meta_model
-
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
 
     partial_summaries: list[str] = []
     for i, ch in enumerate(
@@ -91,12 +63,7 @@ def summarize_and_extract_keywords(
             max_input_chars=MAX_INPUT_CHARS,
         )
     ):
-        s = _summarize_chunk_only_openai(
-            ch,
-            client=client,
-            model=model,
-            summary_max_chars=cfg.summary_max_chars,
-        )
+        s = _summarize_chunk_only(ch, summary_max_chars=cfg.summary_max_chars)
         if s:
             partial_summaries.append(s)
 
@@ -113,7 +80,7 @@ def summarize_and_extract_keywords(
         f"청크 요약 목록:\n{merged}"
         "개수/비율/합계 같은 통계 표현 금지."
     )
-    data = _call_openai_json(client, model=model, prompt=final_prompt)
+    data = complete_json(final_prompt)
 
     summary = str(data.get("summary", "")).strip()
     keywords_raw = data.get("keywords", [])
@@ -145,8 +112,7 @@ def summarize_and_extract_keywords_from_audio(
         f"텍스트:\n{text}"
         "개수/비율/합계 같은 통계 표현 금지."
     )
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
-    data = _call_openai_json(client, model=cfg.meta_model, prompt=final_prompt)
+    data = complete_json(final_prompt)
 
     summary = str(data.get("summary", "")).strip()
     keywords_raw = data.get("keywords", [])

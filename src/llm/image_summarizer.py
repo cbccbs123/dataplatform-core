@@ -7,15 +7,14 @@
 from __future__ import annotations
 
 import base64
-import json
 from io import BytesIO
 from pathlib import Path
 from typing import TypedDict
 
-from openai import OpenAI
 from PIL import Image
 
 from src.config.settings import get_current_settings
+from src.llm.client import complete_vision_json
 
 
 class ImageSummaryResult(TypedDict):
@@ -58,44 +57,6 @@ def _encode_jpeg_bytes_as_data_url_resized(
     return f"data:image/jpeg;base64,{b64}"
 
 
-def _call_openai_vision_json(
-    client: OpenAI,
-    *,
-    model: str,
-    user_text: str,
-    image_data_url: str,
-    temperature: float = 0.0,
-) -> dict:
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_data_url},
-                    },
-                ],
-            }
-        ],
-        temperature=temperature,
-        response_format={"type": "json_object"},
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {
-            "summary": raw,
-            "keywords": [],
-            "objects": [],
-        }
-
-
 def summarize_image_caption_keywords_objects(
     file_path: str | Path,
     *,
@@ -133,7 +94,6 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     image_data_url: str,
 ) -> ImageSummaryResult:
     cfg = get_current_settings()
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
 
     prompt = (
         "이 이미지를 분석해서 반드시 JSON만 출력해.\n"
@@ -147,13 +107,7 @@ def _summarize_image_caption_keywords_objects_from_data_url(
         "개수/비율/합계 같은 통계 표현은 summary/keywords에는 쓰지 말 것."
     )
 
-    data = _call_openai_vision_json(
-        client,
-        model=cfg.meta_model,
-        user_text=prompt,
-        image_data_url=image_data_url,
-        temperature=0.0,
-    )
+    data = complete_vision_json(text=prompt, image_data_url=image_data_url)
 
     summary = str(data.get("summary", "")).strip()[: cfg.summary_max_chars]
 
