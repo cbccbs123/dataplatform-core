@@ -23,20 +23,10 @@ def _build_prompt(labels: list[str]) -> str:
 
 
 def _default_complete(prompt: str) -> str:
-    """온프레미스 OpenAI 호환 엔드포인트 호출(지연 import)."""
-    from openai import OpenAI
+    """온프레미스 LLM 호출(공통 seam). 원문 문자열 반환."""
+    from src.llm.client import complete_text
 
-    from src.config.settings import get_current_settings
-
-    cfg = get_current_settings()
-    client = OpenAI(base_url=cfg.openai_base_url, api_key=cfg.openai_api_key)
-    resp = client.chat.completions.create(
-        model=cfg.meta_model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    return (resp.choices[0].message.content or "").strip()
+    return complete_text(prompt)
 
 
 def classify(
