@@ -60,6 +60,31 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
         sql = " ".join(str(c.args[0]) for c in self.cur.execute.call_args_list)
         self.assertIn("INSERT INTO graph_edge", sql)
 
+    def _insert_params(self, edges, kind=("k1", True), **kwargs):
+        """단일 엣지 upsert 의 INSERT 바인딩 파라미터(ensure_asset_node mock — INSERT 만 self.cur 사용)."""
+        from src.relations import graph_persist
+        kdict = {"relation_kind_id": kind[0], "is_symmetric": kind[1]}
+        with mock.patch.object(graph_persist, "ensure_asset_node", side_effect=lambda conn, aid: "n_" + aid), \
+             mock.patch.object(graph_persist, "fetch_relation_kind", return_value=kdict):
+            graph_persist.sync_graph_edges(
+                self.conn, source_asset_id=_SRC, edges=edges, allowed_target_ids=self.allowed, **kwargs)
+        return self.cur.execute.call_args[0][1]
+
+    def test_status_proposed_below_auto_approve(self) -> None:
+        params = self._insert_params([self._edge(confidence=0.5)], auto_approve_min=0.9)
+        self.assertEqual(params[-1], "proposed")  # status_val 은 INSERT 마지막 바인딩
+
+    def test_status_active_at_or_above_auto_approve(self) -> None:
+        params = self._insert_params([self._edge(confidence=0.95)], auto_approve_min=0.9)
+        self.assertEqual(params[-1], "active")
+
+    def test_topic_jsonb_serialized(self) -> None:
+        import json
+        params = self._insert_params([self._edge(topic_ko="게임", topic_en="gaming")])
+        topic = json.loads(params[6])  # (edge_id,a,b,kind,conf,reason,topic,status) 중 7번째
+        self.assertEqual(topic["topic_ko"], "게임")
+        self.assertEqual(topic["topic_en"], "gaming")
+
     def test_target_not_in_allowed_skipped(self) -> None:
         self.assertEqual(self._run([self._edge(target_media_item_id="018f0000-0000-7000-8000-000000000014")]), (0, 1))
 

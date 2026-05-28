@@ -93,7 +93,7 @@ def main() -> int:
 
     from src.config.settings import init_settings
 
-    parser = argparse.ArgumentParser(description="관계 제안 배치 (asset_relation 적재)")
+    parser = argparse.ArgumentParser(description="관계 제안 배치 (graph_edge 적재)")
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
     parser.add_argument("--all", action="store_true", help="registered 자산 전체 대상")
     parser.add_argument("--top-k", dest="top_k", type=int, default=None)
