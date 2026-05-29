@@ -11,8 +11,9 @@
 디스패처 단일 권위: 미지원 modality 는 사전 차단하지 않고 dispatch_extract 의
 UnsupportedModalityError 를 6번에서 흡수한다(asset.status='failed').
 
-분류(F-5.1)는 ``classify_fn`` 으로 주입(미구현 시 route 의 domain='general' 유지).
-추출은 ``extract_fn`` 으로 주입 가능(기본 dispatch_extract; 테스트에서 대체).
+``classify_fn``/``extract_fn`` 은 **테스트·e2e 전용 override** 주입점이다(운영 호출부 없음).
+운영에서는 미주입으로 두어 레지스트리 기본 경로(분류 cascade_v1 + 도메인 팩 extract/embed)를 타고,
+주입 시 무거운 실경로(LLM/CLIP/STT)를 결정적 stub 으로 대체한다.
 """
 
 from __future__ import annotations
@@ -59,8 +60,8 @@ def run_ingest(
     files: list[str],
     *,
     db: PostgresUtil,
-    extract_fn: ExtractFn | None = None,
-    classify_fn: ClassifyFn | None = None,
+    extract_fn: ExtractFn | None = None,   # 테스트·e2e 전용 override(미주입=팩 기본 extract/embed)
+    classify_fn: ClassifyFn | None = None,  # 테스트·e2e 전용 override(미주입=cascade_v1)
     registry=DEFAULT_REGISTRY,
     settings: Any = None,
 ) -> dict[str, list[Any]]:
@@ -101,7 +102,11 @@ def run_ingest(
                 record_lineage(conn, asset_id, activity="ingest.received.v1", agent="run_ingest",
                                generated={"modality": route.modality}, payload={"fs_path": path})
 
-            # 3) routing → classifying (단계별 커밋)
+            # 3) routing → classifying (한 트랜잭션 묶음 커밋)
+            # status 는 '단계 진입 전'에 찍는 진행형 마커다(완료는 다음 전이로 암시). 그래서:
+            #  - routing: 실작업(route_file, 위)이 row 생성 전 끝나 사후 마커이고, classifying 과 같은
+            #    트랜잭션이라 단독 관측되지 않는다 — received→classifying 사이를 FSM 순차성상 거쳐갈 뿐.
+            #  - classifying: 바로 아래 실분류(cascade) 진입 직전을 정확히 반영.
             with db.transaction() as conn:
                 set_status(conn, asset_id, AssetStatus.ROUTING)
                 record_lineage(conn, asset_id, activity="ingest.routing.v1", agent="run_ingest")
@@ -126,17 +131,19 @@ def run_ingest(
             domain = classification.final_label
             ctx.domain = domain
 
-            # 의료 표준 포맷(DICOM/HL7/FHIR, stage1 시그니처)은 일반 추출 대상이 아님 — 보류(deferred)
-            # cascade v2 이후 stage1_scores 는 {domain: {signature, ...}} 중첩 구조
+            # 시그니처로 확정된 포맷(stage1)이지만 해당 어댑터가 없으면 보류(deferred) — 실패 아닌 계획적 대기.
+            # 현재 시그니처를 등록한 프로파일이 medical(DICOM/HL7/FHIR)뿐이라 사실상 의료 포맷만 보류되지만,
+            # 코드 자체는 도메인-불가지(메커니즘은 범용; 어느 도메인이든 추출기 없는 시그니처 포맷이면 보류).
+            # cascade v2 이후 stage1_scores 는 {domain: {signature, ...}} 중첩 구조.
             signature = None
             if classification.decided_stage == 1:
                 signature = classification.stage1_scores.get(domain, {}).get("signature")
             if signature:
                 with db.transaction() as conn:
-                    set_status(conn, asset_id, AssetStatus.DEFERRED, reason=f"medical_format:{signature}")
+                    set_status(conn, asset_id, AssetStatus.DEFERRED, reason=f"{domain}_format:{signature}")
                     record_lineage(conn, asset_id, activity="ingest.deferred.v1", agent="run_ingest",
-                                   payload={"signature": signature})
-                _LOG.info("deferred(medical %s): asset_id=%s %s", signature, asset_id, path)
+                                   payload={"domain": domain, "signature": signature})
+                _LOG.info("deferred(%s/%s): asset_id=%s %s", domain, signature, asset_id, path)
                 result["deferred"].append(asset_id)
                 continue
 
@@ -196,11 +203,22 @@ def run_ingest(
     return result
 
 
+# ── 초기 설정(부트스트랩) 절차 ────────────────────────────────────────────────
+# [import 시점·자동·호출순서 무관] 이 모듈을 import 하는 것만으로 완료되는 등록(부수효과):
+#   · 전략 레지스트리 DEFAULT_REGISTRY ← 위의 `from src.pipeline import builtins` 가
+#     register_defaults 를 실행 → classify/cascade_v1·extract·embed/by_modality·persist + cross-asset 슬롯.
+#   · 도메인 프로파일 DOMAIN_PROFILES ← builtins→cascade→`src.classify.domains`→medical 체인 →
+#     {"medical"}(DICOM/HL7/FHIR 시그니처+어휘). general 은 미등록 — cascade 엔진 내장 폴백.
+#   (run_relations/run_relations_review 는 이 import 가 없어 레지스트리·프로파일이 비어 있다.)
+# [런타임·main() 안·순서 중요] 아래 3단계는 반드시 이 순서로:
+#   1) load_dotenv(.env.{env}, override=False) — OS 기존 환경변수 우선.
+#   2) init_settings(env) — 필수 환경변수 검증 후 frozen PipelineSettings 생성(이후 get_current_settings 활성).
+#   3) PostgresUtil() + `with db:` — 연결 풀 생성 + PG17 검증.
+#   로깅(_configure_logging)·LLM 클라이언트(get_llm_client)는 모듈 싱글턴 없이 첫 사용 시 지연 초기화.
 def main() -> int:
     """CLI: 로컬 파일 수집 후 asset_* 적재. 예) python -m src.app.run_ingest --env dev --input-dir DIR"""
     import argparse
     import json
-    import sys
     from pathlib import Path
 
     from dotenv import load_dotenv
