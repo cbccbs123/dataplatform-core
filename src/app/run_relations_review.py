@@ -29,6 +29,11 @@ from src.relations.review import (
 )
 
 
+# ── 초기 설정(부트스트랩) 절차 ────────────────────────────────────────────────
+# DB 검토 전용 진입점 — 전략 레지스트리·도메인 프로파일·분류/LLM 부트스트랩과 무관(해당 import 없음).
+# [런타임·main() 안·순서 중요]:
+#   1) load_dotenv(.env.{env}, override=False)  2) init_settings(env): 필수 환경변수 검증+frozen 설정
+#   3) PostgresUtil() + `with db:`: 연결 풀+PG17 검증.  각 동작(approve/reject/promote)은 단일 트랜잭션.
 def main() -> int:
     """CLI: proposed 엣지 큐 조회 / 승인 / 반려 / relation_kind 승격."""
     import argparse

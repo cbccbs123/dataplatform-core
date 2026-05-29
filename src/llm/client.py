@@ -44,7 +44,7 @@ def complete_text(
     *,
     model: str | None = None,
     temperature: float = 0.0,
-    client: OpenAI | None = None,
+    client: OpenAI | None = None,  # 테스트용 모의 클라이언트 주입 seam(미주입=운영 클라이언트)
 ) -> str:
     """JSON-mode 호출 후 원문 문자열 반환('' if 빈응답). 호출부가 직접 파싱할 때.
 
@@ -84,7 +84,7 @@ def complete_json(
     *,
     model: str | None = None,
     temperature: float = 0.0,
-    client: OpenAI | None = None,
+    client: OpenAI | None = None,  # 테스트용 모의 클라이언트 주입 seam(미주입=운영 클라이언트)
 ) -> dict[str, Any]:
     """``complete_text`` + JSON 파싱. 빈응답/파싱실패/비객체 → ``{}``."""
     return _parse_json_or_empty(
@@ -98,7 +98,7 @@ def complete_vision_json(
     image_data_url: str,
     model: str | None = None,
     temperature: float = 0.0,
-    client: OpenAI | None = None,
+    client: OpenAI | None = None,  # 테스트용 모의 클라이언트 주입 seam(미주입=운영 클라이언트)
 ) -> dict[str, Any]:
     """이미지+텍스트 비전 호출 → JSON dict(빈/파싱실패 → ``{}``).
 

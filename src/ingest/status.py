@@ -46,6 +46,11 @@ TERMINAL: frozenset[AssetStatus] = frozenset(
     {AssetStatus.REGISTERED, AssetStatus.FAILED, AssetStatus.DEFERRED}
 )
 
+# 전이 규약: status 는 해당 단계 '진입 전'(처리 시작 시점)에 set_status 로 찍는 진행형 마커이며,
+# 단계 완료는 따로 찍지 않고 '다음 전이'로 암시된다(예: classifying→extracting = 분류 완료).
+# 결과/종착 상태(registered/deferred/failed)만 처리 '후'에 찍는다.
+# routing 은 route_file 이 asset 행 생성(received) 전에 끝나는 즉시 작업이라 사후 마커이고,
+# run_ingest 에서 classifying 과 한 트랜잭션에 묶여 단독으로는 관측되지 않는다(provenance 는 lineage 가 보존).
 # 정상 진행 경로 + 임의 비종료 단계에서 failed 로 전이 가능.
 # classifying → deferred: 의료 표준 포맷 감지 시 추출 보류.
 # classifying → extracting: 일반 도메인 및 의료 비표준 포맷(현 stopgap 경로).

@@ -99,6 +99,13 @@ def run_relations(
     return result
 
 
+# ── 초기 설정(부트스트랩) 절차 ────────────────────────────────────────────────
+# [import 시점] 이 진입점은 전략 레지스트리·도메인 프로파일을 로드하지 않는다
+#   (builtins/cascade import 없음). 관계 제안은 propose_relations_for_asset 로 묶음 위임하며
+#   registry.resolve 를 쓰지 않는다(단계 D 의료 분기에서 팩별 slot resolve 로 전환 예정).
+# [런타임·main() 안·순서 중요]:
+#   1) load_dotenv(.env.{env}, override=False)  2) init_settings(env): 필수 환경변수 검증+frozen 설정
+#   3) PostgresUtil() + `with db:`: 연결 풀+PG17 검증.  온프레미스 LLM 클라이언트는 propose 내부 첫 호출 시 지연 생성.
 def main() -> int:
     """CLI: registered 자산에 대해 관계 제안 배치."""
     import argparse

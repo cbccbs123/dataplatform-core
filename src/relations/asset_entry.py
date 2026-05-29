@@ -56,7 +56,7 @@ def propose_relations_for_asset(
     *,
     top_k: int | None = None,
     embedding_kind: EmbeddingKindFilter = "both",
-    llm_fn: Callable[[str], dict[str, Any]] | None = None,
+    llm_fn: Callable[[str], dict[str, Any]] | None = None,  # 테스트용 주입(미주입=실 LLM 호출)
 ) -> tuple[int, int, int, int]:
     """
     후보 검색 → LLM JSON → 신규 kind inactive 등록 → ``graph_edge`` upsert.

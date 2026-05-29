@@ -67,7 +67,7 @@ def build_user_message(user_text: str, *, tz_name: str = DEFAULT_TZ) -> str:
 def structure_user_query(
     user_text: str,
     *,
-    client: Any | None = None,
+    client: Any | None = None,  # 테스트용 주입 seam(미주입=공통 seam 의 운영 클라이언트)
     model: str | None = None,
     tz_name: str = DEFAULT_TZ,
 ) -> dict[str, Any]:
