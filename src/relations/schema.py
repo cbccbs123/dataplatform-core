@@ -254,8 +254,3 @@ def description_ko_from_type_name_ko(type_name_ko: str) -> str:
     if len(parts) == 1:
         return f"{parts[0]} 도메인 연관"
     return "·".join(parts) + " 도메인 연관"
-
-
-def target_ref_for_media_item(target_id: int) -> str:
-    """미디어 아이템 id 를 엣지 ``target_ref`` 문자열로 고정한다(형식 ``id:{정수}``)."""
-    return f"id:{int(target_id)}"

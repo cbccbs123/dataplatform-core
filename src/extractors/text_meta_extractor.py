@@ -28,20 +28,6 @@ def get_embedding_model(model_name: str) -> SentenceTransformer:
     return SentenceTransformer(model_name)
 
 
-def get_embedding_dimension(model_name: str) -> int:
-    model = get_embedding_model(model_name)
-    return int(model.get_sentence_embedding_dimension())
-
-
-def ensure_embedding_dimension(model_name: str, expected_dimension: int) -> None:
-    actual = get_embedding_dimension(model_name)
-    if actual != expected_dimension:
-        raise ValueError(
-            f"임베딩 차원 불일치: model={model_name!r}의 차원은 {actual}D, "
-            f"요청 차원은 {expected_dimension}D 입니다."
-        )
-
-
 def count_tokens(text: str, *, model_name: str) -> int:
     if not text:
         return 0

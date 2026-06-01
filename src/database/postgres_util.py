@@ -14,7 +14,7 @@ Features:
 - Configurable logging
 - Explicit transaction context manager
 - Server version detection and minimum-version guard
-- Convenience query helpers (execute, fetch_one, fetch_all)
+- Convenience query helpers (execute, fetch_one)
 - Health check utility
 """
 
@@ -93,12 +93,6 @@ class PostgresConfig:
             password=os.getenv("POSTGRES_PASSWORD", ""),
         )
 
-    @classmethod
-    def from_dsn(cls, dsn: str) -> "PostgresConfig":
-        """Optional helper when caller prefers DSN parsing externally."""
-        # Keep config simple; DSN can be passed directly to PostgresUtil.
-        raise NotImplementedError("Use PostgresUtil(dsn=...) directly.")
-
 
 def _resolve_min_server_version(explicit: int | None) -> int:
     if explicit is not None:
@@ -145,12 +139,6 @@ class PostgresUtil:
         self._on_retry = on_retry
         self._on_failure = on_failure
         self._on_success = on_success
-        self._metrics: dict[str, int] = {
-            "operations_total": 0,
-            "operations_succeeded": 0,
-            "operations_failed": 0,
-            "retries_total": 0,
-        }
         self._validate_config()
 
     def _validate_config(self) -> None:
@@ -246,12 +234,10 @@ class PostgresUtil:
         if not idempotent:
             attempts = 1
         last_error: BaseException | None = None
-        self._metrics["operations_total"] += 1
 
         for attempt in range(1, attempts + 1):
             try:
                 result = operation()
-                self._metrics["operations_succeeded"] += 1
                 if self._on_success is not None:
                     self._on_success(
                         {
@@ -264,7 +250,6 @@ class PostgresUtil:
             except Exception as exc:
                 last_error = exc
                 if not self._is_retryable_error(exc) or attempt >= attempts:
-                    self._metrics["operations_failed"] += 1
                     failure_payload = {
                         "operation_name": operation_name,
                         "attempt": attempt,
@@ -287,7 +272,6 @@ class PostgresUtil:
                 backoff_ms = min(max_delay_ms, base_delay_ms * (2 ** (attempt - 1)))
                 jitter = random.randint(0, jitter_ms) if jitter_ms > 0 else 0
                 sleep_ms = backoff_ms + jitter
-                self._metrics["retries_total"] += 1
                 retry_payload = {
                     "operation_name": operation_name,
                     "attempt": attempt,
@@ -312,15 +296,6 @@ class PostgresUtil:
         if last_error is not None:
             raise last_error
         raise RuntimeError("run_with_retry reached unexpected state.")
-
-    def get_metrics(self) -> Mapping[str, int]:
-        """Returns retry/operation counters for monitoring."""
-        return dict(self._metrics)
-
-    def reset_metrics(self) -> None:
-        """Resets in-memory counters."""
-        for key in self._metrics:
-            self._metrics[key] = 0
 
     def connect(self) -> Connection[Any]:
         if self._conn is None or self._conn.closed:
@@ -506,26 +481,6 @@ class PostgresUtil:
         return cast(
             Mapping[str, Any],
             self.run_with_retry(_op, operation_name="fetch_one", idempotent=True),
-        )
-
-    def fetch_all(
-        self,
-        query: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        use_pool: bool = True,
-    ) -> list[Mapping[str, Any]]:
-        def _op() -> list[Mapping[str, Any]]:
-            self.logger.debug("Fetch all query: %s", query)
-            with self.connection(use_pool=use_pool) as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(cast(Any, query), params)
-                    rows = cur.fetchall()
-            return cast(list[Mapping[str, Any]], rows)
-
-        return cast(
-            list[Mapping[str, Any]],
-            self.run_with_retry(_op, operation_name="fetch_all", idempotent=True),
         )
 
 

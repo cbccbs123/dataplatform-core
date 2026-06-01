@@ -47,8 +47,3 @@ def route_file(file_path: str | Path, *, domain: str = "general") -> RouteResult
     if kind == MediaKind.UNKNOWN.value:
         return RouteResult(str(file_path), kind, domain, False, REASON_UNKNOWN_MODALITY)
     return RouteResult(str(file_path), kind, domain, True, "")
-
-
-def route_files(paths: list[str] | list[Path], *, domain: str = "general") -> list[RouteResult]:
-    """여러 파일 라우팅 판정(순서 유지)."""
-    return [route_file(p, domain=domain) for p in paths]

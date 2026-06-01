@@ -7,16 +7,6 @@ import cv2
 from scenedetect import ContentDetector, detect
 
 
-class KeyframeResult(TypedDict):
-    """장면별 대표 프레임 저장 결과."""
-
-    scene_index: int
-    start_sec: float
-    end_sec: float
-    frame_sec: float
-    frame_path: str
-
-
 class KeyframeBytesResult(TypedDict):
     """장면별 대표 프레임(메모리 JPEG) 결과."""
 
@@ -83,75 +73,6 @@ def _read_scene_mid_frame(
     if not ok or frame is None:
         raise RuntimeError("대표 프레임을 읽지 못했습니다.")
     return frame_sec, frame
-
-
-def extract_video_representative_frames(
-    video_path: str | Path,
-    *,
-    output_dir: str | Path | None = None,
-    threshold: float = 30.0,
-    min_scene_len: int = 15,
-    jpeg_quality: int = 90,
-) -> list[KeyframeResult]:
-    """
-    영상에서 장면(Scene) 단위 대표 프레임(중앙 시점) 1장씩 추출한다.
-
-    :param video_path: 입력 비디오 파일 경로.
-    :param output_dir: 저장 디렉토리. None이면 `<영상명>_keyframes` 폴더 생성.
-    :param threshold: PySceneDetect ContentDetector 임계값.
-    :param min_scene_len: 최소 장면 길이(프레임 단위).
-    :param jpeg_quality: 저장 JPEG 품질(0~100).
-    :return: 장면별 대표 프레임 메타데이터 목록.
-    """
-    src = Path(video_path)
-    if not src.is_file():
-        raise FileNotFoundError(str(src))
-
-    dst = Path(output_dir) if output_dir is not None else src.with_name(f"{src.stem}_keyframes")
-    dst.mkdir(parents=True, exist_ok=True)
-
-    scenes = detect(str(src), ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
-    if not scenes:
-        return []
-
-    cap = cv2.VideoCapture(str(src))
-    if not cap.isOpened():
-        raise RuntimeError(f"비디오를 열 수 없습니다: {src}")
-
-    results: list[KeyframeResult] = []
-    try:
-        for i, (start_tc, end_tc) in enumerate(scenes, start=1):
-            start_sec = _to_seconds(start_tc)
-            end_sec = _to_seconds(end_tc)
-            frame_sec = start_sec + max(0.0, (end_sec - start_sec) / 2.0)
-
-            cap.set(cv2.CAP_PROP_POS_MSEC, frame_sec * 1000.0)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-
-            frame_path = dst / f"scene_{i:04d}_{frame_sec:.2f}s.jpg"
-            write_ok = cv2.imwrite(
-                str(frame_path),
-                frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)],
-            )
-            if not write_ok:
-                continue
-
-            results.append(
-                {
-                    "scene_index": i,
-                    "start_sec": round(start_sec, 3),
-                    "end_sec": round(end_sec, 3),
-                    "frame_sec": round(frame_sec, 3),
-                    "frame_path": str(frame_path),
-                }
-            )
-    finally:
-        cap.release()
-
-    return results
 
 
 def extract_video_representative_frame_bytes(

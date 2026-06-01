@@ -16,7 +16,6 @@ from src.ingest.router import (
     REASON_MISSING,
     REASON_UNKNOWN_MODALITY,
     route_file,
-    route_files,
 )
 
 
@@ -63,17 +62,6 @@ class TestRouteFile(RouterTestBase):
             r = route_file(self.f)
         self.assertFalse(r.routable)
         self.assertEqual(r.reason, REASON_MISSING)
-
-
-class TestRouteFiles(RouterTestBase):
-    def test_mixed_batch_preserves_order(self) -> None:
-        with mock.patch.object(router, "detect_file_kind", return_value="txt"):
-            results = route_files([self.f, "/no/such.txt"])
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0].routable)
-        self.assertEqual(results[0].modality, "txt")
-        self.assertFalse(results[1].routable)
-        self.assertEqual(results[1].reason, REASON_MISSING)
 
 
 if __name__ == "__main__":

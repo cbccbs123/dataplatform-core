@@ -16,10 +16,6 @@ from src.file.data_loader import (
 )
 
 
-class TextEmbeddingResult(TypedDict):
-    embedding_vector: list[float]
-
-
 class TextChunkEmbedding(TypedDict):
     chunk_index: int
     embedding_vector: list[float]
@@ -54,20 +50,6 @@ def get_embedding_model(model_name: str) -> SentenceTransformer:
     return SentenceTransformer(model_name)
 
 
-def get_embedding_dimension(model_name: str) -> int:
-    model = get_embedding_model(model_name)
-    return int(model.get_sentence_embedding_dimension())
-
-
-def ensure_embedding_dimension(model_name: str, expected_dimension: int) -> None:
-    actual = get_embedding_dimension(model_name)
-    if actual != expected_dimension:
-        raise ValueError(
-            f"임베딩 차원 불일치: model={model_name!r}의 차원은 {actual}D, "
-            f"요청 차원은 {expected_dimension}D 입니다."
-        )
-
-
 def embed_texts(
     texts: Sequence[str],
     *,
@@ -82,62 +64,6 @@ def embed_texts(
         normalize_embeddings=normalize_embeddings,
     )
     return vectors.tolist()
-
-
-def embedding_text_meta(
-    file_path: str | Path,
-    *,
-    file_kind: str,
-    encoding: str = "utf-8",
-    chunk_size: int = 512,
-    embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",#"BAAI/bge-m3",
-    normalize_embeddings: bool = True,
-) -> TextEmbeddingResult:
-    path = Path(file_path)
-    if not path.is_file():
-        raise FileNotFoundError(str(path))
-
-    kind = normalize_file_kind(file_kind)
-    if kind is None:
-        raise ValueError("file_kind는 필수입니다.")
-
-    weighted_sum: np.ndarray | None = None
-    total_weight = 0.0
-
-    for chunk in iter_document_chunks(
-        path,
-        file_kind=kind,
-        encoding=encoding,
-        chunk_size=chunk_size,
-        overlap_size=0,
-        max_input_chars=MAX_INPUT_CHARS,
-    ):
-        if not chunk:
-            continue
-
-        chunk = normalize_text_for_embedding(chunk)
-        if not chunk.strip():
-            chunk = " "
-
-        chunk_vector = embed_texts(
-            [chunk],
-            model_name=embedding_model_name,
-            normalize_embeddings=normalize_embeddings,
-        )[0]
-        chunk_arr = np.asarray(chunk_vector, dtype=np.float32)
-        weight = float(max(1, len(chunk)))
-        if weighted_sum is None:
-            weighted_sum = np.zeros_like(chunk_arr, dtype=np.float32)
-        weighted_sum += chunk_arr * weight
-        total_weight += weight
-
-    if weighted_sum is None or total_weight == 0:
-        embedding_vector = []
-    else:
-        embedding_vector = (weighted_sum / total_weight).tolist()
-
-    padded_embedding = pad_embedding_to_storage_dim(embedding_vector)
-    return {"embedding_vector": padded_embedding}
 
 
 def _iter_nonempty_chunks(

@@ -49,14 +49,6 @@ def _nonempty_str_list(val: Any) -> list[str]:
     return out
 
 
-def _clip_labels_to_strings(labels: Any) -> list[str]:
-    return _clip_labels_to_strings_with_limits(
-        labels,
-        top_k=_MAX_PLAIN_CHARS,
-        score_min=float("-inf"),
-    )
-
-
 def _clip_labels_to_strings_with_limits(
     labels: Any,
     *,

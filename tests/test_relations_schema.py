@@ -14,7 +14,6 @@ from src.relations.schema import (
     normalize_subtopic_ko,
     parse_llm_edges,
     sanitize_llm_proposed_type_code,
-    target_ref_for_media_item,
     type_label_from_kind_code,
     validate_topic_fields,
 )
@@ -225,11 +224,6 @@ class TestResolveRelationType(unittest.TestCase):
 class TestStructuralCodes(unittest.TestCase):
     def test_expected_structural(self) -> None:
         self.assertIn("duplicate_near", STRUCTURAL_TYPE_CODES)
-
-
-class TestTargetRef(unittest.TestCase):
-    def test_format(self) -> None:
-        self.assertEqual(target_ref_for_media_item(42), "id:42")
 
 
 if __name__ == "__main__":
