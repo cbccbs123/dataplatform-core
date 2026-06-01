@@ -553,7 +553,7 @@ def search_media_images_two_stage(
     _merge_clip_only_candidates(merged, clip_extra)
 
     all_ids = list(merged.keys())
-    bm25_full: dict[int, float] = {}
+    bm25_full: dict[str, float] = {}
     if all_ids:
         with db:
             with db.transaction() as conn:
@@ -660,9 +660,9 @@ def search_media_all_grouped(
     video_merged = _sort_by_similarity_cap(video_st + video_vis, limit_per_bucket)
 
     return {
-        "text_documents": text_documents[:3],
-        "audio": audio_rows[:3],
-        "image": image_rows[:3],
-        "video": video_merged[:3],
+        "text_documents": text_documents[:limit_per_bucket],
+        "audio": audio_rows[:limit_per_bucket],
+        "image": image_rows[:limit_per_bucket],
+        "video": video_merged[:limit_per_bucket],
         "meta": {"structured": structured},
     }
