@@ -563,7 +563,7 @@ def search_media_images_two_stage(
         row["bm25_score"] = _finite_float(bm25_full.get(iid, 0.0), 0.0)
         row["bm25_scaled"] = _saturating_bm25(row["bm25_score"])
 
-    for iid, row in merged.items():
+    for row in merged.values():
         base = (
             alpha * _finite_float(row["s_text"], 0.0)
             + (1.0 - alpha) * _finite_float(row["s_clip"], 0.0)

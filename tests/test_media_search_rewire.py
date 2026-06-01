@@ -337,13 +337,13 @@ class TestHybridSearchRewireDB(unittest.TestCase):
         b = _make_search_asset(
             self.db, self._ids, fts="무관한다른텍스트", summary="", st_vector=q
         )
-        common = dict(
-            query_vector=q,
-            bm25_query="알파베타감마델타",
-            media_types=["txt"],
-            embedding_kind="st",
-            limit=50,
-        )
+        common = {
+            "query_vector": q,
+            "bm25_query": "알파베타감마델타",
+            "media_types": ["txt"],
+            "embedding_kind": "st",
+            "limit": 50,
+        }
         rank_vec = [r["id"] for r in ms._run_hybrid_search(alpha=1.0, **common)]
         rank_fts = [r["id"] for r in ms._run_hybrid_search(alpha=0.0, **common)]
         # alpha=1(벡터 단독) → 벡터매치 B 가 FTS매치 A 보다 위

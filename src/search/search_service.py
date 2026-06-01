@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from src.search.media_search import search_media_all_grouped
 
