@@ -272,6 +272,28 @@ def _sanitize_hybrid_search_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
     return rows
 
 
+def _merge_clip_only_candidates(
+    merged: dict[str, dict[str, Any]], clip_extra: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """1차(ST) 후보 ``merged`` 에 CLIP-단독 후보를 합친다.
+
+    이미 ST 후보로 들어온 자산 id 는 건너뛰어(중복 제거) ST 점수를 보존하고, 1차에 없던
+    CLIP-단독 후보만 ``s_text=0`` 으로 추가한다(같은 영상이 ST·CLIP 양쪽에 떠도 결과 1건). (#7)
+    """
+    for row in clip_extra:
+        iid = str(row["id"])
+        if iid in merged:
+            continue
+        merged[iid] = {
+            "id": iid,
+            "file_uri": row["file_uri"],
+            "modality": row["modality"],
+            "s_text": 0.0,
+            "s_clip": _finite_float(row["similarity"], 0.0),
+        }
+    return merged
+
+
 def _sort_by_similarity_cap(rows: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     # 결정 재현성(헌법 3조): similarity 동점 시 자산 id 오름차순으로 tiebreak 해
     # 입력 순서에 의존하지 않는 고정된 순서를 보장한다.
@@ -528,18 +550,7 @@ def search_media_images_two_stage(
         alpha=1.0,
         clip_model_name=clip_model_name,
     )
-    for row in clip_extra:
-        iid = str(row["id"])
-        if iid in merged:
-            continue
-        s_clip = _finite_float(row["similarity"], 0.0)
-        merged[iid] = {
-            "id": iid,
-            "file_uri": row["file_uri"],
-            "modality": row["modality"],
-            "s_text": 0.0,
-            "s_clip": s_clip,
-        }
+    _merge_clip_only_candidates(merged, clip_extra)
 
     all_ids = list(merged.keys())
     bm25_full: dict[int, float] = {}

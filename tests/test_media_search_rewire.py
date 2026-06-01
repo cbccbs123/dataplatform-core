@@ -30,6 +30,42 @@ def _unit_vec(idx: int) -> list[float]:
     return v
 
 
+def _make_asset_with_embeddings(
+    db: object,
+    ids: list,
+    *,
+    fts: str,
+    summary: str,
+    modality: str,
+    embeddings: list[tuple[str, list[float], int]],
+) -> str:
+    """registered 자산 1건 생성. embeddings=[(channel, vector, chunk_index), ...]."""
+    from src.dispatch.types import AssetRecord, EmbeddingItem
+    from src.ingest.status import AssetStatus, set_status
+    from src.registry.asset_persist import create_asset, finalize_asset
+
+    with db.transaction() as conn:
+        aid = create_asset(
+            conn, fs_path=f"/t/{uuid.uuid4().hex}.bin", modality=modality, file_hash=uuid.uuid4().hex
+        )
+    ids.append(aid)
+    with db.transaction() as conn:
+        set_status(conn, aid, AssetStatus.ROUTING)
+        set_status(conn, aid, AssetStatus.CLASSIFYING)
+        set_status(conn, aid, AssetStatus.EXTRACTING)
+    items = [
+        EmbeddingItem(channel=ch, vector=vec, model_name="test", chunk_index=ci)
+        for ch, vec, ci in embeddings
+    ]
+    with db.transaction() as conn:
+        finalize_asset(
+            conn,
+            aid,
+            AssetRecord(ext_meta={"summary": summary}, fts_plain=fts, embeddings=items),
+        )
+    return str(aid)
+
+
 def _make_search_asset(
     db: object,
     ids: list,
@@ -39,31 +75,10 @@ def _make_search_asset(
     st_vector: list[float],
     modality: str = "txt",
 ) -> str:
-    """registered 자산 1건 생성: search_vector(fts) + ext_meta.summary + st 임베딩."""
-    from src.dispatch.types import AssetRecord, EmbeddingItem
-    from src.ingest.status import AssetStatus, set_status
-    from src.registry.asset_persist import create_asset, finalize_asset
-
-    with db.transaction() as conn:
-        aid = create_asset(
-            conn, fs_path=f"/t/{uuid.uuid4().hex}.txt", modality=modality, file_hash=uuid.uuid4().hex
-        )
-    ids.append(aid)
-    with db.transaction() as conn:
-        set_status(conn, aid, AssetStatus.ROUTING)
-        set_status(conn, aid, AssetStatus.CLASSIFYING)
-        set_status(conn, aid, AssetStatus.EXTRACTING)
-    with db.transaction() as conn:
-        finalize_asset(
-            conn,
-            aid,
-            AssetRecord(
-                ext_meta={"summary": summary},
-                fts_plain=fts,
-                embeddings=[EmbeddingItem(channel="st", vector=st_vector, model_name="test")],
-            ),
-        )
-    return str(aid)
+    """registered 텍스트 자산 1건: search_vector(fts) + ext_meta.summary + st 임베딩(chunk 0)."""
+    return _make_asset_with_embeddings(
+        db, ids, fts=fts, summary=summary, modality=modality, embeddings=[("st", st_vector, 0)]
+    )
 
 # 드롭된 v1 레거시 식별자 — 어떤 검색 SQL에도 남아 있으면 안 된다.
 _LEGACY_TOKENS = (
@@ -223,6 +238,24 @@ class TestHybridSearchAlphaRange(unittest.TestCase):
             ms.search_media_images_two_stage("질의", "query", bm25_weight=-1.0)
 
 
+class TestMergeClipOnlyCandidates(unittest.TestCase):
+    """ST(1차) 후보 + CLIP-단독 후보 병합 시 동일 자산 id 중복 제거(T019/#7)."""
+
+    def test_existing_id_not_duplicated_new_id_added(self) -> None:
+        merged = {
+            "x": {"id": "x", "file_uri": "/x", "modality": "video", "s_text": 0.9, "s_clip": 0.1}
+        }
+        clip_extra = [
+            {"id": "x", "file_uri": "/x", "modality": "video", "similarity": 0.8},  # 중복 → 무시
+            {"id": "y", "file_uri": "/y", "modality": "image", "similarity": 0.7},  # 신규 → 추가
+        ]
+        out = ms._merge_clip_only_candidates(merged, clip_extra)
+        self.assertEqual(set(out.keys()), {"x", "y"})
+        self.assertEqual(out["x"]["s_text"], 0.9)  # 기존 ST 값 보존(덮어쓰지 않음)
+        self.assertEqual(out["y"]["s_text"], 0.0)  # CLIP-단독 → s_text 0
+        self.assertAlmostEqual(out["y"]["s_clip"], 0.7)
+
+
 @unittest.skipUnless(_RUN_DB, "RUN_DB_E2E=1 일 때만(실 PostgreSQL)")
 class TestHybridSearchRewireDB(unittest.TestCase):
     """재배선된 하이브리드 SQL이 실 DB(asset_*)에서 동작 — 레거시 참조 없이 결과 반환(T007/T008)."""
@@ -317,6 +350,34 @@ class TestHybridSearchRewireDB(unittest.TestCase):
         self.assertLess(rank_vec.index(b), rank_vec.index(a))
         # alpha=0(FTS 단독) → FTS매치 A 가 벡터매치 B 보다 위
         self.assertLess(rank_fts.index(a), rank_fts.index(b))
+
+    def test_single_keyframe_video_not_dropped(self) -> None:  # T017/T018 — chunk_index=0 누락 없음
+        from psycopg.rows import dict_row
+
+        vid = _make_asset_with_embeddings(
+            self.db,
+            self._ids,
+            fts="해변 영상",
+            summary="여름 해변",
+            modality="video",
+            embeddings=[("st", _unit_vec(0), 0), ("clip", _unit_vec(1), 0)],  # 단일 키프레임 index 0
+        )
+        # 1차(ST): chunk_index=0 단일 청크 영상이 MAX 집계에서 누락되지 않고 후보로 잡혀야 한다.
+        with self.db.transaction() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                ms._two_stage_stage1_sql(1536),
+                (_unit_vec(0), ["image", "video"], "st", 50),
+            )
+            stage1_ids = [str(r["id"]) for r in cur.fetchall()]
+        self.assertIn(vid, stage1_ids)
+        # 2차(CLIP): 같은 영상의 clip(chunk_index=0) 청크도 id 목록 조회에서 잡혀야 한다.
+        with self.db.transaction() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                ms._two_stage_clip_for_ids_sql(1536),
+                (_unit_vec(1), ["image", "video"], "clip", [vid]),
+            )
+            clip_ids = [str(r["id"]) for r in cur.fetchall()]
+        self.assertIn(vid, clip_ids)
 
     def test_special_chars_query_no_tsquery_error(self) -> None:  # T020 tsquery 안전화
         _make_search_asset(self.db, self._ids, fts="보고서 자료", summary="", st_vector=_unit_vec(0))

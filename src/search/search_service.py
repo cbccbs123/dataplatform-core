@@ -27,13 +27,15 @@ def search_hybrid(
     limit_per_bucket: int = 20,
     text_hybrid_alpha: float = 0.75,
     image_search_alpha: float = 0.65,
+    structured: dict[str, Any] | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
 ) -> dict[str, Any]:
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
     ``modalities`` 가 ``None`` 이면 전체 버킷(text/audio/image/video)을, 지정하면 해당
     버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``.
-    ``_grouped_fn`` 은 테스트 주입 seam(미주입=실제 ``search_media_all_grouped``).
+    ``structured`` 를 넘기면 그대로 grouped 검색에 전달돼 LLM 질의 구조화를 건너뛴다
+    (이미 구조화됐거나 LLM 없이 테스트할 때). ``_grouped_fn`` 은 테스트 주입 seam.
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -45,6 +47,7 @@ def search_hybrid(
 
     grouped = _grouped_fn(
         query,
+        structured=structured,
         limit_per_bucket=limit_per_bucket,
         text_hybrid_alpha=text_hybrid_alpha,
         image_search_alpha=image_search_alpha,

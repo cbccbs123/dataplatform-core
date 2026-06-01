@@ -43,6 +43,18 @@ class TestSearchHybridService(unittest.TestCase):
         out = search_hybrid("질의", _grouped_fn=_fake_grouped)
         self.assertEqual(out["meta"]["structured"]["semantic_query"], "질의")
 
+    def test_structured_forwarded_to_grouped(self) -> None:
+        # structured 를 넘기면 그대로 grouped 검색에 전달돼 LLM 질의구조화를 건너뛸 수 있어야 한다.
+        captured: dict[str, object] = {}
+
+        def fake(query: str, **kw: object) -> dict[str, object]:
+            captured.update(kw)
+            return {"meta": {}}
+
+        s = {"semantic_query": "재작성", "semantic_query_en": "rewritten"}
+        search_hybrid("원질의", structured=s, _grouped_fn=fake)
+        self.assertEqual(captured["structured"], s)
+
 
 if __name__ == "__main__":
     unittest.main()
