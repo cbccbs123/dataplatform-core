@@ -7,9 +7,63 @@ SQL 빌더는 문자열을 반환하므로 DB 없이 구조적으로 검증한�
 
 from __future__ import annotations
 
+import math
+import os
 import unittest
+import uuid
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from src.search import media_search as ms
+
+_RUN_DB = os.getenv("RUN_DB_E2E") == "1"
+_ENV = Path(__file__).resolve().parents[1] / ".env.dev"
+
+
+def _unit_vec(idx: int) -> list[float]:
+    """idx 위치만 1.0 인 1536D 단위 벡터(직교 쌍·코사인 통제용)."""
+    from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+
+    v = [0.0] * FIX_EMBEDDING_DIMENSION
+    v[idx] = 1.0
+    return v
+
+
+def _make_search_asset(
+    db: object,
+    ids: list,
+    *,
+    fts: str,
+    summary: str,
+    st_vector: list[float],
+    modality: str = "txt",
+) -> str:
+    """registered 자산 1건 생성: search_vector(fts) + ext_meta.summary + st 임베딩."""
+    from src.dispatch.types import AssetRecord, EmbeddingItem
+    from src.ingest.status import AssetStatus, set_status
+    from src.registry.asset_persist import create_asset, finalize_asset
+
+    with db.transaction() as conn:
+        aid = create_asset(
+            conn, fs_path=f"/t/{uuid.uuid4().hex}.txt", modality=modality, file_hash=uuid.uuid4().hex
+        )
+    ids.append(aid)
+    with db.transaction() as conn:
+        set_status(conn, aid, AssetStatus.ROUTING)
+        set_status(conn, aid, AssetStatus.CLASSIFYING)
+        set_status(conn, aid, AssetStatus.EXTRACTING)
+    with db.transaction() as conn:
+        finalize_asset(
+            conn,
+            aid,
+            AssetRecord(
+                ext_meta={"summary": summary},
+                fts_plain=fts,
+                embeddings=[EmbeddingItem(channel="st", vector=st_vector, model_name="test")],
+            ),
+        )
+    return str(aid)
 
 # 드롭된 v1 레거시 식별자 — 어떤 검색 SQL에도 남아 있으면 안 된다.
 _LEGACY_TOKENS = (
@@ -113,6 +167,13 @@ class TestSanitizeHybridRows(unittest.TestCase):
         self.assertEqual(out[0]["bm25_scaled"], 0.0)
         self.assertEqual(out[0]["candidate_count"], 3)
 
+    def test_coerces_uuid_id_to_str(self) -> None:
+        # psycopg 는 asset_id 를 uuid.UUID 로 반환 → 결과 계약(시각 경로와 동일)상 str 로 통일.
+        u = uuid.UUID("018f0000-0000-7000-8000-000000000020")
+        out = ms._sanitize_hybrid_search_rows([{"id": u, "similarity": 0.5}])
+        self.assertIsInstance(out[0]["id"], str)
+        self.assertEqual(out[0]["id"], str(u))
+
 
 class TestDeterministicTiebreak(unittest.TestCase):
     """동점 similarity 에서 입력 순서에 의존하지 않는 결정적 순서(T011 — 헌법 3조)."""
@@ -160,6 +221,116 @@ class TestHybridSearchAlphaRange(unittest.TestCase):
             ms.search_media_images_two_stage("질의", "query", alpha=2.0)
         with self.assertRaises(ValueError):
             ms.search_media_images_two_stage("질의", "query", bm25_weight=-1.0)
+
+
+@unittest.skipUnless(_RUN_DB, "RUN_DB_E2E=1 일 때만(실 PostgreSQL)")
+class TestHybridSearchRewireDB(unittest.TestCase):
+    """재배선된 하이브리드 SQL이 실 DB(asset_*)에서 동작 — 레거시 참조 없이 결과 반환(T007/T008)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        load_dotenv(_ENV, override=False)
+        from src.database.postgres_util import PostgresUtil
+
+        cls.db = PostgresUtil()
+        cls.db.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.db.__exit__(None, None, None)
+
+    def setUp(self) -> None:
+        self._ids: list = []
+
+    def tearDown(self) -> None:
+        if self._ids:
+            with self.db.transaction() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM asset WHERE asset_id = ANY(%s)", (self._ids,))
+
+    def test_text_query_returns_current_schema_result(self) -> None:  # T007
+        vec = _unit_vec(0)
+        aid = _make_search_asset(
+            self.db, self._ids, fts="워크숍 발표 자료", summary="작년 워크숍 발표", st_vector=vec
+        )
+        rows = ms._run_hybrid_search(
+            query_vector=vec,
+            bm25_query="워크숍",
+            media_types=["txt"],
+            embedding_kind="st",
+            limit=10,
+            alpha=0.75,
+        )
+        ids = [r["id"] for r in rows]
+        self.assertIn(aid, ids)  # 레거시 참조 없이 현행 스키마로 매칭
+        top = next(r for r in rows if r["id"] == aid)
+        self.assertEqual(top["modality"], "txt")
+        self.assertIn("file_uri", top)
+        self.assertEqual(top["summary"], "작년 워크숍 발표")
+        self.assertGreater(top["similarity"], 0.0)
+
+    def test_irrelevant_query_finite_near_zero_no_exception(self) -> None:  # T008
+        _make_search_asset(self.db, self._ids, fts="고양이 사진", summary="", st_vector=_unit_vec(0))
+        rows = ms._run_hybrid_search(
+            query_vector=_unit_vec(1),  # 저장 벡터와 직교
+            bm25_query="전혀무관한질의어휘zzz",
+            media_types=["txt"],
+            embedding_kind="st",
+            limit=10,
+            alpha=0.75,
+        )
+        self.assertIsInstance(rows, list)
+        for r in rows:
+            self.assertTrue(math.isfinite(r["similarity"]))
+            self.assertLess(r["similarity"], 0.2)  # 무관 → 0 근처
+
+    def test_blank_query_no_exception(self) -> None:  # T008
+        _make_search_asset(self.db, self._ids, fts="문서", summary="", st_vector=_unit_vec(0))
+        rows = ms._run_hybrid_search(
+            query_vector=_unit_vec(2),
+            bm25_query="",
+            media_types=["txt"],
+            embedding_kind="st",
+            limit=10,
+            alpha=0.75,
+        )
+        self.assertIsInstance(rows, list)  # 빈/공백 질의도 예외 없음
+
+    def test_alpha_boundary_monotonic_ranking(self) -> None:  # T009 단조성
+        q = _unit_vec(0)
+        # A: FTS 강함(bm25 매치) / 벡터 약함(직교).  B: 벡터 강함(=query) / bm25 없음.
+        a = _make_search_asset(
+            self.db, self._ids, fts="알파베타감마델타", summary="", st_vector=_unit_vec(7)
+        )
+        b = _make_search_asset(
+            self.db, self._ids, fts="무관한다른텍스트", summary="", st_vector=q
+        )
+        common = dict(
+            query_vector=q,
+            bm25_query="알파베타감마델타",
+            media_types=["txt"],
+            embedding_kind="st",
+            limit=50,
+        )
+        rank_vec = [r["id"] for r in ms._run_hybrid_search(alpha=1.0, **common)]
+        rank_fts = [r["id"] for r in ms._run_hybrid_search(alpha=0.0, **common)]
+        # alpha=1(벡터 단독) → 벡터매치 B 가 FTS매치 A 보다 위
+        self.assertLess(rank_vec.index(b), rank_vec.index(a))
+        # alpha=0(FTS 단독) → FTS매치 A 가 벡터매치 B 보다 위
+        self.assertLess(rank_fts.index(a), rank_fts.index(b))
+
+    def test_special_chars_query_no_tsquery_error(self) -> None:  # T020 tsquery 안전화
+        _make_search_asset(self.db, self._ids, fts="보고서 자료", summary="", st_vector=_unit_vec(0))
+        for q in ["a & b | c", "( ) : !", "검색 & 자료 | (보고서)", "C++ & 100% : test!"]:
+            with self.subTest(q=q):
+                rows = ms._run_hybrid_search(
+                    query_vector=_unit_vec(0),
+                    bm25_query=q,
+                    media_types=["txt"],
+                    embedding_kind="st",
+                    limit=10,
+                    alpha=0.5,
+                )
+                self.assertIsInstance(rows, list)  # to_tsquery 구문 오류 없이 처리
 
 
 if __name__ == "__main__":

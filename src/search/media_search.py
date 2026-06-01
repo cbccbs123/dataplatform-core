@@ -252,6 +252,10 @@ def _saturating_bm25(raw_bm25: object, *, k: float = BM25_SATURATION_K) -> float
 
 def _sanitize_hybrid_search_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in rows:
+        # psycopg 가 asset_id 를 uuid.UUID 로 반환하므로 결과 계약(시각 2단계 경로와 동일)상
+        # 자산 id 를 항상 str(UUID) 로 통일한다(JSON 직렬화·키 비교 일관).
+        if r.get("id") is not None:
+            r["id"] = str(r["id"])
         if "similarity" in r:
             r["similarity"] = _finite_float(r["similarity"], 0.0)
         if "emb_score" in r:
