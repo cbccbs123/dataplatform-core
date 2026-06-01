@@ -1,7 +1,7 @@
 """
 사용자 질의를 검색용 구조화 JSON(keywords, semantic_query 등)으로 바꾼다.
 
-``src/search/media_search.py`` 의 하이브리드 검색에서 사용한다(검색 API는 Phase 2에서 asset_* 로 재배선 예정).
+``src/search/media_search.py`` 의 하이브리드 검색에서 사용한다(현행 `asset_metadata`/`asset_embedding` 스키마 기반).
 
 필요: 프로젝트 루트의 ``.env.dev`` / ``.env.prod`` (OPENAI_BASE_URL, OPENAI_API_KEY, META_MODEL 등)
 """
@@ -78,6 +78,7 @@ def structure_user_query(
     ``client``/``model``을 주입하면 그대로 전달되어 테스트에서 네트워크 없이 동작한다.
     LLM 응답이 비어있으면 기본 empty dict를 반환하고,
     JSON 파싱 실패 시 ``semantic_query``에 원문을 넣어 반환한다(폴백).
+    파싱은 됐으나 dict가 아니면(배열·스칼라) 기본 empty dict로 폴백한다.
     """
     from src.llm.client import complete_text
 
@@ -94,7 +95,12 @@ def structure_user_query(
     if not raw:
         return empty
     try:
-        return dict(json.loads(raw))
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
         return {**empty, "semantic_query": raw}
+    # LLM이 스키마를 어겨 비-dict(JSON 배열·스칼라)를 내면 dict(...) 가 TypeError 를
+    # 던지므로, 객체가 아니면 안전한 기본 dict 로 폴백한다(원본 질의를 semantic_query 로).
+    if not isinstance(parsed, dict):
+        return empty
+    return parsed
 

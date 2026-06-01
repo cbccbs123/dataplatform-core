@@ -1,7 +1,8 @@
-"""``media_chunks`` 임베딩(pgvector)과 ``media_items.search_vector`` FTS 하이브리드 검색.
+"""``asset_embedding`` 임베딩(pgvector)과 ``asset_metadata.search_vector`` FTS 하이브리드 검색.
 
-문서별 임베딩 점수(청크 코사인의 ``MAX``)와 ``ts_rank_cd`` 원시값을
-``bm25 / (bm25 + k)`` 포화 정규화 후 가중합해 랭킹한다."""
+자산별 임베딩 점수(채널·청크 코사인의 ``MAX``)와 ``ts_rank_cd`` 원시값을
+``bm25 / (bm25 + k)`` 포화 정규화 후 가중합해 랭킹한다. 결과 행의 ``id`` 는 자산 UUID,
+``modality`` 는 ``asset.modality``, 요약은 ``asset_metadata.ext_meta->>'summary'`` 다."""
 
 from __future__ import annotations
 
@@ -27,6 +28,9 @@ from src.search.query_preprocess import structure_user_query
 
 EMBEDDING_KIND_ST = "st"
 EMBEDDING_KIND_CLIP = "clip"
+# FTS tsquery 는 사용자 질의를 ``to_tsvector`` 로 토큰화한 뒤 ``tok | tok | ...``(OR) 로 조립한다
+# (원문을 to_tsquery 에 직접 넣으면 ``& | : ( )`` 등에서 구문 오류). 아래 토큰은 너무 일반적이라
+# OR 매칭에 들어가면 과매칭을 유발하므로 tsquery 조립에서 제외한다(SQL 의 ``tok <> ALL(%s)``).
 BM25_OR_EXCLUDE_TOKENS = (
     "과정",
     "방법",
@@ -41,9 +45,9 @@ BM25_SATURATION_K = 0.2
 
 _TWO_STAGE_BM25_FOR_IDS_SQL = """
 SELECT
-    mi.id,
+    am.asset_id AS id,
     ts_rank_cd(
-        coalesce(mi.search_vector, ''::tsvector),
+        coalesce(am.search_vector, ''::tsvector),
         coalesce(
             to_tsquery(
                 %s,
@@ -66,8 +70,15 @@ SELECT
             ''::tsquery
         )
     ) AS bm25_score
-FROM media_items mi
-WHERE mi.id = ANY(%s)
+FROM asset_metadata am
+WHERE am.asset_id = ANY(%s)
+"""
+
+# 자산 UUID 목록 → 요약(asset_metadata.ext_meta->>'summary') 조회.
+_SUMMARIES_FOR_ASSET_IDS_SQL = """
+SELECT am.asset_id AS id, COALESCE(am.ext_meta->>'summary', '') AS summary
+FROM asset_metadata am
+WHERE am.asset_id = ANY(%s)
 """
 
 
@@ -76,11 +87,11 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
     return f"""
                     WITH emb_chunks AS (
                         SELECT
-                            mc.media_item_id AS id,
-                            (1 - (mc.embedding <=> %s::vector({vdim}))) AS chunk_sim
-                        FROM media_chunks mc
-                        WHERE mc.embedding IS NOT NULL
-                          AND mc.embedding_kind = %s
+                            ae.asset_id AS id,
+                            (1 - (ae.embedding <=> %s::vector({vdim}))) AS chunk_sim
+                        FROM asset_embedding ae
+                        WHERE ae.embedding IS NOT NULL
+                          AND ae.channel = %s
                     ),
                     emb AS (
                         SELECT
@@ -92,13 +103,13 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                     joined_inner AS (
                         SELECT
                             e.id,
-                            mi.file_uri,
-                            mi.media_type,
+                            a.fs_uri AS file_uri,
+                            a.modality,
                             e.emb_score,
-                            COALESCE(mi.metadata->>'summary', '') AS summary,
+                            COALESCE(am.ext_meta->>'summary', '') AS summary,
                             COALESCE(
                                 ts_rank_cd(
-                                    coalesce(mi.search_vector, ''::tsvector),
+                                    coalesce(am.search_vector, ''::tsvector),
                                     coalesce(
                                         to_tsquery(
                                             %s,
@@ -124,14 +135,15 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                                 0.0::double precision
                             ) AS bm25_raw
                         FROM emb e
-                        JOIN media_items mi ON mi.id = e.id
-                        WHERE mi.media_type = ANY(%s)
+                        JOIN asset a ON a.asset_id = e.id
+                        LEFT JOIN asset_metadata am ON am.asset_id = a.asset_id
+                        WHERE a.modality = ANY(%s)
                     ),
                     joined AS (
                         SELECT
                             ji.id,
                             ji.file_uri,
-                            ji.media_type,
+                            ji.modality,
                             ji.emb_score,
                             ji.summary,
                             CASE
@@ -144,7 +156,7 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                         SELECT
                             j.id,
                             j.file_uri,
-                            j.media_type,
+                            j.modality,
                             j.emb_score,
                             j.bm25_score,
                             (COALESCE(j.bm25_score, 0.0::double precision)
@@ -158,7 +170,7 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                         SELECT
                             sb.id,
                             sb.file_uri,
-                            sb.media_type,
+                            sb.modality,
                             sb.emb_score,
                             sb.bm25_score,
                             sb.bm25_scaled,
@@ -175,7 +187,7 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                     SELECT
                         id,
                         file_uri,
-                        media_type,
+                        modality,
                         emb_score,
                         bm25_score,
                         bm25_scaled,
@@ -183,7 +195,7 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                         candidate_count,
                         similarity
                     FROM scored
-                    ORDER BY similarity DESC NULLS LAST
+                    ORDER BY similarity DESC NULLS LAST, id ASC
                     LIMIT %s
                     """
 
@@ -191,17 +203,17 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
 def _two_stage_stage1_sql(vdim: int) -> str:
     return f"""
                     SELECT
-                        mi.id,
-                        mi.file_uri,
-                        mi.media_type,
-                        MAX(1 - (mc.embedding <=> %s::vector({vdim}))) AS s_text
-                    FROM media_items mi
-                    JOIN media_chunks mc ON mi.id = mc.media_item_id
-                    WHERE mc.embedding IS NOT NULL
-                      AND mi.media_type = ANY(%s)
-                      AND mc.embedding_kind = %s
-                    GROUP BY mi.id, mi.file_uri, mi.media_type
-                    ORDER BY s_text DESC
+                        a.asset_id AS id,
+                        a.fs_uri AS file_uri,
+                        a.modality,
+                        MAX(1 - (ae.embedding <=> %s::vector({vdim}))) AS s_text
+                    FROM asset a
+                    JOIN asset_embedding ae ON a.asset_id = ae.asset_id
+                    WHERE ae.embedding IS NOT NULL
+                      AND a.modality = ANY(%s)
+                      AND ae.channel = %s
+                    GROUP BY a.asset_id, a.fs_uri, a.modality
+                    ORDER BY s_text DESC, id ASC
                     LIMIT %s
                     """
 
@@ -209,15 +221,15 @@ def _two_stage_stage1_sql(vdim: int) -> str:
 def _two_stage_clip_for_ids_sql(vdim: int) -> str:
     return f"""
                     SELECT
-                        mi.id,
-                        MAX(1 - (mc.embedding <=> %s::vector({vdim}))) AS s_clip
-                    FROM media_items mi
-                    JOIN media_chunks mc ON mi.id = mc.media_item_id
-                    WHERE mc.embedding IS NOT NULL
-                      AND mi.media_type = ANY(%s)
-                      AND mc.embedding_kind = %s
-                      AND mi.id = ANY(%s)
-                    GROUP BY mi.id
+                        a.asset_id AS id,
+                        MAX(1 - (ae.embedding <=> %s::vector({vdim}))) AS s_clip
+                    FROM asset a
+                    JOIN asset_embedding ae ON a.asset_id = ae.asset_id
+                    WHERE ae.embedding IS NOT NULL
+                      AND a.modality = ANY(%s)
+                      AND ae.channel = %s
+                      AND a.asset_id = ANY(%s)
+                    GROUP BY a.asset_id
                     """
 
 
@@ -257,10 +269,11 @@ def _sanitize_hybrid_search_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _sort_by_similarity_cap(rows: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+    # 결정 재현성(헌법 3조): similarity 동점 시 자산 id 오름차순으로 tiebreak 해
+    # 입력 순서에 의존하지 않는 고정된 순서를 보장한다.
     return sorted(
         rows,
-        key=lambda x: _finite_float(x.get("similarity"), 0.0),
-        reverse=True,
+        key=lambda x: (-_finite_float(x.get("similarity"), 0.0), str(x.get("id", ""))),
     )[:n]
 
 
@@ -288,7 +301,7 @@ def _run_hybrid_search(
     alpha: float,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """임베딩 상위 후보에 ``mi.search_vector`` 기준 ``ts_rank_cd`` 를 섞어 반환한다.
+    """임베딩 상위 후보에 ``asset_metadata.search_vector`` 기준 ``ts_rank_cd`` 를 섞어 반환한다.
 
     ``similarity = alpha * emb_score + (1-alpha) * bm25_scaled``.
     여기서 ``bm25_scaled = bm25_score / (bm25_score + BM25_SATURATION_K)``.
@@ -337,8 +350,8 @@ def search_media_text_items(
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    SentenceTransformer 청크 임베딩(``embedding_kind=st``)과 ``media_items.search_vector`` FTS를
-    한 쿼리에서 하이브리드한다. 문서당 청크 유사도는 ``MAX(1 - (mc.embedding <=> 쿼리))`` 이고,
+    SentenceTransformer 청크 임베딩(``asset_embedding.channel='st'``)과 ``asset_metadata.search_vector`` FTS를
+    한 쿼리에서 하이브리드한다. 자산당 청크 유사도는 ``MAX(1 - (ae.embedding <=> 쿼리))`` 이고,
     ``similarity = alpha * emb_score + (1-alpha) * bm25_scaled``.
     ``bm25_scaled`` 는 ``bm25 / (bm25 + BM25_SATURATION_K)``.
 
@@ -369,10 +382,10 @@ def search_media_images_by_text(
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    CLIP 텍스트 쿼리와 ``media_chunks`` 의 CLIP 이미지·키프레임 임베딩을 코사인으로 비교하고,
-    동일 후보에 ``media_items.search_vector`` FTS(``ts_rank_cd``)를 원시 가중합으로 섞는다.
+    CLIP 텍스트 쿼리와 ``asset_embedding``(``channel='clip'``)의 CLIP 이미지·키프레임 임베딩을
+    코사인으로 비교하고, 동일 후보에 ``asset_metadata.search_vector`` FTS(``ts_rank_cd``)를 원시 가중합으로 섞는다.
 
-    ``media_type`` 은 ``MEDIA_TYPES_CLIP_CHUNK_SEARCH``(이미지·영상)만 대상이다.
+    ``modality`` 는 ``MEDIA_TYPES_CLIP_CHUNK_SEARCH``(이미지·영상)만 대상이다.
     """
     query_vector = embed_clip_text_query_for_image_search(query, model_name=clip_model_name)
     return _run_hybrid_search(
@@ -389,11 +402,11 @@ def search_media_images_by_text(
 def _two_stage_load_bm25_for_ids(
     conn: Any,
     query_ko: str,
-    ids: list[int],
-) -> dict[int, float]:
+    ids: list[str],
+) -> dict[str, float]:
     if not ids:
         return {}
-    bm25_by_id: dict[int, float] = {}
+    bm25_by_id: dict[str, float] = {}
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             _TWO_STAGE_BM25_FOR_IDS_SQL,
@@ -406,26 +419,19 @@ def _two_stage_load_bm25_for_ids(
             ),
         )
         for row in cur.fetchall():
-            bm25_by_id[int(row["id"])] = _finite_float(row["bm25_score"], 0.0)
+            bm25_by_id[str(row["id"])] = _finite_float(row["bm25_score"], 0.0)
     return bm25_by_id
 
 
-def _summaries_for_media_item_ids(ids: list[int]) -> dict[int, str]:
+def _summaries_for_media_item_ids(ids: list[str]) -> dict[str, str]:
     if not ids:
         return {}
     db = PostgresUtil()
     with db:
         with db.transaction() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """
-                    SELECT id, COALESCE(metadata->>'summary', '') AS summary
-                    FROM media_items
-                    WHERE id = ANY(%s)
-                    """,
-                    (ids,),
-                )
-                return {int(r["id"]): str(r["summary"] or "") for r in cur.fetchall()}
+                cur.execute(_SUMMARIES_FOR_ASSET_IDS_SQL, (ids,))
+                return {str(r["id"]): str(r["summary"] or "") for r in cur.fetchall()}
 
 
 def search_media_images_two_stage(
@@ -448,7 +454,7 @@ def search_media_images_two_stage(
     합친 뒤, 병합된 전체 후보에 대해 FTS 점수를 다시 채워 적용한다.
     ST 후보가 하나도 없으면 ``search_media_images_by_text`` (임베딩+FTS 하이브리드)로 폴백한다.
 
-    결과 행에는 ``metadata.summary`` 가 ``summary`` 키로 포함된다.
+    결과 행에는 ``asset_metadata.ext_meta->>'summary'`` 가 ``summary`` 키로 포함된다.
     """
     if not 0.0 <= alpha <= 1.0 or not 0.0 <= bm25_weight <= 1.0:
         raise ValueError("alpha와 bm25_weight는 0~1 사이여야 합니다.")
@@ -482,8 +488,8 @@ def search_media_images_two_stage(
             clip_model_name=clip_model_name,
         )
 
-    ids = [int(r["id"]) for r in stage1]
-    clip_by_id: dict[int, float] = {}
+    ids = [str(r["id"]) for r in stage1]
+    clip_by_id: dict[str, float] = {}
     with db:
         with db.transaction() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -497,17 +503,17 @@ def search_media_images_two_stage(
                     ),
                 )
                 for row in cur.fetchall():
-                    clip_by_id[int(row["id"])] = _finite_float(row["s_clip"], 0.0)
+                    clip_by_id[str(row["id"])] = _finite_float(row["s_clip"], 0.0)
 
-    merged: dict[int, dict[str, Any]] = {}
+    merged: dict[str, dict[str, Any]] = {}
     for row in stage1:
-        iid = int(row["id"])
+        iid = str(row["id"])
         s_text = _finite_float(row["s_text"], 0.0)
         s_clip = _finite_float(clip_by_id.get(iid, 0.0), 0.0)
         merged[iid] = {
             "id": iid,
             "file_uri": row["file_uri"],
-            "media_type": row["media_type"],
+            "modality": row["modality"],
             "s_text": s_text,
             "s_clip": s_clip,
         }
@@ -519,14 +525,14 @@ def search_media_images_two_stage(
         clip_model_name=clip_model_name,
     )
     for row in clip_extra:
-        iid = int(row["id"])
+        iid = str(row["id"])
         if iid in merged:
             continue
         s_clip = _finite_float(row["similarity"], 0.0)
         merged[iid] = {
             "id": iid,
             "file_uri": row["file_uri"],
-            "media_type": row["media_type"],
+            "modality": row["modality"],
             "s_text": 0.0,
             "s_clip": s_clip,
         }
@@ -555,14 +561,13 @@ def search_media_images_two_stage(
 
     ranked = sorted(
         merged.values(),
-        key=lambda r: _finite_float(r.get("similarity"), 0.0),
-        reverse=True,
+        key=lambda r: (-_finite_float(r.get("similarity"), 0.0), str(r.get("id", ""))),
     )
     top = ranked[:final_limit]
-    sid = [int(r["id"]) for r in top]
+    sid = [str(r["id"]) for r in top]
     summaries = _summaries_for_media_item_ids(sid)
     for r in top:
-        r["summary"] = summaries.get(int(r["id"]), "")
+        r["summary"] = summaries.get(str(r["id"]), "")
     return top
 
 
@@ -578,7 +583,7 @@ def search_media_all_grouped(
     debug: bool = False,
 ) -> dict[str, Any]:
     """ST 하이브리드(문서·음성·영상 텍스트)와 시각 2단계(이미지·영상)를 한 번에 돌리고
-    ``media_type`` 기준으로 나눈 결과를 반환한다.
+    ``modality`` 기준으로 나눈 결과를 반환한다.
 
     ``video`` 버킷에는 ST 하이브리드 영상과 시각 검색 영상을 ``similarity`` 기준으로 합친 뒤
     상위 ``limit_per_bucket`` 건만 담는다. 각 row에 ``source`` 가 ``st_hybrid`` 또는
@@ -602,7 +607,7 @@ def search_media_all_grouped(
     audio_rows: list[dict[str, Any]] = []
     video_st: list[dict[str, Any]] = []
     for r in st_rows:
-        mt = r.get("media_type")
+        mt = r.get("modality")
         if mt is None:
             continue
         row = {**r, "source": "st_hybrid"}
@@ -629,7 +634,7 @@ def search_media_all_grouped(
     image_rows: list[dict[str, Any]] = []
     video_vis: list[dict[str, Any]] = []
     for r in visual_rows:
-        mt = r.get("media_type")
+        mt = r.get("modality")
         row = {**r, "source": "visual_two_stage"}
         if mt == MediaKind.IMAGE.value:
             image_rows.append(row)
