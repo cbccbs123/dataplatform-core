@@ -294,6 +294,23 @@ def _merge_clip_only_candidates(
     return merged
 
 
+def _dedupe_by_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """자산 id 당 similarity 가 가장 높은 행 1건만 남긴다.
+
+    video 버킷처럼 ST 하이브리드 결과와 시각 2단계 결과를 합칠 때 동일 영상이 양쪽에서
+    나오면 중복으로 보이므로, 더 높은 점수의 행만 보존한다(낮은 쪽 source 는 버린다).
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        iid = str(r.get("id"))
+        cur = best.get(iid)
+        if cur is None or _finite_float(r.get("similarity"), 0.0) > _finite_float(
+            cur.get("similarity"), 0.0
+        ):
+            best[iid] = r
+    return list(best.values())
+
+
 def _sort_by_similarity_cap(rows: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     # 결정 재현성(헌법 3조): similarity 동점 시 자산 id 오름차순으로 tiebreak 해
     # 입력 순서에 의존하지 않는 고정된 순서를 보장한다.
@@ -657,7 +674,8 @@ def search_media_all_grouped(
             video_vis.append(row)
 
     image_rows = _sort_by_similarity_cap(image_rows, limit_per_bucket)
-    video_merged = _sort_by_similarity_cap(video_st + video_vis, limit_per_bucket)
+    # ST 하이브리드 영상 + 시각 2단계 영상을 합치되, 동일 영상이 양쪽에 나오면 id 기준 dedup.
+    video_merged = _sort_by_similarity_cap(_dedupe_by_id(video_st + video_vis), limit_per_bucket)
 
     return {
         "text_documents": text_documents[:limit_per_bucket],

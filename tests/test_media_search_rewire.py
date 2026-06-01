@@ -256,6 +256,22 @@ class TestMergeClipOnlyCandidates(unittest.TestCase):
         self.assertAlmostEqual(out["y"]["s_clip"], 0.7)
 
 
+class TestDedupeById(unittest.TestCase):
+    """여러 source 병합 시 자산 id 당 1건(최고 similarity)만 — video 버킷 ST+시각 중복 제거."""
+
+    def test_keeps_highest_similarity_per_id(self) -> None:
+        rows = [
+            {"id": "v1", "similarity": 0.4, "source": "visual_two_stage"},
+            {"id": "v1", "similarity": 0.9, "source": "st_hybrid"},
+            {"id": "v2", "similarity": 0.5, "source": "st_hybrid"},
+        ]
+        out = ms._dedupe_by_id(rows)
+        by_id = {r["id"]: r for r in out}
+        self.assertEqual(set(by_id), {"v1", "v2"})  # 중복 v1 → 1건
+        self.assertEqual(by_id["v1"]["similarity"], 0.9)  # 높은 쪽 보존
+        self.assertEqual(by_id["v1"]["source"], "st_hybrid")
+
+
 @unittest.skipUnless(_RUN_DB, "RUN_DB_E2E=1 일 때만(실 PostgreSQL)")
 class TestHybridSearchRewireDB(unittest.TestCase):
     """재배선된 하이브리드 SQL이 실 DB(asset_*)에서 동작 — 레거시 참조 없이 결과 반환(T007/T008)."""
