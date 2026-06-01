@@ -8,8 +8,12 @@
 검사(BASE..현재 작업트리):
   1) [차단] 테스트 함수(def test_*) 총개수 감소
   2) [차단] assert 계열 호출(self.assert*, assert ) 총개수 감소
-  3) [차단] @skip/@skipUnless/@skipIf/@expectedFailure 총개수 증가
+  3) [차단] @skip/@skipIf/@expectedFailure 총개수 증가(무조건 무력화 패턴)
   → 하나라도 걸리면 exit 1. "테스트를 약하게 만들어 통과"를 거부한다.
+
+  주의: ``@skipUnless`` 는 **조건부 실행 게이트**(실 DB ``RUN_DB_E2E`` e2e·선택 의존성 등)로
+  이 코드베이스의 표준 e2e 패턴이라 약화가 아니다 → 증가 검사에서 제외한다(신규 e2e 추가 시 오탐 방지).
+  무조건 무력화(@skip/@skipIf/@expectedFailure)와 assert/테스트 함수 감소만 차단한다.
 
 사용:
     python scripts/test_integrity.py            # main 대비
@@ -29,7 +33,9 @@ TESTS = "tests/"
 
 TESTDEF_RX = re.compile(r"^\s*def\s+test_\w+", re.M)
 ASSERT_RX = re.compile(r"\bself\.assert\w+\(|^\s*assert\s", re.M)
-SKIP_RX = re.compile(r"@(?:unittest\.)?(?:skip|skipUnless|skipIf|expectedFailure)\b")
+# skipUnless 는 조건부 실행 게이트(e2e/선택 의존성)라 약화 아님 → 제외.
+# 무조건 무력화 패턴(skip·skipIf·expectedFailure)만 증가 차단 대상.
+SKIP_RX = re.compile(r"@(?:unittest\.)?(?:skip|skipIf|expectedFailure)\b")
 
 
 def _counts(text: str) -> tuple[int, int, int]:
