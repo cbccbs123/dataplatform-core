@@ -103,7 +103,7 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                     joined_inner AS (
                         SELECT
                             e.id,
-                            a.fs_uri AS file_uri,
+                            a.fs_path AS file_uri,
                             a.modality,
                             e.emb_score,
                             COALESCE(am.ext_meta->>'summary', '') AS summary,
@@ -204,7 +204,7 @@ def _two_stage_stage1_sql(vdim: int) -> str:
     return f"""
                     SELECT
                         a.asset_id AS id,
-                        a.fs_uri AS file_uri,
+                        a.fs_path AS file_uri,
                         a.modality,
                         MAX(1 - (ae.embedding <=> %s::vector({vdim}))) AS s_text
                     FROM asset a
@@ -212,7 +212,7 @@ def _two_stage_stage1_sql(vdim: int) -> str:
                     WHERE ae.embedding IS NOT NULL
                       AND a.modality = ANY(%s)
                       AND ae.channel = %s
-                    GROUP BY a.asset_id, a.fs_uri, a.modality
+                    GROUP BY a.asset_id, a.fs_path, a.modality
                     ORDER BY s_text DESC, id ASC
                     LIMIT %s
                     """

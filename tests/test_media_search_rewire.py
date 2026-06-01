@@ -119,7 +119,7 @@ class TestHybridSqlCurrentSchema(unittest.TestCase):
         self.assertIn("channel", sql)  # embedding_kind → channel
         self.assertIn("ext_meta", sql)  # summary 출처
         self.assertIn("modality", sql)  # media_type → modality
-        self.assertIn("fs_uri", sql)  # file_uri → asset.fs_uri
+        self.assertIn("fs_path", sql)  # file_uri ← asset.fs_path(실제 채워지는 경로; fs_uri는 항상 NULL)
 
 
 class TestFiniteFloat(unittest.TestCase):
