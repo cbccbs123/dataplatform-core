@@ -12,6 +12,13 @@ from unittest import mock
 
 from src.classify import text_probe
 
+try:  # pytesseract 는 선택 의존성(OCR) — 미설치 환경(일부 CI)에서는 OCR mock 테스트를 skip
+    import pytesseract  # noqa: F401
+
+    _HAS_PYTESSERACT = True
+except ImportError:
+    _HAS_PYTESSERACT = False
+
 
 class TestTextProbe(unittest.TestCase):
     def setUp(self) -> None:
@@ -31,6 +38,7 @@ class TestTextProbe(unittest.TestCase):
         p.write_text('{"diagnosis": "fever"}', encoding="utf-8")
         self.assertIn("diagnosis", text_probe.extract_text_for_classification(str(p), "json"))
 
+    @unittest.skipUnless(_HAS_PYTESSERACT, "pytesseract 미설치(선택 의존성)")
     def test_image_uses_ocr(self) -> None:
         # 이미지 모달리티는 OCR 경로. pytesseract 를 mock 해 배선만 검증.
         p = self.dir / "x.png"
@@ -43,6 +51,7 @@ class TestTextProbe(unittest.TestCase):
     def test_audio_returns_empty(self) -> None:
         self.assertEqual(text_probe.extract_text_for_classification("/x/a.mp3", "audio"), "")
 
+    @unittest.skipUnless(_HAS_PYTESSERACT, "pytesseract 미설치(선택 의존성)")
     def test_ocr_failure_returns_empty(self) -> None:
         with mock.patch("pytesseract.image_to_string", side_effect=RuntimeError("ocr fail")):
             self.assertEqual(text_probe.extract_text_for_classification("/x/a.png", "image"), "")
