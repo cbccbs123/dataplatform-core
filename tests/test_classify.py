@@ -129,27 +129,27 @@ class TestCascadeEngine(TmpBase):
         self.assertEqual(r.confidence, 1.0)
 
     def test_stage2_top_confirmed(self) -> None:
-        path = self._write("n.txt", "환자 진단 처방".encode("utf-8"))
+        path = self._write("n.txt", "환자 진단 처방".encode())
         r = cascade.classify(path, "txt", provider=self.provider)
         self.assertEqual(r.final_label, DOMAIN_MEDICAL)
         self.assertEqual(r.decided_stage, 2)
         self.assertEqual(r.stage2_scores["medical"]["hits"], 3)
 
     def test_stage2_other_domain(self) -> None:
-        path = self._write("n.txt", "계약 소송 판결".encode("utf-8"))
+        path = self._write("n.txt", "계약 소송 판결".encode())
         r = cascade.classify(path, "txt", provider=self.provider)
         self.assertEqual(r.final_label, "legal")
         self.assertEqual(r.decided_stage, 2)
 
     def test_stage2_general(self) -> None:
-        path = self._write("n.txt", "여행 후기와 맛집".encode("utf-8"))
+        path = self._write("n.txt", "여행 후기와 맛집".encode())
         r = cascade.classify(path, "txt", provider=self.provider)
         self.assertEqual(r.final_label, DOMAIN_GENERAL)
         self.assertEqual(r.decided_stage, 2)
 
     def test_ambiguous_to_stage3(self) -> None:
         # 1 hit < _HIT_THRESHOLD(2) → 모호 → Stage 3.
-        path = self._write("n.txt", "환자 대기실 안내".encode("utf-8"))
+        path = self._write("n.txt", "환자 대기실 안내".encode())
         calls: dict[str, list[str]] = {}
         def fake_s3(text: str, labels: list[str], **kw: object):
             calls["labels"] = labels
@@ -179,13 +179,13 @@ class TestCascadeDefaultProvider(TmpBase):
         self.assertEqual(r.decided_stage, 1)
 
     def test_default_medical_text(self) -> None:
-        path = self._write("note.txt", "환자 진단 처방 내역".encode("utf-8"))
+        path = self._write("note.txt", "환자 진단 처방 내역".encode())
         r = cascade.classify(path, "txt")
         self.assertEqual(r.final_label, DOMAIN_MEDICAL)
         self.assertEqual(r.decided_stage, 2)
 
     def test_default_general_text(self) -> None:
-        path = self._write("note.txt", "여행 후기와 맛집 추천".encode("utf-8"))
+        path = self._write("note.txt", "여행 후기와 맛집 추천".encode())
         r = cascade.classify(path, "txt")
         self.assertEqual(r.final_label, DOMAIN_GENERAL)
         self.assertEqual(r.decided_stage, 2)

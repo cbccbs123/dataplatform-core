@@ -86,7 +86,7 @@ class TestRunIngestE2E(unittest.TestCase):
         except unittest.SkipTest:
             raise
         except Exception as exc:  # noqa: BLE001 — 접속 불가 시 깔끔히 skip
-            raise unittest.SkipTest(f"DB 미접속: {type(exc).__name__}: {exc}")
+            raise unittest.SkipTest(f"DB 미접속: {type(exc).__name__}: {exc}") from None
 
     @classmethod
     def tearDownClass(cls) -> None:

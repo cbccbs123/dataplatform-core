@@ -4,8 +4,10 @@ from unittest.mock import MagicMock
 
 class TestReview(unittest.TestCase):
     def _conn(self, rowcount=1):
-        conn = MagicMock(); cur = MagicMock()
-        cur.__enter__.return_value = cur; cur.rowcount = rowcount
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__.return_value = cur
+        cur.rowcount = rowcount
         conn.cursor.return_value = cur
         return conn, cur
 

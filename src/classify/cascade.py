@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
+from src.classify import domains as _domains  # noqa: F401 — 기본 도메인 프로파일 등록
 from src.classify import stage2_zeroshot, stage3_gemma
 from src.classify.profiles import DomainProfileProvider, RegistryProvider
 from src.classify.text_probe import extract_text_for_classification
@@ -18,7 +19,6 @@ from src.classify.types import (
     POLICY_VERSION,
     ClassificationResult,
 )
-from src.classify import domains as _domains  # noqa: F401 — 기본 도메인 프로파일 등록
 
 _HEAD_BYTES = 8192  # 시그니처 판별에 충분한 선두 바이트(DICOM 프리앰블 132B 포함)
 _HIT_THRESHOLD = 2  # top 도메인 확정 최소 hit — 1개 어휘만으론 일반 문서 오탐 가능성↑

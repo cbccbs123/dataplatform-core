@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from io import BytesIO
-from typing import Sequence, TypedDict
+from typing import TypedDict
 
 import numpy as np
 from PIL import Image

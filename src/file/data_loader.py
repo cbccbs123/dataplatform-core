@@ -9,8 +9,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Iterable, Iterator, TypedDict
+from typing import TypedDict
 
 from src.file.file_type_defs import (
     ALLOWED_TEXT_META_FILE_KINDS,
@@ -33,7 +34,7 @@ class SummaryKeywords(TypedDict):
 
 _OFFICE_EXTENSIONS: dict[str, frozenset[str]] = {
     OfficeKind.WORD.value: frozenset({".docx"}),
-    OfficeKind.EXCEL.value: frozenset({".xlsx"}), 
+    OfficeKind.EXCEL.value: frozenset({".xlsx"}),
     OfficeKind.POWERPOINT.value: frozenset({".pptx"}),
 }
 _MAX_INPUT_CHARS = 20_000_000

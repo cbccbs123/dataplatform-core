@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import random
+from pathlib import Path
 
 
 def _prefix_before_last_underscore(path: Path) -> str:

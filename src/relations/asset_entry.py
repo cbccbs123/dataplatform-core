@@ -14,15 +14,16 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
 
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
-from src.relations.asset_candidates import EmbeddingKindFilter, find_embedding_candidates
 from src.registry.lineage_persist import record_lineage
+from src.relations.asset_candidates import EmbeddingKindFilter, find_embedding_candidates
 from src.relations.graph_persist import sync_graph_edges
 from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
 from src.relations.persist import register_new_relation_kinds

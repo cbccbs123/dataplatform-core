@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from src.classify.types import ClassificationResult
 from src.config.settings import get_current_settings
@@ -29,14 +30,14 @@ from src.dispatch.types import AssetRecord, ExtractContext
 from src.file.hashing import file_hash_and_size
 from src.ingest.router import REASON_MISSING, route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed, set_status
-from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
-from src.registry.classification_persist import record_classification
-from src.registry.lineage_persist import record_lineage
-from src.registry.schema_registry import validate_ext_meta
 from src.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
 from src.pipeline.packs import for_domain
 from src.pipeline.policy import validate as policy_validate
 from src.pipeline.registry import DEFAULT_REGISTRY
+from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
+from src.registry.classification_persist import record_classification
+from src.registry.lineage_persist import record_lineage
+from src.registry.schema_registry import validate_ext_meta
 
 REASON_DUPLICATE = "duplicate"
 

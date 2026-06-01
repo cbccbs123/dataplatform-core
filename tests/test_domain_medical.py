@@ -31,7 +31,7 @@ class TestMedicalSignatures(unittest.TestCase):
         self.assertIsNone(_fhir(b'{"resourceType": "Widget"}'))
 
     def test_non_medical_none(self) -> None:
-        data = "오늘 날씨가 좋네요 hello".encode("utf-8")
+        data = "오늘 날씨가 좋네요 hello".encode()
         self.assertIsNone(_dicom(data))
         self.assertIsNone(_hl7v2(data))
         self.assertIsNone(_fhir(data))

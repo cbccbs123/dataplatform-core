@@ -33,7 +33,7 @@ def extract_text_for_classification(file_path: str, modality: str, *, max_chars:
 def _document_text(file_path: str, modality: str, max_chars: int) -> str:
     if modality in _PLAIN_KINDS:
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding="utf-8", errors="ignore") as f:
                 return f.read(max_chars)
         except OSError:
             return ""

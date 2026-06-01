@@ -180,7 +180,7 @@ def clip_zero_shot_label_scores_from_image_emb(
     text_emb = clip_text_embeddings_normalized(processor, model, prompt_texts)
     logits = clip_zero_shot_logits(image_emb, text_emb, model)
     probs = logits.softmax(dim=0).detach().cpu().numpy()
-    return {lab: float(p) for lab, p in zip(cleaned, probs)}
+    return {lab: float(p) for lab, p in zip(cleaned, probs, strict=False)}
 
 
 def clip_zero_shot_ko_meta_items(label_scores: dict[str, float]) -> list[dict[str, float | str]]:

@@ -24,15 +24,14 @@ import logging
 import os
 import random
 import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping, Sequence, cast
+from typing import Any, cast
 
 import psycopg
-from psycopg import errors
-from psycopg import Connection
+from psycopg import Connection, errors
 from psycopg.rows import dict_row
-
 
 PG17_NUMERIC_VERSION = 170000
 
@@ -371,7 +370,7 @@ class PostgresUtil:
             self._pool.close()
             self._pool = None
 
-    def __enter__(self) -> "PostgresUtil":
+    def __enter__(self) -> PostgresUtil:
         # Default path in services is pooling, so warm up pool first.
         self.open_pool()
         return self

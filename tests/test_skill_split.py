@@ -49,7 +49,8 @@ class TestImageSplit(unittest.TestCase):
 
     def test_extract_stashes_clip_vec_and_embed_reuses(self) -> None:
         from src.skills import image_skill
-        ctx = _ctx("image"); ctx.settings = self._cfg()
+        ctx = _ctx("image")
+        ctx.settings = self._cfg()
         zs = {"label_scores": {"고양이": 0.9}, "clip_image_embedding": [0.5] * 4}
         with mock.patch.multiple("src.extractors.image_meta_extractor", extract_image_meta=mock.Mock(return_value={"w": 10})), \
              mock.patch.multiple("src.llm.image_summarizer", summarize_image_caption_keywords_objects=mock.Mock(return_value={"summary": "s", "objects": ["고양이"]})), \

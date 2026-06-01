@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import magic
+
 from src.file.file_type_defs import MediaKind, OfficeKind
 
 _READ_CHUNK = 262_144
@@ -58,7 +58,7 @@ def _magic_mime(path: Path) -> str:
     return str(mime).lower().strip()
 
 
-def _kind_from_mime(mime: str) -> Optional[MediaKind]:
+def _kind_from_mime(mime: str) -> MediaKind | None:
     if not mime or mime == "application/octet-stream":
         return None
     if mime == "application/pdf":

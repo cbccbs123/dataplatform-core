@@ -75,12 +75,13 @@ class TestRunIngestPackPath(unittest.TestCase):
         reg = _fake_registry(captured)
 
         # 새 중첩 형태의 stage1 단락 결과
-        stage1_medical_fn = lambda p, m: ClassificationResult(
-            final_label="medical",
-            confidence=1.0,
-            decided_stage=1,
-            stage1_scores={"medical": {"signature": "dicom"}},
-        )
+        def stage1_medical_fn(p, m):
+            return ClassificationResult(
+                final_label="medical",
+                confidence=1.0,
+                decided_stage=1,
+                stage1_scores={"medical": {"signature": "dicom"}},
+            )
 
         with contextlib.ExitStack() as stack:
             self._patch(stack)

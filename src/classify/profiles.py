@@ -7,8 +7,9 @@ signatures 는 능력 모듈(코드)로 유지(설계 원칙 2).
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)

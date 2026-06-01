@@ -61,7 +61,7 @@ def summarize_and_extract_keywords(
     cfg = get_current_settings()
 
     partial_summaries: list[str] = []
-    for i, ch in enumerate(
+    for _i, ch in enumerate(
         iter_document_chunks(
             path,
             file_kind=kind,

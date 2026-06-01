@@ -10,8 +10,8 @@ DB·LLM 불필요(순수 파일시스템). 기존 ``directory_paths.list_file_pa
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from src.file.directory_paths import list_file_paths_under_directory
 

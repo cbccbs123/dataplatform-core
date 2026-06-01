@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
-import re
-from typing import Sequence, TypedDict
+from typing import TypedDict
 
 from sentence_transformers import SentenceTransformer
 
 from src.file.data_loader import (
+    MAX_INPUT_CHARS,
     choose_encoding,
     iter_document_chunks,
     normalize_file_kind,
-    MAX_INPUT_CHARS,
 )
 
 
@@ -50,7 +51,7 @@ def embed_texts(
         normalize_embeddings=normalize_embeddings,
     )
     return vectors.tolist()
-    
+
 
 def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:
     total_letters = hangul_count + latin_count

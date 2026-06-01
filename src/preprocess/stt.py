@@ -25,7 +25,6 @@ from typing import TypedDict
 from faster_whisper import WhisperModel
 
 
-
 class TranscriptionResult(TypedDict):
     """전체 텍스트와 구간 목록(가능할 때만 채움)."""
 

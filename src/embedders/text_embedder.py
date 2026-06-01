@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterator, Sequence, TypedDict
+from typing import TypedDict
 
-from sentence_transformers import SentenceTransformer
 import numpy as np
-from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
+from sentence_transformers import SentenceTransformer
+
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.file.data_loader import (
+    MAX_INPUT_CHARS,
     iter_document_chunks,
     iter_plain_text_chunks,
     normalize_file_kind,
-    MAX_INPUT_CHARS,
 )
+from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 
 
 class TextChunkEmbedding(TypedDict):

@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+
 @dataclass(frozen=True)
 class PipelineSettings:
     """파이프라인 실행 설정. ``init_settings(profile)`` 이 한 번만 생성하며 이후 변경 불가(frozen).

@@ -36,7 +36,7 @@ class TestCrossTypes(unittest.TestCase):
         d = Decision(candidate=c, verdict="match", score=10.0)
         self.assertEqual(sp.candidate.target_id, "b")
         self.assertEqual(d.verdict, "match")
-        with self.assertRaises(Exception):
+        with self.assertRaises(AttributeError):  # frozen dataclass → FrozenInstanceError(⊂AttributeError)
             c.source_id = "z"  # frozen
 
 

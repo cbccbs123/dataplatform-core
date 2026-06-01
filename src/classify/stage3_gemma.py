@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from src.classify.types import DOMAIN_REVIEW
 
