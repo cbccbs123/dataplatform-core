@@ -62,6 +62,12 @@ class TestResolveSearchMinScores(unittest.TestCase):
         self.assertEqual(scores["text"], 0.3)
         self.assertEqual(scores["image"], 0.0)
 
+    def test_invalid_float_env_raises(self) -> None:
+        # 잘못된 형식의 환경변수는 _env_float_default 가 ValueError — 프로세스 시작 시 빠르게 실패한다.
+        with _env(SEARCH_MIN_SCORE="not_a_number"):
+            with self.assertRaises(ValueError):
+                resolve_search_min_scores()
+
 
 if __name__ == "__main__":
     unittest.main()

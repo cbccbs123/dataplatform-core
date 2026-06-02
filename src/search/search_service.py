@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
-from src.search.media_search import _finite_float, search_media_all_grouped
+from src.search.media_search import search_media_all_grouped
 
 # 요청 모달리티 라벨 → ``search_media_all_grouped`` 결과 버킷 키.
+# 결정성(헌법 3조): 결과 버킷 조립이 ``list(.items())`` 순회 순서에 의존하므로 삽입 순서를
+# 보존한다(dict 는 3.7+ 삽입 순서 보장). set 등 순서 비보장 타입으로 대체 금지.
 _MODALITY_BUCKETS: dict[str, str] = {
     "text": "text_documents",
     "audio": "audio",
@@ -21,18 +24,31 @@ _MODALITY_BUCKETS: dict[str, str] = {
 }
 
 
+def _row_similarity(row: dict[str, Any]) -> float:
+    """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
+
+    media_search 의 비공개 헬퍼에 의존하지 않도록 서비스 계층에 작은 정화 함수를 둔다.
+    """
+    value = row.get("similarity")
+    try:
+        x = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return x if math.isfinite(x) else 0.0
+
+
 def _filter_by_min_score(
     rows: list[dict[str, Any]], threshold: float
 ) -> list[dict[str, Any]]:
-    """``similarity`` 가 ``threshold`` 미만인 행을 제거한다. 0.0(이하)면 필터 비활성(원본 반환).
+    """``similarity`` 가 ``threshold`` 미만인 행을 제거한다. 0.0 이하(음수 포함)면 필터 비활성(원본 반환).
 
     grouped 결과는 이미 ``similarity`` 내림차순 상위 N 건이라, 잘린 후보는 남은 것보다 점수가
     더 낮다 — 따라서 cap 이후 이 계층에서 걸러도 누락되는 적합 자산은 없다.
-    ``NaN``/누락 ``similarity`` 는 ``_finite_float`` 로 0.0 처리되어 임계값>0 이면 자연 탈락한다.
+    ``NaN``/누락 ``similarity`` 는 ``_row_similarity`` 로 0.0 처리되어 임계값>0 이면 자연 탈락한다.
     """
     if not threshold or threshold <= 0.0:
         return rows
-    return [r for r in rows if _finite_float(r.get("similarity"), 0.0) >= threshold]
+    return [r for r in rows if _row_similarity(r) >= threshold]
 
 
 def search_hybrid(

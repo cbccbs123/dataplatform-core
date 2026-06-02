@@ -106,6 +106,13 @@ class TestSearchHybridMinScore(unittest.TestCase):
         )
         self.assertEqual(out["results"]["image"], [])
 
+    def test_negative_threshold_disables_filter(self) -> None:
+        # 음수 임계값(오타 등)은 0.0 과 동일하게 필터 비활성 — 조용히 전부 통과시킨다.
+        out = search_hybrid(
+            "질의", modalities=["text"], min_scores={"text": -0.3}, _grouped_fn=_scored_grouped
+        )
+        self.assertEqual(len(out["results"]["text_documents"]), 2)
+
     def test_nan_and_missing_similarity_treated_as_zero(self) -> None:
         def grouped(query: str, **_kw: object) -> dict[str, object]:
             return {
