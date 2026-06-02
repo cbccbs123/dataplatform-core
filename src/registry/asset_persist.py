@@ -48,7 +48,6 @@ def create_asset(
     fs_path: str,
     modality: str,
     domain: str = "general",
-    group_id: uuid.UUID | None = None,
     file_hash: str | None = None,
     file_size: int | None = None,
 ) -> uuid.UUID:
@@ -60,10 +59,10 @@ def create_asset(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO asset (asset_id, group_id, modality, fs_path, file_hash, file_size, domain_label, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'received')
+            INSERT INTO asset (asset_id, modality, fs_path, file_hash, file_size, domain_label, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'received')
             """,
-            (asset_id, group_id, modality, fs_path, file_hash, file_size, domain),
+            (asset_id, modality, fs_path, file_hash, file_size, domain),
         )
     return asset_id
 
