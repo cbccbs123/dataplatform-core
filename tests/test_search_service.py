@@ -56,5 +56,72 @@ class TestSearchHybridService(unittest.TestCase):
         self.assertEqual(captured["structured"], s)
 
 
+def _scored_grouped(query: str, **_kw: object) -> dict[str, object]:
+    """각 버킷에 ``similarity`` 가 다른 두 행을 담은 grouped 결과(적합도 필터 검증용)."""
+    return {
+        "text_documents": [
+            {"id": "t_hi", "similarity": 0.40},
+            {"id": "t_lo", "similarity": 0.25},
+        ],
+        "image": [
+            {"id": "i_hi", "similarity": 0.30},
+            {"id": "i_lo", "similarity": 0.17},
+        ],
+        "audio": [{"id": "a1", "similarity": 0.10}],
+        "video": [{"id": "v1", "similarity": 0.10}],
+        "meta": {},
+    }
+
+
+class TestSearchHybridMinScore(unittest.TestCase):
+    def test_filters_rows_below_threshold(self) -> None:
+        out = search_hybrid(
+            "질의", modalities=["text"], min_scores={"text": 0.3}, _grouped_fn=_scored_grouped
+        )
+        ids = [r["id"] for r in out["results"]["text_documents"]]
+        self.assertEqual(ids, ["t_hi"])  # 0.25 행은 제외
+
+    def test_none_and_zero_threshold_passthrough(self) -> None:
+        out_none = search_hybrid("질의", modalities=["text"], _grouped_fn=_scored_grouped)
+        out_zero = search_hybrid(
+            "질의", modalities=["text"], min_scores={"text": 0.0}, _grouped_fn=_scored_grouped
+        )
+        self.assertEqual(len(out_none["results"]["text_documents"]), 2)
+        self.assertEqual(len(out_zero["results"]["text_documents"]), 2)
+
+    def test_threshold_is_independent_per_modality(self) -> None:
+        # text 임계값이 image 버킷을 거르면 안 된다.
+        out = search_hybrid(
+            "질의",
+            modalities=["text", "image"],
+            min_scores={"text": 0.35},
+            _grouped_fn=_scored_grouped,
+        )
+        self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["t_hi"])
+        self.assertEqual(len(out["results"]["image"]), 2)  # image 임계값 미지정 → 그대로
+
+    def test_all_below_yields_empty_bucket(self) -> None:
+        out = search_hybrid(
+            "질의", modalities=["image"], min_scores={"image": 0.99}, _grouped_fn=_scored_grouped
+        )
+        self.assertEqual(out["results"]["image"], [])
+
+    def test_nan_and_missing_similarity_treated_as_zero(self) -> None:
+        def grouped(query: str, **_kw: object) -> dict[str, object]:
+            return {
+                "text_documents": [
+                    {"id": "good", "similarity": 0.5},
+                    {"id": "nan", "similarity": float("nan")},
+                    {"id": "missing"},  # similarity 키 없음
+                ],
+                "meta": {},
+            }
+
+        out = search_hybrid(
+            "질의", modalities=["text"], min_scores={"text": 0.1}, _grouped_fn=grouped
+        )
+        self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["good"])
+
+
 if __name__ == "__main__":
     unittest.main()

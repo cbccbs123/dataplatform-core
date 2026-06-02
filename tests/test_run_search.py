@@ -52,6 +52,30 @@ class TestRunMapsArgs(unittest.TestCase):
         run_search._run(ns, search_fn=fake_search)
         self.assertIsNone(captured["modalities"])
 
+    def test_run_forwards_min_scores(self) -> None:
+        # main() 이 settings.search_min_scores 를 읽어 넘기면 _run 은 그대로 search_hybrid 로 전달한다.
+        captured: dict[str, object] = {}
+
+        def fake_search(query: str, **kw: object) -> dict[str, object]:
+            captured.update(kw)
+            return {}
+
+        ns = argparse.Namespace(query="질의", modalities=None, limit=20, alpha=0.75)
+        scores = {"text": 0.3, "image": 0.2, "video": 0.0, "audio": 0.0}
+        run_search._run(ns, search_fn=fake_search, min_scores=scores)
+        self.assertEqual(captured["min_scores"], scores)
+
+    def test_run_min_scores_defaults_none(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_search(query: str, **kw: object) -> dict[str, object]:
+            captured.update(kw)
+            return {}
+
+        ns = argparse.Namespace(query="질의", modalities=None, limit=20, alpha=0.75)
+        run_search._run(ns, search_fn=fake_search)
+        self.assertIsNone(captured["min_scores"])
+
 
 if __name__ == "__main__":
     unittest.main()

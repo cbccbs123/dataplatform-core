@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from src.search.media_search import search_media_all_grouped
+from src.search.media_search import _finite_float, search_media_all_grouped
 
 # 요청 모달리티 라벨 → ``search_media_all_grouped`` 결과 버킷 키.
 _MODALITY_BUCKETS: dict[str, str] = {
@@ -21,6 +21,20 @@ _MODALITY_BUCKETS: dict[str, str] = {
 }
 
 
+def _filter_by_min_score(
+    rows: list[dict[str, Any]], threshold: float
+) -> list[dict[str, Any]]:
+    """``similarity`` 가 ``threshold`` 미만인 행을 제거한다. 0.0(이하)면 필터 비활성(원본 반환).
+
+    grouped 결과는 이미 ``similarity`` 내림차순 상위 N 건이라, 잘린 후보는 남은 것보다 점수가
+    더 낮다 — 따라서 cap 이후 이 계층에서 걸러도 누락되는 적합 자산은 없다.
+    ``NaN``/누락 ``similarity`` 는 ``_finite_float`` 로 0.0 처리되어 임계값>0 이면 자연 탈락한다.
+    """
+    if not threshold or threshold <= 0.0:
+        return rows
+    return [r for r in rows if _finite_float(r.get("similarity"), 0.0) >= threshold]
+
+
 def search_hybrid(
     query: str,
     *,
@@ -29,6 +43,7 @@ def search_hybrid(
     text_hybrid_alpha: float = 0.75,
     image_search_alpha: float = 0.65,
     structured: dict[str, Any] | None = None,
+    min_scores: dict[str, float] | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
 ) -> dict[str, Any]:
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
@@ -37,14 +52,16 @@ def search_hybrid(
     버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``.
     ``structured`` 를 넘기면 그대로 grouped 검색에 전달돼 LLM 질의 구조화를 건너뛴다
     (이미 구조화됐거나 LLM 없이 테스트할 때). ``_grouped_fn`` 은 테스트 주입 seam.
+    ``min_scores`` 는 모달리티 라벨→적합도 하한(0.0=비활성); 각 버킷에서 ``similarity`` 가
+    임계값 미만인 행을 응답에서 제외한다(미지정 모달리티는 필터하지 않음).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
         if unknown:
             raise ValueError(f"알 수 없는 모달리티: {unknown}")
-        wanted = [_MODALITY_BUCKETS[m] for m in modalities]
+        label_keys = [(m, _MODALITY_BUCKETS[m]) for m in modalities]
     else:
-        wanted = list(_MODALITY_BUCKETS.values())
+        label_keys = list(_MODALITY_BUCKETS.items())
 
     grouped = _grouped_fn(
         query,
@@ -53,5 +70,8 @@ def search_hybrid(
         text_hybrid_alpha=text_hybrid_alpha,
         image_search_alpha=image_search_alpha,
     )
-    results = {key: grouped.get(key, []) for key in wanted}
+    results = {
+        key: _filter_by_min_score(grouped.get(key, []), (min_scores or {}).get(label, 0.0))
+        for label, key in label_keys
+    }
     return {"query": query, "results": results, "meta": grouped.get("meta", {})}

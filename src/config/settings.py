@@ -37,6 +37,8 @@ class PipelineSettings:
     # 아래 두 필드는 이번 브랜치(relations-catalog-slim)에서 추가된 관계 제안 품질 게이트.
     relation_min_sim: float       # 후보 코사인 유사도 하한 — 이 미만은 LLM 에 넣지 않음 (기본 0.2)
     relation_auto_approve_min: float  # 이 이상이면 HITL 없이 자동 승인 (기본 0.9)
+    # 검색 결과 적합도 하한(모달리티별). 0.0=비활성. relations 의 relation_min_sim 과 같은 성격의 게이트.
+    search_min_scores: dict[str, float]
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -86,6 +88,21 @@ def _env_float_default(name: str, default: float) -> float:
         raise ValueError(f"실수 환경변수 형식 오류: {name}={raw!r}") from e
 
 
+# 검색이 쓰는 모달리티 버킷. relations 와 달리 모달리티마다 점수 스케일이 달라(텍스트 하이브리드 vs
+# 시각 2단계) 임계값을 모달리티별로 둔다.
+_SEARCH_MIN_SCORE_MODALITIES = ("text", "image", "video", "audio")
+
+
+def resolve_search_min_scores() -> dict[str, float]:
+    """모달리티 → 검색 적합도 하한 임계값. 공통 ``SEARCH_MIN_SCORE``(기본 0.0)를 각 모달리티
+    기본값으로 쓰고, ``SEARCH_MIN_SCORE_<MODALITY>`` 가 있으면 덮는 2단 폴백. 0.0 이면 비활성."""
+    common = _env_float_default("SEARCH_MIN_SCORE", 0.0)
+    return {
+        m: _env_float_default(f"SEARCH_MIN_SCORE_{m.upper()}", common)
+        for m in _SEARCH_MIN_SCORE_MODALITIES
+    }
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -115,6 +132,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         relation_top_k=_env_int_default("RELATION_TOP_K", 10),
         relation_min_sim=_env_float_default("RELATION_MIN_SIM", 0.2),
         relation_auto_approve_min=_env_float_default("RELATION_AUTO_APPROVE_MIN", 0.9),
+        search_min_scores=resolve_search_min_scores(),
     )
 
 
