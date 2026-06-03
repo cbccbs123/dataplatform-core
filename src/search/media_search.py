@@ -24,6 +24,7 @@ from src.file.file_type_defs import (
 )
 from src.preprocess.media_item_search_text import MEDIA_ITEM_FTS_CONFIG
 from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
+from src.search.fusion import RRF_DEFAULT_K, fuse_rrf
 from src.search.query_preprocess import structure_user_query
 
 EMBEDDING_KIND_ST = "st"
@@ -320,6 +321,39 @@ def _sort_by_similarity_cap(rows: list[dict[str, Any]], n: int) -> list[dict[str
     )[:n]
 
 
+def _apply_fusion(
+    rows: list[dict[str, Any]], *, fusion: str, k: int
+) -> list[dict[str, Any]]:
+    """행을 융합 방식에 따라 재정렬한다(순수, DB·LLM 무관).
+
+    - ``alpha``: 입력 순서를 그대로 유지한다(이미 SQL이 similarity DESC, id ASC로 정렬).
+      프로덕션 기본값이라 이 경로는 동작 불변이 핵심 — 행을 만지지 않고 그대로 돌려준다.
+    - ``rrf``: emb_score·bm25_score 각각의 독립 랭킹을 RRF로 합쳐 재정렬한다.
+      동점·결측은 ``fuse_rrf`` 의 결정적 규칙(점수 DESC, id ASC)을 따른다(헌법 3조).
+      결측 점수는 기존 관용대로 ``_finite_float`` 로 0.0 처리한다(NaN/inf/None 방어).
+    컷오프는 호출부에서 원 코사인(emb_score) 기준으로 별도 적용한다.
+    """
+    if fusion == "alpha":
+        return rows
+    if fusion != "rrf":
+        raise ValueError(f"알 수 없는 fusion: {fusion!r} (alpha|rrf)")
+    by_id = {str(r["id"]): r for r in rows}
+    emb_ranked = [
+        str(r["id"])
+        for r in sorted(
+            rows, key=lambda r: (-_finite_float(r.get("emb_score"), 0.0), str(r["id"]))
+        )
+    ]
+    bm25_ranked = [
+        str(r["id"])
+        for r in sorted(
+            rows, key=lambda r: (-_finite_float(r.get("bm25_score"), 0.0), str(r["id"]))
+        )
+    ]
+    fused = fuse_rrf([emb_ranked, bm25_ranked], k=k)
+    return [by_id[i] for i, _ in fused if i in by_id]
+
+
 def embed_query_for_media_search(query: str) -> list[float]:
     cfg = get_current_settings()
     raw = query.strip() if query.strip() else " "
@@ -342,12 +376,18 @@ def _run_hybrid_search(
     embedding_kind: str,
     limit: int,
     alpha: float,
+    fusion: str = "alpha",
+    rrf_k: int = RRF_DEFAULT_K,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """임베딩 상위 후보에 ``asset_metadata.search_vector`` 기준 ``ts_rank_cd`` 를 섞어 반환한다.
 
     ``similarity = alpha * emb_score + (1-alpha) * bm25_scaled``.
     여기서 ``bm25_scaled = bm25_score / (bm25_score + BM25_SATURATION_K)``.
+
+    ``fusion`` 은 최종 행 정렬 방식이다(기본 ``alpha``=무변경, 프로덕션 동작 불변).
+    ``rrf`` 이면 SQL 의 가중합 순서를 버리고 emb·bm25 독립 랭킹을 RRF 로 합쳐 재정렬한다
+    (``_apply_fusion``). alpha 경로는 SQL 정렬(similarity DESC, id ASC)을 그대로 둔다.
 
     ``debug=True`` 이면 ``candidate_count``(임베딩 조건 통과 후보 전체 행 수)를 유지하고,
     ``debug=False`` 이면 응답에서 제거한다.
@@ -377,6 +417,8 @@ def _run_hybrid_search(
                     ),
                 )
                 rows = _sanitize_hybrid_search_rows(list(cur.fetchall()))
+                # 기본 alpha 면 입력 행을 그대로 반환(동작 불변), rrf 면 순위 융합 재정렬.
+                rows = _apply_fusion(rows, fusion=fusion, k=rrf_k)
                 if not debug:
                     for r in rows:
                         r.pop("bm25_scaled", None)
@@ -390,6 +432,7 @@ def search_media_text_items(
     limit: int = 20,
     alpha: float = 0.75,
     media_types: list[str] | None = None,
+    fusion: str = "alpha",
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """
@@ -412,6 +455,7 @@ def search_media_text_items(
         embedding_kind=EMBEDDING_KIND_ST,
         limit=limit,
         alpha=alpha,
+        fusion=fusion,
         debug=debug,
     )
 
@@ -612,6 +656,7 @@ def search_media_all_grouped(
     image_search_alpha: float = 0.65,
     bm25_weight: float = 0.2,
     clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    fusion: str = "alpha",
     debug: bool = False,
 ) -> dict[str, Any]:
     """ST 하이브리드(문서·음성·영상 텍스트)와 시각 2단계(이미지·영상)를 한 번에 돌리고
@@ -620,6 +665,10 @@ def search_media_all_grouped(
     ``video`` 버킷에는 ST 하이브리드 영상과 시각 검색 영상을 ``similarity`` 기준으로 합친 뒤
     상위 ``limit_per_bucket`` 건만 담는다. 각 row에 ``source`` 가 ``st_hybrid`` 또는
     ``visual_two_stage`` 로 붙는다.
+
+    ``fusion`` 은 ST 하이브리드 경로의 emb·bm25 융합 방식이다(기본 ``alpha``=동작 불변).
+    ``rrf`` 는 ST 하이브리드(텍스트/오디오/영상 텍스트) 후보 재정렬에만 적용하고, 시각 2단계
+    (이미지·영상)는 별도 가중합 경로라 영향받지 않는다(프로토타입 스코프, 설계 §5).
     """
     if structured is None:
         structured = structure_user_query(query)
@@ -632,6 +681,7 @@ def search_media_all_grouped(
         limit=st_fetch_limit,
         alpha=text_hybrid_alpha,
         media_types=list(MEDIA_TYPES_ST_CHUNK_SEARCH),
+        fusion=fusion,
         debug=debug,
     )
 

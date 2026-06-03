@@ -58,6 +58,7 @@ def search_hybrid(
     limit_per_bucket: int = 20,
     text_hybrid_alpha: float = 0.75,
     image_search_alpha: float = 0.65,
+    fusion: str = "alpha",
     structured: dict[str, Any] | None = None,
     min_scores: dict[str, float] | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
@@ -70,6 +71,7 @@ def search_hybrid(
     (이미 구조화됐거나 LLM 없이 테스트할 때). ``_grouped_fn`` 은 테스트 주입 seam.
     ``min_scores`` 는 모달리티 라벨→적합도 하한(0.0=비활성); 각 버킷에서 ``similarity`` 가
     임계값 미만인 행을 응답에서 제외한다(미지정 모달리티는 필터하지 않음).
+    ``fusion`` 은 ST 하이브리드 융합 방식(기본 ``alpha``=기존 동작; ``rrf``=순위 융합 프로토타입).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -85,6 +87,7 @@ def search_hybrid(
         limit_per_bucket=limit_per_bucket,
         text_hybrid_alpha=text_hybrid_alpha,
         image_search_alpha=image_search_alpha,
+        fusion=fusion,
     )
     results = {
         key: _filter_by_min_score(grouped.get(key, []), (min_scores or {}).get(label, 0.0))
