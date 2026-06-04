@@ -182,6 +182,22 @@ class TestIncludeVisualWiring(unittest.TestCase):
         search_hybrid("질의", _grouped_fn=g)  # 전체 모달리티
         self.assertIs(cap["include_visual"], True)
 
+    def test_video_requested_returns_video_bucket(self) -> None:
+        # 동치성 역방향 봉인: video 요청 시 include_visual=True 로 채워진 video 버킷이
+        # 응답에 그대로 보존된다(스킵 최적화가 요청 버킷을 누락시키지 않음).
+        def grouped(query: str, **_kw: object) -> dict[str, object]:
+            return {
+                "text_documents": [],
+                "audio": [],
+                "image": [{"id": "img1", "similarity": 0.6}],
+                "video": [{"id": "vid1", "similarity": 0.7}],
+                "meta": {},
+            }
+
+        out = search_hybrid("질의", modalities=["text", "video"], _grouped_fn=grouped)
+        self.assertEqual([r["id"] for r in out["results"]["video"]], ["vid1"])
+        self.assertNotIn("image", out["results"])  # 미요청 버킷은 반환 안 함
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -446,6 +446,20 @@ class TestGroupedIncludeVisual(unittest.TestCase):
             ms.search_media_all_grouped("회식", structured=self._STRUCTURED)
         mv.assert_called_once()
 
+    def test_include_visual_false_video_bucket_keeps_st_only(self) -> None:
+        # include_visual=False 라도 ST 하이브리드 영상(video_st)은 보존되고 시각 혼입만 빠진다.
+        # → video 버킷이 텅 비는 게 아니라 video_st 만으로 구성됨을 grouped 레벨에서 직접 확인.
+        video_st_row = {"id": "v1", "similarity": 0.8, "modality": ms.MediaKind.VIDEO.value}
+        with mock.patch.object(ms, "search_media_text_items", return_value=[video_st_row]), \
+             mock.patch.object(ms, "search_media_images_two_stage", return_value=[]) as mv:
+            out = ms.search_media_all_grouped(
+                "회식", structured=self._STRUCTURED, include_visual=False
+            )
+        mv.assert_not_called()
+        self.assertEqual([r["id"] for r in out["video"]], ["v1"])  # video_st 보존
+        self.assertEqual([r["source"] for r in out["video"]], ["st_hybrid"])
+        self.assertEqual(out["image"], [])  # 시각 미실행 → 이미지 빈 버킷
+
 
 if __name__ == "__main__":
     unittest.main()
