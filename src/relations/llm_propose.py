@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
 from typing import Any
 
@@ -42,6 +43,25 @@ def propose_edges_json(prompt: str) -> dict[str, Any]:
     return out
 
 
+def _clamp_confidence(raw: Any) -> float:
+    """LLM confidence 를 결정적으로 [0,1] 범위에 가둔다(#2, FR-010, 헌법 3조).
+
+    - 1.5 → 1.0, -0.3 → 0.0 처럼 범위를 벗어난 값은 양 끝으로 클램프.
+    - NaN·무한대·파싱 불가 문자열·누락(None)은 비교가 무의미하므로 결정적 기본값 0.0.
+      (자동승인 임계 판정·DB 저장이 항상 안정적인 수치를 받도록.)
+    """
+    if raw is None:
+        return 0.0
+    try:
+        x = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    # NaN·±inf 는 max/min 비교가 비결정적이므로 0.0 으로 강제.
+    if not math.isfinite(x):
+        return 0.0
+    return max(0.0, min(1.0, x))
+
+
 def parse_and_normalize_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
     """
     LLM 루트 ``dict`` → ``register_new_relation_kinds`` / ``sync_graph_edges`` 가 순회할 **엣지 dict** 리스트.
@@ -65,7 +85,7 @@ def parse_and_normalize_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
             "relation_type_code": normalize_relation_type_code(
                 edge.get("relation_type_code")
             ),
-            "confidence": float(edge.get("confidence") or 0.0),
+            "confidence": _clamp_confidence(edge.get("confidence")),
             "reason": str(edge.get("reason") or "").strip(),
             "topic_ko": tk,
             "subtopic_ko": sk,

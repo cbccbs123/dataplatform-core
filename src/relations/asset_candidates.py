@@ -104,7 +104,9 @@ def find_embedding_candidates(
         LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
         -- registered 상태만 포함 — received/deferred 자산은 관계 대상에서 제외.
         WHERE a.status = 'registered'
-        ORDER BY p.best_sim DESC
+        -- best_sim 동률 시 후보 id(asset_id) ASC 를 보조 정렬로 둬 순서를 결정적으로 고정.
+        -- tiebreaker 가 없으면 동률 후보 순서가 PG 실행 계획에 따라 흔들려 헌법 3조(재현성)를 깬다.
+        ORDER BY p.best_sim DESC, p.id ASC
         LIMIT %s
     """
     # 파라미터 순서: src_vecs의 asset_id, channels, cand의 asset_id(self 제외), min_sim, top_k.
