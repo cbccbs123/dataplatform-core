@@ -9,9 +9,14 @@ DB·LLM 불필요(mock conn). 검증 대상:
 """
 from __future__ import annotations
 
+import json
+import os
 import unittest
 import uuid
+from pathlib import Path
 from unittest import mock
+
+from dotenv import load_dotenv
 
 from src.relations.asset_entry import union_candidates
 from src.relations.path_signal import (
@@ -280,6 +285,71 @@ class TestUnionCandidates(unittest.TestCase):
         out = union_candidates(emb, path)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["file_uri"], "/d/a")
+
+
+# ── T019 [SC-007] 실 DB e2e 스모크 — RUN_DB_E2E=1 일 때만 ──────────────────────
+# LLM 불요·결정적: find_path_signal_candidates 의 실 PostgreSQL 동작(동일 폴더·stem 매칭·
+# 하위 폴더 제외)을 /kpi_path_signal/ 마커 자산으로 검증한다. 기존 데이터 무영향(마커만 생성·삭제).
+_RUN_DB = os.getenv("RUN_DB_E2E") == "1"
+_ENV = Path(__file__).resolve().parents[1] / ".env.dev"
+
+
+@unittest.skipUnless(_RUN_DB, "RUN_DB_E2E=1 일 때만(실 PostgreSQL)")
+class TestPathSignalDB(unittest.TestCase):
+    _PREFIX = "/kpi_path_signal/"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        load_dotenv(_ENV, override=False)
+        from src.config.settings import init_settings
+
+        init_settings("dev")
+        from src.database.ids import uuid7
+        from src.database.postgres_util import PostgresUtil
+
+        cls.db = PostgresUtil()
+        cls.db.__enter__()
+        cls.src, cls.match, cls.other, cls.sub = uuid7(), uuid7(), uuid7(), uuid7()
+        rows = [
+            (cls.src, cls._PREFIX + "manual_v1.txt"),       # 소스
+            (cls.match, cls._PREFIX + "manual_v2.txt"),     # 매칭(정규화 stem 'manual')
+            (cls.other, cls._PREFIX + "memo.txt"),          # 같은 폴더·stem 불일치 → 제외
+            (cls.sub, cls._PREFIX + "sub/manual_v3.txt"),   # 하위 폴더 → 제외(C-2)
+        ]
+        cls._clear()
+        with cls.db.transaction() as conn, conn.cursor() as cur:
+            for aid, path in rows:
+                cur.execute(
+                    "INSERT INTO asset (asset_id, modality, fs_path, file_hash, domain_label, status) "
+                    "VALUES (%s, 'txt', %s, %s, 'general', 'registered')",
+                    (aid, path, aid.hex),
+                )
+                cur.execute(
+                    "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags, search_vector) "
+                    "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}', to_tsvector('simple', ''))",
+                    (aid, json.dumps({"summary": path}, ensure_ascii=False)),
+                )
+
+    @classmethod
+    def _clear(cls) -> None:
+        with cls.db.transaction() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM asset WHERE fs_path LIKE %s", (cls._PREFIX + "%",))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._clear()
+        cls.db.__exit__(None, None, None)
+
+    def test_same_folder_stem_match_only(self) -> None:
+        with self.db.transaction() as conn:
+            out = find_path_signal_candidates(
+                conn, source_asset_id=str(self.src), limit=10
+            )
+        ids = [c["id"] for c in out]
+        # 매칭(manual_v2)만 — memo(stem 불일치)·sub/manual_v3(하위 폴더)·self 제외(C-1·C-2).
+        self.assertEqual(ids, [str(self.match)])
+        self.assertEqual(out[0]["emb_score"], 0.0)  # C-3 path-only sentinel
+        self.assertEqual(out[0]["media_type"], "txt")
 
 
 if __name__ == "__main__":
