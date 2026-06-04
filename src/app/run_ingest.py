@@ -191,7 +191,10 @@ def run_ingest(
                         record_lineage(conn, asset_id, activity="ingest.failed.v1", agent="run_ingest",
                                        payload={"reason": reason})
                     except InvalidTransitionError:
-                        pass  # 이미 종료 상태면 무시
+                        # 이미 종료 상태면 무시. 009: ConcurrentTransitionError(동시 전이 충돌 —
+                        # 다른 워커가 먼저 종료시킨 경우)도 이 계열의 하위라 같은 경로로 흡수돼
+                        # 배치가 멈추지 않는다(호출부 시그니처 무변경).
+                        pass
                 result["failed"].append((asset_id, reason))
 
     _LOG.info(

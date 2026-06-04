@@ -89,10 +89,11 @@ class TestDbHelpers(unittest.TestCase):
     def test_set_status_valid_issues_update(self) -> None:
         conn, cur = _conn_with_status("received")
         set_status(conn, 7, "routing")
-        # 마지막 execute 는 UPDATE 여야 하고 파라미터에 target/None/asset_id 포함.
+        # 마지막 execute 는 조건부 UPDATE — 파라미터에 target/None/asset_id + 기대 현재상태(WHERE 가드).
+        # 009: 원자성 위해 WHERE status=<기대 현재상태> 추가 → 파라미터 끝에 current('received').
         update_calls = [c for c in cur.execute.call_args_list if "UPDATE asset" in c.args[0]]
         self.assertEqual(len(update_calls), 1)
-        self.assertEqual(update_calls[0].args[1], ("routing", None, 7))
+        self.assertEqual(update_calls[0].args[1], ("routing", None, 7, "received"))
 
     def test_set_status_invalid_raises_before_update(self) -> None:
         conn, cur = _conn_with_status("registered")
@@ -105,7 +106,8 @@ class TestDbHelpers(unittest.TestCase):
         mark_failed(conn, 9, "지원하지 않는 modality")
         update_calls = [c for c in cur.execute.call_args_list if "UPDATE asset" in c.args[0]]
         self.assertEqual(len(update_calls), 1)
-        self.assertEqual(update_calls[0].args[1], ("failed", "지원하지 않는 modality", 9))
+        # 009: 조건부 UPDATE — 파라미터 끝에 기대 현재상태('extracting') WHERE 가드 추가.
+        self.assertEqual(update_calls[0].args[1], ("failed", "지원하지 않는 modality", 9, "extracting"))
 
     def test_mark_failed_from_terminal_raises(self) -> None:
         conn, _ = _conn_with_status("registered")

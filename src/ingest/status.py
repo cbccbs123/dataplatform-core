@@ -69,6 +69,16 @@ class InvalidTransitionError(RuntimeError):
     """허용되지 않은 상태 전이."""
 
 
+class ConcurrentTransitionError(InvalidTransitionError):
+    """동시 전이 충돌 — 조건부 UPDATE 가 0행을 갱신(다른 워커가 먼저 상태를 바꿈, lost update 거부).
+
+    ``InvalidTransitionError`` 를 상속한다(의도적): run_ingest 의 fresh 트랜잭션
+    실패-기록 격리부가 이미 ``except InvalidTransitionError`` 로 종료 상태 전이를 흡수하므로,
+    충돌도 같은 경로로 자연 흡수되어 배치가 멈추지 않는다(헌법 8조 — 호출부 시그니처 무변경).
+    단일 워커 순차 경로에서는 발생하지 않으므로 회귀 0.
+    """
+
+
 def validate_transition(current: AssetStatus | str, target: AssetStatus | str) -> None:
     """``current → target`` 이 허용 전이가 아니면 ``InvalidTransitionError``."""
     cur = AssetStatus(current)
@@ -94,18 +104,35 @@ def set_status(
     *,
     reason: str | None = None,
 ) -> None:
-    """현재 상태를 읽어 전이를 검증한 뒤 ``asset.status`` 를 갱신한다.
+    """현재 상태를 읽어 전이를 검증한 뒤 ``asset.status`` 를 **조건부**로 갱신한다.
 
     ``reason`` 은 ``status_reason`` 에 기록(정상 전이 시 None → 이전 사유 클리어).
+
+    동시성(원자성): UPDATE 에 ``WHERE asset_id=%s AND status=<기대 현재상태>`` 가드를 둔다.
+    두 워커가 같은 현재 상태를 읽어 둘 다 검증을 통과해도, DB 가 한쪽만 적용하고
+    나머지는 0행이 된다(lost update 거부). 0행이면 그사이 다른 워커가 바꾼 실제 상태를
+    재조회해 ``ConcurrentTransitionError`` 로 알린다. 단일 워커 순차 경로에서는 항상
+    1행이라 충돌이 나지 않고 결과·검증 순서·status_reason 이 기존과 100% 동일하다(회귀 0).
     """
     tgt = AssetStatus(target)
     current = fetch_status(conn, asset_id)
     validate_transition(current, tgt)
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE asset SET status = %s, status_reason = %s, updated_at = now() WHERE asset_id = %s",
-            (tgt.value, reason, asset_id),
+            "UPDATE asset SET status = %s, status_reason = %s, updated_at = now() "
+            "WHERE asset_id = %s AND status = %s",
+            (tgt.value, reason, asset_id, current.value),
         )
+        if cur.rowcount == 0:
+            # 조건부 UPDATE 0행 = 그사이 다른 워커가 기대 현재상태를 바꿈(또는 행 소멸).
+            # 실제 상태를 재조회해 진단 메시지에 담는다(없으면 unknown).
+            cur.execute("SELECT status FROM asset WHERE asset_id = %s", (asset_id,))
+            row = cur.fetchone()
+            observed = row[0] if row is not None else "unknown"
+            raise ConcurrentTransitionError(
+                f"동시 전이 충돌: asset_id={asset_id} 가 {current.value}→{tgt.value} 를 기대했으나 "
+                f"현재 상태는 {observed} 입니다(다른 워커가 먼저 전이)."
+            )
 
 
 def mark_failed(conn: Connection[Any], asset_id: uuid.UUID, reason: str) -> None:
