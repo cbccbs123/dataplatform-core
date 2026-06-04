@@ -82,10 +82,12 @@ def proximity_rank(
 
     raw(확장자만 제거)가 같으면 같은 파일명(확장자만 다른 변종)으로 보고 최고 근접도(2).
     raw 는 다르지만 접미사 제거 후 정규화 stem 이 같으면 파생/연작으로 보고 근접도 1.
+    소스 stem 이 비면(예 ``_v1.txt`` 처럼 접미사만 있는 파일) 의미 있는 매칭이 아니므로 제외한다 —
+    빈 stem 끼리 ''로 일치하는 오탐(서로 무관한 접미사-only 파일)을 막는다.
     """
-    if cand_raw == src_raw:
+    if src_raw and cand_raw == src_raw:
         return 2
-    if cand_norm == src_norm:
+    if src_norm and cand_norm == src_norm:
         return 1
     return None
 

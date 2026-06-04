@@ -287,6 +287,30 @@ class TestUnionCandidates(unittest.TestCase):
         self.assertEqual(out[0]["file_uri"], "/d/a")
 
 
+class TestEmptyStemGuard(unittest.TestCase):
+    """접미사-only 파일(정규화 stem='')끼리의 오탐 매칭 방지(리뷰 권고)."""
+
+    def test_suffix_only_normalizes_to_empty(self) -> None:
+        self.assertEqual(normalize_stem("_v1.txt"), "")
+        self.assertEqual(normalize_stem("_요약.txt"), "")
+
+    def test_empty_norm_does_not_match(self) -> None:
+        # src/cand 정규화 stem 이 둘 다 '' 인 무관한 파일 → 근접도 매칭 금지(None).
+        self.assertIsNone(
+            proximity_rank(src_raw="_v1", src_norm="", cand_raw="_요약", cand_norm="")
+        )
+
+    def test_nonempty_norm_still_matches(self) -> None:
+        # 정상 회귀: manual_v1 ~ manual_v2 (정규화 stem 'manual') 는 여전히 근접도 1.
+        self.assertEqual(
+            proximity_rank(
+                src_raw="manual_v1", src_norm="manual",
+                cand_raw="manual_v2", cand_norm="manual",
+            ),
+            1,
+        )
+
+
 # ── T019 [SC-007] 실 DB e2e 스모크 — RUN_DB_E2E=1 일 때만 ──────────────────────
 # LLM 불요·결정적: find_path_signal_candidates 의 실 PostgreSQL 동작(동일 폴더·stem 매칭·
 # 하위 폴더 제외)을 /kpi_path_signal/ 마커 자산으로 검증한다. 기존 데이터 무영향(마커만 생성·삭제).

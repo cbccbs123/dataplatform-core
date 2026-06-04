@@ -18,7 +18,7 @@ C+ 변경사항 (dedup 블록·정규화 topic 필드 제거)
 from __future__ import annotations
 
 import json
-import os
+import posixpath
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -106,7 +106,7 @@ def build_relation_proposal_prompt(
     for c in candidates:
         # FR-008(SC-006): 디렉터리 풀경로를 LLM 입력으로 노출하지 않는다(결정성·PHI 누출 방지,
         # 헌법 3조·10조). 후보 식별엔 파일명만 충분하므로 basename 만 ``filename`` 으로 내보낸다.
-        filename = os.path.basename(str(c["file_uri"] or ""))
+        filename = posixpath.basename(str(c["file_uri"] or ""))
         emb_score = round(c["emb_score"], 6)
         # C-3: emb_score=0.0 인 후보는 경로 신호(파일명·폴더 매칭)로 추가된 것 — LLM 이 0.0 을
         # "비유사"로 오해하지 않게 ``signal`` 표식을 붙인다(가이드 문구와 호응).
