@@ -72,6 +72,8 @@ def search_hybrid(
     ``min_scores`` 는 모달리티 라벨→적합도 하한(0.0=비활성); 각 버킷에서 ``similarity`` 가
     임계값 미만인 행을 응답에서 제외한다(미지정 모달리티는 필터하지 않음).
     ``fusion`` 은 ST 하이브리드 융합 방식(기본 ``alpha``=기존 동작; ``rrf``=순위 융합 프로토타입).
+    ⚠️ 한계: ``rrf`` 는 현재 grouped 출력에 반영되지 않는다 — 버킷 cap 이 ``similarity`` 로
+    재정렬하므로 RRF 순서는 ``_run_hybrid_search`` 레벨에서만 효과(KPI 측정용). 설계 §8 후속.
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]

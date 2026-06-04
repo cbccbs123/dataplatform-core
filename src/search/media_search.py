@@ -669,6 +669,13 @@ def search_media_all_grouped(
     ``fusion`` 은 ST 하이브리드 경로의 emb·bm25 융합 방식이다(기본 ``alpha``=동작 불변).
     ``rrf`` 는 ST 하이브리드(텍스트/오디오/영상 텍스트) 후보 재정렬에만 적용하고, 시각 2단계
     (이미지·영상)는 별도 가중합 경로라 영향받지 않는다(프로토타입 스코프, 설계 §5).
+
+    ⚠️ **현재 한계(프로토타입)**: 아래 각 버킷은 ``_sort_by_similarity_cap`` 으로 ``similarity``
+    (alpha 가중합) 기준 재정렬되므로, ``fusion="rrf"`` 가 ``_run_hybrid_search`` 에서 만든 RRF
+    순서는 **이 grouped 출력에는 보존되지 않는다**(RRF 효과는 ``_run_hybrid_search`` 레벨에서만
+    관측 — KPI 하니스 `tests/test_rrf_vs_alpha_kpi.py` 가 그 경로를 직접 쓴다). grouped/공개 API
+    까지 RRF 를 반영하려면 버킷 cap 을 fusion-aware 로 바꾸고 video(시각 병합) 순서를 정의해야
+    한다 — 설계 §8 후속. 그 전까지 ``search_hybrid(fusion="rrf")`` 의 grouped 결과는 alpha 와 동일.
     """
     if structured is None:
         structured = structure_user_query(query)
