@@ -1,6 +1,10 @@
 """T3-1 관계 후보 검색 단위 테스트 (asset_candidates). DB·LLM 불필요.
 
 엣지 영속화는 단계 C에서 graph_edge 로 이관됨(graph_persist) — tests/test_graph_persist.py 참조.
+
+[008 그룹3] run_relations 의 cross_asset 슬롯 resolve 전환(T009~T012) 단위 테스트를 함께 둔다 —
+일반 팩 슬롯 경유 결과가 기존 propose_relations_for_asset 위임과 **동치**(FR-001·SC-001),
+미배선 cross_asset 전략 가드(FR-002), 도메인 폴백(FR-003) 검증. DB·LLM 불필요(seam 주입).
 """
 from __future__ import annotations
 
@@ -117,6 +121,160 @@ class TestDeterministicOrdering(unittest.TestCase):
         norm = " ".join(cur.execute.call_args.args[0].split())
         order_clause = norm[norm.index("ORDER BY"):]
         self.assertLess(order_clause.index("best_sim"), order_clause.index("p.id"))
+
+
+# ── [008 그룹3] T009~T012: run_relations cross_asset 슬롯 resolve 전환 ──────────
+from src.pipeline.packs import GENERAL_PACK, MEDICAL_PACK, for_domain  # noqa: E402
+from src.pipeline.registry import StrategyRegistry  # noqa: E402
+
+
+class TestResolveCrossAssetSlots(unittest.TestCase):
+    """T009·T010 [US1, FR-001·FR-002] — 팩의 cross_asset 슬롯을 레지스트리에서 resolve.
+
+    슬롯 resolve 는 "의료 ER(단계 D)이 코드 분기 없이 끼워질 자리 만들기"이며, 일반 팩의
+    슬롯이 모두 등록돼 있는지(미배선 가드)를 진입부에서 검증하는 chokepoint 다.
+    """
+
+    def _registry_with_defaults(self) -> StrategyRegistry:
+        from src.pipeline.builtins import register_defaults
+        reg = StrategyRegistry()
+        register_defaults(reg)
+        return reg
+
+    def test_general_pack_slots_all_resolvable(self) -> None:
+        # 일반 팩의 cross_asset 슬롯(candidates/score/persist_edges)이 전부 등록돼 있어야 한다.
+        from src.app.run_relations import _resolve_cross_asset_slots
+        reg = self._registry_with_defaults()
+        resolved = _resolve_cross_asset_slots(GENERAL_PACK, registry=reg)
+        # candidates/score/persist_edges 는 Callable 로 resolve 된다.
+        for slot in ("candidates", "score", "persist_edges"):
+            self.assertTrue(callable(resolved[slot]), f"슬롯 {slot} 미해결")
+
+    def test_unwired_strategy_raises_notimplemented(self) -> None:
+        # 미등록 cross_asset 전략(의료 단계 D 전 상태)을 가리키는 팩은 명시적 오류로 차단(FR-002).
+        from src.app.run_relations import _resolve_cross_asset_slots
+        from src.pipeline.packs import DomainPack
+        reg = self._registry_with_defaults()
+        unwired = DomainPack(
+            name="medical",
+            per_asset=dict(MEDICAL_PACK.per_asset),
+            cross_asset={  # candidates 가 미등록 전략을 가리킴
+                "candidates": "blocking_5keys",
+                "score": "llm_propose",
+                "decide": "confidence",
+                "persist_edges": "graph_upsert",
+            },
+            policy="medical_strict",
+        )
+        with self.assertRaises(NotImplementedError):
+            _resolve_cross_asset_slots(unwired, registry=reg)
+
+
+class _FakeDB:
+    """run_relations 가 _fetch_domain_label 로 호출하는 db.execute_in_transaction 만 흉내낸다.
+
+    실제 트랜잭션 대신, domain_label 조회용 콜백에 자산별 라벨을 돌려주는 가짜 커서를 주입한다.
+    """
+
+    def __init__(self, labels: dict[str, str]) -> None:
+        self._labels = labels
+        self._current: str | None = None
+
+    def execute_in_transaction(self, fn, *, idempotent: bool = True):
+        # _fetch_domain_label 의 _run(conn) 만 사용 — domain_label SELECT 1행을 반환하는 conn mock.
+        conn = mock.MagicMock()
+        cur = conn.cursor.return_value.__enter__.return_value
+
+        def _execute(sql, params):
+            aid = params[0]
+            label = self._labels.get(aid)
+            cur.fetchone.return_value = (label,) if label is not None else None
+
+        cur.execute.side_effect = _execute
+        return fn(conn)
+
+
+class TestRunRelationsSlotRouting(unittest.TestCase):
+    """T009·T010·T011 [US1] — run_relations 가 도메인 팩 슬롯 resolve 로 라우팅하되,
+    일반 경로는 기존 propose_relations_for_asset 위임과 **동치**(FR-001)."""
+
+    _A_GEN = "018f0000-0000-7000-8000-000000000011"
+    _A_MED = "018f0000-0000-7000-8000-000000000012"
+    _A_REVIEW = "018f0000-0000-7000-8000-000000000013"
+
+    def test_general_delegates_to_propose_with_same_args(self) -> None:
+        # FR-001/SC-001: 일반 자산은 기존 propose_relations_for_asset 에 동일 인자로 위임되어
+        # 결과(엣지 수치)가 슬롯 미경유 기존 경로와 동일해야 한다.
+        from src.app import run_relations as rr
+        db = _FakeDB({self._A_GEN: "general"})
+        with mock.patch.object(
+            rr, "propose_relations_for_asset", return_value=(1, 2, 3, 4)
+        ) as m:
+            result = rr.run_relations(
+                [self._A_GEN], db=db, top_k=7, embedding_kind="st"
+            )
+        m.assert_called_once_with(db, self._A_GEN, top_k=7, embedding_kind="st")
+        # done 에 (asset_id, edges_upserted, edges_skipped) = (aid, 3, 4) 가 그대로 실려야 한다.
+        self.assertEqual(result["done"], [(self._A_GEN, 3, 4)])
+        self.assertEqual(result["failed"], [])
+
+    def test_review_label_falls_back_to_general(self) -> None:
+        # FR-003: review/미지정 라벨은 일반 팩으로 보수적 폴백 → propose 위임 경로를 탄다.
+        from src.app import run_relations as rr
+        db = _FakeDB({self._A_REVIEW: "review"})
+        with mock.patch.object(
+            rr, "propose_relations_for_asset", return_value=(0, 0, 0, 0)
+        ) as m:
+            result = rr.run_relations([self._A_REVIEW], db=db)
+        m.assert_called_once()
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(len(result["done"]), 1)
+
+    def test_unspecified_label_falls_back_to_general(self) -> None:
+        # FR-003: domain_label NULL/자산 미존재 → 'general' 폴백.
+        from src.app import run_relations as rr
+        db = _FakeDB({})  # 라벨 없음 → fetchone None → 'general'
+        with mock.patch.object(
+            rr, "propose_relations_for_asset", return_value=(0, 0, 1, 0)
+        ) as m:
+            result = rr.run_relations([self._A_GEN], db=db)
+        m.assert_called_once()
+        self.assertEqual(result["done"], [(self._A_GEN, 1, 0)])
+
+    def test_unwired_medical_isolated_as_failed_batch_continues(self) -> None:
+        # FR-002: 의료 cross_asset 전략 미배선이면 그 자산만 failed 격리, 일반 자산은 계속 처리.
+        from src.app import run_relations as rr
+        db = _FakeDB({self._A_MED: "medical", self._A_GEN: "general"})
+
+        # 의료 팩이 미등록 전략을 가리키도록 for_domain 을 패치(단계 D 전 미배선 시뮬레이션).
+        from src.pipeline.packs import DomainPack
+        unwired_medical = DomainPack(
+            name="medical",
+            per_asset=dict(MEDICAL_PACK.per_asset),
+            cross_asset={
+                "candidates": "blocking_5keys",  # 미등록
+                "score": "llm_propose",
+                "decide": "confidence",
+                "persist_edges": "graph_upsert",
+            },
+            policy="medical_strict",
+        )
+
+        def _for_domain(label: str) -> DomainPack:
+            return unwired_medical if label == "medical" else GENERAL_PACK
+
+        with mock.patch.object(rr, "for_domain", side_effect=_for_domain), \
+             mock.patch.object(
+                 rr, "propose_relations_for_asset", return_value=(0, 0, 5, 1)
+             ) as m:
+            result = rr.run_relations([self._A_MED, self._A_GEN], db=db)
+
+        # 의료는 failed 로 격리, 일반은 done. 배치는 중단되지 않는다.
+        failed_ids = [aid for aid, _ in result["failed"]]
+        self.assertIn(self._A_MED, failed_ids)
+        self.assertEqual(result["done"], [(self._A_GEN, 5, 1)])
+        # 일반 자산에 대해서만 propose 위임이 일어난다(의료는 resolve 단계에서 차단).
+        m.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="both")
 
 
 if __name__ == "__main__":

@@ -11,16 +11,28 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from psycopg import Connection
 
 from src.database.postgres_util import PostgresUtil
-from src.pipeline.packs import GENERAL_PACK, for_domain
+
+# builtins import 부수효과로 DEFAULT_REGISTRY 에 cross_asset 전략이 등록된다(register_defaults).
+# 슬롯 resolve(_resolve_cross_asset_slots)가 빈 레지스트리를 만나지 않도록 진입부에서 강제 로드.
+# run_ingest 와 동일 관용(별칭 _builtins) — 부수효과 import 라 직접 참조하지 않는다.
+from src.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
+from src.pipeline.packs import GENERAL_PACK, DomainPack, for_domain
+from src.pipeline.registry import DEFAULT_REGISTRY, StrategyRegistry
 from src.relations.asset_candidates import EmbeddingKindFilter
 from src.relations.asset_entry import propose_relations_for_asset
 
 _LOG = logging.getLogger("meta_extract.run_relations")
+
+# cross_asset 슬롯 중 레지스트리에서 Callable 로 resolve 되는 슬롯.
+# 'decide'(confidence)는 propose_relations_for_asset 내부 auto_approve 임계로 처리되어
+# 별도 Callable 이 등록돼 있지 않으므로 resolve 대상에서 제외한다(packs.py·builtins.py 주석 참조).
+_RESOLVED_CROSS_SLOTS: tuple[str, ...] = ("candidates", "score", "persist_edges")
 
 
 def _fetch_domain_label(db: PostgresUtil, asset_id: str) -> str:
@@ -62,6 +74,42 @@ def _fetch_registered_asset_ids(db: PostgresUtil) -> list[str]:
     return db.execute_in_transaction(_run, idempotent=True)
 
 
+def _resolve_cross_asset_slots(
+    pack: DomainPack, *, registry: StrategyRegistry = DEFAULT_REGISTRY
+) -> dict[str, Callable[..., Any]]:
+    """팩의 cross_asset 슬롯명을 레지스트리에서 Callable 로 resolve(미배선 가드, FR-002).
+
+    **목적(헌법 4조)**: 도메인 차이를 코드 if/else 가 아니라 "팩이 고른 전략 이름"으로 표현한다.
+    여기서 슬롯명을 registry.resolve 로 검증함으로써, 의료 ER(단계 D)이 전용 cross_asset
+    전략(예: blocking_5keys)을 **레지스트리에 등록만 하면** core 파이프라인 수정 없이 갈리는
+    자리를 만든다. 등록 전 상태(미배선)면 KeyError → NotImplementedError 로 승격해 자산 단위
+    격리(run_relations 의 except)로 흘려보낸다 — 배치는 중단되지 않는다.
+
+    'decide'(confidence)는 propose_relations_for_asset 내부 auto_approve 임계로 처리되어 별도
+    Callable 등록이 없으므로 resolve 대상(_RESOLVED_CROSS_SLOTS)에서 제외한다.
+
+    Returns:
+        슬롯 이름 → resolve 된 Callable. (검증 통과 시에만 반환)
+    Raises:
+        NotImplementedError: 슬롯이 가리키는 전략이 레지스트리에 미등록(단계 D 전 의료 등).
+    """
+    resolved: dict[str, Callable[..., Any]] = {}
+    for slot in _RESOLVED_CROSS_SLOTS:
+        name = pack.cross_asset.get(slot)
+        if name is None:
+            raise NotImplementedError(
+                f"cross_asset 슬롯 '{slot}' 미정의(도메인 {pack.name})"
+            )
+        try:
+            resolved[slot] = registry.resolve(slot, name)
+        except KeyError as e:
+            # 미등록 전략 — 의료 cross_asset 전략이 단계 D 전이라 배선되지 않은 경우 등.
+            raise NotImplementedError(
+                f"cross_asset 전략 미구현(도메인 {pack.name}): {slot}={name}"
+            ) from e
+    return resolved
+
+
 def run_relations(
     asset_ids: list[str],
     *,
@@ -73,22 +121,33 @@ def run_relations(
 
     반환값 구조: {"done": [(aid, edges_upserted, edges_kept), ...], "failed": [(aid, msg), ...]}.
     배치 전체 성공 여부는 ``failed`` 리스트가 비어있는지로 판별한다(main 의 종료코드 참조).
+
+    **cross_asset 슬롯 resolve(FR-001~003)**: 자산 domain_label → for_domain 으로 팩을 고르고,
+    팩의 cross_asset 슬롯을 _resolve_cross_asset_slots 로 레지스트리에서 resolve 한다(미배선 가드).
+    일반 팩(슬롯이 GENERAL_PACK.cross_asset 과 동일)은 결과 동치(회귀 0, FR-001/SC-001)를
+    구조적으로 보장하기 위해 기존 propose_relations_for_asset 로 위임한다 — 슬롯 전환의 목적은
+    "의료 전용 전략이 끼워질 자리 만들기"이지 일반 동작을 바꾸는 것이 아니다.
     """
     result: dict[str, list[Any]] = {"done": [], "failed": []}
     for aid in asset_ids:
         try:
             domain = _fetch_domain_label(db, aid)
-            pack = for_domain(domain)
-            # 일반 묶음(_GENERAL_CROSS)을 가리키는 팩은 propose_relations_for_asset 로 위임한다.
-            # 의료도 현재 동일 묶음이라 위임됨(stopgap: 의료 자산은 일반 추출/임베딩 경로 사용).
-            # **내용 비교가 의도**다 — 단계 D 에서 의료가 전용 cross_asset 묶음을 갖게 되면 이 비교가
-            # 트립되어 슬롯별 전략 배선을 강제한다(미배선 방지 forward 가드). 팩 이름 비교로 바꾸면
-            # 일반 묶음을 쓰는 다른 도메인까지 잘못 막으므로 안 된다.
-            if pack.cross_asset != GENERAL_PACK.cross_asset:
-                raise NotImplementedError(f"cross_asset 전략 미구현(도메인 {pack.name})")
-            cat_s, cat_k, edges_u, edges_k = propose_relations_for_asset(
-                db, aid, top_k=top_k, embedding_kind=embedding_kind
-            )
+            pack = for_domain(domain)  # 미지정/review → GENERAL_PACK 폴백(FR-003)
+            # 슬롯 resolve(FR-002): 미배선 전략은 NotImplementedError → 아래 except 에서 failed 격리.
+            # 일반 팩은 전부 등록돼 있어 통과하고, 의료가 전용 전략을 등록(단계 D)하면 그 전략으로 갈린다.
+            _resolve_cross_asset_slots(pack)
+            if pack.cross_asset == GENERAL_PACK.cross_asset:
+                # 일반 cross_asset 묶음 — 기존 경로에 위임해 결과를 100% 동치로 유지(FR-001, 헌법 8조).
+                # 슬롯별 전략을 잘게 호출하는 대신 검증된 propose_relations_for_asset 를 재사용한다.
+                cat_s, cat_k, edges_u, edges_k = propose_relations_for_asset(
+                    db, aid, top_k=top_k, embedding_kind=embedding_kind
+                )
+            else:
+                # 일반 묶음이 아닌 전용 cross_asset 전략(단계 D 의료 등): 슬롯이 모두 등록돼 있어도
+                # 묶음 실행 어댑터가 아직 없으므로 명시적 미구현으로 격리한다(자리만 확보된 상태).
+                raise NotImplementedError(
+                    f"전용 cross_asset 묶음 실행 미구현(도메인 {pack.name}) — 단계 D"
+                )
             result["done"].append((aid, edges_u, edges_k))
             _LOG.info(
                 "relations %s: kinds=%s/%s edges=%s/%s", aid, cat_s, cat_k, edges_u, edges_k
@@ -100,9 +159,10 @@ def run_relations(
 
 
 # ── 초기 설정(부트스트랩) 절차 ────────────────────────────────────────────────
-# [import 시점] 이 진입점은 전략 레지스트리·도메인 프로파일을 로드하지 않는다
-#   (builtins/cascade import 없음). 관계 제안은 propose_relations_for_asset 로 묶음 위임하며
-#   registry.resolve 를 쓰지 않는다(단계 D 의료 분기에서 팩별 slot resolve 로 전환 예정).
+# [import 시점] 이 진입점은 src.pipeline.builtins 를 import 해 DEFAULT_REGISTRY 에 cross_asset
+#   전략(candidates/score/persist_edges)을 등록한다(register_defaults 부수효과). run_relations 가
+#   팩의 cross_asset 슬롯을 registry.resolve 로 검증(미배선 가드)하기 때문이다. 일반 팩은 검증 통과
+#   후 propose_relations_for_asset 로 위임해 결과를 기존과 동치로 유지한다(FR-001).
 # [런타임·main() 안·순서 중요]:
 #   1) load_dotenv(.env.{env}, override=False)  2) init_settings(env): 필수 환경변수 검증+frozen 설정
 #   3) PostgresUtil() + `with db:`: 연결 풀+PG17 검증.  온프레미스 LLM 클라이언트는 propose 내부 첫 호출 시 지연 생성.
