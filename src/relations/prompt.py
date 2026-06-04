@@ -18,8 +18,28 @@ C+ 변경사항 (dedup 블록·정규화 topic 필드 제거)
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+# 경로 패턴 가이드(레버 A, FR-009): 파일명·폴더 신호가 same_series/derived_from/references
+# 후보를 보강하지만(US2 path_signal), 그건 **보조 신호**일 뿐이다. 내용이 실제로 합치할 때만
+# 그 종류를 고르도록 LLM 을 유도한다(오탐 방지). emb_score=0.0 인 경로 신호 후보를
+# "비유사"로 오해하지 않게 "경로 신호" 표식을 함께 둔다(C-3).
+_PATH_SIGNAL_GUIDE_KO = """### 파일명·폴더 경로 신호 가이드 (보조)
+후보에는 **임베딩 유사도(embedding_similarity)** 외에 **파일명·폴더 신호**가 함께 올 수 있다.
+``signal`` 이 ``경로 신호`` 인 후보는 동일 폴더이거나 파일명 stem 이 일치/근접해서 추가된 것으로,
+``embedding_similarity`` 가 0.0 이어도 **비유사가 아니라** 임베딩 점수가 없을 뿐이다(파일명·폴더로 매칭).
+
+흔한 경로 패턴(파일명·폴더):
+- **연작(same_series):** ``강의_1부`` / ``강의_2부``, ``manual_v1`` / ``manual_v2`` 처럼 같은 stem + 순번/버전.
+- **파생(derived_from):** ``report`` → ``report_summary``(요약), ``원문`` → ``번역`` / ``전사`` 처럼 한쪽이 다른쪽에서 생성됨.
+- **참조(references):** 제목·파일명이 다른 자산을 명시적으로 가리킬 때.
+
+**가드(중요):** 파일명·폴더 신호는 **보조이며**, 후보 요약·내용이 실제로 합치할 때만
+``same_series`` / ``derived_from`` / ``references`` 를 고른다. 파일명만 비슷하고 내용이 무관하면
+그 종류를 고르지 말 것(오탐 방지). 내용 근거가 없으면 엣지를 만들지 않아도 된다.
+"""
 
 # relation_type_code(= kind_code) 선택 힌트: DB에 없을 때 프롬프트에 보조 설명으로 쓴다.
 RELATION_KIND_HINTS_KO: dict[str, str] = {
@@ -84,14 +104,22 @@ def build_relation_proposal_prompt(
     """
     cand_lines: list[str] = []
     for c in candidates:
+        # FR-008(SC-006): 디렉터리 풀경로를 LLM 입력으로 노출하지 않는다(결정성·PHI 누출 방지,
+        # 헌법 3조·10조). 후보 식별엔 파일명만 충분하므로 basename 만 ``filename`` 으로 내보낸다.
+        filename = os.path.basename(str(c["file_uri"] or ""))
+        emb_score = round(c["emb_score"], 6)
+        # C-3: emb_score=0.0 인 후보는 경로 신호(파일명·폴더 매칭)로 추가된 것 — LLM 이 0.0 을
+        # "비유사"로 오해하지 않게 ``signal`` 표식을 붙인다(가이드 문구와 호응).
+        signal = "경로 신호" if emb_score == 0.0 else "임베딩"
         cand_lines.append(
             json.dumps(
                 {
                     "target_media_item_id": c["id"],
-                    "file_uri": c["file_uri"],
+                    "filename": filename,
                     "media_type": c["media_type"],
                     "summary": (c["summary"] or "")[:500],
-                    "embedding_similarity": round(c["emb_score"], 6),
+                    "embedding_similarity": emb_score,
+                    "signal": signal,
                 },
                 ensure_ascii=False,
             )
@@ -149,8 +177,10 @@ def build_relation_proposal_prompt(
 소스 요약: {source_summary[:1200]}
 소스 매체 타입: {source_media_type}
 
-후보 목록(embedding_similarity 는 1에 가까울수록 유사):
+후보 목록(embedding_similarity 는 1에 가까울수록 유사. ``signal`` 이 ``경로 신호`` 면 파일명·폴더로 추가된 후보):
 {candidates_block}
+
+{_PATH_SIGNAL_GUIDE_KO}
 
 출력 형식 예:
 {{"edges":[

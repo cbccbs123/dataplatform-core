@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from src.relations.prompt import build_relation_proposal_prompt
 from src.relations.resolve_relation_type import resolve_relation_type_code
 from src.relations.schema import (
     coerce_topic_fields_mvp,
@@ -224,6 +225,73 @@ class TestResolveRelationType(unittest.TestCase):
 class TestStructuralCodes(unittest.TestCase):
     def test_expected_structural(self) -> None:
         self.assertIn("duplicate_near", STRUCTURAL_TYPE_CODES)
+
+
+# ── [008 그룹4] T013·T014·T015: 경로 패턴 힌트 프롬프트(레버 A) ─────────────
+class TestRelationProposalPromptPathSignals(unittest.TestCase):
+    """T013·T014 [US3, FR-008·FR-009, SC-006] — 프롬프트 빌더의 경로 신호 노출·가드.
+
+    - T013(FR-008): 후보 JSON 에 디렉터리 풀경로를 노출하지 않고 **basename 만** 노출(헌법 3조·10조).
+    - T014(FR-009): 파일명·폴더 패턴 가이드 + "내용 합치 시에만" 가드 문구. C-3: 경로 신호
+      후보(emb_score=0.0)를 LLM 이 '비유사'로 오해하지 않게 "경로 신호" 표식/문구를 둔다.
+    """
+
+    _ABS_DIR = "/data/secret_patient_folder/2025"
+    _BASENAME = "report_summary.txt"
+    _FULL = f"{_ABS_DIR}/{_BASENAME}"
+
+    def _build(self, *, emb_score: float = 0.0) -> str:
+        return build_relation_proposal_prompt(
+            source_summary="소스 요약",
+            source_media_type="txt",
+            candidates=[
+                {
+                    "id": "018f0000-0000-7000-8000-000000000007",
+                    "file_uri": self._FULL,
+                    "media_type": "txt",
+                    "emb_score": emb_score,
+                    "summary": "후보 요약",
+                }
+            ],
+            relation_kinds_catalog=[
+                {"type_code": "same_series", "type_name": "연작", "description": "연작"},
+                {"type_code": "derived_from", "type_name": "파생", "description": "파생"},
+                {"type_code": "references", "type_name": "참조", "description": "참조"},
+            ],
+        )
+
+    def test_basename_present(self) -> None:
+        # FR-008/SC-006: 후보의 basename 은 프롬프트에 포함돼 LLM 이 파일명 패턴을 본다.
+        prompt = self._build()
+        self.assertIn(self._BASENAME, prompt)
+
+    def test_directory_fullpath_absent(self) -> None:
+        # FR-008/SC-006: 디렉터리 풀경로(절대경로)는 단 한 건도 노출되지 않는다(PHI·결정성).
+        prompt = self._build()
+        self.assertNotIn(self._ABS_DIR, prompt)
+        self.assertNotIn(self._FULL, prompt)
+        # 'file_uri' 키 자체로 풀경로를 내보내지 않는다(basename 전용 키로 치환).
+        self.assertNotIn(self._ABS_DIR, prompt)
+
+    def test_guard_phrase_present(self) -> None:
+        # FR-009: "내용이 합치할 때만 same_series/derived_from/references 를 고르라" 가드 문구.
+        prompt = self._build()
+        self.assertIn("내용", prompt)
+        self.assertIn("same_series", prompt)
+        self.assertIn("derived_from", prompt)
+        self.assertIn("references", prompt)
+
+    def test_path_pattern_hints_present(self) -> None:
+        # FR-009: 1부/2부 연작·요약/번역/전사 파생·참조 패턴 힌트가 가이드에 포함.
+        prompt = self._build()
+        self.assertIn("파일명", prompt)
+        self.assertIn("폴더", prompt)
+
+    def test_path_signal_marker_for_zero_emb_score(self) -> None:
+        # C-3: emb_score=0.0 인 경로 신호 후보를 LLM 이 '비유사'로 오해하지 않게
+        # "경로 신호" 표식 문구가 프롬프트에 포함된다.
+        prompt = self._build(emb_score=0.0)
+        self.assertIn("경로 신호", prompt)
 
 
 if __name__ == "__main__":

@@ -277,5 +277,121 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
         m.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="both")
 
 
+# ── [008 그룹5] T017: cross-asset end-to-end 후보 흐름 통합 가드 ─────────────
+class _SingleConnDB:
+    """propose_relations_for_asset 의 execute_in_transaction(_run, ...) 만 흉내내는 가짜 DB.
+
+    실 DB·트랜잭션 없이 _run(conn) 을 그대로 실행해, 그 안의 seam(후보 조회·LLM·엣지 upsert)을
+    mock 으로 가로채 union→candidate_ids 흐름을 순수 단위로 검증하기 위한 최소 더블.
+    """
+
+    def execute_in_transaction(self, fn, *, idempotent: bool = True):
+        return fn(mock.MagicMock())
+
+
+# get_current_settings 가 요구하는 env 17개 없이도 순수 단위로 돌리기 위한 최소 cfg 더블.
+# propose_relations_for_asset 이 읽는 4개 설정만 채운다(나머지는 본 경로에서 미사용).
+import types  # noqa: E402
+
+_FAKE_CFG = types.SimpleNamespace(
+    relation_top_k=10,
+    relation_min_sim=0.2,
+    relation_path_top_k=10,
+    relation_auto_approve_min=0.75,
+)
+
+
+class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
+    """T017 [US4, FR-011, SC-007, #10] — cross-asset 경로 **통합** 관점 회귀 가드.
+
+    기존 단위 테스트와 **중복되지 않는** end-to-end seam 흐름만 본다:
+      - TestUnionCandidates(test_path_signal.py): union_candidates 순수 함수 자체 → 본 테스트는
+        그 union 결과가 **propose_relations_for_asset 안에서 sync_graph_edges 의 allowed_target_ids
+        (=candidate_ids)로 실제로 흐르는지**(FR-006 환각 화이트리스트 자동 확장)를 검증.
+      - TestConfidenceClamp: parse_and_normalize_edges 단위 → 중복 안 함.
+      - TestRunRelationsSlotRouting: 슬롯 라우팅·폴백 → 중복 안 함.
+    DB·LLM 불필요(execute_in_transaction·후보 seam·LLM seam 전부 주입/mock).
+    """
+
+    def test_path_candidate_id_flows_into_allowed_target_ids(self) -> None:
+        # FR-006/SC-004: min_sim 미달이라 임베딩 후보엔 없던 경로 신호 후보(_T2)가
+        # union 되어 sync_graph_edges 의 allowed_target_ids(화이트리스트)에 자동 포함돼야 한다.
+        from src.relations import asset_entry as ae
+
+        emb_rows = [
+            {"id": _T1, "file_uri": "/d/a.txt", "media_type": "txt",
+             "emb_score": 0.83, "summary": ""},
+        ]
+        path_rows = [
+            {"id": _T2, "file_uri": "/d/a_summary.txt", "media_type": "txt",
+             "emb_score": 0.0, "summary": ""},  # 경로 신호 전용(min_sim 미달 가정)
+        ]
+        captured: dict = {}
+
+        def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min):
+            captured["allowed"] = allowed_target_ids
+            return 1, 0
+
+        with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
+             mock.patch.object(ae, "_fetch_source_row",
+                               return_value={"fs_path": "/d/a.txt", "modality": "txt", "summary": ""}), \
+             mock.patch.object(ae, "find_embedding_candidates", return_value=emb_rows), \
+             mock.patch.object(ae, "find_path_signal_candidates", return_value=path_rows), \
+             mock.patch.object(ae, "fetch_active_relation_kinds", return_value=[]), \
+             mock.patch.object(ae, "register_new_relation_kinds", return_value=(0, 0)), \
+             mock.patch.object(ae, "sync_graph_edges", side_effect=_fake_sync), \
+             mock.patch.object(ae, "record_lineage", return_value=None):
+            ae.propose_relations_for_asset(
+                _SingleConnDB(), _SRC, top_k=5,
+                llm_fn=lambda _prompt: {"edges": []},
+            )
+
+        allowed = captured["allowed"]
+        # 임베딩 후보(_T1)와 경로 신호 후보(_T2)가 모두 화이트리스트에 들어가야 환각 차단을 통과.
+        self.assertIn(_T1, allowed)
+        self.assertIn(_T2, allowed)  # FR-006: 경로 신호 후보 자동 확장
+
+    def test_overlap_keeps_embedding_emb_score_in_prompt_candidates(self) -> None:
+        # C-3 회귀: 같은 asset_id 가 임베딩·경로 양쪽에 있으면 임베딩 실측 emb_score 가
+        # 프롬프트 후보로 흐른다(0.0 sentinel 로 덮어쓰지 않음). build_prompt 에 넘어간
+        # candidates 를 가로채 검증한다.
+        from src.relations import asset_entry as ae
+
+        emb_rows = [
+            {"id": _T1, "file_uri": "/d/a.txt", "media_type": "txt",
+             "emb_score": 0.77, "summary": ""},
+        ]
+        path_rows = [
+            {"id": _T1, "file_uri": "/d/a.txt", "media_type": "txt",
+             "emb_score": 0.0, "summary": ""},  # 같은 _T1 (겹침)
+        ]
+        captured: dict = {}
+
+        def _fake_prompt(*, source_summary, source_media_type, candidates, relation_kinds_catalog):
+            captured["candidates"] = list(candidates)
+            return "PROMPT"
+
+        with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
+             mock.patch.object(ae, "_fetch_source_row",
+                               return_value={"fs_path": "/d/a.txt", "modality": "txt", "summary": ""}), \
+             mock.patch.object(ae, "find_embedding_candidates", return_value=emb_rows), \
+             mock.patch.object(ae, "find_path_signal_candidates", return_value=path_rows), \
+             mock.patch.object(ae, "fetch_active_relation_kinds", return_value=[]), \
+             mock.patch.object(ae, "register_new_relation_kinds", return_value=(0, 0)), \
+             mock.patch.object(ae, "build_relation_proposal_prompt", side_effect=_fake_prompt), \
+             mock.patch.object(ae, "sync_graph_edges", return_value=(0, 0)), \
+             mock.patch.object(ae, "record_lineage", return_value=None):
+            ae.propose_relations_for_asset(
+                _SingleConnDB(), _SRC, top_k=5,
+                llm_fn=lambda _prompt: {"edges": []},
+            )
+
+        cands = captured["candidates"]
+        # 겹친 _T1 은 1건만, emb_score 는 임베딩 실측값(0.77) 유지.
+        t1 = [c for c in cands if c["id"] == _T1]
+        self.assertEqual(len(t1), 1)
+        self.assertEqual(t1[0]["emb_score"], 0.77)
+
+
 if __name__ == "__main__":
     unittest.main()
