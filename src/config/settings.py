@@ -37,9 +37,12 @@ class PipelineSettings:
     # 아래 두 필드는 이번 브랜치(relations-catalog-slim)에서 추가된 관계 제안 품질 게이트.
     relation_min_sim: float       # 후보 코사인 유사도 하한 — 이 미만은 LLM 에 넣지 않음 (기본 0.2)
     relation_auto_approve_min: float  # 이 이상이면 HITL 없이 자동 승인 (기본 0.9)
-    # 경로 신호(path_signal) 후보의 별도 한도(C-2). 임베딩 top_k 와 독립적으로 LIMIT 해
+    # 경로 신호(path_signal) 후보의 별도 한도(008, C-2). 임베딩 top_k 와 독립적으로 LIMIT 해
     # 동일 폴더 폭주를 차단한다. union 총 후보 ≤ relation_top_k + relation_path_top_k.
     relation_path_top_k: int
+    # 관계 재시도/미해소 큐(relation_resolution)의 재시도 상한(009). attempts 가 이 값에 도달하면
+    # decide_resolution_status 가 failed(DLQ)로 승격한다. run_relations --retry 가 소비 (기본 3).
+    relation_retry_max_attempts: int
     # 검색 결과 적합도 하한(모달리티별). 0.0=비활성. relations 의 relation_min_sim 과 같은 성격의 게이트.
     search_min_scores: dict[str, float]
 
@@ -136,6 +139,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         relation_min_sim=_env_float_default("RELATION_MIN_SIM", 0.2),
         relation_auto_approve_min=_env_float_default("RELATION_AUTO_APPROVE_MIN", 0.9),
         relation_path_top_k=_env_int_default("RELATION_PATH_TOP_K", 10),
+        relation_retry_max_attempts=_env_int_default("RELATION_RETRY_MAX_ATTEMPTS", 3),
         search_min_scores=resolve_search_min_scores(),
     )
 

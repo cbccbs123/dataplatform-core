@@ -62,14 +62,16 @@ class TestFinalizeAsset(unittest.TestCase):
         self.assertEqual(emb_rows, [(_FIXED, "st", 0, [0.1, 0.2], "legacy", None)])
         upd = [c for c in _executes(cur) if "UPDATE asset SET status" in c.args[0]]
         self.assertEqual(len(upd), 1)
-        self.assertEqual(upd[0].args[1], ("registered", None, _FIXED))
+        # 009: finalize_asset 이 경유하는 set_status 가 조건부 UPDATE 로 원자화 →
+        # 파라미터 끝에 기대 현재상태('extracting') WHERE 가드 추가.
+        self.assertEqual(upd[0].args[1], ("registered", None, _FIXED, "extracting"))
 
     def test_no_embeddings_skips_executemany(self) -> None:
         conn, cur = _mock_conn({"status": "extracting"})
         finalize_asset(conn, _FIXED, AssetRecord(fts_plain="x"))
         self.assertEqual(cur.executemany.call_count, 0)
         upd = [c for c in _executes(cur) if "UPDATE asset SET status" in c.args[0]]
-        self.assertEqual(upd[0].args[1], ("registered", None, _FIXED))
+        self.assertEqual(upd[0].args[1], ("registered", None, _FIXED, "extracting"))
 
 
 if __name__ == "__main__":

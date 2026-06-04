@@ -85,6 +85,19 @@ class TestRunIngest(unittest.TestCase):
         self.assertTrue(res["skipped"][0][1].startswith(ri.REASON_DUPLICATE))
         m["create_asset"].assert_not_called()
 
+    def test_deferred_duplicate_skipped_no_new_row(self) -> None:
+        # 009(#4): 이미 deferred 로 보류된 동일 해시(DICOM 재수집)는 find_registered_asset_by_hash
+        # 가 기존 asset_id 를 dup 으로 돌려준다 → skip, 새 deferred/asset 행 미생성(중복 0).
+        # run_ingest 의 skip 분기는 dup is not None 만 보므로 dedup 확장과 동일하게 동작한다.
+        res, m = self._ingest(["/d/scan.dcm"], _route(modality="unknown"),
+                              extract_fn=lambda ctx: AssetRecord(), dup=_EXISTING)
+        self.assertEqual(res["registered"], [])
+        self.assertEqual(res["deferred"], [])
+        self.assertEqual(len(res["skipped"]), 1)
+        self.assertTrue(res["skipped"][0][1].startswith(ri.REASON_DUPLICATE))
+        m["create_asset"].assert_not_called()
+        m["record_classification"].assert_not_called()
+
     def test_medical_standard_format_deferred(self) -> None:
         # DICOM 등 stage1 시그니처 → 추출 보류(deferred), 실패 아님, 추출 미호출.
         called = {"extract": False}

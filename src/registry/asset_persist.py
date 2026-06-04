@@ -28,14 +28,23 @@ from src.ingest.status import AssetStatus, set_status
 
 
 def find_registered_asset_by_hash(conn: Connection[Any], file_hash: str) -> uuid.UUID | None:
-    """동일 내용(file_hash)으로 이미 ``registered`` 된 자산의 asset_id. 없으면 None(중복 적재 방지용).
+    """동일 내용(file_hash)으로 이미 적재된 자산의 asset_id. 없으면 None(중복 적재 방지용).
 
     run_ingest 가 파일 픽업 직후 이 함수로 중복을 검사해, 기존 자산이 있으면 파이프라인을 건너뛴다.
-    ``failed``/``deferred`` 상태의 같은 해시는 중복으로 보지 않아 재처리를 허용한다.
+
+    009(#4) dedup 범위 확장: 중복 식별 대상은 ``status IN ('registered','deferred')`` 다.
+    함수명은 'registered' 지만 의미는 "이미 적재되어 보존 중인 자산"으로 넓어졌다.
+      - ``deferred`` 포함 이유: DICOM 등 의료 표준 포맷이 추출기 부재로 보류(deferred)된 자산은
+        실패가 아니라 계획적 대기 상태다. 같은 파일을 재수집할 때마다 중복 ``deferred`` 행이
+        쌓이지 않도록(SC-003) 중복으로 본다. 단계 D에서 deferred→registered 정상 전이가
+        일어나도 그땐 같은 asset_id 를 재사용하므로 이 dedup 이 정상 전이를 막지 않는다.
+      - ``failed`` 미포함(재처리 허용 유지): 실패한 같은 해시는 중복으로 보지 않아 재수집 시
+        새로 처리한다(실패 복구 경로 — FR-004, SC-004). 그래서 IN 목록에 'failed' 를 넣지 않는다.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT asset_id FROM asset WHERE file_hash = %s AND status = 'registered' LIMIT 1",
+            "SELECT asset_id FROM asset "
+            "WHERE file_hash = %s AND status IN ('registered', 'deferred') LIMIT 1",
             (file_hash,),
         )
         row = cur.fetchone()

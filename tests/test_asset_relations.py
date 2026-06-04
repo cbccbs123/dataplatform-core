@@ -185,10 +185,16 @@ class _FakeDB:
         conn = mock.MagicMock()
         cur = conn.cursor.return_value.__enter__.return_value
 
-        def _execute(sql, params):
-            aid = params[0]
-            label = self._labels.get(aid)
-            cur.fetchone.return_value = (label,) if label is not None else None
+        def _execute(sql, params=None):
+            # _fetch_domain_label 의 domain_label SELECT → 라벨 반환.
+            # 009 병합: run_relations 가 자산별 _record_resolution(_fetch_attempts SELECT
+            # relation_resolution / upsert)을 호출하므로, 큐 경로는 행 없음(None)→attempts 0 으로 흘린다.
+            if "domain_label" in sql:
+                aid = params[0]
+                label = self._labels.get(aid)
+                cur.fetchone.return_value = (label,) if label is not None else None
+            else:
+                cur.fetchone.return_value = None
 
         cur.execute.side_effect = _execute
         return fn(conn)
@@ -211,7 +217,7 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
             rr, "propose_relations_for_asset", return_value=(1, 2, 3, 4)
         ) as m:
             result = rr.run_relations(
-                [self._A_GEN], db=db, top_k=7, embedding_kind="st"
+                [self._A_GEN], db=db, top_k=7, embedding_kind="st", max_attempts=3
             )
         m.assert_called_once_with(db, self._A_GEN, top_k=7, embedding_kind="st")
         # done 에 (asset_id, edges_upserted, edges_skipped) = (aid, 3, 4) 가 그대로 실려야 한다.
@@ -225,7 +231,7 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
         with mock.patch.object(
             rr, "propose_relations_for_asset", return_value=(0, 0, 0, 0)
         ) as m:
-            result = rr.run_relations([self._A_REVIEW], db=db)
+            result = rr.run_relations([self._A_REVIEW], db=db, max_attempts=3)
         m.assert_called_once()
         self.assertEqual(result["failed"], [])
         self.assertEqual(len(result["done"]), 1)
@@ -237,7 +243,7 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
         with mock.patch.object(
             rr, "propose_relations_for_asset", return_value=(0, 0, 1, 0)
         ) as m:
-            result = rr.run_relations([self._A_GEN], db=db)
+            result = rr.run_relations([self._A_GEN], db=db, max_attempts=3)
         m.assert_called_once()
         self.assertEqual(result["done"], [(self._A_GEN, 1, 0)])
 
@@ -267,7 +273,7 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
              mock.patch.object(
                  rr, "propose_relations_for_asset", return_value=(0, 0, 5, 1)
              ) as m:
-            result = rr.run_relations([self._A_MED, self._A_GEN], db=db)
+            result = rr.run_relations([self._A_MED, self._A_GEN], db=db, max_attempts=3)
 
         # 의료는 failed 로 격리, 일반은 done. 배치는 중단되지 않는다.
         failed_ids = [aid for aid, _ in result["failed"]]
