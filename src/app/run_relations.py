@@ -19,8 +19,17 @@ from src.database.postgres_util import PostgresUtil
 from src.pipeline.packs import GENERAL_PACK, for_domain
 from src.relations.asset_candidates import EmbeddingKindFilter
 from src.relations.asset_entry import propose_relations_for_asset
+from src.relations.resolution_persist import (
+    decide_resolution_status,
+    fetch_unresolved_asset_ids,
+    upsert_resolution,
+)
 
 _LOG = logging.getLogger("meta_extract.run_relations")
+
+# 큐 last_reason 비식별 표식(헌법 10조 — PHI/풀경로 금지).
+# 고립(엣지0)은 표식 1개, 예외는 예외 **타입명**만 기록한다(메시지·경로 미포함).
+_REASON_ISOLATED = "isolated:no_edges"
 
 
 def _fetch_domain_label(db: PostgresUtil, asset_id: str) -> str:
@@ -62,20 +71,86 @@ def _fetch_registered_asset_ids(db: PostgresUtil) -> list[str]:
     return db.execute_in_transaction(_run, idempotent=True)
 
 
+def _fetch_unresolved_asset_ids(db: PostgresUtil) -> list[str]:
+    """``--retry`` 대상 자산 id — pending(미해소) + 미시도만, 결정적 정렬.
+
+    베이스(status='registered' + 임베딩 존재)는 ``_fetch_registered_asset_ids`` 와 공유하고,
+    ``relation_resolution`` LEFT JOIN 으로 (rr.status='pending' OR rr.asset_id IS NULL) 만 고른다.
+    resolved/failed(DLQ) 자산은 제외된다. 정렬은 attempts ASC, created_at ASC(결정적, 헌법 3조).
+    실제 쿼리는 resolution_persist.fetch_unresolved_asset_ids(conn-우선)에 위임한다.
+    """
+
+    def _run(conn: Connection[Any]) -> list[str]:
+        return fetch_unresolved_asset_ids(conn)
+
+    return db.execute_in_transaction(_run, idempotent=True)
+
+
+def _record_resolution(
+    db: PostgresUtil, aid: str, edges_upserted: int, *, error: Exception | None, max_attempts: int
+) -> None:
+    """한 자산 처리 결과를 큐에 반영 — **별도 fresh 트랜잭션**으로 격리(run_ingest 패턴 차용).
+
+    핵심(SC-008): 한 자산의 큐 upsert 실패가 다른 자산 처리나 이미 적재된 관계를 롤백하면 안 된다.
+    그래서 큐 갱신은 propose_relations_for_asset 트랜잭션 **밖**, 자산별 독립 fresh 트랜잭션에서 수행하고,
+    여기서 또 예외가 나면 로그만 남기고 흡수한다(배치·다른 자산에 전파 금지).
+
+    last_reason 은 비식별만(헌법 10조): 고립은 _REASON_ISOLATED 표식, 예외는 예외 **타입명**만.
+    예외 메시지·파일 경로는 PHI/풀경로 누출 위험이 있어 큐에 담지 않는다.
+    """
+    cur_attempts = _fetch_attempts(db, aid)
+    status, next_attempts = decide_resolution_status(
+        edges_upserted, cur_attempts, error=error, max_attempts=max_attempts
+    )
+    reason = type(error).__name__ if error is not None else _REASON_ISOLATED
+    try:
+        def _run(conn: Connection[Any]) -> None:
+            upsert_resolution(conn, aid, status=status, attempts=next_attempts, reason=reason)
+
+        db.execute_in_transaction(_run, idempotent=False)
+    except Exception as exc:  # noqa: BLE001 — 큐 갱신 실패 격리(다른 자산 미롤백)
+        _LOG.warning("resolution queue upsert failed %s: %s", aid, exc)
+
+
+def _fetch_attempts(db: PostgresUtil, aid: str) -> int:
+    """자산의 현재 큐 attempts(없으면 0). decide_resolution_status 입력으로 쓴다."""
+
+    def _run(conn: Connection[Any]) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT attempts FROM relation_resolution WHERE asset_id = %s LIMIT 1", (aid,)
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    return db.execute_in_transaction(_run, idempotent=True)
+
+
 def run_relations(
     asset_ids: list[str],
     *,
     db: PostgresUtil,
     top_k: int | None = None,
     embedding_kind: EmbeddingKindFilter = "both",
+    max_attempts: int | None = None,
 ) -> dict[str, list[Any]]:
-    """자산 리스트 순회하며 관계 제안. 자산 단위 예외 흡수.
+    """자산 리스트 순회하며 관계 제안. 자산 단위 예외 흡수 + 미해소 큐 갱신.
 
     반환값 구조: {"done": [(aid, edges_upserted, edges_kept), ...], "failed": [(aid, msg), ...]}.
     배치 전체 성공 여부는 ``failed`` 리스트가 비어있는지로 판별한다(main 의 종료코드 참조).
+
+    각 자산 처리 직후 결과(edges_upserted/예외)로 ``decide_resolution_status`` 를 호출해
+    relation_resolution 큐를 **별도 fresh 트랜잭션**으로 갱신한다(자산별 격리, SC-008).
+    ``max_attempts`` 미지정 시 현재 설정 ``relation_retry_max_attempts`` 를 사용한다.
     """
+    if max_attempts is None:
+        from src.config.settings import get_current_settings
+
+        max_attempts = get_current_settings().relation_retry_max_attempts
     result: dict[str, list[Any]] = {"done": [], "failed": []}
     for aid in asset_ids:
+        edges_u = 0
+        err: Exception | None = None
         try:
             domain = _fetch_domain_label(db, aid)
             pack = for_domain(domain)
@@ -94,8 +169,11 @@ def run_relations(
                 "relations %s: kinds=%s/%s edges=%s/%s", aid, cat_s, cat_k, edges_u, edges_k
             )
         except Exception as exc:  # noqa: BLE001 — 자산 단위 격리
+            err = exc
             _LOG.warning("relations failed %s: %s", aid, exc)
             result["failed"].append((aid, str(exc)))
+        # 자산 처리 결과를 큐에 반영(엣지0/예외/성공 모두). fresh 트랜잭션 격리.
+        _record_resolution(db, aid, edges_u, error=err, max_attempts=max_attempts)
     return result
 
 
@@ -119,6 +197,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="관계 제안 배치 (graph_edge 적재)")
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
     parser.add_argument("--all", action="store_true", help="registered 자산 전체 대상")
+    parser.add_argument(
+        "--retry",
+        action="store_true",
+        help="미해소(pending) + 미시도 자산만 골라 재시도(relation_resolution 큐 기반)",
+    )
     parser.add_argument("--top-k", dest="top_k", type=int, default=None)
     parser.add_argument(
         "--embedding-kind", dest="embedding_kind", choices=["st", "clip", "both"], default="both"
@@ -134,7 +217,11 @@ def main() -> int:
 
     db = PostgresUtil()
     with db:
-        if args.all:
+        # 선택 분기: --retry(미해소+미시도) > --all(registered 전체) > 명시 asset_ids.
+        # --all·명시 asset_ids 경로는 무변경(회귀 0) — --retry 만 큐 기반 LEFT JOIN 선택을 쓴다.
+        if args.retry:
+            asset_ids = _fetch_unresolved_asset_ids(db)
+        elif args.all:
             asset_ids = _fetch_registered_asset_ids(db)
         else:
             asset_ids = list(args.asset_ids)
