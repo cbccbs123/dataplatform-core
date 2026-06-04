@@ -81,7 +81,10 @@ def run_ingest(
                 result["skipped"].append((path, route.reason))
                 continue
 
-            # 1.5) 내용 해시 기반 중복 방지: 동일 file_hash 가 이미 registered 면 skip
+            # 1.5) 내용 해시 기반 중복 방지: 동일 file_hash 가 이미 적재(registered/deferred)면 skip.
+            # 009(#4): dedup 범위가 deferred 까지 확장돼, DICOM 등 보류 자산을 재수집해도
+            # 새 deferred 행을 만들지 않고 기존 자산을 가리키며 skip 한다(중복 0). failed 는
+            # 여기서 dup=None 으로 떨어져 재처리된다(find_registered_asset_by_hash 가 IN 범위로 제어).
             file_hash, file_size = file_hash_and_size(path)
             with db.transaction() as conn:
                 dup = find_registered_asset_by_hash(conn, file_hash)
