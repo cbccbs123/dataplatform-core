@@ -200,7 +200,7 @@ def main() -> int:
     parser.add_argument(
         "--retry",
         action="store_true",
-        help="미해소(pending) + 미시도 자산만 골라 재시도(relation_resolution 큐 기반)",
+        help="미해소(pending) + 미시도 자산만 골라 재시도(relation_resolution 큐 기반). --all 동시 지정 시 --retry 우선",
     )
     parser.add_argument("--top-k", dest="top_k", type=int, default=None)
     parser.add_argument(

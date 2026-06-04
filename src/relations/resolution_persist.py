@@ -87,8 +87,9 @@ def upsert_resolution(
 # run_relations._fetch_registered_asset_ids 와 동일한 베이스(status='registered' + 임베딩 존재)에
 # relation_resolution 를 LEFT JOIN 하여 미해소(pending)와 미시도(큐 행 없음=asset_id IS NULL)만 고른다.
 #   * resolved/failed(DLQ) 자산은 (rr.status='pending' OR rr.asset_id IS NULL) 조건으로 자연 제외.
-#   * 정렬은 attempts ASC, created_at ASC — 결정적 tiebreaker(헌법 3조 결정 재현성, SC-007).
-#     attempts 가 작은(덜 시도한) 자산 우선, 동률이면 자산 생성순.
+#   * 정렬은 attempts ASC, created_at ASC, asset_id ASC — 결정적 tiebreaker(헌법 3조, SC-007).
+#     attempts 가 작은(덜 시도한) 자산 우선, 동률이면 생성순, created_at 동일 μs 까지 같으면
+#     asset_id 로 절대 결정성 보장(동일 타임스탬프 충돌 시 비결정 제거).
 _UNRESOLVED_SQL = """
     SELECT a.asset_id
     FROM asset a
@@ -96,7 +97,7 @@ _UNRESOLVED_SQL = """
     WHERE a.status = 'registered'
       AND EXISTS (SELECT 1 FROM asset_embedding e WHERE e.asset_id = a.asset_id)
       AND (rr.status = 'pending' OR rr.asset_id IS NULL)
-    ORDER BY rr.attempts ASC NULLS FIRST, a.created_at ASC
+    ORDER BY rr.attempts ASC NULLS FIRST, a.created_at ASC, a.asset_id ASC
 """
 
 
