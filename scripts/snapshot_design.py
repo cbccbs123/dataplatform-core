@@ -65,7 +65,7 @@ def _update_index(snapshot: Path, feature: str, note: str, source: Path) -> None
         "# 설계서 스냅샷 이력 (design-history)\n\n"
         "기능 개발 시점마다 `docs/설계서.md`(또는 지정 소스)를 통째로 동결한 **버전별 스냅샷**이다.\n"
         "과거 스냅샷은 **절대 변경하지 않는다** — 각 파일이 그 시점의 설계 동결본이며, 복구가 필요 없다.\n"
-        "현행(살아있는) 설계서는 `docs/설계서.md`, 진척·로드맵은 `ROADMAP.md`가 권위다.\n\n"
+        "현행(살아있는) 설계서는 `docs/설계서.md`, 진척·로드맵은 `specs/README.md`가 권위다.\n\n"
         "생성: `python scripts/snapshot_design.py \"<기능명>\"` 또는 `/report-writer <기능명>`.\n\n"
         "| 버전 | 날짜 | 기능 | 소스 | 비고 | 스냅샷 |\n"
         "|---|---|---|---|---|---|\n"
