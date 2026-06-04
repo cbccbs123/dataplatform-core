@@ -12,6 +12,7 @@ import os
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 from dotenv import load_dotenv
 
@@ -408,6 +409,42 @@ class TestHybridSearchRewireDB(unittest.TestCase):
                     alpha=0.5,
                 )
                 self.assertIsInstance(rows, list)  # to_tsquery 구문 오류 없이 처리
+
+
+class TestGroupedIncludeVisual(unittest.TestCase):
+    """``search_media_all_grouped(include_visual=...)`` 가 시각 2단계(CLIP) 실행 여부를 제어한다.
+
+    DB·모델을 때리는 ``search_media_text_items``/``search_media_images_two_stage`` 를 모킹해
+    호출 여부만 검증한다(텍스트/오디오만 요청 시 CLIP 미실행 = 낭비 제거, 결과 동치).
+    """
+
+    _STRUCTURED = {"semantic_query": "회식", "semantic_query_en": "dinner"}
+
+    def test_include_visual_false_skips_two_stage(self) -> None:
+        with mock.patch.object(ms, "search_media_text_items", return_value=[]) as mt, \
+             mock.patch.object(ms, "search_media_images_two_stage", return_value=[]) as mv:
+            out = ms.search_media_all_grouped(
+                "회식", structured=self._STRUCTURED, include_visual=False
+            )
+        mt.assert_called_once()  # ST 하이브리드(텍스트/오디오/영상텍스트)는 여전히 실행
+        mv.assert_not_called()   # 시각 2단계(CLIP)는 건너뜀
+        self.assertEqual(out["image"], [])  # 이미지 버킷은 비어야(시각 미실행)
+
+    def test_include_visual_true_calls_two_stage(self) -> None:
+        with mock.patch.object(ms, "search_media_text_items", return_value=[]) as mt, \
+             mock.patch.object(ms, "search_media_images_two_stage", return_value=[]) as mv:
+            ms.search_media_all_grouped(
+                "회식", structured=self._STRUCTURED, include_visual=True
+            )
+        mt.assert_called_once()
+        mv.assert_called_once()  # 시각 2단계 실행
+
+    def test_default_keeps_visual_backward_compatible(self) -> None:
+        # include_visual 미지정(기본 True) → 기존 동작과 동일하게 시각 2단계 실행(회귀 0).
+        with mock.patch.object(ms, "search_media_text_items", return_value=[]), \
+             mock.patch.object(ms, "search_media_images_two_stage", return_value=[]) as mv:
+            ms.search_media_all_grouped("회식", structured=self._STRUCTURED)
+        mv.assert_called_once()
 
 
 if __name__ == "__main__":

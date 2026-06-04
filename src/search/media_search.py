@@ -657,6 +657,7 @@ def search_media_all_grouped(
     bm25_weight: float = 0.2,
     clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
     fusion: str = "alpha",
+    include_visual: bool = True,
     debug: bool = False,
 ) -> dict[str, Any]:
     """ST 하이브리드(문서·음성·영상 텍스트)와 시각 2단계(이미지·영상)를 한 번에 돌리고
@@ -669,6 +670,11 @@ def search_media_all_grouped(
     ``fusion`` 은 ST 하이브리드 경로의 emb·bm25 융합 방식이다(기본 ``alpha``=동작 불변).
     ``rrf`` 는 ST 하이브리드(텍스트/오디오/영상 텍스트) 후보 재정렬에만 적용하고, 시각 2단계
     (이미지·영상)는 별도 가중합 경로라 영향받지 않는다(프로토타입 스코프, 설계 §5).
+
+    ``include_visual`` 이 ``False`` 면 시각 2단계(CLIP)를 아예 돌리지 않는다 — 호출부가
+    이미지·영상 버킷을 요청하지 않았을 때 불필요한 임베딩·라벨 검색 비용을 없앤다. 이때
+    image 버킷은 비고 video 버킷은 ST 하이브리드 영상(video_st)만 담겨, 시각 후보가 어차피
+    버려질 모달리티 조합에서 결과가 동치다(기본 ``True``=기존 동작 불변, 회귀 0).
 
     ⚠️ **현재 한계(프로토타입)**: 아래 각 버킷은 ``_sort_by_similarity_cap`` 으로 ``similarity``
     (alpha 가중합) 기준 재정렬되므로, ``fusion="rrf"`` 가 ``_run_hybrid_search`` 에서 만든 RRF
@@ -710,15 +716,20 @@ def search_media_all_grouped(
     text_documents = _sort_by_similarity_cap(text_documents, limit_per_bucket)
     audio_rows = _sort_by_similarity_cap(audio_rows, limit_per_bucket)
 
-    visual_final_limit = max(limit_per_bucket * 4, 40)
-    visual_rows = search_media_images_two_stage(
-        st_q,
-        en_q or st_q,
-        final_limit=visual_final_limit,
-        alpha=image_search_alpha,
-        bm25_weight=bm25_weight,
-        clip_model_name=clip_model_name,
-    )
+    # 시각 2단계(CLIP 임베딩 + 라벨 BM25)는 비용이 큰 경로다. 호출부가 이미지·영상 버킷을
+    # 전혀 원하지 않으면(include_visual=False) 통째로 건너뛴다 — image 는 빈 버킷, video 는
+    # ST 하이브리드 결과(video_st)만 남아 동치(시각 후보가 애초에 버려질 모달리티이므로).
+    visual_rows: list[dict[str, Any]] = []
+    if include_visual:
+        visual_final_limit = max(limit_per_bucket * 4, 40)
+        visual_rows = search_media_images_two_stage(
+            st_q,
+            en_q or st_q,
+            final_limit=visual_final_limit,
+            alpha=image_search_alpha,
+            bm25_weight=bm25_weight,
+            clip_model_name=clip_model_name,
+        )
 
     image_rows: list[dict[str, Any]] = []
     video_vis: list[dict[str, Any]] = []

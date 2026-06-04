@@ -66,7 +66,9 @@ def search_hybrid(
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
     ``modalities`` 가 ``None`` 이면 전체 버킷(text/audio/image/video)을, 지정하면 해당
-    버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``.
+    버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``. 요청에 image·video 가
+    하나도 없으면(text/audio 전용) grouped 에 ``include_visual=False`` 를 넘겨 시각 2단계
+    (CLIP)를 건너뛴다 — 버려질 시각 후보를 계산하지 않아 비용↓, 반환 버킷은 동일.
     ``structured`` 를 넘기면 그대로 grouped 검색에 전달돼 LLM 질의 구조화를 건너뛴다
     (이미 구조화됐거나 LLM 없이 테스트할 때). ``_grouped_fn`` 은 테스트 주입 seam.
     ``min_scores`` 는 모달리티 라벨→적합도 하한(0.0=비활성); 각 버킷에서 ``similarity`` 가
@@ -83,6 +85,11 @@ def search_hybrid(
     else:
         label_keys = list(_MODALITY_BUCKETS.items())
 
+    # 시각 2단계(CLIP)는 image·video 버킷에만 기여한다. 둘 다 요청하지 않았으면(text/audio 전용)
+    # grouped 에 include_visual=False 를 넘겨 CLIP 경로를 통째로 건너뛴다 — 어차피 버려질 시각
+    # 후보를 계산하지 않아 비용↓·결과 동치. 전체(None) 또는 image/video 포함이면 기존대로 True.
+    include_visual = modalities is None or bool(set(modalities) & {"image", "video"})
+
     grouped = _grouped_fn(
         query,
         structured=structured,
@@ -90,6 +97,7 @@ def search_hybrid(
         text_hybrid_alpha=text_hybrid_alpha,
         image_search_alpha=image_search_alpha,
         fusion=fusion,
+        include_visual=include_visual,
     )
     results = {
         key: _filter_by_min_score(grouped.get(key, []), (min_scores or {}).get(label, 0.0))

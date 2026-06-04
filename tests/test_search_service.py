@@ -130,5 +130,58 @@ class TestSearchHybridMinScore(unittest.TestCase):
         self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["good"])
 
 
+class TestIncludeVisualWiring(unittest.TestCase):
+    """요청 모달리티에 image/video 가 없으면 시각 2단계(CLIP)는 낭비이므로,
+    search_hybrid 가 grouped 에 ``include_visual=False`` 를 넘겨 건너뛰게 한다(결과 동치·비용 절감).
+
+    text/audio 만 요청 → include_visual=False. image·video 중 하나라도 포함하거나 전체(None) → True.
+    """
+
+    @staticmethod
+    def _capturing_grouped():
+        captured: dict[str, object] = {}
+
+        def _g(query: str, **kw: object) -> dict[str, object]:
+            captured.update(kw)
+            return {"text_documents": [], "audio": [], "image": [], "video": [], "meta": {}}
+
+        return _g, captured
+
+    def test_text_only_skips_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", modalities=["text"], _grouped_fn=g)
+        self.assertIs(cap["include_visual"], False)
+
+    def test_text_audio_skips_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", modalities=["text", "audio"], _grouped_fn=g)
+        self.assertIs(cap["include_visual"], False)
+
+    def test_audio_only_skips_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", modalities=["audio"], _grouped_fn=g)
+        self.assertIs(cap["include_visual"], False)
+
+    def test_image_requested_keeps_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", modalities=["image"], _grouped_fn=g)
+        self.assertIs(cap["include_visual"], True)
+
+    def test_video_requested_keeps_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", modalities=["video"], _grouped_fn=g)
+        self.assertIs(cap["include_visual"], True)
+
+    def test_text_with_video_keeps_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", modalities=["text", "video"], _grouped_fn=g)
+        self.assertIs(cap["include_visual"], True)
+
+    def test_none_modalities_keeps_visual(self) -> None:
+        g, cap = self._capturing_grouped()
+        search_hybrid("질의", _grouped_fn=g)  # 전체 모달리티
+        self.assertIs(cap["include_visual"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
