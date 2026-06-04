@@ -71,6 +71,22 @@ class TestApplyFusion(unittest.TestCase):
             _apply_fusion(self._rows(), fusion="zzz", k=60)
 
 
+class TestBlendVec(unittest.TestCase):
+    """충돌 코퍼스용 순수 벡터 헬퍼(_blend_vec) 단위 검증(DB 불요).
+
+    L/S/B 부류를 만들 때 q방향 가중(q_weight)이 작을수록 정규화 후 q방향 성분이
+    작아져야(=질의와의 코사인이 낮아져야) lexical-강/semantic-약(L) 자산이 성립한다.
+    """
+
+    def test_low_q_weight_lowers_cosine(self) -> None:
+        from tests.fixtures.search.build_corpus import _blend_vec
+
+        strong = _blend_vec(3, 1200, 1.0)  # B/S: q성분 큼
+        weak = _blend_vec(3, 1200, 0.2)  # L: q성분 작음
+        # 정규화 후 q방향 성분(=단위 질의벡터와의 코사인)이 q_weight 큰 쪽이 더 커야 한다.
+        self.assertGreater(strong[3], weak[3])
+
+
 class TestFusionWiringDefaults(unittest.TestCase):
     """프로덕션 동작 불변 가드(헌법 8조): 배선된 함수의 fusion 기본값이 모두 alpha 여야 한다.
 
