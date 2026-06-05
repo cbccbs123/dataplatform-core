@@ -22,6 +22,7 @@ from src.database.postgres_util import PostgresUtil
 # 슬롯 resolve(_resolve_cross_asset_slots)가 빈 레지스트리를 만나지 않도록 진입부에서 강제 로드.
 # run_ingest 와 동일 관용(별칭 _builtins) — 부수효과 import 라 직접 참조하지 않는다.
 from src.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
+from src.pipeline.cross_runner import run_cross_asset
 from src.pipeline.packs import GENERAL_PACK, DomainPack, for_domain
 from src.pipeline.registry import DEFAULT_REGISTRY, StrategyRegistry
 from src.relations.asset_candidates import EmbeddingKindFilter
@@ -34,10 +35,16 @@ from src.relations.resolution_persist import (
 
 _LOG = logging.getLogger("meta_extract.run_relations")
 
-# cross_asset 슬롯 중 레지스트리에서 Callable 로 resolve 되는 슬롯(008).
+# cross_asset 슬롯 중 레지스트리에서 Callable 로 resolve 되는 슬롯(008, 일반 경로 가드용).
 # 'decide'(confidence)는 propose_relations_for_asset 내부 auto_approve 임계로 처리되어
 # 별도 Callable 이 등록돼 있지 않으므로 resolve 대상에서 제외한다(packs.py·builtins.py 주석 참조).
+# **무변경**: 일반 팩 가드(_resolve_cross_asset_slots 기본 인자)에서만 쓴다.
 _RESOLVED_CROSS_SLOTS: tuple[str, ...] = ("candidates", "score", "persist_edges")
+
+# 제네릭 cross_asset 러너(016)가 실행하는 contracts.py 계약 4슬롯 — 'decide' 를 포함한다.
+# 비일반 팩(예 샘플)은 decide 슬롯에 별도 Callable(sample_decide)을 등록하므로 4슬롯 전부를
+# resolve 해 run_cross_asset 에 넘긴다. 일반 경로의 _RESOLVED_CROSS_SLOTS(3슬롯)와는 별개다.
+_GENERIC_CROSS_SLOTS: tuple[str, ...] = ("candidates", "score", "decide", "persist_edges")
 
 # 큐 last_reason 비식별 표식(009, 헌법 10조 — PHI/풀경로 금지).
 # 고립(엣지0)은 표식 1개, 예외는 예외 **타입명**만 기록한다(메시지·경로 미포함).
@@ -84,7 +91,10 @@ def _fetch_registered_asset_ids(db: PostgresUtil) -> list[str]:
 
 
 def _resolve_cross_asset_slots(
-    pack: DomainPack, *, registry: StrategyRegistry = DEFAULT_REGISTRY
+    pack: DomainPack,
+    *,
+    registry: StrategyRegistry = DEFAULT_REGISTRY,
+    slots: tuple[str, ...] = _RESOLVED_CROSS_SLOTS,
 ) -> dict[str, Callable[..., Any]]:
     """팩의 cross_asset 슬롯명을 레지스트리에서 Callable 로 resolve(미배선 가드, FR-002).
 
@@ -94,8 +104,10 @@ def _resolve_cross_asset_slots(
     자리를 만든다. 등록 전 상태(미배선)면 KeyError → NotImplementedError 로 승격해 자산 단위
     격리(run_relations 의 except)로 흘려보낸다 — 배치는 중단되지 않는다.
 
-    'decide'(confidence)는 propose_relations_for_asset 내부 auto_approve 임계로 처리되어 별도
-    Callable 등록이 없으므로 resolve 대상(_RESOLVED_CROSS_SLOTS)에서 제외한다.
+    **slots 인자(016)**: 어떤 슬롯 집합을 resolve 할지 선택한다. 기본은 일반 경로 가드용
+    _RESOLVED_CROSS_SLOTS(3슬롯, 'decide' 제외 — 일반은 propose 내부 auto_approve 처리)이며,
+    제네릭 러너 경로(비일반 팩)는 _GENERIC_CROSS_SLOTS(4슬롯, 'decide' 포함)를 넘긴다.
+    기본값이 _RESOLVED_CROSS_SLOTS 라 기존 호출·테스트는 무영향이다.
 
     Returns:
         슬롯 이름 → resolve 된 Callable. (검증 통과 시에만 반환)
@@ -103,7 +115,7 @@ def _resolve_cross_asset_slots(
         NotImplementedError: 슬롯이 가리키는 전략이 레지스트리에 미등록(단계 D 전 의료 등).
     """
     resolved: dict[str, Callable[..., Any]] = {}
-    for slot in _RESOLVED_CROSS_SLOTS:
+    for slot in slots:
         name = pack.cross_asset.get(slot)
         if name is None:
             raise NotImplementedError(
@@ -181,6 +193,7 @@ def run_relations(
     top_k: int | None = None,
     embedding_kind: EmbeddingKindFilter = "both",
     max_attempts: int | None = None,
+    _domain_fn: Callable[[PostgresUtil, str], str] | None = None,
 ) -> dict[str, list[Any]]:
     """자산 리스트 순회하며 관계 제안. 자산 단위 예외 흡수 + 미해소 큐 갱신.
 
@@ -193,10 +206,26 @@ def run_relations(
     구조적으로 보장하기 위해 기존 propose_relations_for_asset 로 위임한다 — 슬롯 전환의 목적은
     "의료 전용 전략이 끼워질 자리 만들기"이지 일반 동작을 바꾸는 것이 아니다.
 
+    **비일반 팩 → 제네릭 러너(016)**: 일반 묶음이 아닌 팩(예 샘플)은 4슬롯(decide 포함)을
+    _GENERIC_CROSS_SLOTS 로 resolve 해 cross_runner.run_cross_asset 으로 contracts.py 계약
+    순서대로 실행한다(NotImplementedError 였던 자리 교체). 미등록 전략 팩은 여전히
+    _resolve_cross_asset_slots 가 NotImplementedError 를 내고 바깥 except 가 failed 로 격리한다
+    (Acceptance 2 유지). 헌법 4조: 도메인명 코드 분기 없이 for_domain + cross_asset 비교로만 갈린다.
+
+    **_domain_fn seam**: domain_label 조회를 주입 가능하게 한 seam. 기본(None)은 모듈 수준
+    _fetch_domain_label 를 **호출 시점에 이름으로** 조회한다 — 이래야 기존
+    ``mock.patch.object(rr, "_fetch_domain_label", ...)`` 가 그대로 먹어 회귀 0 이 보장된다
+    (정의 시점 바인딩이면 모듈 패치가 무시됨). 실 DB e2e 픽스처는 이 seam 으로 'sample' 라벨을
+    직접 주입해 비일반 러너 라우팅을 검증한다(G4).
+
     **미해소 큐 갱신(009, SC-008)**: 각 자산 처리 직후 결과(edges_upserted/예외)로
     ``decide_resolution_status`` 를 호출해 relation_resolution 큐를 **별도 fresh 트랜잭션**으로
     갱신한다(자산별 격리). ``max_attempts`` 미지정 시 설정 ``relation_retry_max_attempts`` 를 쓴다.
     """
+    # seam 기본값 해소: None 이면 모듈 수준 _fetch_domain_label 를 **호출 시점에** 잡는다.
+    # (def 기본값으로 직접 바인딩하면 mock.patch.object(rr, "_fetch_domain_label", ...) 가 안 먹어
+    #  기존 테스트가 깨진다 — 회귀 0 을 위해 런타임 이름 조회로 둔다.)
+    domain_fn = _domain_fn if _domain_fn is not None else _fetch_domain_label
     if max_attempts is None:
         from src.config.settings import get_current_settings
 
@@ -206,23 +235,26 @@ def run_relations(
         edges_u = 0
         err: Exception | None = None
         try:
-            domain = _fetch_domain_label(db, aid)
+            domain = domain_fn(db, aid)  # seam(기본 _fetch_domain_label) — G4 e2e 가 'sample' 주입
             pack = for_domain(domain)  # 미지정/review → GENERAL_PACK 폴백(FR-003)
-            # 슬롯 resolve(FR-002): 미배선 전략은 NotImplementedError → 아래 except 에서 failed 격리.
-            # 일반 팩은 전부 등록돼 있어 통과하고, 의료가 전용 전략을 등록(단계 D)하면 그 전략으로 갈린다.
-            _resolve_cross_asset_slots(pack)
             if pack.cross_asset == GENERAL_PACK.cross_asset:
                 # 일반 cross_asset 묶음 — 기존 경로에 위임해 결과를 100% 동치로 유지(FR-001, 헌법 8조).
                 # 슬롯별 전략을 잘게 호출하는 대신 검증된 propose_relations_for_asset 를 재사용한다.
+                # 일반 가드용 슬롯 resolve(미배선 가드, FR-002): 일반 팩은 전부 등록돼 있어 통과한다.
+                _resolve_cross_asset_slots(pack)
                 cat_s, cat_k, edges_u, edges_k = propose_relations_for_asset(
                     db, aid, top_k=top_k, embedding_kind=embedding_kind
                 )
             else:
-                # 일반 묶음이 아닌 전용 cross_asset 전략(단계 D 의료 등): 슬롯이 모두 등록돼 있어도
-                # 묶음 실행 어댑터가 아직 없으므로 명시적 미구현으로 격리한다(자리만 확보된 상태).
-                raise NotImplementedError(
-                    f"전용 cross_asset 묶음 실행 미구현(도메인 {pack.name}) — 단계 D"
+                # 비일반 팩(예 샘플): contracts.py 계약 4슬롯(decide 포함)을 resolve 해 제네릭
+                # 러너로 실행한다(016). 미등록 전략 팩이면 _resolve 가 NotImplementedError →
+                # 바깥 except 가 failed 격리(Acceptance 2 유지). 헌법 4조: 러너는 도메인 무관.
+                resolved = _resolve_cross_asset_slots(pack, slots=_GENERIC_CROSS_SLOTS)
+                edges_u = db.execute_in_transaction(
+                    lambda conn: run_cross_asset(resolved, conn, aid), idempotent=False
                 )
+                # 러너 경로는 카탈로그 카운트가 N/A — 로깅 정합용 0 으로 둔다(엣지 수만 의미).
+                cat_s = cat_k = edges_k = 0
             result["done"].append((aid, edges_u, edges_k))
             _LOG.info(
                 "relations %s: kinds=%s/%s edges=%s/%s", aid, cat_s, cat_k, edges_u, edges_k

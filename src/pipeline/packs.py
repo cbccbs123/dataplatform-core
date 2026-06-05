@@ -61,7 +61,33 @@ MEDICAL_PACK = DomainPack(
     policy="medical_strict",            # ForbidTag("external_llm") — 온프레미스 LLM 만 허용
 )
 
-_PACKS: dict[str, DomainPack] = {"general": GENERAL_PACK, "medical": MEDICAL_PACK}
+# 샘플 도메인 cross-asset 묶음(spec 016).
+# - 008 이 만든 cross_asset 슬롯 resolve seam + contracts.py 의 cross_asset 계약 4종을
+#   **일반과 다른 전략**으로 처음 실제 배선·실행하는 데모용 팩이다.
+# - per_asset 은 일반과 동일(샘플은 cross_asset 만 갈림). cross_asset 4슬롯은 결정적·무LLM 샘플
+#   전략(sample_strategies.py)을 가리킨다 — 묶음이 GENERAL_PACK.cross_asset 과 **달라야**
+#   run_relations 가 else(러너) 경로로 라우팅한다(헌법 4조: 도메인명 분기 아닌 데이터 비교).
+# - persist_edges 슬롯의 등록명은 'sample_graph_upsert'(함수는 sample_persist_edges) — 일반
+#   'graph_upsert' 와 구분되는 별도 전략명이다.
+_SAMPLE_CROSS = {
+    "candidates": "sample_candidates",
+    "score": "sample_score",
+    "decide": "sample_decide",
+    "persist_edges": "sample_graph_upsert",
+}
+
+SAMPLE_PACK = DomainPack(
+    name="sample",
+    per_asset=dict(GENERAL_PACK.per_asset),  # per_asset 은 일반과 동일
+    cross_asset=dict(_SAMPLE_CROSS),
+    policy="general_default",
+)
+
+_PACKS: dict[str, DomainPack] = {
+    "general": GENERAL_PACK,
+    "medical": MEDICAL_PACK,
+    "sample": SAMPLE_PACK,
+}
 
 
 def for_domain(label: str) -> DomainPack:

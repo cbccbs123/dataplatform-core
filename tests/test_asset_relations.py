@@ -128,6 +128,75 @@ from src.pipeline.packs import GENERAL_PACK, MEDICAL_PACK, for_domain  # noqa: E
 from src.pipeline.registry import StrategyRegistry  # noqa: E402
 
 
+# ── [016 G3] T011~T012: SAMPLE_PACK + 샘플 4전략 등록 ─────────────────────────
+class TestSamplePackRegistration(unittest.TestCase):
+    """T011·T012 [016 US1] — 샘플 도메인 팩이 등록되고 cross_asset 슬롯이 샘플 전략으로 resolve.
+
+    목적: 008 이 만든 cross_asset 슬롯 resolve seam 을 **일반과 다른 전략**(else 분기로 가는
+    비일반 팩)으로 처음 실제 배선한다. 헌법 4조: 갈림은 for_domain(팩 선택) + cross_asset
+    데이터 비교로만 — 도메인명 코드 분기 없음.
+    """
+
+    def _registry_with_defaults(self) -> StrategyRegistry:
+        from src.pipeline.builtins import register_defaults
+        reg = StrategyRegistry()
+        register_defaults(reg)
+        return reg
+
+    def test_for_domain_sample_returns_sample_pack(self) -> None:
+        # for_domain('sample') → SAMPLE_PACK(name='sample'). _PACKS 에 등록돼 폴백이 아니어야 한다.
+        from src.pipeline.packs import SAMPLE_PACK, for_domain
+        pack = for_domain("sample")
+        self.assertIs(pack, SAMPLE_PACK)
+        self.assertEqual(pack.name, "sample")
+
+    def test_sample_pack_cross_asset_differs_from_general(self) -> None:
+        # else(비일반) 분기로 가려면 cross_asset 묶음이 GENERAL_PACK 과 달라야 한다(핵심 라우팅 조건).
+        from src.pipeline.packs import GENERAL_PACK, SAMPLE_PACK
+        self.assertNotEqual(SAMPLE_PACK.cross_asset, GENERAL_PACK.cross_asset)
+        # decide 포함 4슬롯 모두 샘플 전략명을 가리킨다.
+        self.assertEqual(
+            SAMPLE_PACK.cross_asset,
+            {
+                "candidates": "sample_candidates",
+                "score": "sample_score",
+                "decide": "sample_decide",
+                "persist_edges": "sample_graph_upsert",
+            },
+        )
+
+    def test_sample_pack_per_asset_same_as_general(self) -> None:
+        # per_asset 은 일반과 동일(샘플은 cross_asset 만 데모로 갈림).
+        from src.pipeline.packs import GENERAL_PACK, SAMPLE_PACK
+        self.assertEqual(SAMPLE_PACK.per_asset, GENERAL_PACK.per_asset)
+
+    def test_sample_strategies_registered_and_resolvable(self) -> None:
+        # 샘플 4전략(슬롯명→함수)이 레지스트리에서 resolve 되고, 일반과 다른 Callable 이어야 한다.
+        from src.pipeline import sample_strategies as ss
+        reg = self._registry_with_defaults()
+        # 슬롯명(persist_edges 의 등록명은 'sample_graph_upsert', 함수는 sample_persist_edges).
+        self.assertIs(reg.resolve("candidates", "sample_candidates"), ss.sample_candidates)
+        self.assertIs(reg.resolve("score", "sample_score"), ss.sample_score)
+        self.assertIs(reg.resolve("decide", "sample_decide"), ss.sample_decide)
+        self.assertIs(reg.resolve("persist_edges", "sample_graph_upsert"), ss.sample_persist_edges)
+        # 일반 전략과 다른 Callable.
+        self.assertIsNot(
+            reg.resolve("candidates", "sample_candidates"),
+            reg.resolve("candidates", "embedding_topk"),
+        )
+        self.assertIsNot(
+            reg.resolve("persist_edges", "sample_graph_upsert"),
+            reg.resolve("persist_edges", "graph_upsert"),
+        )
+
+    def test_sample_candidates_tagged_deterministic(self) -> None:
+        # 결정성 태그(헌법 3조) — candidates/score/decide 는 deterministic.
+        reg = self._registry_with_defaults()
+        self.assertIn("deterministic", reg.tags("candidates", "sample_candidates"))
+        self.assertIn("deterministic", reg.tags("score", "sample_score"))
+        self.assertIn("deterministic", reg.tags("decide", "sample_decide"))
+
+
 class TestResolveCrossAssetSlots(unittest.TestCase):
     """T009·T010 [US1, FR-001·FR-002] — 팩의 cross_asset 슬롯을 레지스트리에서 resolve.
 
@@ -211,15 +280,18 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
     def test_general_delegates_to_propose_with_same_args(self) -> None:
         # FR-001/SC-001: 일반 자산은 기존 propose_relations_for_asset 에 동일 인자로 위임되어
         # 결과(엣지 수치)가 슬롯 미경유 기존 경로와 동일해야 한다.
+        # T015(016): 일반 경로는 제네릭 러너를 **타지 않음**을 함께 단언해 동작 불변을 못박는다.
         from src.app import run_relations as rr
         db = _FakeDB({self._A_GEN: "general"})
         with mock.patch.object(
             rr, "propose_relations_for_asset", return_value=(1, 2, 3, 4)
-        ) as m:
+        ) as m, mock.patch.object(rr, "run_cross_asset") as runner:
             result = rr.run_relations(
                 [self._A_GEN], db=db, top_k=7, embedding_kind="st", max_attempts=3
             )
         m.assert_called_once_with(db, self._A_GEN, top_k=7, embedding_kind="st")
+        # 일반 경로는 러너(016)를 절대 호출하지 않는다 — propose 위임 경로 그대로(회귀 0).
+        runner.assert_not_called()
         # done 에 (asset_id, edges_upserted, edges_skipped) = (aid, 3, 4) 가 그대로 실려야 한다.
         self.assertEqual(result["done"], [(self._A_GEN, 3, 4)])
         self.assertEqual(result["failed"], [])
@@ -281,6 +353,154 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
         self.assertEqual(result["done"], [(self._A_GEN, 5, 1)])
         # 일반 자산에 대해서만 propose 위임이 일어난다(의료는 resolve 단계에서 차단).
         m.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="both")
+
+
+# ── [016 G3] T013~T015: 비일반 팩 → 제네릭 러너 라우팅 + _domain_fn seam ──────
+class _RunnerFakeDB:
+    """run_relations 의 두 종류 execute_in_transaction 호출을 모두 흉내내는 가짜 DB.
+
+    1) _fetch_domain_label / _record_resolution(_fetch_attempts·upsert) — SELECT/None 흘림.
+    2) 러너 경로 ``execute_in_transaction(lambda conn: run_cross_asset(...), idempotent=False)``
+       — fn(conn) 을 그대로 실행해 콜백 안의 run_cross_asset 가 fake conn 으로 돌게 한다.
+
+    _domain_fn seam 을 주입해 라벨 조회는 우회하므로(테스트 단순화), 이 fake conn 은 큐 경로의
+    SELECT(행 없음)와 러너 콜백 실행만 담당한다.
+    """
+
+    def execute_in_transaction(self, fn, *, idempotent: bool = True):
+        conn = mock.MagicMock()
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = None   # 큐 경로 SELECT → attempts 0
+        cur.fetchall.return_value = []
+        return fn(conn)
+
+
+class TestRunRelationsRunnerRouting(unittest.TestCase):
+    """T013·T014 [016 US1] — 비일반(샘플) 팩은 NotImplementedError 가 아니라 제네릭 러너로 라우팅.
+
+    헌법 4조: 라우팅 갈림은 _domain_fn(라벨) → for_domain(팩 선택) + cross_asset 데이터 비교로만.
+    Acceptance 2(미등록 전략 팩 → NotImplementedError → failed)는 유지된다.
+    """
+
+    _A_SAMPLE = "018f0000-0000-7000-8000-000000000015"
+    _A_GEN = "018f0000-0000-7000-8000-000000000016"
+    _A_MED = "018f0000-0000-7000-8000-000000000017"
+
+    def test_sample_pack_routes_to_runner_not_notimplemented(self) -> None:
+        # 비일반 샘플 팩 → run_cross_asset 호출(NotImplementedError 아님). _domain_fn seam 으로 'sample' 주입.
+        from src.app import run_relations as rr
+        db = _RunnerFakeDB()
+        with mock.patch.object(rr, "run_cross_asset", return_value=3) as runner:
+            result = rr.run_relations(
+                [self._A_SAMPLE],
+                db=db,
+                max_attempts=3,
+                _domain_fn=lambda _db, _aid: "sample",
+            )
+        # 러너가 정확히 한 번, source_asset_id=해당 자산으로 호출됐다.
+        runner.assert_called_once()
+        call = runner.call_args
+        # run_cross_asset(resolved, conn, source_asset_id)
+        self.assertEqual(call.args[2], self._A_SAMPLE)
+        resolved = call.args[0]
+        # 4슬롯(decide 포함)이 모두 resolve 돼 러너에 전달됐다.
+        self.assertEqual(set(resolved.keys()), {"candidates", "score", "decide", "persist_edges"})
+        # 적재 엣지 수(러너 반환=3)가 done 에 실린다. 카탈로그 카운트는 N/A(0).
+        self.assertEqual(result["done"], [(self._A_SAMPLE, 3, 0)])
+        self.assertEqual(result["failed"], [])
+
+    def test_sample_pack_resolves_actual_sample_strategies(self) -> None:
+        # 러너에 전달된 4 Callable 이 실제 샘플 전략(sample_strategies)이어야 한다(실배선 증명).
+        from src.app import run_relations as rr
+        from src.pipeline import sample_strategies as ss
+        db = _RunnerFakeDB()
+        captured: dict = {}
+
+        def _spy(resolved, conn, source_asset_id):
+            captured.update(resolved)
+            return 0
+
+        with mock.patch.object(rr, "run_cross_asset", side_effect=_spy):
+            rr.run_relations(
+                [self._A_SAMPLE], db=db, max_attempts=3,
+                _domain_fn=lambda _db, _aid: "sample",
+            )
+        self.assertIs(captured["candidates"], ss.sample_candidates)
+        self.assertIs(captured["score"], ss.sample_score)
+        self.assertIs(captured["decide"], ss.sample_decide)
+        self.assertIs(captured["persist_edges"], ss.sample_persist_edges)
+
+    def test_domain_fn_seam_exists_with_none_default(self) -> None:
+        # seam 파라미터가 존재하고 기본값이 None(미주입) — 미주입 시 모듈 _fetch_domain_label 로 폴백.
+        import inspect
+        from src.app import run_relations as rr
+        sig = inspect.signature(rr.run_relations)
+        self.assertIn("_domain_fn", sig.parameters)
+        self.assertIsNone(sig.parameters["_domain_fn"].default)
+
+    def test_default_seam_honors_module_patch_of_fetch_domain_label(self) -> None:
+        # 회귀 0 핵심: _domain_fn 미주입 시 mock.patch.object(rr,"_fetch_domain_label",...) 가
+        # 그대로 적용돼야 한다(def 기본값 직접 바인딩이면 패치가 무시돼 기존 테스트가 깨짐).
+        from src.app import run_relations as rr
+        db = _RunnerFakeDB()
+        with mock.patch.object(rr, "_fetch_domain_label", return_value="general") as fdl, \
+             mock.patch.object(
+                 rr, "propose_relations_for_asset", return_value=(0, 0, 1, 0)
+             ) as prop:
+            result = rr.run_relations([self._A_GEN], db=db, max_attempts=3)
+        fdl.assert_called_once_with(db, self._A_GEN)
+        prop.assert_called_once()
+        self.assertEqual(result["done"], [(self._A_GEN, 1, 0)])
+
+    def test_unwired_pack_still_notimplemented_failed(self) -> None:
+        # Acceptance 2 유지: 미등록 전략 팩(blocking_5keys)은 여전히 NotImplementedError → failed.
+        from src.app import run_relations as rr
+        from src.pipeline.packs import DomainPack
+        db = _RunnerFakeDB()
+        unwired = DomainPack(
+            name="medical",
+            per_asset=dict(MEDICAL_PACK.per_asset),
+            cross_asset={
+                "candidates": "blocking_5keys",  # 미등록
+                "score": "llm_propose",
+                "decide": "confidence",
+                "persist_edges": "graph_upsert",
+            },
+            policy="medical_strict",
+        )
+        with mock.patch.object(rr, "for_domain", side_effect=lambda _l: unwired), \
+             mock.patch.object(rr, "run_cross_asset") as runner:
+            result = rr.run_relations(
+                [self._A_MED], db=db, max_attempts=3,
+                _domain_fn=lambda _db, _aid: "medical",
+            )
+        # 러너는 호출되지 않고(resolve 단계에서 차단), failed 로 격리된다.
+        runner.assert_not_called()
+        failed_ids = [aid for aid, _ in result["failed"]]
+        self.assertIn(self._A_MED, failed_ids)
+        self.assertEqual(result["done"], [])
+
+    def test_sample_and_general_mixed_batch_routes_each(self) -> None:
+        # 혼합 배치: 샘플은 러너, 일반은 propose 위임 — 라우팅이 자산별로 정확히 갈린다.
+        from src.app import run_relations as rr
+        db = _RunnerFakeDB()
+        labels = {self._A_SAMPLE: "sample", self._A_GEN: "general"}
+        with mock.patch.object(rr, "run_cross_asset", return_value=2) as runner, \
+             mock.patch.object(
+                 rr, "propose_relations_for_asset", return_value=(0, 0, 5, 1)
+             ) as prop:
+            result = rr.run_relations(
+                [self._A_SAMPLE, self._A_GEN], db=db, max_attempts=3,
+                _domain_fn=lambda _db, aid: labels[aid],
+            )
+        # 샘플 → 러너 1회, 일반 → propose 1회.
+        runner.assert_called_once()
+        prop.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="both")
+        self.assertEqual(result["failed"], [])
+        # done 순서: 샘플(러너 반환 2, 카탈로그 N/A 0) → 일반(propose 3·4 위치 → 5,1).
+        self.assertEqual(
+            result["done"], [(self._A_SAMPLE, 2, 0), (self._A_GEN, 5, 1)]
+        )
 
 
 # ── [008 그룹5] T017: cross-asset end-to-end 후보 흐름 통합 가드 ─────────────

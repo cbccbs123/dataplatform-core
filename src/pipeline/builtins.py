@@ -14,6 +14,12 @@ from src.dispatch.dispatcher import dispatch_embed, dispatch_extract_meta
 from src.dispatch.types import ExtractContext
 from src.pipeline.registry import DEFAULT_REGISTRY, StrategyRegistry
 from src.registry.asset_persist import finalize_asset
+from src.pipeline.sample_strategies import (
+    sample_candidates,
+    sample_decide,
+    sample_persist_edges,
+    sample_score,
+)
 from src.relations.asset_candidates import find_embedding_candidates
 from src.relations.graph_persist import sync_graph_edges
 from src.relations.llm_propose import propose_edges_json
@@ -59,6 +65,15 @@ def register_defaults(registry: StrategyRegistry) -> None:
     registry.register("candidates", "embedding_topk", find_embedding_candidates, tags={"deterministic"})
     registry.register("score", "llm_propose", propose_edges_json, tags={"onprem_llm"})
     registry.register("persist_edges", "graph_upsert", sync_graph_edges)
+
+    # 샘플 도메인 cross-asset 전략(spec 016) — 결정적·무LLM 데모. 008 슬롯 resolve seam +
+    # contracts.py cross_asset 계약 4종을 일반과 다른 전략으로 처음 배선해 제네릭 러너로 실행한다.
+    # persist_edges 의 등록명('sample_graph_upsert')과 함수명(sample_persist_edges)이 다른 점 주의 —
+    # 팩의 슬롯명(SAMPLE_PACK.cross_asset['persist_edges']='sample_graph_upsert')과 일치시킨 것이다.
+    registry.register("candidates", "sample_candidates", sample_candidates, tags={"deterministic"})
+    registry.register("score", "sample_score", sample_score, tags={"deterministic"})
+    registry.register("decide", "sample_decide", sample_decide, tags={"deterministic"})
+    registry.register("persist_edges", "sample_graph_upsert", sample_persist_edges)
 
 
 register_defaults(DEFAULT_REGISTRY)
