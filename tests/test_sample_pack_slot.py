@@ -18,10 +18,10 @@ from src.pipeline.cross_types import Candidate, Decision, Evidence, ScoredPair
 
 # ── 공용 fake conn 헬퍼 ─────────────────────────────────────────────────────
 def _conn_returning(rows: list[dict]) -> MagicMock:
-    """``find_embedding_candidates`` 가 쓰는 dict_row 커서 인터페이스를 흉내내는 fake conn.
+    """샘플 전략의 dict_row 커서 조회(fetchall)를 흉내내는 fake conn.
 
-    sample_candidates 는 conn 만 받으므로, fake conn 이 fetchall() 로 후보 행을 돌려주게
-    설계해 DB 없이 단위 테스트한다.
+    sample_candidates/score 는 conn 으로 SQL 을 실행하므로, fake conn 이 fetchall() 로
+    행을 돌려주게 설계해 DB 없이 단위 테스트한다.
     """
     conn = MagicMock()
     cur = MagicMock()
@@ -36,15 +36,12 @@ class TestSampleCandidates(unittest.TestCase):
     _SRC = "018f0000-0000-7000-8000-000000000001"
 
     def _rows(self) -> list[dict]:
-        # find_embedding_candidates 의 반환 형태(EmbeddingCandidate). 일부러 순서를 뒤섞어
+        # sample_candidates 의 경로 마커 SQL 이 SELECT 하는 행 형태(id 만). 일부러 순서를 뒤섞어
         # sample_candidates 가 target asset_id 오름차순으로 정렬하는지 본다.
         return [
-            {"id": "018f0000-0000-7000-8000-000000000017", "file_uri": "/a/c3.txt",
-             "media_type": "txt", "emb_score": 0.91, "summary": ""},
-            {"id": "018f0000-0000-7000-8000-000000000007", "file_uri": "/a/a1.txt",
-             "media_type": "txt", "emb_score": 0.72, "summary": ""},
-            {"id": "018f0000-0000-7000-8000-000000000012", "file_uri": "/a/b2.txt",
-             "media_type": "txt", "emb_score": 0.85, "summary": ""},
+            {"id": "018f0000-0000-7000-8000-000000000017"},
+            {"id": "018f0000-0000-7000-8000-000000000007"},
+            {"id": "018f0000-0000-7000-8000-000000000012"},
         ]
 
     def test_returns_candidate_list_with_source_and_target(self) -> None:

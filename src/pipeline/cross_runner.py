@@ -47,9 +47,12 @@ def run_cross_asset(
         source_asset_id: 후보 탐색의 기준 자산.
 
     반환
-        적재된 엣지 수 = verdict=='match' 결정 수. ``persist_edges`` 는 계약상 None 을
+        적재 의도된 엣지 수 = verdict=='match' 결정 수. ``persist_edges`` 는 계약상 None 을
         반환하므로(EdgePersistStage), 러너가 decisions 에서 match 수를 직접 센다.
-        빈 후보·빈 결정이면 0 을 돌려준다.
+        ⚠️ 엄밀히는 "match 결정 수"다 — persist 구현(예 sync_graph_edges)이 자기참조·후보집합
+        밖 타깃·inactive relation_kind 를 skip 할 수 있어 실제 upsert 수와 다를 여지가 있다(샘플
+        정상 경로에선 일치). 정확한 적재 수가 필요하면 EdgePersistStage 계약을 int 반환으로
+        확장해야 한다(후속). 빈 후보·빈 결정이면 0 을 돌려준다.
     """
     # contracts.py Protocol 순서대로 실행 — 도메인 분기 없이 4 Callable 만 호출한다.
     cands = resolved["candidates"](conn, source_asset_id)

@@ -13,13 +13,13 @@ from src.classify import cascade
 from src.dispatch.dispatcher import dispatch_embed, dispatch_extract_meta
 from src.dispatch.types import ExtractContext
 from src.pipeline.registry import DEFAULT_REGISTRY, StrategyRegistry
-from src.registry.asset_persist import finalize_asset
 from src.pipeline.sample_strategies import (
     sample_candidates,
     sample_decide,
     sample_persist_edges,
     sample_score,
 )
+from src.registry.asset_persist import finalize_asset
 from src.relations.asset_candidates import find_embedding_candidates
 from src.relations.graph_persist import sync_graph_edges
 from src.relations.llm_propose import propose_edges_json
