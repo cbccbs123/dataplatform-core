@@ -25,7 +25,8 @@
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 
 def run_cross_asset(
     resolved: dict[str, Callable[..., Any]],
-    conn: "Connection[Any]",
+    conn: Connection[Any],
     source_asset_id: str,
 ) -> int:
     """resolve 된 4슬롯 전략을 계약 순서대로 실행하고 적재 엣지 수를 돌려준다.

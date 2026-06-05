@@ -433,6 +433,7 @@ class TestRunRelationsRunnerRouting(unittest.TestCase):
     def test_domain_fn_seam_exists_with_none_default(self) -> None:
         # seam 파라미터가 존재하고 기본값이 None(미주입) — 미주입 시 모듈 _fetch_domain_label 로 폴백.
         import inspect
+
         from src.app import run_relations as rr
         sig = inspect.signature(rr.run_relations)
         self.assertIn("_domain_fn", sig.parameters)

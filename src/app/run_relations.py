@@ -250,8 +250,10 @@ def run_relations(
                 # 러너로 실행한다(016). 미등록 전략 팩이면 _resolve 가 NotImplementedError →
                 # 바깥 except 가 failed 격리(Acceptance 2 유지). 헌법 4조: 러너는 도메인 무관.
                 resolved = _resolve_cross_asset_slots(pack, slots=_GENERIC_CROSS_SLOTS)
+                # 루프 변수(resolved/aid)는 기본인자로 바인딩 — 늦은 바인딩 footgun 차단(ruff B023).
                 edges_u = db.execute_in_transaction(
-                    lambda conn: run_cross_asset(resolved, conn, aid), idempotent=False
+                    lambda conn, _resolved=resolved, _aid=aid: run_cross_asset(_resolved, conn, _aid),
+                    idempotent=False,
                 )
                 # 러너 경로는 카탈로그 카운트가 N/A — 로깅 정합용 0 으로 둔다(엣지 수만 의미).
                 cat_s = cat_k = edges_k = 0

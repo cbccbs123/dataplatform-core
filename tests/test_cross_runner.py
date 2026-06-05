@@ -240,6 +240,7 @@ class TestRunCrossAssetDomainAgnostic(unittest.TestCase):
         import inspect
         import io
         import tokenize
+
         from src.pipeline import cross_runner
 
         src = inspect.getsource(cross_runner)

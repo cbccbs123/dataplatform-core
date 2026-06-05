@@ -112,6 +112,7 @@ class TestSampleScore(unittest.TestCase):
         # 헌법 2조: 샘플 점수는 LLM seam 을 호출하지 않는다.
         # complete_text/json/vision_json 어디도 부르지 않음을 patch 로 확인.
         from unittest import mock
+
         from src.pipeline.sample_strategies import sample_score
         with mock.patch("src.llm.client.complete_text") as mt, \
              mock.patch("src.llm.client.complete_json") as mj, \
@@ -164,24 +165,24 @@ class TestSampleDecide(unittest.TestCase):
         self.assertTrue(all(isinstance(d, Decision) for d in out))
 
     def test_above_threshold_is_match(self) -> None:
-        from src.pipeline.sample_strategies import sample_decide, SAMPLE_DECIDE_TAU
+        from src.pipeline.sample_strategies import SAMPLE_DECIDE_TAU, sample_decide
         out = sample_decide([self._scored(SAMPLE_DECIDE_TAU + 0.1)])
         self.assertEqual(out[0].verdict, "match")
 
     def test_below_threshold_is_non_match(self) -> None:
-        from src.pipeline.sample_strategies import sample_decide, SAMPLE_DECIDE_TAU
+        from src.pipeline.sample_strategies import SAMPLE_DECIDE_TAU, sample_decide
         out = sample_decide([self._scored(SAMPLE_DECIDE_TAU - 0.1)])
         self.assertEqual(out[0].verdict, "non_match")
 
     def test_boundary_at_threshold_is_match(self) -> None:
         # 경계값(score == τ)은 match 쪽에 결정적으로 포함(>= 규칙).
-        from src.pipeline.sample_strategies import sample_decide, SAMPLE_DECIDE_TAU
+        from src.pipeline.sample_strategies import SAMPLE_DECIDE_TAU, sample_decide
         out = sample_decide([self._scored(SAMPLE_DECIDE_TAU)])
         self.assertEqual(out[0].verdict, "match")
 
     def test_tie_scores_deterministic(self) -> None:
         # 동점이라도 입력 순서·결과가 결정적(2회 동일).
-        from src.pipeline.sample_strategies import sample_decide, SAMPLE_DECIDE_TAU
+        from src.pipeline.sample_strategies import SAMPLE_DECIDE_TAU, sample_decide
         scored = [
             self._scored(SAMPLE_DECIDE_TAU, "018f0000-0000-7000-8000-000000000012"),
             self._scored(SAMPLE_DECIDE_TAU, "018f0000-0000-7000-8000-000000000007"),
@@ -219,6 +220,7 @@ class TestSamplePersistEdges(unittest.TestCase):
         기존 sync_graph_edges 한 곳으로만 적재함을 단언한다.
         """
         from unittest import mock
+
         from src.pipeline import sample_strategies
         conn = MagicMock()
         with mock.patch.object(sample_strategies, "sync_graph_edges", return_value=(0, 0)) as spy:
@@ -261,6 +263,7 @@ class TestSamplePersistEdges(unittest.TestCase):
     def test_no_match_skips_persist_call_or_empty(self) -> None:
         # non_match 만 있으면 적재할 엣지가 없다 — sync_graph_edges 미호출 또는 빈 edges.
         from unittest import mock
+
         from src.pipeline import sample_strategies
         conn = MagicMock()
         with mock.patch.object(sample_strategies, "sync_graph_edges", return_value=(0, 0)) as spy:
@@ -273,6 +276,7 @@ class TestSamplePersistEdges(unittest.TestCase):
         conn, spy = self._run_capturing([self._decision(self._T1, "match")])
         # _run_capturing 은 반환을 버리므로 직접 한 번 더 확인.
         from unittest import mock
+
         from src.pipeline import sample_strategies
         c = MagicMock()
         with mock.patch.object(sample_strategies, "sync_graph_edges", return_value=(1, 0)):
@@ -283,6 +287,7 @@ class TestSamplePersistEdges(unittest.TestCase):
         # 신규 스키마·카탈로그 금지: ensure_relation_kind_for_llm_proposal 같은 등록 경로를
         # 호출하지 않음을 단언(기존 sync_graph_edges 만 경유).
         from unittest import mock
+
         from src.pipeline import sample_strategies
         conn = MagicMock()
         with mock.patch.object(sample_strategies, "sync_graph_edges", return_value=(1, 0)), \
