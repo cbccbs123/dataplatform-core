@@ -20,12 +20,13 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from psycopg import Connection
+from psycopg.rows import dict_row
 
 from src.pipeline.cross_types import Candidate, Decision, Evidence, ScoredPair
-from src.relations.asset_candidates import find_embedding_candidates
 from src.relations.graph_persist import sync_graph_edges
 
 # ── 상수 ────────────────────────────────────────────────────────────────────
@@ -35,24 +36,38 @@ SAMPLE_TOP_K = 10
 SAMPLE_DECIDE_TAU = 0.5
 # 샘플 데모가 쓰는 기존 relation_kind 어휘(시드 active). 의미 약결합 데모용.
 SAMPLE_RELATION_KIND = "same_series"
-# Evidence/검색 식별용 블로킹 키·비교자(추적 메타).
-_BLOCK_KEY = "embedding"
-_COMPARATOR = "embedding_cosine"
+# 샘플 픽스처 격리 마커(FR-004): 이 경로 조각을 가진 registered 자산만 샘플 후보로 본다.
+# 전역 임베딩 top-k(find_embedding_candidates)는 운영 임베딩 수천 건에 묻혀 샘플 픽스처를
+# 못 찾고, zero-norm 임베딩의 NaN 코사인이 정렬 최상위를 점유한다(2026-06-05 e2e 진단).
+# → 샘플은 경로 마커로 후보를 격리해 결정적·자기완결적으로 동작한다.
+_SAMPLE_PATH_MARKER = "%/sample_pack/%"
+_BLOCK_KEY = "sample_pack"       # Candidate.block_key — 경로 마커 기반 블로킹(추적)
 _METHOD = "sample"
+_EVIDENCE_FIELD = "embedding"    # Evidence.field — 비교 대상(임베딩 코사인)
+_COMPARATOR = "embedding_cosine"
 
 
 def sample_candidates(conn: Connection[Any], source_asset_id: str) -> list[Candidate]:
-    """임베딩 top-k 이웃을 ``Candidate`` 로 매핑(결정적).
+    """``/sample_pack/`` 마커 자산을 결정적 이웃 후보로 선별(전역 임베딩 검색 비의존).
 
-    ``find_embedding_candidates`` 결과(같은 채널 코사인 top-k)를 재사용한다.
-    각 행을 ``Candidate(source_id, target_id, block_key='embedding', method='sample')`` 로
-    매핑하고, **target asset_id 오름차순**으로 정렬해 동일 입력 2회 동일 출력을 보장한다
-    (헌법 3조; find_embedding_candidates 자체도 (best_sim DESC, id ASC) tiebreak 를 갖지만
-    candidates 슬롯의 계약 순서는 target_id 오름차순으로 명시적으로 재고정한다).
+    spec 016 e2e 격리 요구(2026-06-05 진단): 전역 ``find_embedding_candidates`` 는 운영
+    임베딩(수천 건)에 묻혀 샘플 픽스처를 못 찾고, zero-norm 임베딩의 NaN 코사인이 PG
+    ``ORDER BY DESC`` 최상위를 점유한다. 그래서 샘플 후보는 ``/sample_pack/`` 경로 마커를
+    가진 ``registered`` 자산으로 한정해(FR-004) 운영 데이터와 격리하고, **target asset_id
+    오름차순**으로 결정적 정렬한다(헌법 3조). spec FR-001 이 허용한 "결정적 픽스처 이웃" 방식.
     """
-    rows = find_embedding_candidates(
-        conn, source_asset_id=source_asset_id, top_k=SAMPLE_TOP_K
-    )
+    sql = """
+        SELECT a.asset_id::text AS id
+        FROM asset a
+        WHERE a.fs_path LIKE %s
+          AND a.status = 'registered'
+          AND a.asset_id::text <> %s
+        ORDER BY a.asset_id
+        LIMIT %s
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, (_SAMPLE_PATH_MARKER, source_asset_id, SAMPLE_TOP_K))
+        rows = cur.fetchall()
     cands = [
         Candidate(
             source_id=source_asset_id,
@@ -62,39 +77,55 @@ def sample_candidates(conn: Connection[Any], source_asset_id: str) -> list[Candi
         )
         for r in rows
     ]
-    # 결정성: target asset_id 오름차순 고정.
+    # 결정성: target asset_id 오름차순 고정(SQL ORDER BY 와 일치, 이중 보장).
     cands.sort(key=lambda c: c.target_id)
     return cands
 
 
 def sample_score(conn: Connection[Any], pairs: list[Candidate]) -> list[ScoredPair]:
-    """후보를 결정적 코사인 점수로 채점(LLM 미호출).
+    """후보를 **소스↔후보 쌍 코사인**으로 채점(결정적·LLM 미호출).
 
-    헌법 2조: LLM seam 을 전혀 호출하지 않는다. 점수는 후보의 임베딩 코사인 유사도라는
-    **사전계산 신호**(find_embedding_candidates)에서 가져온 고정 규칙이다.
+    헌법 2조: LLM seam 을 전혀 호출하지 않는다. 점수는 소스와 각 후보의 같은 채널 임베딩
+    코사인 유사도(사전계산 벡터)라는 고정 규칙이다.
 
-    설계
-        모든 pair 의 source_id 가 동일하다는 전제 하에, 그 소스에 대한 임베딩 이웃을 한 번
-        조회해 ``{target_id: 코사인유사도}`` 맵을 만든다. 후보가 그 맵에 없으면(이웃 컷오프
-        밖) 점수 0.0 으로 보수 처리한다. ``Evidence(field='embedding',
-        comparator='embedding_cosine', similarity=score)`` 를 부착해 추적성을 남긴다.
-        조회 1회를 모든 pair 가 공유하므로 동일 입력 2회 동일 출력(결정성)이다.
+    설계(전역 랭킹 비의존)
+        모든 pair 의 source_id 가 동일하다는 계약 전제 하에, 소스와 **후보 집합 한정**으로
+        같은 채널 임베딩 쌍의 MAX 코사인을 한 번에 조회해 ``{target_id: sim}`` 맵을 만든다.
+        전역 top-k 가 아니라 주어진 후보만 채점하므로 운영 데이터·NaN 정렬에 영향받지 않는다.
+        zero-norm 등으로 sim 이 비유한(NaN/inf)이면 0.0 으로 보수 처리한다(결정성·안전).
+        후보가 맵에 없으면(임베딩 부재 등) 0.0. ``Evidence(field='embedding',
+        comparator='embedding_cosine')`` 부착. 조회 1회를 공유하므로 2회 동일 출력(결정성).
     """
     if not pairs:
         return []
-    # 모든 pair 가 같은 소스라는 계약 전제. 첫 pair 의 소스로 이웃 유사도 맵을 만든다.
     source_id = pairs[0].source_id
-    rows = find_embedding_candidates(
-        conn, source_asset_id=source_id, top_k=SAMPLE_TOP_K
-    )
-    sim_by_target: dict[str, float] = {
-        str(r["id"]): float(r["emb_score"] or 0.0) for r in rows
-    }
+    target_ids = [c.target_id for c in pairs]
+    sql = """
+        SELECT ta.asset_id::text AS id,
+               MAX(1 - (sa.embedding <=> ta.embedding)) AS sim
+        FROM asset_embedding sa
+        JOIN asset_embedding ta ON ta.channel = sa.channel
+        WHERE sa.asset_id::text = %s
+          AND ta.asset_id::text = ANY(%s)
+        GROUP BY ta.asset_id
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, (source_id, target_ids))
+        rows = cur.fetchall()
+    sim_by_target: dict[str, float] = {}
+    for r in rows:
+        try:
+            sim = float(r["sim"])
+        except (TypeError, ValueError):
+            sim = 0.0
+        if not math.isfinite(sim):  # NaN/inf(zero-norm 등) → 0.0 보수 처리
+            sim = 0.0
+        sim_by_target[str(r["id"])] = sim
     out: list[ScoredPair] = []
     for c in pairs:
         score = sim_by_target.get(c.target_id, 0.0)
         ev = Evidence(
-            field=_BLOCK_KEY,
+            field=_EVIDENCE_FIELD,
             comparator=_COMPARATOR,
             similarity=score,
             weight=score,

@@ -70,11 +70,11 @@ class TestSampleCandidates(unittest.TestCase):
         self.assertEqual(out1, out2)
 
     def test_method_and_block_key_tagged(self) -> None:
-        # 추적용 block_key='embedding', method 는 비지 않아야(샘플 전략 식별).
+        # 추적용 block_key='sample_pack'(경로 마커 블로킹), method 는 비지 않아야(샘플 전략 식별).
         from src.pipeline.sample_strategies import sample_candidates
         out = sample_candidates(_conn_returning(self._rows()), self._SRC)
         for c in out:
-            self.assertEqual(c.block_key, "embedding")
+            self.assertEqual(c.block_key, "sample_pack")
             self.assertTrue(c.method)
 
     def test_empty_when_no_neighbors(self) -> None:
@@ -95,13 +95,11 @@ class TestSampleScore(unittest.TestCase):
         ]
 
     def _conn_scores(self) -> MagicMock:
-        # sample_score 가 후보별 코사인 유사도를 conn 으로 조회한다고 가정한 fake.
-        # find_embedding_candidates 형태(id, emb_score)를 돌려준다.
+        # sample_score 가 후보 집합 한정으로 소스↔후보 쌍 MAX 코사인을 조회한다고 가정한 fake.
+        # 반환 행 형태는 (id, sim) — 픽스처-격리 쌍 코사인 쿼리의 결과.
         rows = [
-            {"id": self._T1, "file_uri": "/a/a1.txt", "media_type": "txt",
-             "emb_score": 0.80, "summary": ""},
-            {"id": self._T2, "file_uri": "/a/b2.txt", "media_type": "txt",
-             "emb_score": 0.40, "summary": ""},
+            {"id": self._T1, "sim": 0.80},
+            {"id": self._T2, "sim": 0.40},
         ]
         return _conn_returning(rows)
 
