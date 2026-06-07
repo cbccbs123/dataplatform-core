@@ -27,6 +27,7 @@ __all__ = [
     "propose_edges_json",
     "register_new_relation_kinds",
     "resolve_relation_type_code",
+    "fetch_active_relations_for_asset",
 ]
 
 
@@ -58,6 +59,10 @@ def __getattr__(name: str) -> Any:
         return fn
     if name == "resolve_relation_type_code":
         from src.relations.resolve_relation_type import resolve_relation_type_code as fn
+
+        return fn
+    if name == "fetch_active_relations_for_asset":
+        from src.relations.graph_query import fetch_active_relations_for_asset as fn
 
         return fn
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
