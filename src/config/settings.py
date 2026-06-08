@@ -28,6 +28,9 @@ class PipelineSettings:
     # 017 A/B: BGE-M3 채널('st_bge')용 임베딩 모델. _require_env 가 아닌 선택 필드 —
     # 미설정 시 기본 'BAAI/bge-m3'(기존 text_embedding_model=KoSimCSE 와 별개, 동작 무변경).
     text_embedding_model_bge: str
+    # 018: 운영 텍스트 임베딩 활성 채널. 적재·검색·관계가 'st' 하드코딩 대신 이 단일 출처를 참조해
+    # 모델을 토글한다. _env_str_default 선택 필드 — 미설정 시 기본 'st'(KoSimCSE) → 동작 무변경.
+    active_embed_channel: str
     text_embedding_chunk_size: int
     text_embedding_normalize: bool
     video_max_keyframes: int
@@ -132,6 +135,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         encoding=_require_env("ENCODING"),
         text_embedding_model=_require_env("TEXT_EMBED_MODEL"),
         text_embedding_model_bge=_env_str_default("TEXT_EMBED_MODEL_BGE", "BAAI/bge-m3"),
+        active_embed_channel=_env_str_default("EMBED_ACTIVE_CHANNEL", "st"),
         text_embedding_chunk_size=_require_env_int("TEXT_EMBED_CHUNK_SIZE"),
         text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
         video_max_keyframes=(
@@ -184,3 +188,20 @@ def model_for_channel(channel: str, settings: PipelineSettings | None = None) ->
         raise ValueError(
             f"지원하지 않는 텍스트 임베딩 채널: {channel!r} (지원: {sorted(mapping)})"
         ) from None
+
+
+def active_embed_channel(settings: PipelineSettings | None = None) -> str:
+    """운영 텍스트 임베딩 활성 채널(018). 적재·검색·관계가 공유하는 단일 출처.
+
+    ``settings`` 미지정 시 활성 설정을 사용한다(테스트는 ``settings`` 주입으로 순수 단위 검증).
+    기본값은 ``'st'``(KoSimCSE) — 회귀 0."""
+    cfg = settings if settings is not None else get_current_settings()
+    return cfg.active_embed_channel
+
+
+def active_embed_model(settings: PipelineSettings | None = None) -> str:
+    """활성 채널의 임베딩 모델(018). ``active_embed_channel`` → ``model_for_channel`` 합성.
+
+    기본 active='st' → KoSimCSE(``text_embedding_model``), 'st_bge' → BGE-M3. 미지원 활성 채널은
+    ``model_for_channel`` 이 즉시 ``ValueError`` 로 차단한다(잘못된 모델 사용 방지)."""
+    return model_for_channel(active_embed_channel(settings), settings)

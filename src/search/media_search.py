@@ -699,7 +699,11 @@ def search_media_all_grouped(
     ``channel``/``query_model_name`` 은 017 A/B 텍스트 채널 선택으로 **ST 하이브리드 경로에만**
     전달된다(텍스트/오디오/영상 텍스트 버킷). 기본값(``'st'``·``None``)이면 기존 KoSimCSE 동작과
     완전 동치. **시각 2단계(CLIP) 경로는 무변경** — 늘 ``channel='clip'``·KoSimCSE 1차로 돌린다
-    (FR-008 텍스트 채널 한정). 따라서 ``channel='st_bge'`` 라도 image 버킷은 기존과 동일하다.
+    (FR-008 텍스트 채널 한정).
+    ⚠️ 018 갭(2026-06-08 코드리뷰): 시각 2단계 stage-1 의 **ST 캡션 프리필터**(`_two_stage_stage1_sql`)도
+    ``channel='st'``·KoSimCSE 고정이다. 적재가 018 활성 채널을 따르므로 ``active='st_bge'`` 전환 시
+    신규 image/video ST 캡션은 이 프리필터에서 누락된다(BGE 전환 시 image recall 저하; 기본 'st' 무해).
+    BGE 운영 전환 전 stage-1 active-aware 화가 후속(spec 018 범위 밖).
 
     ⚠️ **현재 한계(프로토타입)**: 아래 각 버킷은 ``_sort_by_similarity_cap`` 으로 ``similarity``
     (alpha 가중합) 기준 재정렬되므로, ``fusion="rrf"`` 가 ``_run_hybrid_search`` 에서 만든 RRF

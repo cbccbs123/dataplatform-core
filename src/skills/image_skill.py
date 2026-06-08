@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-from src.config.settings import get_current_settings
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.skills.meta_split import split_core_ext
 
-_CHANNEL_ST = "st"
 _CHANNEL_CLIP = "clip"
 
 
@@ -68,7 +67,8 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     """이미지 임베딩 2채널(ST·CLIP)을 생성해 반환한다.
 
     ST(SentenceTransformer): VLM 이 생성한 캡션+키워드+라벨을 텍스트로 직렬화해 임베딩.
-    CLIP: _extract_image_meta 에서 저장한 벡터를 ctx.scratch["clip_vec"] 로 재사용.
+    텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
+    CLIP: _extract_image_meta 에서 저장한 벡터를 ctx.scratch["clip_vec"] 로 재사용(시각 채널은 무변경).
 
     ``chunk_content`` 가 공백뿐이면 " " 로 대체 — pad 후 영벡터에 가깝지만 DB 삽입은 성공한다.
     1536D 통일은 ``pad_embedding_to_storage_dim`` 이 담당한다(CLIP 벡터는 이미 1536D 패딩됨).
@@ -78,13 +78,15 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
+    channel = active_embed_channel(cfg)
+    model = active_embed_model(cfg)
     meta = dict(rec.core_meta) | dict(rec.ext_meta)
     chunk_content = build_image_vlm_text_for_embedding(meta)
     if not chunk_content.strip():
         chunk_content = " "
     st_raw = embed_texts(
         [chunk_content],
-        model_name=cfg.text_embedding_model,
+        model_name=model,
         normalize_embeddings=cfg.text_embedding_normalize,
     )[0]
     st_vec = pad_embedding_to_storage_dim(st_raw)
@@ -94,6 +96,6 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         raise RuntimeError("_embed_image: ctx.scratch['clip_vec'] 없음 — _extract_image_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
     return [
-        EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=0),
+        EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=0),
         EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0),
     ]
