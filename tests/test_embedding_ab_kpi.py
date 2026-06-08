@@ -10,12 +10,15 @@ retrieval 품질(recall@20·MRR·nDCG@20 + latency p95)을 비교 측정한다. 
     조용히 0 을 산출하지 않도록 빈/형식오류는 명확한 ``ValueError`` 로 차단한다.
   - **A/B 하니스 e2e(``RUN_DB_E2E`` 게이트)**: ``tests/fixtures/search/golden_ko.json`` 이
     **존재할 때만** 실행한다(부재면 skip — 사람 검수 확정 필요). 각 질의를 ``('st', KoSimCSE)``·
-    ``('st_bge', BGE)`` 두 채널로 ``search_hybrid`` 검색해 ``metrics.py`` 로 지표를 산출하고,
-    채널별 평균 비교표를 로그로 남긴다. 평가 풀은 **두 채널 모두 백필된 자산**으로 한정한다
-    (FR-005 Edge — 'st' 만 있는 비백필 자산을 빼 공정 비교). 2회 실행 동일(SC-004).
+    ``('st_bge', BGE)`` 두 채널로 **text+audio+video 멀티모달** ``search_hybrid`` 검색해 세 버킷을
+    단일 랭킹으로 합치고(``_merge_ranked_ids``) ``metrics.py`` 로 지표를 산출, 채널별 평균 비교표를
+    로그로 남긴다. text 만 평가하면 BGE-M3 핵심 강점(긴 STT=audio·영상 자막)을 못 재기 때문에
+    멀티모달로 확장한다. 평가 풀은 **두 채널 모두 백필 + text/audio/video 모달리티 자산**으로
+    한정한다(FR-005 Edge — 'st' 만 있는 비백필 자산 + image 자산을 빼 공정 비교; image 후보는
+    CLIP 채널이라 텍스트 A/B 무관). 2회 실행 동일(SC-004).
 
-결정성(헌법 3조): 질의 구조화 LLM 을 건너뛰고(``structured`` 주입) 모달리티를 text 로 고정,
-검색 tiebreak(asset_id)·임베딩 normalize 가 결정적이라 2회 실행이 동일 수치를 낸다.
+결정성(헌법 3조): 질의 구조화 LLM 을 건너뛰고(``structured`` 주입) 모달리티를 text+audio+video 로
+고정, 합산 정렬 tiebreak(asset_id)·임베딩 normalize 가 결정적이라 2회 실행이 동일 수치를 낸다.
 읽기 전용(검색·조회만, 쓰기·스키마 0). 학습 0(두 모델 inference only).
 """
 
@@ -32,6 +35,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 
+from src.file.file_type_defs import MEDIA_TYPES_ST_CHUNK_SEARCH, MediaKind
 from src.search.search_service import search_hybrid
 from tests.fixtures.search.metrics import mrr, ndcg_at_k, recall_at_k
 
@@ -274,6 +278,152 @@ class TestBuildDraftsTopicGrouping(unittest.TestCase):
         self.assertEqual(drafts[0]["relevant_asset_ids"], ["id-1", "id-2"])
 
 
+def _finite_sim(row: dict) -> float:
+    """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
+
+    합산 정렬 키가 결정적이 되도록(헌법 3조) 비유한 점수를 0.0 으로 눌러 정렬 폭발을 막는다.
+    """
+    v = row.get("similarity")
+    try:
+        x = float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return x if math.isfinite(x) else 0.0
+
+
+def _merge_ranked_ids(buckets: dict, pool: set[str]) -> list[str]:
+    """text/audio/video 버킷 rows 를 합쳐 평가 풀 자산 id 단일 랭킹을 만든다(순수, DB 무관).
+
+    멀티모달 확장 핵심: text_documents + audio + video 세 버킷을 한 랭킹으로 합쳐 BGE-M3 의
+    긴 문맥 강점(긴 STT=audio·영상 자막)이 점수에 반영되게 한다. **image 버킷은 제외**한다 —
+    image 의 검색 후보는 CLIP(``channel='clip'``)이라 텍스트 채널 A/B('st' vs 'st_bge')와
+    무관하기 때문이다. 정렬은 ``similarity`` 내림차순 + ``asset_id`` 오름차순 tiebreak 로
+    입력 순서에 의존하지 않는 결정적 순서를 보장한다(헌법 3조). 같은 자산 중복은 첫 등장만
+    남기고(모달리티 분리로 실제론 disjoint 하나 방어적 dedup), 평가 풀('st'·'st_bge' 공존 +
+    text/audio/video) 밖 자산은 랭킹에서 제외한다.
+    """
+    rows: list[dict] = []
+    for key in ("text_documents", "audio", "video"):
+        rows.extend(buckets.get(key) or [])
+    rows = sorted(rows, key=lambda r: (-_finite_sim(r), str(r.get("id", ""))))
+    ranked: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        rid = str(r.get("id"))
+        if rid in seen:
+            continue
+        seen.add(rid)
+        if rid in pool:
+            ranked.append(rid)
+    return ranked
+
+
+class TestMergeRankedIds(unittest.TestCase):
+    """text/audio/video 버킷 합산 단일 랭킹(순수 함수, DB 무관) — 멀티모달 확장 핵심 로직.
+
+    text 버킷만 평가하면 BGE-M3 핵심 강점(긴 STT=audio·영상 자막)을 측정 못 한다. 그래서
+    text_documents + audio + video 세 버킷을 합쳐 단일 랭킹을 만든다. 합성 버킷으로 ① image
+    버킷 제외(텍스트 채널 A/B 무관 — CLIP 검색) ② similarity 내림차순 + asset_id 오름차순
+    tiebreak(결정적, 헌법 3조) ③ 평가 풀 한정 ④ 비유한 similarity 0.0 처리를 고정한다.
+    """
+
+    def test_combines_text_audio_video_excludes_image(self) -> None:
+        buckets = {
+            "text_documents": [{"id": "t1", "similarity": 0.5}],
+            "audio": [{"id": "a1", "similarity": 0.9}],
+            "video": [{"id": "v1", "similarity": 0.7}],
+            "image": [{"id": "img1", "similarity": 0.99}],  # 풀에 있어도 랭킹 제외돼야 함
+        }
+        pool = {"t1", "a1", "v1", "img1"}
+        ranked = _merge_ranked_ids(buckets, pool)
+        # similarity 내림차순: a1(0.9) > v1(0.7) > t1(0.5). image 는 텍스트 A/B 무관이라 빠진다.
+        self.assertEqual(ranked, ["a1", "v1", "t1"])
+
+    def test_tiebreak_by_asset_id_ascending(self) -> None:
+        buckets = {
+            "text_documents": [
+                {"id": "t_b", "similarity": 0.5},
+                {"id": "t_a", "similarity": 0.5},
+            ],
+            "audio": [],
+            "video": [],
+        }
+        pool = {"t_a", "t_b"}
+        # 동점 → asset_id 오름차순(입력 순서 무관, 결정적).
+        self.assertEqual(_merge_ranked_ids(buckets, pool), ["t_a", "t_b"])
+
+    def test_pool_filter_drops_non_pool_assets(self) -> None:
+        buckets = {
+            "text_documents": [{"id": "t1", "similarity": 0.8}],
+            "audio": [{"id": "a_out", "similarity": 0.9}],  # 평가 풀 밖 → 제외
+            "video": [],
+        }
+        self.assertEqual(_merge_ranked_ids(buckets, {"t1"}), ["t1"])
+
+    def test_missing_buckets_tolerated(self) -> None:
+        # 버킷 키가 없거나 None 이어도 KeyError 없이 빈 리스트로 취급.
+        self.assertEqual(_merge_ranked_ids({"audio": None}, {"x"}), [])
+        self.assertEqual(_merge_ranked_ids({}, {"x"}), [])
+
+    def test_non_finite_similarity_treated_as_zero(self) -> None:
+        buckets = {
+            "text_documents": [{"id": "t1", "similarity": float("nan")}],
+            "audio": [{"id": "a1", "similarity": 0.1}],
+            "video": [{"id": "v1"}],  # similarity 누락 → 0.0
+        }
+        pool = {"t1", "a1", "v1"}
+        # a1(0.1) 최상위, 나머지 0.0 동점 → asset_id 오름차순(t1 < v1).
+        self.assertEqual(_merge_ranked_ids(buckets, pool), ["a1", "t1", "v1"])
+
+    def test_deduped_across_buckets(self) -> None:
+        # 모달리티 분리로 실제론 disjoint 하지만, 같은 id 가 중복돼도 첫 등장만(방어적 dedup).
+        buckets = {
+            "text_documents": [{"id": "x", "similarity": 0.9}],
+            "audio": [{"id": "x", "similarity": 0.2}],
+            "video": [],
+        }
+        self.assertEqual(_merge_ranked_ids(buckets, {"x"}), ["x"])
+
+    def test_deterministic_two_calls_equal(self) -> None:
+        buckets = {
+            "text_documents": [{"id": "t1", "similarity": 0.5}],
+            "audio": [{"id": "a1", "similarity": 0.5}],
+            "video": [{"id": "v1", "similarity": 0.5}],
+        }
+        pool = {"t1", "a1", "v1"}
+        self.assertEqual(_merge_ranked_ids(buckets, pool), _merge_ranked_ids(buckets, pool))
+
+
+class TestEvalPoolModalityFilter(unittest.TestCase):
+    """평가 풀 조회가 image 모달리티를 SQL 에서 제외하는지(mock conn, DB 무관).
+
+    image 자산의 'st'/'st_bge' 임베딩은 검색에 안 쓰여(시각은 CLIP 채널) 텍스트 A/B 로 평가
+    불가하므로, 평가 풀을 text/audio/video 모달리티(``MEDIA_TYPES_ST_CHUNK_SEARCH``)로 한정한다.
+    """
+
+    def _db(self, rows):
+        from unittest import mock
+
+        db = mock.MagicMock()
+        conn = db.transaction.return_value.__enter__.return_value
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchall.return_value = rows
+        return db, cur
+
+    def test_pool_query_restricts_to_text_audio_video(self) -> None:
+        db, cur = self._db([("id-1",), ("id-2",)])
+        pool = TestEmbeddingABKpi._load_eval_pool(db)
+        self.assertEqual(pool, {"id-1", "id-2"})
+        # execute 에 넘긴 modality 파라미터: image 없음 + text/audio/video 전부 포함.
+        args, _ = cur.execute.call_args
+        params = args[1]
+        modalities = set(params[0])
+        self.assertNotIn(MediaKind.IMAGE.value, modalities)
+        self.assertIn(MediaKind.AUDIO.value, modalities)
+        self.assertIn(MediaKind.VIDEO.value, modalities)
+        self.assertEqual(modalities, set(MEDIA_TYPES_ST_CHUNK_SEARCH))
+
+
 def _p95(values: list[float]) -> float:
     """nearest-rank p95(결정적). 빈 입력은 0.0."""
     if not values:
@@ -324,32 +474,45 @@ class TestEmbeddingABKpi(unittest.TestCase):
 
     @staticmethod
     def _load_eval_pool(db) -> set[str]:
-        """두 채널('st'·'st_bge') 모두 백필된 자산 id 집합(평가 풀, FR-005 Edge)."""
+        """평가 풀: 두 채널('st'·'st_bge') 공존 + 텍스트 A/B 로 평가 가능한 modality 자산 id 집합.
+
+        FR-005 Edge: 'st' 만 있는 비백필 자산을 빼 공정 비교한다(두 채널 공존만). 추가로 평가 풀을
+        text/audio/video 모달리티(``MEDIA_TYPES_ST_CHUNK_SEARCH``)로 한정한다 — image 자산의
+        'st'/'st_bge' 임베딩은 검색에 쓰이지 않고(시각 후보는 CLIP ``channel='clip'``) 텍스트 채널
+        A/B 로 품질을 평가할 수 없기 때문이다(image 제외). 모달리티 파라미터는 결정적 정렬로 바인딩.
+        """
+        eval_modalities = sorted(MEDIA_TYPES_ST_CHUNK_SEARCH)
         with db.transaction() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT asset_id FROM asset_embedding "
-                "WHERE channel IN ('st', 'st_bge') "
-                "GROUP BY asset_id HAVING count(DISTINCT channel) = 2"
+                "SELECT ae.asset_id FROM asset_embedding ae "
+                "JOIN asset a ON a.asset_id = ae.asset_id "
+                "WHERE ae.channel IN ('st', 'st_bge') "
+                "AND a.modality = ANY(%s) "
+                "GROUP BY ae.asset_id HAVING count(DISTINCT ae.channel) = 2",
+                (eval_modalities,),
             )
             return {str(r[0]) for r in cur.fetchall()}
 
     def _ranked_ids(self, query: str, channel: str, model: str | None) -> list[str]:
-        """한 질의를 한 채널로 검색해 평가 풀에 속한 자산 id 순위를 반환한다.
+        """한 질의를 한 채널로 검색해 평가 풀에 속한 자산 id 순위를 반환한다(멀티모달 합산).
 
-        LLM 질의 구조화를 건너뛰고(``structured`` 주입) text 모달리티만 검색해 결정적·텍스트
-        채널 한정으로 만든다. 평가 풀('st'·'st_bge' 공존) 밖 자산은 제외 — 두 채널이 같은
-        후보 우주를 보게 해 공정 비교(비백필 'st' 자산이 'st' 채널에만 유리하게 잡히는 편향 제거).
+        LLM 질의 구조화를 건너뛰고(``structured`` 주입) **text+audio+video 모달리티**를 검색해
+        세 버킷을 단일 랭킹으로 합친다(``_merge_ranked_ids``) — text 만 평가하면 BGE-M3 핵심 강점
+        (긴 STT=audio·영상 자막)을 못 잰다. ST 하이브리드 경로(text_documents·audio·video_st)에는
+        ``text_channel``/``text_query_model`` 이 자동 전파돼 'st' vs 'st_bge' 가 분리 평가된다.
+        **image 버킷은 합산에서 제외**(CLIP 검색이라 텍스트 채널 A/B 무관). 평가 풀('st'·'st_bge'
+        공존 + text/audio/video) 밖 자산도 제외 — 두 채널이 같은 후보 우주를 보게 해 공정 비교.
+        합산 정렬은 similarity 내림차순 + asset_id 오름차순 tiebreak 로 결정적(헌법 3조).
         """
         res = search_hybrid(
             query,
-            modalities=["text"],
+            modalities=["text", "audio", "video"],
             limit_per_bucket=_FETCH,
             structured={"semantic_query": query, "semantic_query_en": ""},
             text_channel=channel,
             text_query_model=model,
         )
-        ranked = [str(r["id"]) for r in res["results"]["text_documents"]]
-        return [rid for rid in ranked if rid in self.pool]
+        return _merge_ranked_ids(res["results"], self.pool)
 
     def _compute(self) -> tuple[dict, dict, int]:
         """골든셋 전체를 두 채널로 검색해 채널별 per-query 지표·latency 를 모은다.
@@ -386,7 +549,8 @@ class TestEmbeddingABKpi(unittest.TestCase):
         # 비교표 로그(측정 결과). 합격 단정은 두 채널 산출 + 2회 동일까지.
         metrics = ("recall@20", "MRR", "nDCG@20")
         print(
-            f"\n[BGE-M3 A/B KPI] 평가 질의 {evaluated} / 평가 풀(두 채널 백필) {len(self.pool)}"
+            f"\n[BGE-M3 A/B KPI] modality=text+audio+video(image 제외) | "
+            f"평가 질의 {evaluated} / 평가 풀(두 채널 백필 ∩ text/audio/video) {len(self.pool)}"
         )
         for m in metrics:
             line = f"  {m:<10}"
