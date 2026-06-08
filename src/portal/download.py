@@ -50,9 +50,10 @@ def parse_range_header(range_value: str | None, file_size: int) -> tuple[int, in
         - ``bytes=start-``    → ``(start, file_size-1)`` (열린 끝)
         - ``bytes=-suffix``   → ``(file_size-suffix, file_size-1)`` (마지막 suffix 바이트,
           suffix 가 파일보다 크면 전체로 클램프 — RFC 7233)
-    헤더가 ``None`` 이면 ``None``(=전체 다운로드). 범위 위반(시작이 파일 크기 이상·끝이
-    파일 크기 이상·역순)·형식 오류·다중 범위는 ``ValueError`` 로 거부한다(API 가 416 매핑,
-    plan D-4: 범위 초과를 엄격히 거부).
+    헤더가 ``None`` 이면 ``None``(=전체 다운로드). 끝이 파일 크기 이상이면 ``file_size-1`` 로
+    **클램프**한다(RFC 7233 §2.1 — 거부 아님; 일부 플레이어/다운로드 매니저가 stale 한 큰 end 를
+    재요청해도 206 응답). 시작이 파일 크기 이상·역순·형식 오류·다중 범위는 ``ValueError`` 로
+    거부한다(API 가 416 매핑). (2026-06-08 코드리뷰: plan D-4 의 strict 거부를 RFC 클램프로 완화.)
     """
     if range_value is None:
         return None
@@ -92,8 +93,9 @@ def parse_range_header(range_value: str | None, file_size: int) -> tuple[int, in
         raise ValueError(f"Range 시작이 파일 크기 이상(416): {start} >= {file_size}")
     if end < start:
         raise ValueError(f"Range 역순(416): {start} > {end}")
+    # 끝이 파일 크기 이상이면 거부하지 않고 마지막 바이트로 클램프한다(RFC 7233 §2.1).
     if end >= file_size:
-        raise ValueError(f"Range 끝이 파일 크기 이상(416): {end} >= {file_size}")
+        end = file_size - 1
     return (start, end)
 
 

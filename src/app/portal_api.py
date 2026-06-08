@@ -177,8 +177,13 @@ def _guess_content_type(file_name: str, modality: str | None) -> str:
 
 
 def _content_disposition(file_name: str) -> str:
-    """RFC 5987 attachment 헤더(ASCII filename + UTF-8 filename* 병기)."""
-    return f"attachment; filename=\"{file_name}\"; filename*=UTF-8''{quote(file_name)}"
+    """RFC 6266 attachment 헤더(ASCII filename + UTF-8 filename* 병기).
+
+    ASCII fallback 에서 큰따옴표·제어문자(CR/LF)·비-ASCII 를 제거해 헤더 분리/인젝션을 막는다
+    (UTF-8 ``filename*`` 측은 ``quote`` 로 안전). file_name 은 basename 이라 현실 위험은 낮으나 위생.
+    """
+    ascii_safe = "".join(c for c in file_name if c.isascii() and c.isprintable() and c != '"')
+    return f'attachment; filename="{ascii_safe}"; filename*=UTF-8\'\'{quote(file_name)}'
 
 
 def _file_iterator(path: str, start: int, end: int) -> Iterator[bytes]:

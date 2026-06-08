@@ -58,12 +58,18 @@ class TestParseRangeHeader(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_range_header("bytes=1000-1100", 1000)
 
-    def test_end_beyond_file_raises(self) -> None:
-        # 끝이 파일 크기 이상(범위 초과) → ValueError(416, plan D-4 strict).
+    def test_end_beyond_file_clamps(self) -> None:
+        # 끝이 파일 크기 이상이면 file_size-1 로 클램프(RFC 7233 §2.1) → 거부 아님.
+        # 일부 미디어 플레이어/다운로드 매니저가 stale 한 큰 end 를 재요청해도 206 으로 응답.
         from src.portal.download import parse_range_header
 
-        with self.assertRaises(ValueError):
-            parse_range_header("bytes=0-1000", 1000)
+        self.assertEqual(parse_range_header("bytes=0-1000", 1000), (0, 999))
+
+    def test_partial_start_with_end_beyond_clamps(self) -> None:
+        # bytes=500-5000 (start 유효, end 초과) → (500, 999) 로 클램프(부분 범위 유지).
+        from src.portal.download import parse_range_header
+
+        self.assertEqual(parse_range_header("bytes=500-5000", 1000), (500, 999))
 
     def test_reversed_range_raises(self) -> None:
         # 역순(start > end) → ValueError.

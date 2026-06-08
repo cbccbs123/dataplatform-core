@@ -13,7 +13,7 @@
     - 한계(plan R-1): ``search_hybrid`` 가 ``limit_per_bucket`` 까지만 반환하므로 본 페이징은
       "한 질의가 반환한 상위 결과 집합 내" 페이징이다(전체 코퍼스 무한 스크롤 아님).
 
-DB·네트워크·파일 IO 없음. 표준 라이브러리 + ``search_service`` 정화 함수만 import.
+DB·네트워크·파일 IO 없음. 표준 라이브러리만 import(완전 순수).
 """
 
 from __future__ import annotations
@@ -21,9 +21,23 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 from typing import Any
 
-from src.search.search_service import _row_similarity
+
+def _row_similarity(row: dict[str, Any]) -> float:
+    """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
+
+    ``search_service._row_similarity`` 와 **동일 규칙의 작은 사본**이다. search_service 를
+    import 하면 media_search→torch 체인을 끌어와 "완전 순수" 주장이 깨지므로(모듈 docstring),
+    6줄짜리 정화 함수만 사본화해 표준 라이브러리만으로 순수성을 유지한다(2026-06-08 코드리뷰).
+    """
+    value = row.get("similarity")
+    try:
+        x = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return x if math.isfinite(x) else 0.0
 
 # 결과 버킷 키 → 모달리티 라벨. sample_search_api._BUCKET_TO_MODALITY 와 동일 매핑을
 # 재현한다(샘플 모듈에 묶이지 않도록 포탈 계층에 작은 사본을 둔다). 미지정 버킷은 키 그대로.
@@ -59,6 +73,12 @@ def flatten_ranked(
     ``(-round(similarity,6), asset_id)`` (유사도 desc·asset_id asc). similarity 는
     ``search_service._row_similarity`` 로 정화(None/NaN/inf → 0.0).
     행에 ``domain_label`` 이 있고 ``exclude_domains`` 에 들면 제외(없으면 포함, FR-014).
+
+    ⚠️ 알려진 갭(2026-06-08 코드리뷰): 현재 006 검색 결과 행(``media_search``)에는
+    ``domain_label`` 컬럼이 없어, 검색 경로에서 이 필터는 **no-op** 이다. medical 자산이
+    아직 적재되지 않아(단계 D 최후) 현재 무해하나, **단계 D(의료 ingest) 착수 전 006 검색
+    행에 ``domain_label`` 을 도입해 본 필터를 실효화해야 한다**(상세·다운로드는 DB 게이트로
+    이미 의료 배제). 후속: specs/010-general-portal/tasks.md.
     """
     flat: list[dict[str, Any]] = []
     for bucket, rows in (search_result.get("results") or {}).items():
