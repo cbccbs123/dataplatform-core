@@ -34,8 +34,10 @@ class TestTextSplit(unittest.TestCase):
         from src.skills import text_skill
         chunks = [{"embedding_vector": [0.1], "chunk_index": 0}, {"embedding_vector": [0.2], "chunk_index": 1}]
         ctx = _ctx()
+        # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
         ctx.settings = mock.Mock(encoding="utf-8", text_embedding_chunk_size=100,
-                                 text_embedding_model="m", text_embedding_normalize=True)
+                                 text_embedding_model="m", text_embedding_normalize=True,
+                                 active_embed_channel="st")
         with mock.patch.multiple("src.embedders.text_embedder", embedding_text_chunks=mock.Mock(return_value=chunks)):
             embs = text_skill._embed_text(ctx, AssetRecord())
         self.assertEqual([e.chunk_index for e in embs], [0, 1])
@@ -44,8 +46,10 @@ class TestTextSplit(unittest.TestCase):
 
 class TestImageSplit(unittest.TestCase):
     def _cfg(self):
+        # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
         return mock.Mock(labels_score_min=0.0, image_labels_meta_top_k=5,
-                         text_embedding_model="m", text_embedding_normalize=True)
+                         text_embedding_model="m", text_embedding_normalize=True,
+                         active_embed_channel="st")
 
     def test_extract_stashes_clip_vec_and_embed_reuses(self) -> None:
         from src.skills import image_skill
@@ -78,7 +82,9 @@ class TestAudioSplit(unittest.TestCase):
     def test_extract_stashes_stt_text_and_embed_reuses(self) -> None:
         from src.skills import audio_skill
         ctx = _ctx("audio")
-        ctx.settings = mock.Mock(text_embedding_chunk_size=100, text_embedding_model="m", text_embedding_normalize=True)
+        # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
+        ctx.settings = mock.Mock(text_embedding_chunk_size=100, text_embedding_model="m",
+                                 text_embedding_normalize=True, active_embed_channel="st")
         with mock.patch.multiple("src.preprocess.stt", transcribe_audio_local=mock.Mock(return_value={"text": "안녕"})), \
              mock.patch.multiple("src.extractors.audio_meta_extractor", extract_audio_meta=mock.Mock(return_value={"dur": 3})), \
              mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords_from_audio=mock.Mock(return_value={"summary": "s"})), \
@@ -98,9 +104,10 @@ class TestVideoSplit(unittest.TestCase):
     def test_extract_stashes_keyframes_and_embed_pairs(self) -> None:
         from src.skills import video_skill
         ctx = _ctx("video")
+        # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
         ctx.settings = mock.Mock(video_max_keyframes=2, labels_score_min=0.0,
                                  video_keyframe_labels_meta_top_k=5, text_embedding_model="m",
-                                 text_embedding_normalize=True)
+                                 text_embedding_normalize=True, active_embed_channel="st")
         frames = [{"scene_index": 0, "start_sec": 0, "end_sec": 1, "frame_sec": 0, "jpeg_bytes": b"x"}]
         clip_ve = {"keyframes": [{"clip_image_embedding": [0.7] * 4,
                                   "summary": {"summary": "s", "keywords": ["k"]},

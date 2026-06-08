@@ -6,11 +6,9 @@
 
 from __future__ import annotations
 
-from src.config.settings import get_current_settings
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.skills.meta_split import split_core_ext
-
-_CHANNEL_ST = "st"
 
 
 def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
@@ -42,24 +40,29 @@ def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
 
     텍스트는 미디어(이미지/영상/오디오)와 달리 scratch 핸드오프 없이
     파일에서 직접 청크를 재생성한다 — extract 단계에서 공유 계산이 없기 때문이다.
-    chunk_index 는 0-based 순번으로, DB persist 시 channel='st' 와 함께 청크를 식별한다.
+    chunk_index 는 0-based 순번으로, DB persist 시 활성 채널(기본 'st')과 함께 청크를 식별한다.
+
+    채널·모델은 활성 임베딩 프로파일(018)로 결정한다 — 적재·검색·관계가 공유하는 단일 출처.
+    기본 active='st' → channel='st'·KoSimCSE 로 기존 적재와 동치(회귀 0).
     """
     from src.embedders.text_embedder import embedding_text_chunks
 
     cfg = ctx.settings or get_current_settings()
+    channel = active_embed_channel(cfg)
+    model = active_embed_model(cfg)
     chunks = embedding_text_chunks(
         ctx.file_path,
         file_kind=ctx.modality,
         encoding=cfg.encoding,
         chunk_size=cfg.text_embedding_chunk_size,
-        embedding_model_name=cfg.text_embedding_model,
+        embedding_model_name=model,
         normalize_embeddings=cfg.text_embedding_normalize,
     )
     return [
         EmbeddingItem(
-            channel=_CHANNEL_ST,
+            channel=channel,
             vector=c["embedding_vector"],
-            model_name=cfg.text_embedding_model,
+            model_name=model,
             chunk_index=int(c["chunk_index"]),
         )
         for c in chunks

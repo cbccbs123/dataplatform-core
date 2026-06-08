@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-from src.config.settings import get_current_settings
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.skills.meta_split import split_core_ext
 
-_CHANNEL_ST = "st"
 _CHANNEL_CLIP = "clip"
 
 
@@ -104,7 +103,8 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
 
     키프레임 n 개 → EmbeddingItem 2n 개(ST·CLIP 쌍). chunk_index 는 키프레임 순번(0-based).
     같은 chunk_index 를 공유하는 ST/CLIP 쌍이 하이브리드 검색에서 동일 시점 프레임을 나타낸다.
-    CLIP 벡터는 ctx.scratch["keyframes"] 에서 꺼내므로 CLIP 추론을 재실행하지 않는다.
+    텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
+    CLIP 벡터는 ctx.scratch["keyframes"] 에서 꺼내므로 CLIP 추론을 재실행하지 않는다(시각 채널은 무변경).
     계약 위반(extract 없이 단독 호출) 시 RuntimeError 로 즉시 탐지된다.
     """
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
@@ -112,6 +112,8 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
+    channel = active_embed_channel(cfg)
+    model = active_embed_model(cfg)
     # 계약 위반 즉시 탐지: extract 없이 embed 만 단독 호출하면 RuntimeError.
     keyframes = ctx.scratch.get("keyframes")
     if keyframes is None:
@@ -124,11 +126,11 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
             chunk_content = " "
         st_raw = embed_texts(
             [chunk_content],
-            model_name=cfg.text_embedding_model,
+            model_name=model,
             normalize_embeddings=cfg.text_embedding_normalize,
         )[0]
         st_vec = pad_embedding_to_storage_dim(st_raw)
         # 키프레임당 ST/CLIP 한 쌍(같은 chunk_index, 채널로 구분)
-        embeddings.append(EmbeddingItem(channel=_CHANNEL_ST, vector=st_vec, model_name=cfg.text_embedding_model, chunk_index=i))
+        embeddings.append(EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=i))
         embeddings.append(EmbeddingItem(channel=_CHANNEL_CLIP, vector=kf["clip_vec"], model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i))
     return embeddings
