@@ -11,7 +11,8 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-from src.search.media_search import search_media_all_grouped
+from src.config.settings import model_for_channel
+from src.search.media_search import EMBEDDING_KIND_ST, search_media_all_grouped
 
 # 요청 모달리티 라벨 → ``search_media_all_grouped`` 결과 버킷 키.
 # 결정성(헌법 3조): 결과 버킷 조립이 ``list(.items())`` 순회 순서에 의존하므로 삽입 순서를
@@ -61,6 +62,8 @@ def search_hybrid(
     fusion: str = "alpha",
     structured: dict[str, Any] | None = None,
     min_scores: dict[str, float] | None = None,
+    text_channel: str = EMBEDDING_KIND_ST,
+    text_query_model: str | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
 ) -> dict[str, Any]:
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
@@ -76,6 +79,14 @@ def search_hybrid(
     ``fusion`` 은 ST 하이브리드 융합 방식(기본 ``alpha``=기존 동작; ``rrf``=순위 융합 프로토타입).
     ⚠️ 한계: ``rrf`` 는 현재 grouped 출력에 반영되지 않는다 — 버킷 cap 이 ``similarity`` 로
     재정렬하므로 RRF 순서는 ``_run_hybrid_search`` 레벨에서만 효과(KPI 측정용). 설계 §8 후속.
+
+    ``text_channel``/``text_query_model`` 은 017 A/B 텍스트 임베딩 채널 선택이다(텍스트 채널 한정,
+    시각 CLIP 경로 무변경). 기본값 ``('st', None)`` 이면 기존 동작과 완전 동치 — grouped 에
+    ``channel='st'``·``query_model_name=None`` 을 넘기고, 질의 임베딩 모델 해소는 media_search 가
+    기존대로(``cfg.text_embedding_model``=KoSimCSE) 맡는다(이 기본 경로는 ``get_current_settings``
+    를 건드리지 않아 settings 미초기화 환경에서도 동작 보존, 회귀 0). ``text_query_model`` 을 주면
+    그 모델을 그대로 쓰고, 미지정이면서 ``text_channel`` 이 기본('st')이 아니면 ``model_for_channel``
+    로 해소한다(FR-004 질의-문서 모델 일치; 미지원 채널은 ``ValueError``).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -90,6 +101,14 @@ def search_hybrid(
     # 후보를 계산하지 않아 비용↓·결과 동치. 전체(None) 또는 image/video 포함이면 기존대로 True.
     include_visual = modalities is None or bool(set(modalities) & {"image", "video"})
 
+    # 질의 임베딩 모델 해소(FR-004): 명시 모델이 우선. 미지정이면서 기본 채널('st')이면
+    # None 을 그대로 넘겨 media_search 가 기존 KoSimCSE 경로로 해소하게 둔다 — 기본 경로는
+    # get_current_settings 를 건드리지 않아 settings 미초기화에서도 동작 보존(회귀 0). 비-기본
+    # 채널(예: 'st_bge')은 A/B 에 설정이 필수이므로 model_for_channel 로 즉시 해소한다.
+    query_model_name = text_query_model
+    if query_model_name is None and text_channel != EMBEDDING_KIND_ST:
+        query_model_name = model_for_channel(text_channel)
+
     grouped = _grouped_fn(
         query,
         structured=structured,
@@ -97,6 +116,8 @@ def search_hybrid(
         text_hybrid_alpha=text_hybrid_alpha,
         image_search_alpha=image_search_alpha,
         fusion=fusion,
+        channel=text_channel,
+        query_model_name=query_model_name,
         include_visual=include_visual,
     )
     results = {
