@@ -354,15 +354,21 @@ def _apply_fusion(
     return [by_id[i] for i, _ in fused if i in by_id]
 
 
-def embed_query_for_media_search(query: str) -> list[float]:
+def embed_query_for_media_search(
+    query: str, *, model_name: str | None = None
+) -> list[float]:
+    """질의 텍스트를 임베딩한다(017 A/B). ``model_name`` 미지정 시 기존대로 ``cfg.text_embedding_model``
+    (KoSimCSE)을 쓴다 — 기본 경로 완전 동치. ``model_name`` 을 주면 그 모델로 질의를 임베딩해
+    해당 채널의 문서 임베딩과 같은 벡터 공간에서 비교한다(FR-004 질의-문서 모델 일치)."""
     cfg = get_current_settings()
+    mn = model_name if model_name is not None else cfg.text_embedding_model
     raw = query.strip() if query.strip() else " "
     q = normalize_text_for_embedding(raw)
     if not q.strip():
         q = " "
     row = embed_texts(
         [q],
-        model_name=cfg.text_embedding_model,
+        model_name=mn,
         normalize_embeddings=cfg.text_embedding_normalize,
     )[0]
     return pad_embedding_to_storage_dim(row)
@@ -373,7 +379,7 @@ def _run_hybrid_search(
     query_vector: list[float],
     bm25_query: str,
     media_types: list[str],
-    embedding_kind: str,
+    embedding_kind: str = EMBEDDING_KIND_ST,
     limit: int,
     alpha: float,
     fusion: str = "alpha",
@@ -381,6 +387,11 @@ def _run_hybrid_search(
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """임베딩 상위 후보에 ``asset_metadata.search_vector`` 기준 ``ts_rank_cd`` 를 섞어 반환한다.
+
+    ``embedding_kind`` 는 ``asset_embedding.channel`` SQL 파라미터다(017 A/B의 채널 선택자).
+    기본값 ``EMBEDDING_KIND_ST``('st'=KoSimCSE)로만 두면 기존 동작과 완전 동치이고, 호출부가
+    ``'st_bge'``(BGE) 등을 주면 그 채널의 문서 임베딩과 비교한다. ``query_vector`` 는 호출부가
+    이미 해당 채널과 같은 모델로 만든 질의 벡터여야 한다(FR-004 질의-문서 모델 일치).
 
     ``similarity = alpha * emb_score + (1-alpha) * bm25_scaled``.
     여기서 ``bm25_scaled = bm25_score / (bm25_score + BM25_SATURATION_K)``.
@@ -433,6 +444,8 @@ def search_media_text_items(
     alpha: float = 0.75,
     media_types: list[str] | None = None,
     fusion: str = "alpha",
+    channel: str = EMBEDDING_KIND_ST,
+    query_model_name: str | None = None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """
@@ -445,14 +458,19 @@ def search_media_text_items(
 
     기본 ``media_types`` 는 ``MEDIA_TYPES_ST_CHUNK_SEARCH``(문서·오디오 STT·영상 VLM 텍스트 청크 등)로
     CLIP 청크와 섞이지 않게 한다. 결과에는 ``summary`` 가 포함된다.
+
+    ``channel``/``query_model_name`` 은 017 A/B 채널 선택이다. 기본값(``'st'``·``None``)이면
+    질의를 KoSimCSE(``cfg.text_embedding_model``)로 임베딩해 ``channel='st'`` 문서와 비교 — 기존
+    동작 완전 동치. ``channel='st_bge'``·``query_model_name='BAAI/bge-m3'`` 처럼 짝을 맞춰 주면
+    그 모델로 질의를 임베딩해 같은 채널의 문서 임베딩과 비교한다(FR-004 질의-문서 모델 일치).
     """
-    query_vector = embed_query_for_media_search(query)
+    query_vector = embed_query_for_media_search(query, model_name=query_model_name)
     mt = media_types if media_types is not None else list(MEDIA_TYPES_ST_CHUNK_SEARCH)
     return _run_hybrid_search(
         query_vector=query_vector,
         bm25_query=query,
         media_types=mt,
-        embedding_kind=EMBEDDING_KIND_ST,
+        embedding_kind=channel,
         limit=limit,
         alpha=alpha,
         fusion=fusion,
@@ -657,6 +675,8 @@ def search_media_all_grouped(
     bm25_weight: float = 0.2,
     clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
     fusion: str = "alpha",
+    channel: str = EMBEDDING_KIND_ST,
+    query_model_name: str | None = None,
     include_visual: bool = True,
     debug: bool = False,
 ) -> dict[str, Any]:
@@ -675,6 +695,11 @@ def search_media_all_grouped(
     이미지·영상 버킷을 요청하지 않았을 때 불필요한 임베딩·라벨 검색 비용을 없앤다. 이때
     image 버킷은 비고 video 버킷은 ST 하이브리드 영상(video_st)만 담겨, 시각 후보가 어차피
     버려질 모달리티 조합에서 결과가 동치다(기본 ``True``=기존 동작 불변, 회귀 0).
+
+    ``channel``/``query_model_name`` 은 017 A/B 텍스트 채널 선택으로 **ST 하이브리드 경로에만**
+    전달된다(텍스트/오디오/영상 텍스트 버킷). 기본값(``'st'``·``None``)이면 기존 KoSimCSE 동작과
+    완전 동치. **시각 2단계(CLIP) 경로는 무변경** — 늘 ``channel='clip'``·KoSimCSE 1차로 돌린다
+    (FR-008 텍스트 채널 한정). 따라서 ``channel='st_bge'`` 라도 image 버킷은 기존과 동일하다.
 
     ⚠️ **현재 한계(프로토타입)**: 아래 각 버킷은 ``_sort_by_similarity_cap`` 으로 ``similarity``
     (alpha 가중합) 기준 재정렬되므로, ``fusion="rrf"`` 가 ``_run_hybrid_search`` 에서 만든 RRF
@@ -695,6 +720,8 @@ def search_media_all_grouped(
         alpha=text_hybrid_alpha,
         media_types=list(MEDIA_TYPES_ST_CHUNK_SEARCH),
         fusion=fusion,
+        channel=channel,
+        query_model_name=query_model_name,
         debug=debug,
     )
 

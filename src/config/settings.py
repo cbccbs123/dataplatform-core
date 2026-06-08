@@ -25,6 +25,9 @@ class PipelineSettings:
     overlap_size: int
     encoding: str
     text_embedding_model: str
+    # 017 A/B: BGE-M3 채널('st_bge')용 임베딩 모델. _require_env 가 아닌 선택 필드 —
+    # 미설정 시 기본 'BAAI/bge-m3'(기존 text_embedding_model=KoSimCSE 와 별개, 동작 무변경).
+    text_embedding_model_bge: str
     text_embedding_chunk_size: int
     text_embedding_normalize: bool
     video_max_keyframes: int
@@ -84,6 +87,13 @@ def _env_int_default(name: str, default: int) -> int:
         raise ValueError(f"정수 환경변수 형식 오류: {name}={raw!r}") from e
 
 
+def _env_str_default(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip()
+
+
 def _env_float_default(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
@@ -121,6 +131,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         overlap_size=_require_env_int("OVERLAP_SIZE"),
         encoding=_require_env("ENCODING"),
         text_embedding_model=_require_env("TEXT_EMBED_MODEL"),
+        text_embedding_model_bge=_env_str_default("TEXT_EMBED_MODEL_BGE", "BAAI/bge-m3"),
         text_embedding_chunk_size=_require_env_int("TEXT_EMBED_CHUNK_SIZE"),
         text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
         video_max_keyframes=(
@@ -154,3 +165,22 @@ def get_current_settings() -> PipelineSettings:
     if _SETTINGS is None:
         raise RuntimeError("settings가 초기화되지 않았습니다. 먼저 init_settings(profile)를 호출하세요.")
     return _SETTINGS
+
+
+def model_for_channel(channel: str, settings: PipelineSettings | None = None) -> str:
+    """텍스트 임베딩 채널 → 질의 임베딩 모델 매핑(017 A/B). 질의-문서 모델을 일치(FR-004)시키는 단일 출처.
+
+    ``'st'``=KoSimCSE(기존), ``'st_bge'``=BGE-M3. ``settings`` 미지정 시 활성 설정을 사용한다
+    (테스트는 ``settings`` 를 주입해 순수 단위로 검증). 미지원 채널은 잘못된 모델로 검색하지 않도록
+    즉시 ``ValueError`` 로 차단한다(시각 'clip' 채널은 본 텍스트 매핑 대상이 아님)."""
+    cfg = settings if settings is not None else get_current_settings()
+    mapping = {
+        "st": cfg.text_embedding_model,
+        "st_bge": cfg.text_embedding_model_bge,
+    }
+    try:
+        return mapping[channel]
+    except KeyError:
+        raise ValueError(
+            f"지원하지 않는 텍스트 임베딩 채널: {channel!r} (지원: {sorted(mapping)})"
+        ) from None
