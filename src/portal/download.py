@@ -1,14 +1,45 @@
 """포탈 다운로드 지원 — 단일 자산·관계 묶음(spec 010 D-4/D-5).
 
 본 파일은 그룹별로 함수가 늘어난다:
-    - **G2(이번)**: ``parse_range_header`` — HTTP Range 헤더 파싱(**완전 순수**, DB·IO 0).
-    - G3(후속): ``resolve_download_target``/``collect_bundle_assets``/``build_bundle_zip``
-      (conn·파일 IO). 같은 파일에 별도 task 로 추가 예정이므로 이번에는 순수 함수만 둔다.
+    - **G2**: ``parse_range_header`` — HTTP Range 헤더 파싱(**완전 순수**, DB·IO 0).
+    - **G3**: ``resolve_download_target``(단일 다운로드 타깃 해소·노출 게이트) ·
+      ``collect_bundle_assets``(관계 ego-network 묶음 수집·결정적 정렬) ·
+      ``build_bundle_zip``(원본 → zip, 누락은 manifest 로 고지하는 부분 zip).
+
+읽기 전용
+    asset/graph 조회만(쓰기·스키마 변경 0, 헌법 6조). 관계는 ``graph_query`` seam 경유.
+    결정성(헌법 3조): 묶음 정렬 tiebreak(seed→confidence→asset_id) + zip 엔트리 순서·타임스탬프 고정.
 """
 
 from __future__ import annotations
 
+import io
+import json
+import logging
+import os
+import zipfile
+from typing import Any
+
+from psycopg import Connection
+from psycopg.rows import dict_row
+
+# 묶음 이웃은 반드시 graph_query seam 경유(대칭 엣지 양방향·status 필터). 직접 graph_edge 쿼리 금지.
+from src.relations.graph_query import fetch_active_relations_for_asset
+
+logger = logging.getLogger(__name__)
+
 _BYTES_PREFIX = "bytes="
+
+# 다운로드 노출 게이트(상세와 동일): registered·비의료만 노출. 그 외/없음은 API 가 404.
+_DOWNLOAD_TARGET_SQL = """
+SELECT asset_id, fs_path, fs_uri, file_size, modality, domain_label, status
+FROM asset
+WHERE asset_id = %s
+LIMIT 1
+"""
+
+# 묶음 자산들의 파일 경로 일괄 조회. 정렬은 파이썬에서 결정적으로 하므로 ORDER BY 불필요.
+_BUNDLE_PATHS_SQL = "SELECT asset_id, fs_path FROM asset WHERE asset_id = ANY(%s)"
 
 
 def parse_range_header(range_value: str | None, file_size: int) -> tuple[int, int] | None:
@@ -64,3 +95,165 @@ def parse_range_header(range_value: str | None, file_size: int) -> tuple[int, in
     if end >= file_size:
         raise ValueError(f"Range 끝이 파일 크기 이상(416): {end} >= {file_size}")
     return (start, end)
+
+
+def resolve_download_target(
+    conn: Connection[Any], *, asset_id: str
+) -> dict[str, Any] | None:
+    """``asset_id`` 의 단일 다운로드 타깃을 해소한다(노출 게이트 포함, plan D-4).
+
+    Returns:
+        registered·비의료면 ``{"asset_id","fs_path","fs_uri","file_size","modality","file_name"}``
+        (``file_name`` = ``fs_path`` basename). 행 없음/비registered/의료(FR-014) → ``None`` (API 404).
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_DOWNLOAD_TARGET_SQL, (asset_id,))
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+    if row["status"] != "registered":
+        return None
+    if row["domain_label"] == "medical":
+        return None
+
+    fs_path = row["fs_path"]
+    return {
+        "asset_id": str(row["asset_id"]),
+        "fs_path": fs_path,
+        "fs_uri": row["fs_uri"],
+        "file_size": row["file_size"],
+        "modality": row["modality"],
+        "file_name": os.path.basename(fs_path) if fs_path else "",
+    }
+
+
+def _fetch_asset_paths(
+    conn: Connection[Any], asset_ids: list[str]
+) -> dict[str, Any]:
+    """주어진 asset_id 들의 ``fs_path`` 를 일괄 조회해 ``{asset_id: fs_path}`` 로 반환한다."""
+    if not asset_ids:
+        return {}
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_BUNDLE_PATHS_SQL, (list(asset_ids),))
+        rows = cur.fetchall()
+    return {str(r["asset_id"]): r["fs_path"] for r in rows}
+
+
+def collect_bundle_assets(
+    conn: Connection[Any],
+    *,
+    seed_asset_id: str,
+    max_neighbors: int = 50,
+    min_confidence: float = 0.0,
+) -> list[dict[str, Any]]:
+    """관계 ego-network(seed + 1-hop active 이웃) 묶음 자산을 수집한다(plan D-5).
+
+    절차
+        1. ``graph_query``(active, **양방향**)로 이웃을 받아 self-loop 제외·``min_confidence``
+           미만 제외·중복 이웃(다중 엣지)은 최고 confidence 로 합친다.
+        2. 결정적 정렬 — 이웃을 (confidence desc, asset_id asc)로 줄세운 뒤 ``max_neighbors``
+           초과 시 상위 N 으로 절단(허브 자산 메가블롭 방지, 절단 시 ``log`` 경고).
+        3. seed 를 맨 앞에 두고 각 자산의 ``fs_path``/``file_name`` 을 채워 반환.
+
+    Returns:
+        ``[{"asset_id","fs_path","file_name"}, ...]`` — seed 먼저, 그다음 이웃(결정적 순서).
+        이웃 0이면 seed 단독 1건(US3 Acc 3). asset 행이 없어 경로를 모르는 항목은 제외.
+    """
+    seed_id = str(seed_asset_id)
+    neighbors = fetch_active_relations_for_asset(conn, asset_id=seed_id)
+
+    # 이웃 dedup: 같은 자산이 여러 엣지로 와도 한 번만(최고 confidence 보존). None → 0.0 정화.
+    best_conf: dict[str, float] = {}
+    for n in neighbors:
+        nid = str(n["asset_id"])
+        if nid == seed_id:
+            continue  # self-loop 방어
+        conf = n.get("confidence")
+        conf = float(conf) if conf is not None else 0.0
+        if conf < min_confidence:
+            continue
+        if nid not in best_conf or conf > best_conf[nid]:
+            best_conf[nid] = conf
+
+    # 결정적 정렬: confidence desc, asset_id asc.
+    ordered = sorted(best_conf.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(ordered) > max_neighbors:
+        logger.warning(
+            "묶음 이웃 %d개가 max_neighbors=%d 초과 — confidence 상위 %d개로 절단(seed=%s)",
+            len(ordered), max_neighbors, max_neighbors, seed_id,
+        )
+        ordered = ordered[:max_neighbors]
+
+    # 최종 순서: seed 먼저 → 이웃(위 정렬). 경로 일괄 조회 후 enrich.
+    ordered_ids = [seed_id] + [nid for nid, _ in ordered]
+    path_map = _fetch_asset_paths(conn, ordered_ids)
+
+    targets: list[dict[str, Any]] = []
+    for aid in ordered_ids:
+        fs_path = path_map.get(aid)
+        if fs_path is None:
+            continue  # asset 행 없음(파일 경로 미상) → 묶음 제외
+        targets.append(
+            {"asset_id": aid, "fs_path": fs_path, "file_name": os.path.basename(fs_path)}
+        )
+    return targets
+
+
+def _dedup_entry_name(name: str, used: set[str]) -> str:
+    """zip 엔트리명 충돌 시 ``root_1.ext`` 식 접미사로 유일화한다(결정적)."""
+    if name not in used:
+        used.add(name)
+        return name
+    root, ext = os.path.splitext(name)
+    i = 1
+    while True:
+        cand = f"{root}_{i}{ext}"
+        if cand not in used:
+            used.add(cand)
+            return cand
+        i += 1
+
+
+def build_bundle_zip(targets: list[dict[str, Any]]) -> bytes:
+    """묶음 타깃들의 원본 파일을 zip 바이트로 만든다(plan D-5).
+
+    부분 zip 보장(Edge Case)
+        존재하지 않거나 읽기 실패한 파일은 **skip** 하고 zip 내 ``_manifest.json`` 에 누락
+        목록을 기록한다. 전체 실패하지 않는다 — 누락이 전부여도 manifest 만 담은 유효 zip 을 낸다.
+
+    결정성(헌법 3조)
+        엔트리 순서는 ``targets`` 순서(collect 가 결정적), 엔트리 타임스탬프는 1980-01-01 로
+        고정해 동일 입력 2회 동일 바이트를 보장한다.
+    """
+    buf = io.BytesIO()
+    missing: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for t in targets:
+            fs_path = t.get("fs_path")
+            file_name = t.get("file_name") or (os.path.basename(fs_path) if fs_path else "")
+            try:
+                with open(fs_path, "rb") as fh:  # type: ignore[arg-type]
+                    data = fh.read()
+            except (OSError, TypeError):
+                missing.append(
+                    {"asset_id": t.get("asset_id"), "fs_path": fs_path, "file_name": file_name}
+                )
+                continue
+            entry = _dedup_entry_name(file_name, used_names)
+            _write_zip_entry(zf, entry, data)
+
+        if missing:
+            manifest = json.dumps({"missing": missing}, ensure_ascii=False, sort_keys=True, indent=2)
+            _write_zip_entry(zf, "_manifest.json", manifest.encode("utf-8"))
+
+    return buf.getvalue()
+
+
+def _write_zip_entry(zf: zipfile.ZipFile, arcname: str, data: bytes) -> None:
+    """타임스탬프 고정 ZipInfo 로 엔트리를 쓴다(결정적 바이트, 헌법 3조)."""
+    info = zipfile.ZipInfo(filename=arcname, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    zf.writestr(info, data)
