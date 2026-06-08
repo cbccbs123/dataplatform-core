@@ -11,7 +11,7 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-from src.config.settings import model_for_channel
+from src.config.settings import active_embed_channel, model_for_channel
 from src.search.media_search import EMBEDDING_KIND_ST, search_media_all_grouped
 
 # 요청 모달리티 라벨 → ``search_media_all_grouped`` 결과 버킷 키.
@@ -62,7 +62,7 @@ def search_hybrid(
     fusion: str = "alpha",
     structured: dict[str, Any] | None = None,
     min_scores: dict[str, float] | None = None,
-    text_channel: str = EMBEDDING_KIND_ST,
+    text_channel: str | None = None,
     text_query_model: str | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
 ) -> dict[str, Any]:
@@ -80,13 +80,17 @@ def search_hybrid(
     ⚠️ 한계: ``rrf`` 는 현재 grouped 출력에 반영되지 않는다 — 버킷 cap 이 ``similarity`` 로
     재정렬하므로 RRF 순서는 ``_run_hybrid_search`` 레벨에서만 효과(KPI 측정용). 설계 §8 후속.
 
-    ``text_channel``/``text_query_model`` 은 017 A/B 텍스트 임베딩 채널 선택이다(텍스트 채널 한정,
-    시각 CLIP 경로 무변경). 기본값 ``('st', None)`` 이면 기존 동작과 완전 동치 — grouped 에
-    ``channel='st'``·``query_model_name=None`` 을 넘기고, 질의 임베딩 모델 해소는 media_search 가
-    기존대로(``cfg.text_embedding_model``=KoSimCSE) 맡는다(이 기본 경로는 ``get_current_settings``
-    를 건드리지 않아 settings 미초기화 환경에서도 동작 보존, 회귀 0). ``text_query_model`` 을 주면
-    그 모델을 그대로 쓰고, 미지정이면서 ``text_channel`` 이 기본('st')이 아니면 ``model_for_channel``
-    로 해소한다(FR-004 질의-문서 모델 일치; 미지원 채널은 ``ValueError``).
+    ``text_channel``/``text_query_model`` 은 텍스트 임베딩 채널 선택이다(텍스트 채널 한정, 시각
+    CLIP 경로 무변경). **미지정(None)** 이면 운영 활성 프로파일(018, 적재·검색·관계 단일 출처)로
+    해소한다 — ``text_channel`` 은 ``active_embed_channel()``, 질의 모델은 (해소된) 채널의
+    ``model_for_channel`` 로 일치시킨다(FR-004 질의-문서 모델 일치). 017 A/B 하니스처럼 **명시
+    전달은 그대로 우선**한다(명시 채널/모델이면 활성 해소를 건너뜀).
+
+    회귀 0(SC-002): 기본 active='st' → channel='st'·KoSimCSE(=``model_for_channel('st')``=
+    ``cfg.text_embedding_model``) 로 기존 동작과 동치. settings 미초기화(순수 단위 등)에서는
+    활성 해소가 ``RuntimeError`` 이므로 기존 기본 ``('st', None)`` 으로 보수적 폴백한다 —
+    이때 ``query_model_name=None`` 을 넘겨 media_search 가 기존대로 KoSimCSE 로 해소한다(006/017
+    검색 단위가 settings 없이 그대로 동작). 미지원 채널은 ``model_for_channel`` 이 ``ValueError``.
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -101,13 +105,22 @@ def search_hybrid(
     # 후보를 계산하지 않아 비용↓·결과 동치. 전체(None) 또는 image/video 포함이면 기존대로 True.
     include_visual = modalities is None or bool(set(modalities) & {"image", "video"})
 
-    # 질의 임베딩 모델 해소(FR-004): 명시 모델이 우선. 미지정이면서 기본 채널('st')이면
-    # None 을 그대로 넘겨 media_search 가 기존 KoSimCSE 경로로 해소하게 둔다 — 기본 경로는
-    # get_current_settings 를 건드리지 않아 settings 미초기화에서도 동작 보존(회귀 0). 비-기본
-    # 채널(예: 'st_bge')은 A/B 에 설정이 필수이므로 model_for_channel 로 즉시 해소한다.
+    # 채널·질의모델 해소(018, FR-004). 명시 전달은 그대로 우선(A/B). 미지정(None)이면 운영 활성
+    # 프로파일(적재·검색·관계 단일 출처)로 해소한다 — text_channel 은 active_embed_channel(),
+    # 질의 모델은 (해소된) 채널의 model_for_channel 로 일치시킨다.
+    # settings 미초기화(순수 단위 등)에서는 활성 해소가 RuntimeError 이므로 기존 기본('st', None)으로
+    # 보수적 폴백한다 — query_model_name=None 은 media_search 가 기존대로 KoSimCSE 로 해소(회귀 0).
     query_model_name = text_query_model
-    if query_model_name is None and text_channel != EMBEDDING_KIND_ST:
-        query_model_name = model_for_channel(text_channel)
+    try:
+        if text_channel is None:
+            text_channel = active_embed_channel()
+        if query_model_name is None:
+            query_model_name = model_for_channel(text_channel)
+    except RuntimeError:
+        # settings 미초기화: 기존 검색 단위(006/017 기본 경로)가 settings 없이 그대로 동작.
+        if text_channel is None:
+            text_channel = EMBEDDING_KIND_ST
+        # query_model_name 은 None 유지 → media_search 가 기존대로 cfg.text_embedding_model 로 해소.
 
     grouped = _grouped_fn(
         query,

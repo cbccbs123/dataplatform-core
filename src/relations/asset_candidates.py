@@ -20,6 +20,7 @@ from typing import Any, Literal, TypedDict
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.config.settings import active_embed_channel
 from src.search.media_search import EMBEDDING_KIND_CLIP, EMBEDDING_KIND_ST
 
 EmbeddingKindFilter = Literal["st", "clip", "both"]
@@ -40,12 +41,20 @@ def _channels_param(kind: EmbeddingKindFilter) -> list[str]:
 
     채널 간 벡터는 공간이 달라 코사인 비교가 무의미하므로, SQL에서 channel로 조인해
     같은 채널끼리만 유사도를 계산한다. "both"는 채널별 독립 비교 후 자산 단위 MAX로 합산된다.
+
+    텍스트 채널은 운영 활성 임베딩 채널(018, 적재·검색·관계 단일 출처)을 따른다 — 기본 active='st'
+    이면 기존과 동치. settings 미초기화(순수 단위 등)에서는 활성 해소가 ``RuntimeError`` 이므로
+    기존 기본 'st' 로 보수적 폴백한다(회귀 0). CLIP 채널은 active 와 무관하게 무변경(텍스트 한정).
     """
-    if kind == "st":
-        return [EMBEDDING_KIND_ST]
     if kind == "clip":
         return [EMBEDDING_KIND_CLIP]
-    return [EMBEDDING_KIND_ST, EMBEDDING_KIND_CLIP]
+    try:
+        text_channel = active_embed_channel()
+    except RuntimeError:
+        text_channel = EMBEDDING_KIND_ST
+    if kind == "st":
+        return [text_channel]
+    return [text_channel, EMBEDDING_KIND_CLIP]
 
 
 def find_embedding_candidates(
