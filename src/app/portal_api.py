@@ -1,0 +1,288 @@
+"""일반 도메인 포탈 백엔드 API (FastAPI) — spec 010 P1 정식 진입점(plan D-6).
+
+검색 → 상세 조회 → 단일/관계묶음 다운로드를 묶은 **정식 HTTP(JSON) 백엔드**다. 개발용
+샘플(``sample_search_api``)이 증명한 FastAPI 패턴(`_lifespan`: load_dotenv→init_settings)을
+정식 포탈 라우터로 승격한다. 환경은 ``PORTAL_API_ENV``(기본 dev).
+
+엔드포인트(FR-015 계약)
+    - ``GET /health``                       → ``{"status":"ok","env":...}``
+    - ``GET /search``                       → ``{"items","next_cursor","meta"}`` (cursor 페이지)
+    - ``GET /assets/{asset_id}``            → AssetDetail (없음/의료/비registered → 404)
+    - ``GET /assets/{asset_id}/download``   → 원본 스트리밍(Range 부분 요청 206 지원)
+    - ``GET /assets/{asset_id}/bundle``     → 관계 ego-network zip
+
+헌법 불변식
+    - **FR-013(헌법 2조)**: 포탈은 신규 LLM 호출 0. 검색은 ``search_hybrid``(006 seam, 내부에서
+      ``src/llm/client`` 경유)만 재사용한다. 본 파일은 LLM SDK·LLM seam 패키지를 직접
+      import/호출하지 않는다(grep 가드로 검증).
+    - **FR-014(헌법 7·10조)**: 검색은 ``exclude_domains={'medical'}``, 상세·다운로드·묶음 seed 는
+      서비스 계층(``fetch_asset_detail``/``resolve_download_target``)의 노출 게이트로 의료를 배제한다.
+    - **결정성(헌법 3조)**: 응답 순서·페이지는 ``flatten_ranked``/``paginate``/``graph_query`` 결정성에
+      위임한다(라우터는 추가 정렬을 하지 않는다).
+    - **읽기 전용(헌법 6조)**: 스키마·쓰기 0. DB 접근은 조회 트랜잭션(idempotent)만.
+
+인증은 후속(plan §0.1) — 현재 권한=단일(인증 도입 전엔 전체 열람). 미들웨어/``Depends`` 주입은
+후속 010-follow plan 에서 일괄 삽입한다(YAGNI: 지금은 placeholder 의존성도 두지 않는다).
+"""
+from __future__ import annotations
+
+import mimetypes
+import os
+from collections.abc import Callable, Iterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
+
+# 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
+# search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
+from src.portal.asset_detail import fetch_asset_detail
+from src.portal.download import (
+    build_bundle_zip,
+    collect_bundle_assets,
+    parse_range_header,
+    resolve_download_target,
+)
+from src.portal.search_page import flatten_ranked, paginate
+from src.search.search_service import search_hybrid
+
+_ENV = os.getenv("PORTAL_API_ENV", "dev")
+_VALID_MODALITIES = ("text", "image", "video", "audio")
+
+# 의료(PHI) 배제 도메인 집합(FR-014). 검색 평탄화에서 이 도메인 행을 제거한다.
+_EXCLUDE_DOMAINS = frozenset({"medical"})
+
+# cursor 페이징은 "한 질의가 반환한 상위 결과 집합 내" 페이징이다(plan R-1). 그 집합을 넉넉히
+# 받기 위해 버킷당 한도를 크게 둔다(전체 코퍼스 keyset 페이징은 006 재설계 후속).
+_SEARCH_LIMIT_PER_BUCKET = 200
+
+# 다운로드 스트리밍 청크 크기(64KiB) — 대용량 멀티모달 자산을 메모리에 다 올리지 않는다.
+_STREAM_CHUNK = 64 * 1024
+
+
+def _run_in_db(callback: Callable[[Any], Any]) -> Any:
+    """PostgresUtil 조회 트랜잭션에서 ``callback(conn)`` 을 실행하는 단일 seam.
+
+    상세/다운로드/묶음 핸들러의 DB 접근은 모두 이 함수를 거친다(테스트는 이 함수를 patch 로
+    대체해 DB 없이 단위 검증). ``idempotent=True`` 조회 전용(쓰기 0, 헌법 6조).
+    PostgresUtil 은 import 비용·풀 초기화를 늦추기 위해 함수 안에서 지연 import 한다.
+    """
+    from src.database.postgres_util import PostgresUtil
+
+    db = PostgresUtil()
+    with db:
+        return db.execute_in_transaction(callback, idempotent=True)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # sample_search_api 와 동일 부트스트랩: .env.{env} 로드 → init_settings(필수 env 검증). 1회만.
+    from src.config.settings import init_settings
+
+    project_root = Path(__file__).resolve().parents[2]
+    dotenv_path = project_root / f".env.{_ENV}"
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+    init_settings(_ENV)
+    yield
+
+
+app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
+# 인증 후속: 여기에 미들웨어/Depends(get_principal) 를 일괄 삽입한다(plan §0.1, 010-follow).
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    """헬스 체크(부트스트랩·라우팅 확인용)."""
+    return {"status": "ok", "env": _ENV}
+
+
+def _parse_modalities(modalities: str | None) -> list[str] | None:
+    """콤마 구분 모달리티 문자열을 검증된 리스트로 파싱한다(미지정=None=전체).
+
+    알 수 없는 모달리티는 ``HTTPException(400)`` 으로 거부한다.
+    """
+    if not modalities or not modalities.strip():
+        return None
+    mods = [m.strip() for m in modalities.split(",") if m.strip()]
+    unknown = [m for m in mods if m not in _VALID_MODALITIES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 modality: {unknown} (허용: {list(_VALID_MODALITIES)})",
+        )
+    return mods or None
+
+
+@app.get("/search")
+def search(
+    q: str = Query(..., description="검색 질의(한국어)"),
+    modalities: str | None = Query(
+        None, description="콤마 구분: text,image,video,audio (미지정=전체)"
+    ),
+    page_size: int = Query(20, ge=1, le=200, description="한 페이지 결과 수"),
+    cursor: str | None = Query(None, description="다음 페이지 cursor(이전 응답의 next_cursor)"),
+) -> dict[str, Any]:
+    """006 하이브리드 검색을 cursor 페이지로 감싸 반환한다(FR-001/002/003).
+
+    내부: ``search_hybrid``(신규 LLM 호출 0, 006 seam) → ``flatten_ranked``(의료 배제, FR-014)
+    → ``paginate``(결정적 cursor 페이지). 위조/깨진 cursor 는 400 으로 거부한다.
+    """
+    mods = _parse_modalities(modalities)
+
+    # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). limit_per_bucket 은 cursor 페이징
+    # 대상 집합을 넉넉히 확보(plan R-1).
+    result = search_hybrid(q, modalities=mods, limit_per_bucket=_SEARCH_LIMIT_PER_BUCKET)
+
+    # FR-014: 의료 도메인 행 배제 후 결정적 단일 랭킹으로 평탄화.
+    ranked = flatten_ranked(result, exclude_domains=_EXCLUDE_DOMAINS)
+
+    try:
+        page = paginate(ranked, cursor=cursor, page_size=page_size)
+    except ValueError as exc:
+        # 위조·만료 cursor(decode 실패) → 400(Edge Case).
+        raise HTTPException(status_code=400, detail=f"잘못된 cursor: {exc}") from exc
+
+    return {
+        "items": page["items"],
+        "next_cursor": page["next_cursor"],
+        "meta": {"query": q, "modalities": mods, "page_size": page_size},
+    }
+
+
+@app.get("/assets/{asset_id}")
+def asset_detail(asset_id: str) -> dict[str, Any]:
+    """자산 1건 상세(메타·임베딩 채널 요약·관계 미니뷰)를 반환한다(FR-004/005/006).
+
+    노출 게이트(FR-014)는 ``fetch_asset_detail`` 이 책임진다 — 없음/비registered/의료면 None →
+    404(자산 데이터 노출 0).
+    """
+    detail = _run_in_db(lambda conn: fetch_asset_detail(conn, asset_id=asset_id))
+    if detail is None:
+        raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 노출 대상이 아님")
+    return detail
+
+
+def _guess_content_type(file_name: str, modality: str | None) -> str:
+    """파일명 확장자 → MIME, 실패 시 모달리티 기반 폴백(최종 octet-stream)."""
+    ctype, _ = mimetypes.guess_type(file_name)
+    if ctype:
+        return ctype
+    fallback = {"text": "text/plain; charset=utf-8"}
+    return fallback.get(modality or "", "application/octet-stream")
+
+
+def _content_disposition(file_name: str) -> str:
+    """RFC 5987 attachment 헤더(ASCII filename + UTF-8 filename* 병기)."""
+    return f"attachment; filename=\"{file_name}\"; filename*=UTF-8''{quote(file_name)}"
+
+
+def _file_iterator(path: str, start: int, end: int) -> Iterator[bytes]:
+    """``[start, end]`` (둘 다 포함) 구간을 청크 단위로 읽어 흘려보낸다(메모리 절약·스트리밍)."""
+    remaining = end - start + 1
+    with open(path, "rb") as fh:
+        fh.seek(start)
+        while remaining > 0:
+            chunk = fh.read(min(_STREAM_CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+@app.get("/assets/{asset_id}/download")
+def download(asset_id: str, request: Request) -> StreamingResponse:
+    """단일 자산 원본을 스트리밍한다 — HTTP ``Range`` 부분 요청(206) 지원(FR-007/009).
+
+    절차
+        1. ``resolve_download_target`` 로 노출 게이트(registered·비의료) 통과 확인 → None → 404.
+        2. 원본 파일 존재 확인 → 없거나 접근 불가면 410(FR-009, 자산 데이터 노출 0).
+        3. ``Range`` 헤더가 있으면 ``parse_range_header`` 로 구간 산출 → 206 + ``Content-Range``;
+           범위 위반(ValueError) → 416. 헤더 없으면 200 전체.
+    바이트 산출은 디스크 실제 크기 기준(무결성). ``Accept-Ranges: bytes`` 항상 고지.
+    """
+    target = _run_in_db(lambda conn: resolve_download_target(conn, asset_id=asset_id))
+    if target is None:
+        raise HTTPException(status_code=404, detail="다운로드 대상을 찾을 수 없거나 노출 대상이 아님")
+
+    fs_path = target.get("fs_path")
+    if not fs_path or not os.path.isfile(fs_path):
+        # FR-009: DB 엔 있으나 원본이 사라짐/접근 불가 → 자산 노출 없이 410 Gone.
+        raise HTTPException(status_code=410, detail="원본 파일이 존재하지 않거나 접근할 수 없음")
+
+    file_size = os.path.getsize(fs_path)
+    file_name = target.get("file_name") or os.path.basename(fs_path)
+    content_type = _guess_content_type(file_name, target.get("modality"))
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": _content_disposition(file_name),
+    }
+
+    range_value = request.headers.get("range")
+    try:
+        rng = parse_range_header(range_value, file_size)
+    except ValueError as exc:
+        # 범위 위반(416 Range Not Satisfiable) — Content-Range 로 전체 크기 고지.
+        raise HTTPException(
+            status_code=416,
+            detail=f"요청 범위 충족 불가: {exc}",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        ) from exc
+
+    if rng is None:
+        start, end, status_code = 0, file_size - 1, 200
+    else:
+        start, end = rng
+        status_code = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+    headers["Content-Length"] = str(end - start + 1)
+    return StreamingResponse(
+        _file_iterator(fs_path, start, end),
+        status_code=status_code,
+        media_type=content_type,
+        headers=headers,
+    )
+
+
+@app.get("/assets/{asset_id}/bundle")
+def bundle(asset_id: str) -> Response:
+    """seed 자산 기준 관계 ego-network(seed + 1-hop active 이웃)를 zip 으로 묶어 내려준다(FR-008).
+
+    seed 는 ``resolve_download_target`` 로 게이팅한다 — None(없음/의료/비registered) → 404. 이로써
+    의료/비registered seed 의 묶음 진입을 차단한다.
+
+    한계(MVP 범위): **이웃 자산의 의료 필터는 적용하지 않는다.** 현재 medical 자산이 존재하지
+    않아(plan §0.1) 실효가 없고, 이웃별 도메인 게이트(RBAC·노출 정책)는 후속(013/RBAC, 010-follow)
+    에서 ``collect_bundle_assets`` 수준에 추가한다.
+    """
+
+    def _work(conn: Any) -> list[dict[str, Any]] | None:
+        # seed 게이트: 노출 불가(의료/비registered/없음) seed → None 신호 → 404.
+        if resolve_download_target(conn, asset_id=asset_id) is None:
+            return None
+        return collect_bundle_assets(conn, seed_asset_id=asset_id)
+
+    targets = _run_in_db(_work)
+    if targets is None:
+        raise HTTPException(status_code=404, detail="묶음 seed 를 찾을 수 없거나 노출 대상이 아님")
+
+    # build_bundle_zip 은 파일 IO(원본 읽기) — DB 트랜잭션 밖에서 수행. 누락 파일은 부분 zip + manifest.
+    zip_bytes = build_bundle_zip(targets)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": _content_disposition(f"bundle_{asset_id}.zip")},
+    )
+
+
+if __name__ == "__main__":
+    # python -m src.app.portal_api 로도 띄울 수 있게(개발 편의).
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("PORTAL_API_PORT", "8001")))
