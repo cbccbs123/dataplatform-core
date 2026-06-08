@@ -165,65 +165,113 @@ class TestLoadGolden(unittest.TestCase):
             load_golden(path)
 
 
-class TestDraftQueryRule(unittest.TestCase):
-    """골든셋 초안 질의 생성 규칙(순수 단위, DB 무관) — 결정적·폴백 순서 검증(T010)."""
+class TestTopicPrefixRule(unittest.TestCase):
+    """골든셋 주제(파일명 prefix) 추출·질의 생성 규칙(순수 단위, DB 무관) — 결정적(T010 재설계).
+
+    데이터 파일명은 ``<주제>_<YouTube ID(11자)>_<제목>.<ext>`` 로 자연 군집한다. 같은 주제 =
+    관련 자산이므로 주제 prefix 를 정답군으로 쓴다. 추출 규칙(정규식)을 여러 케이스로 고정한다.
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.mod = _load_draft_module()
 
-    def test_keywords_preferred_and_capped(self) -> None:
-        # keywords 우선, 앞 3개만 공백으로 묶는다(짧은 자연 질의).
-        q = self.mod._draft_query_from_ext_meta(
-            {"keywords": ["재무", "보고서", "2024", "분기"], "summary": "무시됨"}
-        )
-        self.assertEqual(q, "재무 보고서 2024")
+    def test_simple_two_token_topic(self) -> None:
+        # <주제(밑줄 포함)>_<11자 ID>_<제목> — ID 직전까지가 주제.
+        name = "무선_충전기_7iTajgt8pec_Qi2 다 같은 Qi2 아니죠 UGREEN 무선 충전기.jpg"
+        self.assertEqual(self.mod._topic_from_filename(name), "무선_충전기")
 
-    def test_summary_first_sentence_when_no_keywords(self) -> None:
-        # keywords 없으면 summary 첫 문장(종결부호 경계)으로 폴백.
-        q = self.mod._draft_query_from_ext_meta(
-            {"summary": "2024년 연간 재무 실적 요약. 상세 내용은 본문 참고."}
-        )
-        self.assertEqual(q, "2024년 연간 재무 실적 요약")
+    def test_single_token_topic(self) -> None:
+        name = "선거_DOYCfVbioXQ_정원오 44.9% 오세훈 39.8% 서울시장 선거.mp4"
+        self.assertEqual(self.mod._topic_from_filename(name), "선거")
 
-    def test_summary_capped_to_max_len(self) -> None:
-        long = "가" * 200
-        q = self.mod._draft_query_from_ext_meta({"summary": long})
-        self.assertEqual(len(q), self.mod._QUERY_MAX_LEN)
+    def test_three_token_topic(self) -> None:
+        name = "주식_투자_기초_AbCdEfGhIjK_초보 투자자를 위한 가이드.mp3"
+        self.assertEqual(self.mod._topic_from_filename(name), "주식_투자_기초")
 
-    def test_empty_meta_returns_none(self) -> None:
-        # summary·keywords 둘 다 없으면 None(초안에서 제외).
-        self.assertIsNone(self.mod._draft_query_from_ext_meta({}))
-        self.assertIsNone(self.mod._draft_query_from_ext_meta({"summary": "  ", "keywords": []}))
+    def test_youtube_id_with_underscore_and_dash(self) -> None:
+        # 실제 ID 는 [A-Za-z0-9_-] 11자 — 밑줄/하이픈을 포함할 수 있다(주제 토큰과 구분).
+        name = "스마트폰_5ncp-_GXBsU_YENA (최예나) - SMARTPHONE MV.jpg"
+        self.assertEqual(self.mod._topic_from_filename(name), "스마트폰")
 
-    def test_keywords_string_form_tolerated(self) -> None:
-        # 방어적: keywords 가 단일 str 로 와도 처리.
-        q = self.mod._draft_query_from_ext_meta({"keywords": "단일키워드"})
-        self.assertEqual(q, "단일키워드")
+    def test_double_extension_still_matches_prefix(self) -> None:
+        # .ko.txt / .stt.txt 같은 이중 확장자도 prefix 추출에는 무관(앞에서만 매칭).
+        name = "라면_끓이기_GMjx9GrF1nY_3분 라면 황금레시피.ko.txt"
+        self.assertEqual(self.mod._topic_from_filename(name), "라면_끓이기")
+
+    def test_non_matching_name_returns_none(self) -> None:
+        # 주제 패턴이 아닌 파일명은 None(골든셋에서 제외).
+        self.assertIsNone(self.mod._topic_from_filename("manifest.json"))
+        self.assertIsNone(self.mod._topic_from_filename("그냥파일.txt"))
+
+    def test_query_from_topic_underscore_to_space(self) -> None:
+        # 질의 = 주제명(밑줄→공백) — 자연어 질의.
+        self.assertEqual(self.mod._query_from_topic("무선_충전기"), "무선 충전기")
+        self.assertEqual(self.mod._query_from_topic("선거"), "선거")
 
     def test_rule_is_deterministic(self) -> None:
-        # 같은 입력 2회 → 같은 질의(결정성, 헌법 3조).
-        meta = {"keywords": ["a", "b", "c", "d"]}
+        # 같은 입력 2회 → 같은 주제(결정성, 헌법 3조).
+        name = "등산_입문_ZyXwVuTsRqP_초보 등산 가이드.mp4"
         self.assertEqual(
-            self.mod._draft_query_from_ext_meta(meta),
-            self.mod._draft_query_from_ext_meta(meta),
+            self.mod._topic_from_filename(name), self.mod._topic_from_filename(name)
         )
 
-    def test_build_drafts_shape_with_mock_conn(self) -> None:
-        # build_drafts 가 {query, relevant_asset_ids:[자기자산]} 형태를 만들고, 질의 못 만든 자산은 skip.
+
+class TestBuildDraftsTopicGrouping(unittest.TestCase):
+    """주제별 그룹핑·min-group 필터·결정적 정렬(mock conn, DB 무관)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = _load_draft_module()
+
+    def _conn(self, rows):
         from unittest import mock
 
         conn = mock.MagicMock()
         cur = conn.cursor.return_value.__enter__.return_value
-        cur.fetchall.return_value = [
-            {"asset_id": "a1", "ext_meta": {"keywords": ["문서", "요약"]}},
-            {"asset_id": "a2", "ext_meta": {}},  # 질의 생성 불가 → skip
-            {"asset_id": "a3", "ext_meta": {"summary": "회의록 핵심 정리."}},
-        ]
-        drafts = self.mod.build_drafts(conn, limit=None)
+        cur.fetchall.return_value = rows
+        return conn
+
+    def test_groups_by_topic_and_sorts(self) -> None:
+        # 주제별로 묶고, 주제·asset_id 정렬(결정적). 질의=주제(밑줄→공백), 정답=주제 자산 전부.
+        conn = self._conn(
+            [
+                {"asset_id": "id-b", "fs_path": "/d/무선_충전기_aaaaaaaaaaa_x.jpg"},
+                {"asset_id": "id-a", "fs_path": "/d/무선_충전기_bbbbbbbbbbb_y.mp4"},
+                {"asset_id": "id-e", "fs_path": "/d/등산_입문_ccccccccccc_z.mp3"},
+                {"asset_id": "id-d", "fs_path": "/d/등산_입문_ddddddddddd_w.mp4"},
+            ]
+        )
+        drafts = self.mod.build_drafts(conn, min_group=2)
         self.assertEqual(len(drafts), 2)
-        self.assertEqual(drafts[0], {"query": "문서 요약", "relevant_asset_ids": ["a1"]})
-        self.assertEqual(drafts[1]["relevant_asset_ids"], ["a3"])
+        # 주제 정렬: '등산_입문' < '무선_충전기'(유니코드 코드포인트 기준, 결정적).
+        self.assertEqual(drafts[0]["query"], "등산 입문")
+        self.assertEqual(drafts[0]["relevant_asset_ids"], ["id-d", "id-e"])  # asset_id 정렬
+        self.assertEqual(drafts[1]["query"], "무선 충전기")
+        self.assertEqual(drafts[1]["relevant_asset_ids"], ["id-a", "id-b"])
+
+    def test_min_group_filters_small_topics(self) -> None:
+        # min_group 미만 자산 주제는 제외(노이즈↓). 주제 패턴 아닌 파일은 그룹에서 제외.
+        rows = [
+            {"asset_id": "id-1", "fs_path": "/d/김치_담그기_aaaaaaaaaaa_a.jpg"},
+            {"asset_id": "id-2", "fs_path": "/d/김치_담그기_bbbbbbbbbbb_b.mp4"},
+            {"asset_id": "id-3", "fs_path": "/d/요가_자세_ccccccccccc_c.mp4"},  # 단일 자산 주제
+            {"asset_id": "id-4", "fs_path": "/d/manifest.json"},  # 주제 없음
+        ]
+        d2 = self.mod.build_drafts(self._conn(rows), min_group=2)
+        self.assertEqual([x["query"] for x in d2], ["김치 담그기"])  # 요가(1건)·manifest 제외
+        d1 = self.mod.build_drafts(self._conn(rows), min_group=1)
+        self.assertEqual([x["query"] for x in d1], ["김치 담그기", "요가 자세"])  # 1건도 포함
+
+    def test_duplicate_asset_ids_deduped(self) -> None:
+        # 같은 자산이 (DISTINCT 누락 등으로) 중복돼도 정답은 유일·정렬.
+        rows = [
+            {"asset_id": "id-1", "fs_path": "/d/낚시_방법_aaaaaaaaaaa_a.jpg"},
+            {"asset_id": "id-1", "fs_path": "/d/낚시_방법_aaaaaaaaaaa_a.jpg"},
+            {"asset_id": "id-2", "fs_path": "/d/낚시_방법_bbbbbbbbbbb_b.mp4"},
+        ]
+        drafts = self.mod.build_drafts(self._conn(rows), min_group=2)
+        self.assertEqual(drafts[0]["relevant_asset_ids"], ["id-1", "id-2"])
 
 
 def _p95(values: list[float]) -> float:

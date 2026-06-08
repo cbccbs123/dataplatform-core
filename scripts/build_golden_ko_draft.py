@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
-"""한국어 골든셋 초안 생성 — registered 자산 ext_meta 에서 질의·정답 초안을 뽑는다 (017 G4 / T010).
+"""한국어 골든셋 초안 생성 — 파일명 주제(prefix) 기반 정답군으로 질의·정답 초안을 만든다 (017 G4).
 
 017 A/B(KoSimCSE vs BGE-M3) 하니스(`tests/test_embedding_ab_kpi.py`)는 **사람이 검수·확정한**
 한국어 골든셋(`tests/fixtures/search/golden_ko.json`)으로 두 채널 retrieval 품질을 비교한다.
-사람이 질의를 100% 손으로 만드는 부담을 줄이기 위해, 이 스크립트는 자산의 ``ext_meta``
-(``summary``/``keywords``)에서 **질의 초안 + 정답 자산 id(자기 자산)** 를 **결정적**으로 뽑아
+
+이 데이터는 파일명이 ``<주제>_<YouTube ID(11자)>_<제목>.<ext>`` 패턴으로 자연 군집한다
+(예: ``무선_충전기_7iTajgt8pec_…``, ``라면_끓이기_GMjx9GrF1nY_…``). **같은 주제 = 관련 자산**
+이므로, 주제 prefix 로 자산을 묶어 정답군으로 쓰면 "자기 자산 1건"보다 훨씬 의미 있는 골든셋이
+된다(검수 부담도 작다 — 주제 그룹이 자동 정답). 이 스크립트는 주제별 그룹을 **결정적**으로 뽑아
 ``tests/fixtures/search/golden_ko.draft.json`` 에 기록한다.
 
-⚠️ **초안은 noisy 하다 — 사람 확정본만 하니스가 사용한다.**
-  - 자동 라벨(정답=자기 자산 1건)은 누락·과잉이 있을 수 있다. 같은 주제의 다른 자산이
-    실제로는 정답인데 빠지거나, 질의가 너무 일반적이라 부정확할 수 있다.
-  - 사람이 이 초안을 열어 ① 질의 문장을 자연스럽게 다듬고 ② 정답 자산 id 를 보정(추가/제거)해
-    ``golden_ko.json`` 으로 확정한다(질의 20~50건 권장, plan R-3). 하니스는 ``golden_ko.json``
-    이 **존재할 때만** 돈다(초안 파일은 입력으로 쓰지 않는다).
+규칙
+  - **주제 prefix 추출**: basename 에서 ``<주제>_<11자 ID>_`` 의 ID 직전까지를 주제로 한다
+    (``_topic_from_filename``). YouTube ID 는 ``[A-Za-z0-9_-]`` 11자(밑줄/하이픈 포함 가능)라
+    한국어 주제 토큰과 구조적으로 구분된다. 패턴이 아니면 제외(예: ``manifest.json``).
+  - **질의**: 주제명을 자연어로(밑줄→공백, 예: ``무선_충전기`` → "무선 충전기").
+  - **정답**: 그 주제의 ``channel='st_bge'`` 백필된 자산 전부(평가 풀과 정합 — st_bge 없는 자산
+    제외). 두 채널 공존 자산만 하니스가 평가하므로 st_bge 보유를 그룹 모집단으로 삼는다.
+  - **--min-group N**(기본 2): 자산 수 N 미만 주제 제외(단일 자산 주제 노이즈↓).
 
-결정성(헌법 3조): 대상 자산을 ``ORDER BY asset_id`` 로 고정 순서 조회하고, 질의 생성 규칙은
-시드 없는 순수 함수(``_draft_query_from_ext_meta``)다 → 같은 DB 상태면 2회 실행 동일 초안.
-읽기 전용(SELECT 만, 쓰기·스키마 0). 학습 0(LLM·모델 미사용 — 메타에서 규칙 추출만).
+⚠️ **초안은 사람 최종 확인이 필요하다 — 하니스는 확정본(golden_ko.json)만 사용한다.**
+  사람이 이 초안을 열어 질의 문장·주제 선택을 검수·보정(주제 1~2개 제거/병합 등)해
+  ``golden_ko.json`` 으로 확정한다(질의 20~50건 권장, plan R-3). 하니스는 ``golden_ko.json``
+  이 **존재할 때만** 돈다(초안 파일은 입력으로 쓰지 않는다).
+
+결정성(헌법 3조): 주제·asset_id 를 정렬해 같은 DB 상태면 2회 실행 동일 초안.
+읽기 전용(SELECT 만, 쓰기·스키마 0). 학습 0(LLM·모델 미사용 — 파일명 규칙 추출만).
 
 실행
     conda activate AuroraFS
-    python scripts/build_golden_ko_draft.py --env dev --limit 30
+    python scripts/build_golden_ko_draft.py --env dev --min-group 2
 """
 
 from __future__ import annotations
@@ -28,22 +37,28 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
+import sys
 from pathlib import Path
 from typing import Any
 
-from psycopg.rows import dict_row
+# scripts/ 직접 실행(python scripts/build_golden_ko_draft.py) 시 'src' 패키지를 찾도록
+# 저장소 루트를 sys.path 에 추가한다(PYTHONPATH=. 없이도 동작). src 임포트보다 먼저 와야 한다.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from psycopg.rows import dict_row  # noqa: E402 — sys.path 부트스트랩 뒤에 와야 함
 
 _LOG = logging.getLogger("meta_extract.build_golden_ko_draft")
 
 # 초안 출력 경로(사람이 검수해 golden_ko.json 으로 확정). 초안 파일 자체는 커밋 대상 아님.
-_DRAFT_PATH = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "search" / "golden_ko.draft.json"
+_DRAFT_PATH = _REPO_ROOT / "tests" / "fixtures" / "search" / "golden_ko.draft.json"
 
-# 질의 문장 길이 상한(요약 기반 질의가 너무 길어지지 않게). 검수자가 다듬는 출발점.
-_QUERY_MAX_LEN = 60
-# 키워드 기반 질의에 묶는 키워드 수(너무 많으면 질의가 부자연).
-_KEYWORDS_IN_QUERY = 3
-# 요약 첫 문장 분리 경계(한국어/영문 종결부호·개행).
-_SENTENCE_BREAKS = (". ", "。", "!", "?", "\n")
+# 파일명 주제 prefix 규칙: <주제(밑줄 포함)>_<YouTube ID 11자>_<제목>.
+# YouTube ID = [A-Za-z0-9_-] 11자(밑줄/하이픈 포함 가능). 주제는 비탐욕(.+?)으로 ID 직전까지.
+# 한국어 주제 토큰은 ASCII 가 아니므로, ID 직전 11자 ASCII 토큰이 유일하게 매칭된다.
+_TOPIC_ID_RE = re.compile(r"^(?P<topic>.+?)_(?P<id>[A-Za-z0-9_-]{11})_")
 
 
 def _configure_logging() -> None:
@@ -56,81 +71,68 @@ def _configure_logging() -> None:
     _LOG.propagate = False
 
 
-def _draft_query_from_ext_meta(ext_meta: dict[str, Any]) -> str | None:
-    """``ext_meta`` 에서 한국어 질의 초안 문자열을 **결정적**으로 만든다(없으면 None).
+def _topic_from_filename(name: str) -> str | None:
+    """파일 basename 에서 주제 prefix(밑줄 보존)를 추출한다(패턴 아니면 None).
 
-    규칙(순서 고정 — 시드·무작위 없음):
-      1) ``keywords`` 가 있으면 앞 ``_KEYWORDS_IN_QUERY`` 개 비어있지 않은 문자열을 공백으로 묶는다.
-         (키워드 질의는 retrieval 평가에 가장 자연스러운 짧은 질의.)
-      2) 없으면 ``summary`` 의 **첫 문장**(종결부호/개행 경계)을 ``_QUERY_MAX_LEN`` 자로 잘라 쓴다.
-      3) 둘 다 없으면 None(이 자산은 초안에서 제외 — 사람이 따로 추가).
+    ``무선_충전기_7iTajgt8pec_…`` → ``무선_충전기``. ID 가 밑줄을 포함해도(``5ncp-_GXBsU``)
+    11자 ASCII 토큰으로 한 번에 매칭되므로 주제(``스마트폰``)가 정확히 잘린다.
     """
-    # 1) keywords 우선 — list[str] 또는 단일 str 모두 허용(방어적).
-    keywords = ext_meta.get("keywords")
-    terms: list[str] = []
-    if isinstance(keywords, str):
-        terms = [keywords.strip()] if keywords.strip() else []
-    elif isinstance(keywords, list):
-        terms = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
-    if terms:
-        return " ".join(terms[:_KEYWORDS_IN_QUERY])
-
-    # 2) summary 첫 문장 폴백.
-    summary = ext_meta.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        text = summary.strip()
-        cut = len(text)
-        for brk in _SENTENCE_BREAKS:
-            pos = text.find(brk)
-            if pos != -1:
-                cut = min(cut, pos)
-        first = text[:cut].strip() or text.strip()
-        return first[:_QUERY_MAX_LEN].strip()
-
-    return None
+    m = _TOPIC_ID_RE.match(name)
+    if not m:
+        return None
+    topic = m.group("topic").strip()
+    return topic or None
 
 
-def _fetch_assets(conn: Any, *, limit: int | None) -> list[dict[str, Any]]:
-    """registered 자산 중 ``summary``/``keywords`` 가 있는 자산의 asset_id·ext_meta 를 결정적 순서로.
+def _query_from_topic(topic: str) -> str:
+    """주제명을 자연어 질의로(밑줄→공백). ``무선_충전기`` → "무선 충전기"."""
+    return topic.replace("_", " ").strip()
 
-    ``ORDER BY a.asset_id`` 로 고정 순서(2회 실행 동일·``--limit`` 단계적 추출이 같은 앞부분).
+
+def _fetch_assets(conn: Any) -> list[dict[str, Any]]:
+    """``channel='st_bge'`` 백필된 registered 자산의 asset_id·fs_path 를 결정적 순서로 조회.
+
+    골든셋 정답은 st_bge 보유 자산으로 한정한다(하니스 평가 풀 = 두 채널 공존). ``ORDER BY
+    a.asset_id`` 로 고정 순서(2회 실행 동일). 백필을 먼저 돌린 뒤 이 스크립트를 실행한다.
     """
     sql = (
-        "SELECT a.asset_id, am.ext_meta "
+        "SELECT DISTINCT a.asset_id, a.fs_path "
         "FROM asset a "
-        "JOIN asset_metadata am ON am.asset_id = a.asset_id "
+        "JOIN asset_embedding e ON e.asset_id = a.asset_id AND e.channel = 'st_bge' "
         "WHERE a.status = 'registered' "
-        "AND (am.ext_meta ? 'summary' OR am.ext_meta ? 'keywords') "
         "ORDER BY a.asset_id"
     )
-    params: list[Any] = []
-    if limit is not None:
-        sql += " LIMIT %s"
-        params.append(limit)
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, params)
+        cur.execute(sql)
         return list(cur.fetchall())
 
 
-def build_drafts(conn: Any, *, limit: int | None) -> list[dict[str, Any]]:
-    """대상 자산을 조회해 질의 초안 목록 ``[{"query", "relevant_asset_ids"}]`` 을 만든다.
+def build_drafts(conn: Any, *, min_group: int = 2) -> list[dict[str, Any]]:
+    """주제별 그룹으로 골든셋 초안 ``[{"query", "relevant_asset_ids"}]`` 을 만든다(결정적).
 
-    질의를 못 만든 자산(summary·keywords 둘 다 빈약)은 건너뛴다(사람이 따로 보강).
-    정답은 **자기 자산 1건**(noisy — 사람이 같은 주제 자산을 추가/보정).
+    파일명에서 주제 prefix 를 추출해 자산을 묶고, 자산 수 ``min_group`` 미만 주제는 제외한다.
+    질의=주제명(밑줄→공백), 정답=주제 자산 전부(중복 제거·asset_id 정렬). 주제명 정렬로 결정적.
     """
-    rows = _fetch_assets(conn, limit=limit)
+    rows = _fetch_assets(conn)
+    groups: dict[str, set[str]] = {}
+    for row in rows:
+        topic = _topic_from_filename(Path(row["fs_path"]).name)
+        if topic is None:
+            continue
+        groups.setdefault(topic, set()).add(str(row["asset_id"]))
+
     drafts: list[dict[str, Any]] = []
     skipped = 0
-    for row in rows:
-        ext_meta = row.get("ext_meta") or {}
-        query = _draft_query_from_ext_meta(ext_meta if isinstance(ext_meta, dict) else {})
-        if not query:
+    for topic in sorted(groups):
+        ids = sorted(groups[topic])
+        if len(ids) < min_group:
             skipped += 1
             continue
-        drafts.append(
-            {"query": query, "relevant_asset_ids": [str(row["asset_id"])]}
-        )
-    _LOG.info("초안 생성: %s건 (조회 %s건, 질의 생성 불가 skip %s건)", len(drafts), len(rows), skipped)
+        drafts.append({"query": _query_from_topic(topic), "relevant_asset_ids": ids})
+    _LOG.info(
+        "초안 생성: 주제 %s개 (조회 %s건, min-group<%s 제외 %s개)",
+        len(drafts), len(rows), min_group, skipped,
+    )
     return drafts
 
 
@@ -144,38 +146,38 @@ def main() -> int:
     from src.database.postgres_util import PostgresUtil
 
     parser = argparse.ArgumentParser(
-        description="한국어 골든셋 초안 생성 (017 A/B 하니스용; 사람 검수 전 초안)"
+        description="한국어 골든셋 초안 생성 (017 A/B 하니스용; 주제 기반·사람 검수 전 초안)"
     )
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
-    parser.add_argument("--limit", type=int, default=None, help="초안 대상 자산 수 상한")
+    parser.add_argument(
+        "--min-group", type=int, default=2, dest="min_group",
+        help="정답군 최소 자산 수(미만 주제 제외, 기본 2)",
+    )
     args = parser.parse_args()
 
     _configure_logging()
-    project_root = Path(__file__).resolve().parents[1]
-    dotenv_path = project_root / f".env.{args.env}"
+    dotenv_path = _REPO_ROOT / f".env.{args.env}"
     if dotenv_path.is_file():
         load_dotenv(dotenv_path=dotenv_path, override=False)
     init_settings(args.env)
 
     db = PostgresUtil()
     with db, db.transaction() as conn:
-        drafts = build_drafts(conn, limit=args.limit)
+        drafts = build_drafts(conn, min_group=args.min_group)
 
     _DRAFT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _DRAFT_PATH.write_text(
         json.dumps(drafts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    _LOG.info("기록: %s (%s건)", _DRAFT_PATH, len(drafts))
+    _LOG.info("기록: %s (%s주제)", _DRAFT_PATH, len(drafts))
     print(
-        f"초안 {len(drafts)}건 기록 → {_DRAFT_PATH}\n"
-        "다음: 사람이 질의 문장·정답 자산 id 를 검수·보정해 "
+        f"초안 {len(drafts)}주제 기록 → {_DRAFT_PATH}\n"
+        "다음: 사람이 질의 문장·주제 선택을 검수·보정해 "
         "tests/fixtures/search/golden_ko.json 으로 확정하세요(질의 20~50건 권장). "
-        "자동 라벨은 noisy → 초안일 뿐, 하니스는 확정본(golden_ko.json)만 사용합니다."
+        "초안은 자동 군집일 뿐, 하니스는 확정본(golden_ko.json)만 사용합니다."
     )
     return 0
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(main())
