@@ -15,6 +15,7 @@ OLD ``candidates.py`` 와의 차이
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal, TypedDict
 
 from psycopg import Connection
@@ -22,6 +23,8 @@ from psycopg.rows import dict_row
 
 from src.config.settings import active_embed_channel
 from src.search.media_search import EMBEDDING_KIND_CLIP, EMBEDDING_KIND_ST
+
+_LOG = logging.getLogger(__name__)
 
 EmbeddingKindFilter = Literal["st", "clip", "both"]
 
@@ -51,6 +54,8 @@ def _channels_param(kind: EmbeddingKindFilter) -> list[str]:
     try:
         text_channel = active_embed_channel()
     except RuntimeError:
+        # settings 미초기화(테스트 등): 'st' 보수 폴백. 운영(run_relations)은 init_settings 필수.
+        _LOG.warning("settings 미초기화 — 관계 후보 텍스트 채널 'st' 보수 폴백")
         text_channel = EMBEDDING_KIND_ST
     if kind == "st":
         return [text_channel]

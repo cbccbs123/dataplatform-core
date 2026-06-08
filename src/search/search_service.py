@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from typing import Any
 
 from src.config.settings import active_embed_channel, model_for_channel
 from src.search.media_search import EMBEDDING_KIND_ST, search_media_all_grouped
+
+_LOG = logging.getLogger(__name__)
 
 # 요청 모달리티 라벨 → ``search_media_all_grouped`` 결과 버킷 키.
 # 결정성(헌법 3조): 결과 버킷 조립이 ``list(.items())`` 순회 순서에 의존하므로 삽입 순서를
@@ -118,6 +121,9 @@ def search_hybrid(
             query_model_name = model_for_channel(text_channel)
     except RuntimeError:
         # settings 미초기화: 기존 검색 단위(006/017 기본 경로)가 settings 없이 그대로 동작.
+        # 운영 진입점(run_search 등)은 항상 init_settings 하므로 이 폴백은 비운영(테스트) 경로다 —
+        # 오설정(운영서 init_settings 누락)을 관측 가능하게 warning 으로 남긴다(동작 불변).
+        _LOG.warning("settings 미초기화 — 활성 임베딩 채널 'st' 보수 폴백(운영은 init_settings 필수)")
         if text_channel is None:
             text_channel = EMBEDDING_KIND_ST
         # query_model_name 은 None 유지 → media_search 가 기존대로 cfg.text_embedding_model 로 해소.
