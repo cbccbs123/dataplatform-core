@@ -106,7 +106,7 @@ def main() -> int:
 
     from src.config.settings import get_current_settings, init_settings
     from src.database.postgres_util import PostgresUtil
-    from src.search.opensearch_sync import get_client, resolve_channel
+    from src.search.opensearch_sync import check_pgvector_version, get_client, resolve_channel
 
     dotenv_path = _REPO_ROOT / f".env.{args.env}"
     if dotenv_path.is_file():
@@ -125,14 +125,16 @@ def main() -> int:
     )
 
     db = PostgresUtil()
+
+    def _resync_txn(conn: Any) -> dict[str, Any]:
+        # 선검사: 동기화 SELECT 의 avg(embedding) 집계는 pgvector>=0.5 의존 → 미달이면 재색인 전에
+        # 원인 분명한 오류로 중단(모호한 SQL 오류 회피). 그 뒤 읽기전용 전체 재동기화를 조립·실행.
+        check_pgvector_version(conn)
+        return run_resync(client, conn, channel=channel, index=index, recreate=args.recreate)
+
     with db:
         # 읽기 전용 조회 트랜잭션(원본 PG 무수정, FR-004). 멱등(_id=asset_id upsert)이라 재시도 안전.
-        report = db.execute_in_transaction(
-            lambda conn: run_resync(
-                client, conn, channel=channel, index=index, recreate=args.recreate
-            ),
-            idempotent=True,
-        )
+        report = db.execute_in_transaction(_resync_txn, idempotent=True)
 
     doc_count = client.count(index=index).get("count")
     print(format_report(report, doc_count=doc_count))

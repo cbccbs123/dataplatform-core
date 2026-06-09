@@ -64,16 +64,23 @@ def _patched_os_sync():
         yield fake
 
 
-class TestOpenSearchHookHelper(unittest.TestCase):
-    """격리 헬퍼 ``_opensearch_index_best_effort`` 단위 검증."""
+class TestOpenSearchIndexerFactory(unittest.TestCase):
+    """배치 색인기 ``_make_opensearch_indexer`` 단위 검증 — 안전 게이트 + 클라이언트 1회 재사용.
+
+    팩토리가 돌려준 콜러블 ``index(asset_id)`` 를 자산 finalize 직후마다 부른다. off 안전·격리·
+    채널/인덱스 전달은 종전 헬퍼와 동일하게 보장하되, 클라이언트는 배치당 1회만 생성한다.
+    """
 
     def setUp(self) -> None:
         self.db = mock.MagicMock()
 
-    # (a) off → 즉시 반환 + opensearch_sync 미접근(미import)
+    def _indexer(self, settings):
+        return ri._make_opensearch_indexer(db=self.db, settings=settings)
+
+    # (a) off → 콜러블 즉시 반환 + opensearch_sync 미접근(미import)
     def test_disabled_returns_immediately_without_touching_module(self) -> None:
         with _patched_os_sync() as fake:
-            ri._opensearch_index_best_effort(_ASSET, db=self.db, settings=_settings(enabled=False))
+            self._indexer(_settings(enabled=False))(_ASSET)
         # index/client 미호출
         fake.index_asset.assert_not_called()
         fake.get_client.assert_not_called()
@@ -84,9 +91,8 @@ class TestOpenSearchHookHelper(unittest.TestCase):
 
     # (a') 설정에 필드가 아예 없어도(레거시 settings) off 로 간주, 안전 반환(getattr 폴백)
     def test_missing_flag_attr_treated_as_off(self) -> None:
-        legacy = object()  # opensearch_sync_enabled 속성 없음
         with _patched_os_sync() as fake:
-            ri._opensearch_index_best_effort(_ASSET, db=self.db, settings=legacy)
+            self._indexer(object())(_ASSET)  # opensearch_sync_enabled 속성 없음
         fake.index_asset.assert_not_called()
         self.assertEqual(fake.accessed, [])
 
@@ -96,9 +102,7 @@ class TestOpenSearchHookHelper(unittest.TestCase):
             fake.index_asset.side_effect = RuntimeError("OS down")
             with self.assertLogs(ri._LOG, level="WARNING") as log:
                 # 예외가 전파되면 이 호출이 raise → 테스트 실패. 격리 성공이면 정상 반환.
-                ret = ri._opensearch_index_best_effort(
-                    _ASSET, db=self.db, settings=_settings(enabled=True)
-                )
+                ret = self._indexer(_settings(enabled=True))(_ASSET)
         self.assertIsNone(ret)
         self.assertTrue(any("asset_id" in m or "opensearch" in m.lower() for m in log.output))
 
@@ -107,16 +111,14 @@ class TestOpenSearchHookHelper(unittest.TestCase):
         with _patched_os_sync() as fake:
             fake.get_client.side_effect = ConnectionError("unreachable")
             with self.assertLogs(ri._LOG, level="WARNING"):
-                ret = ri._opensearch_index_best_effort(
-                    _ASSET, db=self.db, settings=_settings(enabled=True)
-                )
+                ret = self._indexer(_settings(enabled=True))(_ASSET)
         self.assertIsNone(ret)
         fake.index_asset.assert_not_called()
 
     # (c) enabled + 정상 → index_asset 이 해당 asset_id 로 호출
     def test_enabled_indexes_with_asset_id(self) -> None:
         with _patched_os_sync() as fake:
-            ri._opensearch_index_best_effort(_ASSET, db=self.db, settings=_settings(enabled=True))
+            self._indexer(_settings(enabled=True))(_ASSET)
         fake.index_asset.assert_called_once()
         call = fake.index_asset.call_args
         # asset_id 가 (문자열로) 전달되었는지 — 위치/키워드 어디에 있든 인자 집합에서 확인
@@ -127,6 +129,16 @@ class TestOpenSearchHookHelper(unittest.TestCase):
         self.assertEqual(call.kwargs.get("channel"), "st")
         # 읽기 conn 을 열었음(PG 읽기전용 → OS 쓰기)
         self.db.transaction.assert_called_once()
+
+    # (d) 배치 다건 → 클라이언트는 1회만 생성·재사용(연결 셋업 절감), 색인·읽기 conn 은 자산마다
+    def test_client_created_once_and_reused_across_batch(self) -> None:
+        with _patched_os_sync() as fake:
+            index = self._indexer(_settings(enabled=True))
+            for i in range(3):
+                index(uuid.UUID(int=i))
+        fake.get_client.assert_called_once()  # 배치당 1회 생성(자산마다 새 연결 X)
+        self.assertEqual(fake.index_asset.call_count, 3)  # 자산마다 색인
+        self.assertEqual(self.db.transaction.call_count, 3)  # 자산마다 별도 읽기 트랜잭션
 
 
 # ── (a) run_ingest 전체 경로에서 off → OS 코드 미접촉(회귀 0) ──────────────────

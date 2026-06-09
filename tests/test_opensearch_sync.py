@@ -301,6 +301,17 @@ class TestIndexAsset(unittest.TestCase):
         self.assertTrue(_is_read_only(sql))
         self.assertEqual(params, ("st", "a1"))
 
+    def test_select_filters_registered_status(self) -> None:
+        # 단건 색인도 전체 재동기화(_SYNC_SQL)와 **대칭**으로 status='registered' 만 색인한다 —
+        # 비-registered(deferred/failed/medical)는 행이 없어 no-op. 증분 경로로만 비-registered 가
+        # 새던 비대칭(번들 게이트 우회와 같은 결의 누출)을 SQL 단에서 차단.
+        from src.search.opensearch_sync import index_asset
+
+        conn = _FakeConn([_asset_row()])
+        index_asset(_FakeClient(existing=True), conn, "a1", index="assets", channel="st")
+        sql, _params = conn.cursors[0].executed[0]
+        self.assertIn("REGISTERED", sql.upper())
+
     def test_noop_when_no_row(self) -> None:
         # 자산/임베딩 없음(INNER JOIN 제외) → 색인 안 함, 명시적 None 반환.
         from src.search.opensearch_sync import index_asset
@@ -309,6 +320,45 @@ class TestIndexAsset(unittest.TestCase):
         result = index_asset(client, _FakeConn([]), "missing", index="assets", channel="st")
         self.assertIsNone(result)
         self.assertEqual(client.indexed, [])
+
+
+class TestCheckPgvectorVersion(unittest.TestCase):
+    """pgvector>=0.5 선검사 — 동기화 SELECT 의 avg(embedding) 집계가 pgvector 0.5.0 도입 의존이라,
+    복구 도구 시작 시 한 번 읽기전용으로 버전을 확인해 구버전/미설치를 원인 분명한 오류로 막는다."""
+
+    def test_passes_when_version_meets_minimum(self) -> None:
+        from src.search.opensearch_sync import check_pgvector_version
+
+        self.assertEqual(check_pgvector_version(_FakeConn([{"extversion": "0.5.0"}])), "0.5.0")
+
+    def test_passes_for_newer_version(self) -> None:
+        # 0.7.x 등 상위 버전은 통과(메이저·마이너 튜플 비교).
+        from src.search.opensearch_sync import check_pgvector_version
+
+        self.assertEqual(check_pgvector_version(_FakeConn([{"extversion": "0.7.4"}])), "0.7.4")
+
+    def test_raises_when_below_minimum(self) -> None:
+        # 0.4.x 는 vector 타입 집계(avg/sum)가 없어 동기화가 깨진다 → 선검사에서 차단.
+        from src.search.opensearch_sync import check_pgvector_version
+
+        with self.assertRaises(RuntimeError):
+            check_pgvector_version(_FakeConn([{"extversion": "0.4.4"}]))
+
+    def test_raises_when_not_installed(self) -> None:
+        # pg_extension 에 vector 행 없음(미설치) → 명확한 RuntimeError.
+        from src.search.opensearch_sync import check_pgvector_version
+
+        with self.assertRaises(RuntimeError):
+            check_pgvector_version(_FakeConn([]))
+
+    def test_query_is_read_only(self) -> None:
+        # 선검사도 PG 무수정(FR-004·헌법 6조) — 읽기전용 SELECT.
+        from src.search.opensearch_sync import check_pgvector_version
+
+        conn = _FakeConn([{"extversion": "0.5.0"}])
+        check_pgvector_version(conn)
+        sql, _ = conn.cursors[0].executed[0]
+        self.assertTrue(_is_read_only(sql))
 
 
 class TestSyncAll(unittest.TestCase):

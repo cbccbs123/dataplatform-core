@@ -40,8 +40,11 @@ JOIN (
 """
 # 전체 재동기화(복구 도구) — registered 자산 전부, asset_id 정렬로 결정적 순서(FR-005).
 _SYNC_SQL = _ASSET_SELECT + "WHERE a.status = 'registered'\nORDER BY a.asset_id\n"
-# 단건 색인(증분 훅) — 그 자산 1건만. 파라미터 순서 (channel, asset_id): 서브쿼리 channel 이 먼저.
-_ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s\n"
+# 단건 색인(증분 훅) — 그 자산 1건만. 전체 재동기화(_SYNC_SQL)와 **대칭**으로 status='registered' 만
+# 색인한다(비-registered → 행 없음 → index_asset no-op). 두 경로의 게이트를 맞춰, deferred/failed/medical
+# 이 증분 경로로만 새던 비대칭(번들 게이트 우회와 같은 결의 누출)을 SQL 단에서 차단한다.
+# 파라미터 순서 (channel, asset_id): 서브쿼리 channel 이 먼저.
+_ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s AND a.status = 'registered'\n"
 
 
 def parse_vector(value: Any) -> list[float]:
@@ -202,6 +205,35 @@ def _fetch_one(conn: Any, sql: str, params: tuple) -> dict[str, Any] | None:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         return cur.fetchone()
+
+
+def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> str:
+    """pgvector 확장 버전이 최소 요구(기본 0.5)를 만족하는지 선검사한다(읽기전용 1쿼리, FR-004).
+
+    동기화 SELECT 가 자산당 청크 임베딩을 ``avg(embedding)`` 으로 평균 풀링하는데, vector 타입
+    집계(avg/sum)는 pgvector **0.5.0** 에서 추가됐다(그 이전엔 집계 함수 자체가 없다). 미설치/구버전
+    환경에서 동기화가 런타임에 모호한 SQL 오류로 깨지는 대신, 복구 도구(run_opensearch_resync)
+    시작 시 한 번 선검사해 원인이 분명한 오류로 막는다. 반환: 확인된 확장 버전 문자열.
+    미설치·구버전이면 ``RuntimeError``.
+    """
+    from psycopg.rows import dict_row
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+        row = cur.fetchone()
+    if not row or not row.get("extversion"):
+        raise RuntimeError(
+            "pgvector 확장이 설치돼 있지 않다 — OpenSearch 동기화는 avg(embedding) 집계"
+            "(pgvector>=0.5)를 요구한다. 'CREATE EXTENSION vector' 후 재시도."
+        )
+    version = str(row["extversion"])
+    parts = tuple(int(p) for p in version.split(".")[:2] if p.isdigit())
+    if parts < minimum:
+        need = ".".join(str(n) for n in minimum)
+        raise RuntimeError(
+            f"pgvector {version} < {need} — avg(embedding) 집계 미지원. 확장 업그레이드 필요."
+        )
+    return version
 
 
 def iter_asset_docs(conn: Any, channel: str) -> Iterator[dict[str, Any]]:

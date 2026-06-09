@@ -57,32 +57,48 @@ def _configure_logging() -> None:
     _LOG.propagate = False
 
 
-def _opensearch_index_best_effort(asset_id: Any, *, db: PostgresUtil, settings: Any) -> None:
-    """자산 finalize(PG 커밋) **직후** 그 자산을 OpenSearch 에 best-effort 증분 색인한다(spec 020, FR-002).
+def _make_opensearch_indexer(*, db: PostgresUtil, settings: Any) -> Callable[[Any], None]:
+    """ingest 배치용 best-effort 증분 색인기를 만든다(spec 020, FR-002 · 클라이언트 1회 재사용).
+
+    반환한 콜러블 ``index(asset_id)`` 를 자산 finalize(PG 커밋) **직후**마다 부른다.
 
     안전 게이트(프로덕션 적재 경로 — 회귀 0·격리):
-      · **opt-in off(기본)이면 즉시 반환** — ``opensearch_sync_enabled`` 미설정/False 면 아무 것도
-        하지 않고, ``src.search.opensearch_sync``·opensearch-py 를 **import 조차 하지 않는다**(아래 지연
-        import). 따라서 미도입 환경의 run_ingest 동작이 완전 불변(SC-001). 레거시 settings 에 필드가
+      · **opt-in off(기본)이면 콜러블이 즉시 반환** — ``opensearch_sync_enabled`` 미설정/False 면 아무
+        것도 하지 않고, ``src.search.opensearch_sync``·opensearch-py 를 **import 조차 하지 않는다**(아래
+        지연 import). 미도입 환경의 run_ingest 동작이 완전 불변(SC-001). 레거시 settings 에 필드가
         없어도 ``getattr`` 폴백으로 off 취급.
-      · **격리**: enabled 여도 전체를 ``try/except Exception`` 으로 감싸 OS 미도달·색인 오류를
-        ``_LOG.warning`` 만 남기고 삼킨다 — ingest 를 중단하거나 PG 를 롤백하지 않는다(SC-003).
-        (이미 finalize 트랜잭션이 커밋된 뒤이므로 OS 색인은 본질적으로 PG 와 분리된 best-effort 작업.)
+      · **클라이언트 재사용**: OpenSearch 클라이언트·활성 채널은 **첫 색인에서 1회** 만들어 ``cache``
+        에 담아 배치 전체에서 재사용한다 — 디렉터리/파일리스트 수집에서 자산마다 새 연결을 열던 낭비를
+        없앤다(배치당 1회 셋업).
+      · **격리**: 각 색인을 ``try/except Exception`` 으로 감싸 OS 미도달·색인 오류를 ``_LOG.warning``
+        만 남기고 삼킨다 — ingest 를 중단·롤백하지 않는다(SC-003). finalize 트랜잭션 커밋 뒤라 OS
+        색인은 본질적으로 PG 와 분리된 best-effort 작업이다.
     """
-    if not getattr(settings, "opensearch_sync_enabled", False):
-        return  # off(기본) — OpenSearch 코드 미접촉, 기존 동작 불변
-    try:
-        # 지연 import — 플래그 off 환경(opensearch-py 미설치 가능)의 순수성을 보존한다.
-        from src.config.settings import active_embed_channel
-        from src.search.opensearch_sync import get_client, index_asset
+    enabled = getattr(settings, "opensearch_sync_enabled", False)
+    cache: dict[str, Any] = {}  # 첫 성공 셋업 후 client·index_asset·channel 을 담아 배치 내 재사용
 
-        channel = active_embed_channel(settings)  # 적재·검색과 같은 활성 채널(018)을 색인
-        client = get_client(settings.opensearch_url)
-        # PG 는 읽기전용(SELECT만, FR-004) → OpenSearch 에만 쓰기(CQRS). finalize 커밋과 별도 트랜잭션.
-        with db.transaction() as conn:
-            index_asset(client, conn, str(asset_id), index=settings.opensearch_index, channel=channel)
-    except Exception as exc:  # noqa: BLE001 — OS 색인 실패가 적재를 막지 않는다(best-effort 격리)
-        _LOG.warning("opensearch 증분 색인 실패(무시): asset_id=%s (%s)", asset_id, exc)
+    def index(asset_id: Any) -> None:
+        if not enabled:
+            return  # off(기본) — OpenSearch 코드 미접촉, 기존 동작 불변
+        try:
+            if "client" not in cache:
+                # 지연 import — 플래그 off 환경(opensearch-py 미설치 가능)의 순수성을 보존한다.
+                from src.config.settings import active_embed_channel
+                from src.search.opensearch_sync import get_client, index_asset
+
+                cache["channel"] = active_embed_channel(settings)  # 적재·검색과 같은 채널(018)
+                cache["client"] = get_client(settings.opensearch_url)  # 배치당 1회 생성·재사용
+                cache["index_asset"] = index_asset
+            # PG 는 읽기전용(SELECT만, FR-004) → OpenSearch 에만 쓰기(CQRS). finalize 와 별도 트랜잭션.
+            with db.transaction() as conn:
+                cache["index_asset"](
+                    cache["client"], conn, str(asset_id),
+                    index=settings.opensearch_index, channel=cache["channel"],
+                )
+        except Exception as exc:  # noqa: BLE001 — OS 색인 실패가 적재를 막지 않는다(best-effort 격리)
+            _LOG.warning("opensearch 증분 색인 실패(무시): asset_id=%s (%s)", asset_id, exc)
+
+    return index
 
 
 def run_ingest(
@@ -98,6 +114,9 @@ def run_ingest(
     _configure_logging()
     cfg = settings or get_current_settings()
     result: dict[str, list[Any]] = {"registered": [], "failed": [], "skipped": [], "deferred": []}
+    # OpenSearch 증분 색인기 — 배치당 1회 생성(opt-in off 면 no-op·미import). 클라이언트는 첫 색인에서
+    # 만들어 배치 전체 재사용(자산마다 새 연결 X). 자산 finalize 직후 os_index(asset_id) 로 호출.
+    os_index = _make_opensearch_indexer(db=db, settings=cfg)
 
     for path in files:
         # 파일 단위 격리: 한 파일의 어떤 실패도 배치를 멈추지 않는다.
@@ -211,8 +230,8 @@ def run_ingest(
 
             # 증분 색인(opt-in·격리) — 위 finalize 트랜잭션이 **PG 커밋된 직후** 호출한다(FR-002).
             # off(기본)면 즉시 반환해 OpenSearch 코드를 전혀 건드리지 않으므로 기존 동작 불변(SC-001).
-            # 헬퍼 내부 try/except 로 OS 실패를 삼켜 적재를 중단·롤백하지 않는다(SC-003).
-            _opensearch_index_best_effort(asset_id, db=db, settings=cfg)
+            # 색인기 내부 try/except 로 OS 실패를 삼켜 적재를 중단·롤백하지 않는다(SC-003).
+            os_index(asset_id)
         except Exception as exc:  # noqa: BLE001 — route/create/추출/적재 모든 실패 흡수
             reason = f"{type(exc).__name__}: {exc}"
             _LOG.warning("failed: asset_id=%s %s (%s)", asset_id, path, reason)
