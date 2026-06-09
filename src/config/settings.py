@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,12 @@ class PipelineSettings:
     relation_retry_max_attempts: int
     # 검색 결과 적합도 하한(모달리티별). 0.0=비활성. relations 의 relation_min_sim 과 같은 성격의 게이트.
     search_min_scores: dict[str, float]
+    # 019: per-asset 청크 집계 방식(검색 시점 산식). 검색 경로(ST 하이브리드·시각 2단계)가 흩어진
+    # MAX 하드코딩 대신 이 단일 출처(chunk_agg_config)를 참조한다. 선택 필드 —
+    # 미설정 시 기본 'max'(=기존 MAX 집계와 동치) → 회귀 0(SC-001). 'topk_mean'/'mix' 는 측정용 토글.
+    chunk_agg: str
+    chunk_agg_k: int        # topk_mean 상위 k(기본 3)
+    chunk_agg_mix_w: float  # mix 가중치 w: w*MAX + (1-w)*AVG (기본 0.5)
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -156,6 +165,11 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         relation_path_top_k=_env_int_default("RELATION_PATH_TOP_K", 10),
         relation_retry_max_attempts=_env_int_default("RELATION_RETRY_MAX_ATTEMPTS", 3),
         search_min_scores=resolve_search_min_scores(),
+        # 019: 집계 방식의 유효성 검증(미지원 값 차단)은 chunk_agg_config 헬퍼가 수행한다 —
+        # 018 active_embed_channel(필드는 raw 저장) + active_embed_model(헬퍼가 ValueError) 과 동형.
+        chunk_agg=_env_str_default("SEARCH_CHUNK_AGG", "max"),
+        chunk_agg_k=_env_int_default("SEARCH_CHUNK_AGG_K", 3),
+        chunk_agg_mix_w=_env_float_default("SEARCH_CHUNK_AGG_MIX_W", 0.5),
     )
 
 
@@ -205,3 +219,41 @@ def active_embed_model(settings: PipelineSettings | None = None) -> str:
     기본 active='st' → KoSimCSE(``text_embedding_model``), 'st_bge' → BGE-M3. 미지원 활성 채널은
     ``model_for_channel`` 이 즉시 ``ValueError`` 로 차단한다(잘못된 모델 사용 방지)."""
     return model_for_channel(active_embed_channel(settings), settings)
+
+
+# 019: 지원하는 per-asset 청크 집계 방식. 'max'=기존 MAX(회귀 0), 'topk_mean'=상위 k 평균,
+# 'mix'=w*MAX+(1-w)*AVG. 미지원 값은 잘못된 산식으로 검색하지 않도록 chunk_agg_config 가 차단한다.
+_CHUNK_AGG_MODES = ("max", "topk_mean", "mix")
+
+
+@dataclass(frozen=True)
+class ChunkAggConfig:
+    """per-asset 청크 집계 설정의 네임드 단일 출처(019). 검색 경로가 이 값으로 집계식을 고른다.
+
+    frozen=True 라 동일 설정 → 동일 값(==)이 결정적으로 보장된다(헌법 3조)."""
+
+    agg: str        # 'max' | 'topk_mean' | 'mix'
+    k: int          # topk_mean 상위 k
+    mix_w: float    # mix 가중치 w
+
+
+def chunk_agg_config(settings: PipelineSettings | None = None) -> ChunkAggConfig:
+    """per-asset 청크 집계 설정(019). 검색 경로(ST 하이브리드·시각 2단계)가 공유하는 단일 출처.
+
+    018 ``active_embed_channel``/``active_embed_model`` 동형 — ``settings`` 미지정 시 활성 설정을
+    사용하고(테스트는 ``settings`` 주입으로 순수 단위 검증), 지원하지 않는 ``SEARCH_CHUNK_AGG`` 값은
+    즉시 ``ValueError`` 로 차단한다(잘못된 산식으로 검색 방지).
+
+    회귀 0(SC-001): 기본 ``agg='max'`` 는 기존 MAX 집계와 동치다. settings 미초기화(순수 단위 등)에서는
+    활성 해소가 ``RuntimeError`` 이므로 기존 MAX 동작을 보존하도록 ``max`` 기본 집계로 보수 폴백한다
+    (운영 진입점은 항상 ``init_settings`` 하므로 이 폴백은 비운영 경로 — 오설정을 warning 으로 남긴다)."""
+    try:
+        cfg = settings if settings is not None else get_current_settings()
+    except RuntimeError:
+        _LOG.warning("settings 미초기화 — 청크 집계 'max' 보수 폴백(운영은 init_settings 필수)")
+        return ChunkAggConfig(agg="max", k=3, mix_w=0.5)
+    if cfg.chunk_agg not in _CHUNK_AGG_MODES:
+        raise ValueError(
+            f"지원하지 않는 청크 집계 방식: {cfg.chunk_agg!r} (지원: {list(_CHUNK_AGG_MODES)})"
+        )
+    return ChunkAggConfig(agg=cfg.chunk_agg, k=cfg.chunk_agg_k, mix_w=cfg.chunk_agg_mix_w)
