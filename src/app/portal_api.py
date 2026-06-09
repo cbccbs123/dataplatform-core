@@ -55,7 +55,7 @@ from src.search.search_service import search_hybrid
 _ENV = os.getenv("PORTAL_API_ENV", "dev")
 _VALID_MODALITIES = ("text", "image", "video", "audio")
 
-# 의료(PHI) 배제 도메인 집합(FR-014). 검색 평탄화에서 이 도메인 행을 제거한다.
+# 의료(PHI) 배제 도메인 집합(FR-014). group_ranked 가 각 모달리티 버킷에서 이 도메인 행을 제거한다.
 _EXCLUDE_DOMAINS = frozenset({"medical"})
 
 # search_hybrid 의 버킷당 후보 풀 한도. 응답은 모달리티별 top-N(size)으로 자르지만, 2단계 시각
