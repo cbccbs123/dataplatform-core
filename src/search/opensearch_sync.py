@@ -18,9 +18,30 @@ PG 는 **읽기 전용**(SELECT 만), OpenSearch 에만 색인을 쓴다(CQRS �
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+
+# ── 읽기전용 SELECT (FR-004, 헌법 6조) — 원본 PG 무수정 ──
+# registered 자산 + 메타(LEFT JOIN) + 활성 채널 청크 **평균 임베딩**(avg, 자산당 1행)을 한 행으로 모은다.
+# avg(embedding) 은 pgvector 집계(>=0.5.0). 임베딩 없는 자산은 INNER JOIN 으로 자연 제외(→ 색인 대상 아님).
+_ASSET_SELECT = """
+SELECT a.asset_id, a.modality, a.domain_label, a.status, a.fs_path,
+       am.ext_meta, e.emb AS emb, e.n AS chunk_count
+FROM asset a
+LEFT JOIN asset_metadata am ON am.asset_id = a.asset_id
+JOIN (
+    SELECT asset_id, avg(embedding) AS emb, count(*) AS n
+    FROM asset_embedding
+    WHERE channel = %s AND embedding IS NOT NULL
+    GROUP BY asset_id
+) e ON e.asset_id = a.asset_id
+"""
+# 전체 재동기화(복구 도구) — registered 자산 전부, asset_id 정렬로 결정적 순서(FR-005).
+_SYNC_SQL = _ASSET_SELECT + "WHERE a.status = 'registered'\nORDER BY a.asset_id\n"
+# 단건 색인(증분 훅) — 그 자산 1건만. 파라미터 순서 (channel, asset_id): 서브쿼리 channel 이 먼저.
+_ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s\n"
 
 
 def parse_vector(value: Any) -> list[float]:
@@ -124,3 +145,128 @@ def asset_to_doc(row: dict[str, Any], channel: str) -> dict[str, Any]:
     if any(x != 0.0 for x in vec):
         doc["embedding"] = vec
     return doc
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# IO 함수 (G2) — opensearch-py·psycopg 는 모듈 상단이 아니라 **함수 내부에서 지연 import**.
+# 플래그 off(미도입) 환경의 모듈 순수성(상단 import 없음)을 보존하기 위함이다 — 위 순수 함수만
+# 쓰는 단위 게이트는 opensearch-py·psycopg 미설치여도 import 가능해야 한다.
+# 실제 OS·DB 동작 검증은 G5(실OS·실DB e2e). 여기 IO 는 가짜 클라이언트/conn 으로 액션 조립을 단위 검증.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def get_client(url: str | None = None) -> Any:
+    """현재 설정(`OPENSEARCH_URL`, 미지정 시 기본 http://localhost:9200)의 OpenSearch 클라이언트.
+
+    DEV 무인증(http) 기준. ``OPENSEARCH_URL`` 설정 필드는 후속 그룹에서 추가되므로 여기서는
+    ``getattr`` 로 안전 조회(없으면 기본값) 한다 — 본 그룹(G2)은 settings 스키마를 건드리지 않는다.
+    """
+    from opensearchpy import OpenSearch
+
+    from src.config.settings import get_current_settings
+
+    if url is None:
+        url = getattr(get_current_settings(), "opensearch_url", None) or "http://localhost:9200"
+    return OpenSearch(
+        hosts=[url],
+        http_compress=True,
+        use_ssl=url.startswith("https"),
+        verify_certs=False,
+        ssl_show_warn=False,
+        timeout=60,
+    )
+
+
+def ensure_index(
+    client: Any, index: str, *, recreate: bool = False, dim: int = FIX_EMBEDDING_DIMENSION
+) -> str:
+    """인덱스가 없으면 생성한다. ``recreate=True`` 면 **명시적으로** 삭제 후 재생성(파괴적·옵트인).
+
+    반환: ``'created'`` | ``'recreated'`` | ``'exists'``. 매핑은 단일 출처 ``build_index_body``.
+    """
+    exists = client.indices.exists(index=index)
+    if exists and recreate:
+        client.indices.delete(index=index)
+        client.indices.create(index=index, body=build_index_body(dim=dim))
+        return "recreated"
+    if not exists:
+        client.indices.create(index=index, body=build_index_body(dim=dim))
+        return "created"
+    return "exists"
+
+
+def _fetch_one(conn: Any, sql: str, params: tuple) -> dict[str, Any] | None:
+    """단건 행을 dict 로 조회(읽기전용). psycopg 는 지연 import."""
+    from psycopg.rows import dict_row
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return cur.fetchone()
+
+
+def iter_asset_docs(conn: Any, channel: str) -> Iterator[dict[str, Any]]:
+    """PG 에서 registered 자산을 읽어 OpenSearch 문서를 yield(읽기 전용)."""
+    from psycopg.rows import dict_row
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_SYNC_SQL, (channel,))
+        for row in cur:
+            yield asset_to_doc(row, channel)
+
+
+def index_asset(
+    client: Any, conn: Any, asset_id: str, *, index: str, channel: str
+) -> dict[str, Any] | None:
+    """자산 1건을 OpenSearch 에 색인한다(증분 훅의 정상 경로 — PG 읽기 전용 → OS 쓰기).
+
+    그 자산의 (메타 + 활성 채널 평균 임베딩) 1행을 조회해 ``asset_to_doc`` 로 문서를 만들고
+    ``client.index(_id=asset_id)`` 로 **upsert**(재실행 멱등) 한다. 자산/임베딩이 없으면(INNER
+    JOIN 제외) 색인하지 않고 ``None`` 을 반환한다(no-op). 반환: 색인한 문서 또는 ``None``.
+    """
+    row = _fetch_one(conn, _ASSET_ONE_SQL, (channel, asset_id))
+    if row is None:
+        return None
+    doc = asset_to_doc(row, channel)
+    client.index(index=index, id=str(asset_id), body=doc)
+    return doc
+
+
+def _bulk_actions(index: str, docs: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """문서를 bulk upsert 액션으로 감싼다(``_id=asset_id`` → 재실행 시 덮어쓰기·중복 없음)."""
+    for doc in docs:
+        yield {"_index": index, "_id": doc["asset_id"], "_source": doc}
+
+
+def sync_all(
+    client: Any,
+    conn: Any,
+    *,
+    index: str,
+    channel: str,
+    recreate: bool = False,
+    dim: int = FIX_EMBEDDING_DIMENSION,
+    bulk_fn: Callable[..., tuple[int, list]] | None = None,
+) -> tuple[str, int, list[Any]]:
+    """registered 자산 전체를 OpenSearch 로 재동기화한다(복구 도구 — PG 읽기 전용 → OS 쓰기).
+
+    ``_id=asset_id`` upsert 라 재실행은 멱등(중복 없음). 기본은 비파괴(없으면 생성·있으면 upsert);
+    스키마 변경 시에만 ``recreate=True``. ``bulk_fn`` 은 색인 seam(기본 opensearch-py ``helpers.bulk``)
+    으로, 단위 테스트가 가짜를 주입해 OS 없이 액션을 검증한다. 반환: ``(인덱스상태, 색인 건수, 오류 목록)``.
+    """
+    if bulk_fn is None:
+        from opensearchpy import helpers
+
+        bulk_fn = helpers.bulk
+
+    status = ensure_index(client, index, recreate=recreate, dim=dim)
+    actions = _bulk_actions(index, iter_asset_docs(conn, channel))
+    ok, errors = bulk_fn(client, actions, stats_only=False, raise_on_error=False)
+    client.indices.refresh(index=index)
+    return status, ok, list(errors)
+
+
+def resolve_channel(channel: str | None) -> str:
+    """미지정이면 운영 활성 임베딩 채널(018)로 해소한다(적재·검색과 같은 채널을 색인)."""
+    from src.config.settings import active_embed_channel
+
+    return channel if channel is not None else active_embed_channel()
