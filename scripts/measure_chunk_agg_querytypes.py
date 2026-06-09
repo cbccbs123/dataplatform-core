@@ -24,22 +24,22 @@ def main() -> int:
         print("RUN_DB_E2E=1 필요(실DB 측정).")
         return 0
     from dotenv import load_dotenv
-
     from scripts.build_golden_ko_draft import _fetch_assets, _topic_from_filename
     from scripts.measure_chunk_agg_kpi import (
         compute_agg_kpi_table,
         format_comparison_table,
         make_db_search_fn,
     )
+    from tests.test_embedding_ab_kpi import (
+        _GOLDEN_PATH,
+        TestEmbeddingABKpi,
+        _merge_ranked_ids,
+        load_golden,
+    )
+
     from src.config.settings import ChunkAggConfig, init_settings
     from src.database.postgres_util import PostgresUtil
     from src.search.search_service import search_hybrid
-    from tests.test_embedding_ab_kpi import (
-        TestEmbeddingABKpi,
-        _merge_ranked_ids,
-        _GOLDEN_PATH,
-        load_golden,
-    )
 
     env = "dev"
     if "--env" in sys.argv:
