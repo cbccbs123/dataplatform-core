@@ -12,7 +12,7 @@ from typing import Any
 from psycopg.rows import dict_row
 
 from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME, FIX_EMBEDDING_DIMENSION
-from src.config.settings import get_current_settings
+from src.config.settings import ChunkAggConfig, chunk_agg_config, get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.embedders.image_embedder import embed_clip_text_query_for_image_search
 from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
@@ -83,10 +83,50 @@ WHERE am.asset_id = ANY(%s)
 """
 
 
-def _hybrid_embedding_bm25_sql(vdim: int) -> str:
-    """단일 트랜잭션에서 임베딩 후보 + FTS를 섞는 하이브리드 SQL."""
-    return f"""
-                    WITH emb_chunks AS (
+# 019: per-asset 청크 집계 빌더(순수, DB 무관). 검색 시점 자산 점수를 청크 코사인의 집계로 만든다.
+# 기본 max 는 종전 ``MAX`` 와 문자 동일(SC-001 회귀 0). 윈도우 경로(topk_mean/mix)는 ranked CTE 가
+# 부여한 결정적 순위 컬럼(_CHUNK_AGG_RANK_COL)을 참조한다.
+_MAX_AGG = ChunkAggConfig(agg="max", k=3, mix_w=0.5)
+_CHUNK_AGG_RANK_COL = "agg_rn"  # ranked CTE 의 row_number 컬럼명(topk_mean 상위 k 필터)
+
+
+def _chunk_agg_expr(agg: str, *, sim_expr: str, k: int, w: float) -> str:
+    """per-asset 청크 집계식을 만드는 순수 함수(DB 없이 문자열로 검증 가능).
+
+    - ``max`` → ``MAX(<sim_expr>)`` — 종전 집계식과 **문자 동일**(회귀 0 / SC-001).
+    - ``topk_mean`` → 자산별 청크 순위 상위 ``k`` 평균
+      ``AVG(CASE WHEN agg_rn <= k THEN <sim_expr> END)``. 순위(agg_rn)는 ranked CTE 가
+      ``ORDER BY <sim> DESC NULLS LAST, chunk_index ASC`` 로 매겨 동점 청크에서도 결정적이다
+      (헌법 3조). 이때 ``sim_expr`` 는 ranked CTE 의 집계 대상 컬럼명(agg_sim).
+    - ``mix`` → ``w*MAX(<sim_expr>) + (1-w)*AVG(<sim_expr>)``.
+    - 그 외 → ``ValueError``(잘못된 산식으로 검색 방지).
+
+    ``sim_expr`` 는 집계 대상 per-chunk 유사도 식/컬럼이다(NaN 가드 포함 여부는 호출부 책임)."""
+    if agg == "max":
+        return f"MAX({sim_expr})"
+    if agg == "topk_mean":
+        return f"AVG(CASE WHEN {_CHUNK_AGG_RANK_COL} <= {int(k)} THEN {sim_expr} END)"
+    if agg == "mix":
+        return f"({w} * MAX({sim_expr}) + (1 - {w}) * AVG({sim_expr}))"
+    raise ValueError(f"지원하지 않는 청크 집계 방식: {agg!r} (지원: max|topk_mean|mix)")
+
+
+def _hybrid_emb_cte_sql(agg: ChunkAggConfig, vdim: int) -> str:
+    """ST 하이브리드 SQL 의 emb CTE(자산별 청크 집계 → emb_score). agg 에 따라 형태가 갈린다.
+
+    - ``max``: 종전 ``emb_chunks → emb(MAX) GROUP BY`` 구조를 빌더 식으로 그대로 재현
+      (전체 SQL 바이트 동일, SC-001).
+    - ``topk_mean``/``mix``: chunk_index ASC 안정 정렬로 ``row_number``(agg_rn)를 부여한
+      ``emb_ranked`` CTE 를 끼우고 상위 k 평균(또는 w*MAX+(1-w)*AVG)을 집계한다. NaN 가드
+      (``chunk_sim = chunk_sim``)는 두 경로 모두 보존한다(드라이버 NaN 코사인 방어)."""
+    if agg.agg == "max":
+        emb_expr = _chunk_agg_expr(
+            "max",
+            sim_expr="CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END",
+            k=agg.k,
+            w=agg.mix_w,
+        )
+        return f"""WITH emb_chunks AS (
                         SELECT
                             ae.asset_id AS id,
                             (1 - (ae.embedding <=> %s::vector({vdim}))) AS chunk_sim
@@ -97,10 +137,44 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                     emb AS (
                         SELECT
                             id,
-                            MAX(CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END) AS emb_score
+                            {emb_expr} AS emb_score
                         FROM emb_chunks
                         GROUP BY id
+                    )"""
+    emb_expr = _chunk_agg_expr(agg.agg, sim_expr="agg_sim", k=agg.k, w=agg.mix_w)
+    return f"""WITH emb_chunks AS (
+                        SELECT
+                            ae.asset_id AS id,
+                            ae.chunk_index AS chunk_pos,
+                            (1 - (ae.embedding <=> %s::vector({vdim}))) AS chunk_sim
+                        FROM asset_embedding ae
+                        WHERE ae.embedding IS NOT NULL
+                          AND ae.channel = %s
                     ),
+                    emb_ranked AS (
+                        SELECT
+                            id,
+                            (CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END) AS agg_sim,
+                            row_number() OVER (
+                                PARTITION BY id
+                                ORDER BY (CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END)
+                                         DESC NULLS LAST, chunk_pos ASC
+                            ) AS agg_rn
+                        FROM emb_chunks
+                    ),
+                    emb AS (
+                        SELECT
+                            id,
+                            {emb_expr} AS emb_score
+                        FROM emb_ranked
+                        GROUP BY id
+                    )"""
+
+
+# ST 하이브리드 SQL 의 emb 집계 이후 공통 tail(joined_inner→…→ORDER BY…LIMIT).
+# emb CTE 만 집계 방식에 따라 달라지고 이 tail 은 불변 — max·윈도우 분기가 공유한다.
+# emb CTE 의 닫는 ')' 뒤 ','부터 시작한다(빌더가 emb CTE 와 이어붙여 완성 SQL 을 만든다).
+_HYBRID_BM25_TAIL = """,
                     joined_inner AS (
                         SELECT
                             e.id,
@@ -201,13 +275,33 @@ def _hybrid_embedding_bm25_sql(vdim: int) -> str:
                     """
 
 
-def _two_stage_stage1_sql(vdim: int) -> str:
+def _hybrid_embedding_bm25_sql(vdim: int, chunk_agg: ChunkAggConfig | None = None) -> str:
+    """단일 트랜잭션에서 임베딩 후보 + FTS를 섞는 하이브리드 SQL.
+
+    ``chunk_agg`` 미지정 = ``max``(종전과 바이트 동일, SC-001). 활성 설정 해소는 런타임 호출부
+    (``_run_hybrid_search``)가 ``chunk_agg_config()`` 로 하고 빌더는 순수 함수로 둔다 —
+    emb CTE 만 집계 방식에 따라 달라지고 이후 tail(joined_inner→…→ORDER BY)은 공유한다."""
+    agg = chunk_agg if chunk_agg is not None else _MAX_AGG
     return f"""
+                    {_hybrid_emb_cte_sql(agg, vdim)}{_HYBRID_BM25_TAIL}"""
+
+
+def _two_stage_stage1_sql(vdim: int, chunk_agg: ChunkAggConfig | None = None) -> str:
+    """시각 2단계 1차: 이미지·영상 ST(VLM 텍스트) 청크 집계 s_text 로 후보를 고른다.
+
+    ``chunk_agg`` 미지정 = ``max``(종전 바이트 동일). 윈도우 경로(topk_mean/mix)는 chunk_index
+    안정 정렬로 상위 k 평균/mix 를 집계한다 — 조인·필터·정렬·LIMIT·%s 개수 불변."""
+    agg = chunk_agg if chunk_agg is not None else _MAX_AGG
+    if agg.agg == "max":
+        s_text = _chunk_agg_expr(
+            "max", sim_expr=f"1 - (ae.embedding <=> %s::vector({vdim}))", k=agg.k, w=agg.mix_w
+        )
+        return f"""
                     SELECT
                         a.asset_id AS id,
                         a.fs_path AS file_uri,
                         a.modality,
-                        MAX(1 - (ae.embedding <=> %s::vector({vdim}))) AS s_text
+                        {s_text} AS s_text
                     FROM asset a
                     JOIN asset_embedding ae ON a.asset_id = ae.asset_id
                     WHERE ae.embedding IS NOT NULL
@@ -217,13 +311,60 @@ def _two_stage_stage1_sql(vdim: int) -> str:
                     ORDER BY s_text DESC, id ASC
                     LIMIT %s
                     """
-
-
-def _two_stage_clip_for_ids_sql(vdim: int) -> str:
+    s_text = _chunk_agg_expr(agg.agg, sim_expr="agg_sim", k=agg.k, w=agg.mix_w)
     return f"""
+                    WITH stage1_chunks AS (
+                        SELECT
+                            a.asset_id AS id,
+                            a.fs_path AS file_uri,
+                            a.modality,
+                            ae.chunk_index AS chunk_pos,
+                            (1 - (ae.embedding <=> %s::vector({vdim}))) AS chunk_sim
+                        FROM asset a
+                        JOIN asset_embedding ae ON a.asset_id = ae.asset_id
+                        WHERE ae.embedding IS NOT NULL
+                          AND a.modality = ANY(%s)
+                          AND ae.channel = %s
+                    ),
+                    stage1_ranked AS (
+                        SELECT
+                            id,
+                            file_uri,
+                            modality,
+                            (CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END) AS agg_sim,
+                            row_number() OVER (
+                                PARTITION BY id
+                                ORDER BY (CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END)
+                                         DESC NULLS LAST, chunk_pos ASC
+                            ) AS agg_rn
+                        FROM stage1_chunks
+                    )
+                    SELECT
+                        id,
+                        file_uri,
+                        modality,
+                        {s_text} AS s_text
+                    FROM stage1_ranked
+                    GROUP BY id, file_uri, modality
+                    ORDER BY s_text DESC, id ASC
+                    LIMIT %s
+                    """
+
+
+def _two_stage_clip_for_ids_sql(vdim: int, chunk_agg: ChunkAggConfig | None = None) -> str:
+    """시각 2단계 2차: 후보 id 들의 CLIP 청크 집계 s_clip.
+
+    ``chunk_agg`` 미지정 = ``max``(종전 바이트 동일). 윈도우 경로는 chunk_index 안정 정렬로
+    상위 k 평균/mix 를 집계한다(조인·필터·%s 개수 불변)."""
+    agg = chunk_agg if chunk_agg is not None else _MAX_AGG
+    if agg.agg == "max":
+        s_clip = _chunk_agg_expr(
+            "max", sim_expr=f"1 - (ae.embedding <=> %s::vector({vdim}))", k=agg.k, w=agg.mix_w
+        )
+        return f"""
                     SELECT
                         a.asset_id AS id,
-                        MAX(1 - (ae.embedding <=> %s::vector({vdim}))) AS s_clip
+                        {s_clip} AS s_clip
                     FROM asset a
                     JOIN asset_embedding ae ON a.asset_id = ae.asset_id
                     WHERE ae.embedding IS NOT NULL
@@ -231,6 +372,37 @@ def _two_stage_clip_for_ids_sql(vdim: int) -> str:
                       AND ae.channel = %s
                       AND a.asset_id = ANY(%s)
                     GROUP BY a.asset_id
+                    """
+    s_clip = _chunk_agg_expr(agg.agg, sim_expr="agg_sim", k=agg.k, w=agg.mix_w)
+    return f"""
+                    WITH clip_chunks AS (
+                        SELECT
+                            a.asset_id AS id,
+                            ae.chunk_index AS chunk_pos,
+                            (1 - (ae.embedding <=> %s::vector({vdim}))) AS chunk_sim
+                        FROM asset a
+                        JOIN asset_embedding ae ON a.asset_id = ae.asset_id
+                        WHERE ae.embedding IS NOT NULL
+                          AND a.modality = ANY(%s)
+                          AND ae.channel = %s
+                          AND a.asset_id = ANY(%s)
+                    ),
+                    clip_ranked AS (
+                        SELECT
+                            id,
+                            (CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END) AS agg_sim,
+                            row_number() OVER (
+                                PARTITION BY id
+                                ORDER BY (CASE WHEN chunk_sim = chunk_sim THEN chunk_sim END)
+                                         DESC NULLS LAST, chunk_pos ASC
+                            ) AS agg_rn
+                        FROM clip_chunks
+                    )
+                    SELECT
+                        id,
+                        {s_clip} AS s_clip
+                    FROM clip_ranked
+                    GROUP BY id
                     """
 
 
@@ -384,6 +556,7 @@ def _run_hybrid_search(
     alpha: float,
     fusion: str = "alpha",
     rrf_k: int = RRF_DEFAULT_K,
+    chunk_agg: ChunkAggConfig | None = None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """임베딩 상위 후보에 ``asset_metadata.search_vector`` 기준 ``ts_rank_cd`` 를 섞어 반환한다.
@@ -402,12 +575,17 @@ def _run_hybrid_search(
 
     ``debug=True`` 이면 ``candidate_count``(임베딩 조건 통과 후보 전체 행 수)를 유지하고,
     ``debug=False`` 이면 응답에서 제거한다.
+
+    ``chunk_agg`` 는 per-asset 청크 집계 방식(019)이다. 미지정(None)이면 ``chunk_agg_config()`` 로
+    활성 설정을 해소한다 — settings 미초기화(순수 단위·실DB e2e)에서는 ``max`` 보수 폴백이라 종전
+    SQL 과 바이트 동일(회귀 0/SC-001). 명시 전달은 그대로 우선(017 채널처럼 명시 우선·측정 seam).
     """
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha는 0~1 사이여야 합니다.")
+    agg = chunk_agg if chunk_agg is not None else chunk_agg_config()
     db = PostgresUtil()
     vdim = FIX_EMBEDDING_DIMENSION
-    sql = _hybrid_embedding_bm25_sql(vdim)
+    sql = _hybrid_embedding_bm25_sql(vdim, chunk_agg=agg)
     with db:
         with db.transaction() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -446,6 +624,7 @@ def search_media_text_items(
     fusion: str = "alpha",
     channel: str = EMBEDDING_KIND_ST,
     query_model_name: str | None = None,
+    chunk_agg: ChunkAggConfig | None = None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """
@@ -474,6 +653,7 @@ def search_media_text_items(
         limit=limit,
         alpha=alpha,
         fusion=fusion,
+        chunk_agg=chunk_agg,
         debug=debug,
     )
 
@@ -484,6 +664,7 @@ def search_media_images_by_text(
     limit: int = 20,
     alpha: float = 0.85,
     clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    chunk_agg: ChunkAggConfig | None = None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """
@@ -491,6 +672,7 @@ def search_media_images_by_text(
     코사인으로 비교하고, 동일 후보에 ``asset_metadata.search_vector`` FTS(``ts_rank_cd``)를 원시 가중합으로 섞는다.
 
     ``modality`` 는 ``MEDIA_TYPES_CLIP_CHUNK_SEARCH``(이미지·영상)만 대상이다.
+    ``chunk_agg`` 는 per-asset 청크 집계(019, 미지정=활성 설정) — 시각 2단계 호출부가 일관 전달한다.
     """
     query_vector = embed_clip_text_query_for_image_search(query, model_name=clip_model_name)
     return _run_hybrid_search(
@@ -500,6 +682,7 @@ def search_media_images_by_text(
         embedding_kind=EMBEDDING_KIND_CLIP,
         limit=limit,
         alpha=alpha,
+        chunk_agg=chunk_agg,
         debug=debug,
     )
 
@@ -548,6 +731,7 @@ def search_media_images_two_stage(
     alpha: float = 0.65,
     bm25_weight: float = 0.2,
     clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    chunk_agg: ChunkAggConfig | None = None,
 ) -> list[dict[str, Any]]:
     """
     1차: 이미지·영상의 SentenceTransformer(VLM 텍스트) 청크로 후보 id 를 고른다.
@@ -560,16 +744,21 @@ def search_media_images_two_stage(
     ST 후보가 하나도 없으면 ``search_media_images_by_text`` (임베딩+FTS 하이브리드)로 폴백한다.
 
     결과 행에는 ``asset_metadata.ext_meta->>'summary'`` 가 ``summary`` 키로 포함된다.
+
+    ``chunk_agg`` 는 per-asset 청크 집계(019). 미지정이면 ``chunk_agg_config()`` 로 활성 설정을
+    한 번 해소해 stage1(s_text)·clip(s_clip)·CLIP-단독 후보 경로 전체가 같은 집계를 따른다(일관성·
+    결정성). 미초기화 시 ``max`` 보수 폴백(종전 동치). 명시 전달은 그대로 우선(측정 seam).
     """
     if not 0.0 <= alpha <= 1.0 or not 0.0 <= bm25_weight <= 1.0:
         raise ValueError("alpha와 bm25_weight는 0~1 사이여야 합니다.")
 
+    agg = chunk_agg if chunk_agg is not None else chunk_agg_config()
     db = PostgresUtil()
     text_q = embed_query_for_media_search(query_ko)
     clip_q = embed_clip_text_query_for_image_search(query_en, model_name=clip_model_name)
     vdim = FIX_EMBEDDING_DIMENSION
-    stage1_sql = _two_stage_stage1_sql(vdim)
-    clip_sql = _two_stage_clip_for_ids_sql(vdim)
+    stage1_sql = _two_stage_stage1_sql(vdim, chunk_agg=agg)
+    clip_sql = _two_stage_clip_for_ids_sql(vdim, chunk_agg=agg)
 
     with db:
         with db.transaction() as conn:
@@ -591,6 +780,7 @@ def search_media_images_two_stage(
             limit=final_limit,
             alpha=1.0 - bm25_weight,
             clip_model_name=clip_model_name,
+            chunk_agg=agg,
         )
 
     ids = [str(r["id"]) for r in stage1]
@@ -628,6 +818,7 @@ def search_media_images_two_stage(
         limit=max(stage1_limit, final_limit * 4),
         alpha=1.0,
         clip_model_name=clip_model_name,
+        chunk_agg=agg,
     )
     _merge_clip_only_candidates(merged, clip_extra)
 
@@ -677,6 +868,7 @@ def search_media_all_grouped(
     fusion: str = "alpha",
     channel: str = EMBEDDING_KIND_ST,
     query_model_name: str | None = None,
+    chunk_agg: ChunkAggConfig | None = None,
     include_visual: bool = True,
     debug: bool = False,
 ) -> dict[str, Any]:
@@ -705,6 +897,9 @@ def search_media_all_grouped(
     신규 image/video ST 캡션은 이 프리필터에서 누락된다(BGE 전환 시 image recall 저하; 기본 'st' 무해).
     BGE 운영 전환 전 stage-1 active-aware 화가 후속(spec 018 범위 밖).
 
+    ``chunk_agg`` 는 per-asset 청크 집계(019)로 ST 하이브리드·시각 2단계 양쪽에 같은 값이 전달된다
+    (미지정=각 경로가 ``chunk_agg_config()`` 활성 해소, 기본 ``max``=회귀 0). 명시 전달은 우선.
+
     ⚠️ **현재 한계(프로토타입)**: 아래 각 버킷은 ``_sort_by_similarity_cap`` 으로 ``similarity``
     (alpha 가중합) 기준 재정렬되므로, ``fusion="rrf"`` 가 ``_run_hybrid_search`` 에서 만든 RRF
     순서는 **이 grouped 출력에는 보존되지 않는다**(RRF 효과는 ``_run_hybrid_search`` 레벨에서만
@@ -726,6 +921,7 @@ def search_media_all_grouped(
         fusion=fusion,
         channel=channel,
         query_model_name=query_model_name,
+        chunk_agg=chunk_agg,
         debug=debug,
     )
 
@@ -760,6 +956,7 @@ def search_media_all_grouped(
             alpha=image_search_alpha,
             bm25_weight=bm25_weight,
             clip_model_name=clip_model_name,
+            chunk_agg=chunk_agg,
         )
 
     image_rows: list[dict[str, Any]] = []

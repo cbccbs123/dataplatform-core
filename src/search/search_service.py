@@ -12,7 +12,7 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-from src.config.settings import active_embed_channel, model_for_channel
+from src.config.settings import ChunkAggConfig, active_embed_channel, model_for_channel
 from src.search.media_search import EMBEDDING_KIND_ST, search_media_all_grouped
 
 _LOG = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ def search_hybrid(
     min_scores: dict[str, float] | None = None,
     text_channel: str | None = None,
     text_query_model: str | None = None,
+    chunk_agg: ChunkAggConfig | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
 ) -> dict[str, Any]:
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
@@ -82,6 +83,9 @@ def search_hybrid(
     ``fusion`` 은 ST 하이브리드 융합 방식(기본 ``alpha``=기존 동작; ``rrf``=순위 융합 프로토타입).
     ⚠️ 한계: ``rrf`` 는 현재 grouped 출력에 반영되지 않는다 — 버킷 cap 이 ``similarity`` 로
     재정렬하므로 RRF 순서는 ``_run_hybrid_search`` 레벨에서만 효과(KPI 측정용). 설계 §8 후속.
+    ``chunk_agg`` 는 per-asset 청크 집계 방식(019)이다. 미지정(None)이면 검색 SQL 빌더 호출부가
+    ``chunk_agg_config()`` 로 활성 설정을 해소한다(기본 ``max``=종전 동치, 회귀 0). 명시 전달은
+    그대로 grouped 경로로 흘러 우선한다(017 채널처럼 측정 seam — KPI 하니스가 집계 방식을 주입).
 
     ``text_channel``/``text_query_model`` 은 텍스트 임베딩 채널 선택이다(텍스트 채널 한정, 시각
     CLIP 경로 무변경). **미지정(None)** 이면 운영 활성 프로파일(018, 적재·검색·관계 단일 출처)로
@@ -137,6 +141,7 @@ def search_hybrid(
         fusion=fusion,
         channel=text_channel,
         query_model_name=query_model_name,
+        chunk_agg=chunk_agg,
         include_visual=include_visual,
     )
     results = {
