@@ -6,7 +6,7 @@
 
 엔드포인트(FR-015 계약)
     - ``GET /health``                       → ``{"status":"ok","env":...}``
-    - ``GET /search``                       → ``{"items","next_cursor","meta"}`` (cursor 페이지)
+    - ``GET /search``                       → ``{"query","results":{modality:[...]},"meta"}`` (모달리티별 그룹)
     - ``GET /assets/{asset_id}``            → AssetDetail (없음/의료/비registered → 404)
     - ``GET /assets/{asset_id}/download``   → 원본 스트리밍(Range 부분 요청 206 지원)
     - ``GET /assets/{asset_id}/bundle``     → 관계 ego-network zip
@@ -17,8 +17,8 @@
       import/호출하지 않는다(grep 가드로 검증).
     - **FR-014(헌법 7·10조)**: 검색은 ``exclude_domains={'medical'}``, 상세·다운로드·묶음 seed 는
       서비스 계층(``fetch_asset_detail``/``resolve_download_target``)의 노출 게이트로 의료를 배제한다.
-    - **결정성(헌법 3조)**: 응답 순서·페이지는 ``flatten_ranked``/``paginate``/``graph_query`` 결정성에
-      위임한다(라우터는 추가 정렬을 하지 않는다).
+    - **결정성(헌법 3조)**: 응답 순서는 ``group_ranked``(버킷 내 -round(sim,6)·asset_id)/
+      ``graph_query`` 결정성에 위임한다(라우터는 추가 정렬을 하지 않는다).
     - **읽기 전용(헌법 6조)**: 스키마·쓰기 0. DB 접근은 조회 트랜잭션(idempotent)만.
 
 인증은 후속(plan §0.1) — 현재 권한=단일(인증 도입 전엔 전체 열람). 미들웨어/``Depends`` 주입은
@@ -38,6 +38,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
+from src.config.settings import get_current_settings
+
 # 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
 from src.portal.asset_detail import fetch_asset_detail
@@ -47,17 +49,18 @@ from src.portal.download import (
     parse_range_header,
     resolve_download_target,
 )
-from src.portal.search_page import flatten_ranked, paginate
+from src.portal.search_group import group_ranked
 from src.search.search_service import search_hybrid
 
 _ENV = os.getenv("PORTAL_API_ENV", "dev")
 _VALID_MODALITIES = ("text", "image", "video", "audio")
 
-# 의료(PHI) 배제 도메인 집합(FR-014). 검색 평탄화에서 이 도메인 행을 제거한다.
+# 의료(PHI) 배제 도메인 집합(FR-014). group_ranked 가 각 모달리티 버킷에서 이 도메인 행을 제거한다.
 _EXCLUDE_DOMAINS = frozenset({"medical"})
 
-# cursor 페이징은 "한 질의가 반환한 상위 결과 집합 내" 페이징이다(plan R-1). 그 집합을 넉넉히
-# 받기 위해 버킷당 한도를 크게 둔다(전체 코퍼스 keyset 페이징은 006 재설계 후속).
+# search_hybrid 의 버킷당 후보 풀 한도. 응답은 모달리티별 top-N(size)으로 자르지만, 2단계 시각
+# 후보 풀·랭킹 품질을 위해 풀을 넉넉히 받은 뒤 group_ranked 에서 size 로 캡한다(의료 배제로 줄어도
+# 충분한 잔여 확보). 전체 코퍼스 keyset 페이징은 006 재설계 후속.
 _SEARCH_LIMIT_PER_BUCKET = 200
 
 # 다운로드 스트리밍 청크 크기(64KiB) — 대용량 멀티모달 자산을 메모리에 다 올리지 않는다.
@@ -101,6 +104,20 @@ def health() -> dict[str, str]:
     return {"status": "ok", "env": _ENV}
 
 
+def _search_min_scores() -> dict[str, float] | None:
+    """settings 의 모달리티별 적합도 하한(``SEARCH_MIN_SCORE_*``)을 검색에 적용한다.
+
+    ``run_search``/``sample_search_api`` 와 동일하게 ``search_hybrid`` 에 floor 를 넘겨, 점수
+    무관한 약한 후보가 결과에 그대로 노출되는 것을 막는다(010 포탈은 이 배선을 빠뜨렸었다).
+    settings 미초기화(라우팅 단위 테스트·오설정)면 ``None``(필터 비활성=기존 동작)으로 보수
+    폴백한다 — 운영 진입점은 lifespan 이 ``init_settings`` 하므로 항상 설정값을 따른다.
+    """
+    try:
+        return get_current_settings().search_min_scores
+    except RuntimeError:
+        return None
+
+
 def _parse_modalities(modalities: str | None) -> list[str] | None:
     """콤마 구분 모달리티 문자열을 검증된 리스트로 파싱한다(미지정=None=전체).
 
@@ -124,33 +141,35 @@ def search(
     modalities: str | None = Query(
         None, description="콤마 구분: text,image,video,audio (미지정=전체)"
     ),
-    page_size: int = Query(20, ge=1, le=200, description="한 페이지 결과 수"),
-    cursor: str | None = Query(None, description="다음 페이지 cursor(이전 응답의 next_cursor)"),
+    size: int = Query(20, ge=1, le=100, description="모달리티별 최대 결과 수(top-N)"),
 ) -> dict[str, Any]:
-    """006 하이브리드 검색을 cursor 페이지로 감싸 반환한다(FR-001/002/003).
+    """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003).
 
-    내부: ``search_hybrid``(신규 LLM 호출 0, 006 seam) → ``flatten_ranked``(의료 배제, FR-014)
-    → ``paginate``(결정적 cursor 페이지). 위조/깨진 cursor 는 400 으로 거부한다.
+    내부: ``search_hybrid``(신규 LLM 호출 0, 006 seam) → ``group_ranked``(모달리티별 독립 랭킹·
+    의료 배제, FR-014). 모달리티 간 점수 척도가 비교 불가라 단일 랭킹으로 합치지 않고 섹션별로
+    제공한다 — 포탈은 어차피 text/image/video/audio 로 분류해 보여주면 되고, 이로써 점수가
+    구조적으로 높은 영상이 다른 모달리티를 침범하는 문제를 피한다. 섹션별 top-N(``size``), 페이징
+    없음(전체 코퍼스 keyset 페이징은 006 재설계 후속).
     """
     mods = _parse_modalities(modalities)
 
-    # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). limit_per_bucket 은 cursor 페이징
-    # 대상 집합을 넉넉히 확보(plan R-1).
-    result = search_hybrid(q, modalities=mods, limit_per_bucket=_SEARCH_LIMIT_PER_BUCKET)
+    # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
+    # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
+    result = search_hybrid(
+        q,
+        modalities=mods,
+        limit_per_bucket=_SEARCH_LIMIT_PER_BUCKET,
+        min_scores=_search_min_scores(),
+    )
 
-    # FR-014: 의료 도메인 행 배제 후 결정적 단일 랭킹으로 평탄화.
-    ranked = flatten_ranked(result, exclude_domains=_EXCLUDE_DOMAINS)
-
-    try:
-        page = paginate(ranked, cursor=cursor, page_size=page_size)
-    except ValueError as exc:
-        # 위조·만료 cursor(decode 실패) → 400(Edge Case).
-        raise HTTPException(status_code=400, detail=f"잘못된 cursor: {exc}") from exc
+    # FR-014: 버킷별 의료 배제 + 모달리티별 독립 랭킹·top-N. results 는 {modality: [rows]}.
+    grouped = group_ranked(result, limit_per_modality=size, exclude_domains=_EXCLUDE_DOMAINS)
+    counts = {modality: len(rows) for modality, rows in grouped.items()}
 
     return {
-        "items": page["items"],
-        "next_cursor": page["next_cursor"],
-        "meta": {"query": q, "modalities": mods, "page_size": page_size},
+        "query": q,
+        "results": grouped,
+        "meta": {"query": q, "modalities": mods, "size": size, "counts": counts},
     }
 
 

@@ -7,8 +7,8 @@
     ``unittest.mock.patch`` 로 대체해 **DB·LLM·네트워크 없이** 순수 단위로 돈다.
 
 검증 대상
-    - T022: ``/health`` 200 · ``/search`` 정상(items+next_cursor+meta) · 의료 배제(FR-014)
-      · 위조 cursor → 400.
+    - T022: ``/health`` 200 · ``/search`` 정상(query+results(모달리티별)+meta) · 버킷별 의료
+      배제(FR-014) · size top-N.
     - T023: ``/assets/{id}`` 200/404 · ``/assets/{id}/download`` Range→206+Content-Range·
       원본 없음→404/410(FR-009) · ``/assets/{id}/bundle`` → application/zip · seed 게이트 404.
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -38,8 +39,8 @@ def _passthrough_db(callback):
 def _fake_search_result() -> dict:
     """``search_hybrid`` 가 돌려주는 모달리티 버킷 결과 대역.
 
-    의료 행(domain_label='medical')을 일부러 섞어 FR-014 배제 배선을 검증할 수 있게 한다.
-    유사도 내림차순 정렬 시 의료(0.95)가 1위지만 배제되어야 한다.
+    의료 행(domain_label='medical')을 image 버킷에 섞어 FR-014 버킷별 배제를 검증할 수 있게
+    한다. text 는 a1>a2>a3, image 는 의료(0.95) 1건뿐이라 배제 후 빈 섹션이 된다.
     """
     return {
         "query": "회식",
@@ -79,65 +80,78 @@ class TestHealth(unittest.TestCase):
 
 
 class TestSearch(unittest.TestCase):
-    """``/search`` — cursor 페이지·의료배제·위조 cursor."""
+    """``/search`` — 모달리티별 그룹 응답·버킷별 의료배제·size top-N."""
 
     def setUp(self) -> None:
         self.client = TestClient(app)
 
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_returns_page_contract(self, mock_search) -> None:
-        # 정상 검색: items + next_cursor + meta 계약. page_size=2 면 상위 2건 + next_cursor 발급.
+    def test_search_returns_grouped_contract(self, mock_search) -> None:
+        # 정상 검색: query + results(모달리티별 dict) + meta(counts). cursor/평탄 items 없음.
         mock_search.return_value = _fake_search_result()
-        resp = self.client.get("/search", params={"q": "회식", "page_size": 2})
+        resp = self.client.get("/search", params={"q": "회식", "size": 10})
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
-        self.assertIn("items", body)
-        self.assertIn("next_cursor", body)
-        self.assertIn("meta", body)
-        # 의료(0.95) 배제 후 a1(0.9)·a2(0.8) 두 건이 첫 페이지.
-        self.assertEqual([it["asset_id"] for it in body["items"]], ["a1", "a2"])
-        self.assertIsNotNone(body["next_cursor"])
-        self.assertEqual(body["meta"]["query"], "회식")
+        self.assertNotIn("next_cursor", body)  # cursor 제거됨
+        self.assertEqual(body["query"], "회식")
+        # results 는 모달리티별 dict — text 섹션 안에서만 랭킹(a1>a2>a3).
+        self.assertEqual([r["asset_id"] for r in body["results"]["text"]], ["a1", "a2", "a3"])
+        # image 섹션은 의료 1건뿐이라 배제 후 빈 리스트(섹션 키는 존재).
+        self.assertEqual(body["results"]["image"], [])
+        self.assertEqual(body["meta"]["counts"], {"text": 3, "image": 0})
+        self.assertEqual(body["meta"]["size"], 10)
 
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_excludes_medical(self, mock_search) -> None:
-        # FR-014: domain_label='medical' 자산은 검색 결과에서 배제된다(큰 page_size 로 전부 확인).
+    def test_search_excludes_medical_per_bucket(self, mock_search) -> None:
+        # FR-014: domain_label='medical' 은 해당 버킷에서 배제된다(image 섹션에서 med1 사라짐).
         mock_search.return_value = _fake_search_result()
-        resp = self.client.get("/search", params={"q": "회식", "page_size": 10})
-        self.assertEqual(resp.status_code, 200)
-        ids = [it["asset_id"] for it in resp.json()["items"]]
-        self.assertEqual(ids, ["a1", "a2", "a3"])
-        self.assertNotIn("med1", ids)
+        body = self.client.get("/search", params={"q": "회식", "size": 10}).json()
+        all_ids = [r["asset_id"] for rows in body["results"].values() for r in rows]
+        self.assertNotIn("med1", all_ids)
 
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_passes_exclude_medical_to_flatten(self, mock_search) -> None:
-        # FR-014 배선: flatten_ranked 가 exclude_domains={'medical'} 로 호출되는지 직접 확인.
+    def test_search_passes_exclude_and_size_to_group(self, mock_search) -> None:
+        # 배선: group_ranked 가 exclude_domains={'medical'} · limit_per_modality=size 로 호출되는지.
         mock_search.return_value = _fake_search_result()
-        with patch("src.app.portal_api.flatten_ranked", return_value=[]) as mock_flatten:
-            self.client.get("/search", params={"q": "x", "page_size": 5})
+        with patch("src.app.portal_api.group_ranked", return_value={}) as mock_group:
+            self.client.get("/search", params={"q": "x", "size": 7})
         self.assertEqual(
-            mock_flatten.call_args.kwargs["exclude_domains"], frozenset({"medical"})
+            mock_group.call_args.kwargs["exclude_domains"], frozenset({"medical"})
         )
+        self.assertEqual(mock_group.call_args.kwargs["limit_per_modality"], 7)
 
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_forged_cursor_returns_400(self, mock_search) -> None:
-        # 위조/깨진 cursor 는 400(Edge Case) — decode_cursor ValueError 매핑.
+    def test_search_size_caps_per_modality(self, mock_search) -> None:
+        # size=2 → 각 모달리티 섹션이 상위 2건으로 제한된다(섹션별 독립 top-N).
         mock_search.return_value = _fake_search_result()
-        resp = self.client.get("/search", params={"q": "x", "cursor": "###broken###"})
-        self.assertEqual(resp.status_code, 400)
+        body = self.client.get("/search", params={"q": "회식", "size": 2}).json()
+        self.assertEqual([r["asset_id"] for r in body["results"]["text"]], ["a1", "a2"])
 
+    @patch("src.app.portal_api.get_current_settings")
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_next_cursor_walks_pages(self, mock_search) -> None:
-        # 발급된 next_cursor 로 다음 페이지를 요청하면 겹치지 않고 마지막에 next_cursor=None.
+    def test_search_applies_min_scores_from_settings(
+        self, mock_search, mock_settings
+    ) -> None:
+        # ②(2026-06-09): 포탈은 settings 의 모달리티별 적합도 하한(SEARCH_MIN_SCORE_*)을
+        # search_hybrid 에 전달해야 한다 — run_search/sample_search_api 와 동일하게 floor 를
+        # 걸어 점수 무관 무관 결과 벽을 막는다(010 포탈의 누락 교정).
         mock_search.return_value = _fake_search_result()
-        first = self.client.get("/search", params={"q": "x", "page_size": 2}).json()
-        cur = first["next_cursor"]
-        self.assertIsNotNone(cur)
-        second = self.client.get(
-            "/search", params={"q": "x", "page_size": 2, "cursor": cur}
-        ).json()
-        self.assertEqual([it["asset_id"] for it in second["items"]], ["a3"])
-        self.assertIsNone(second["next_cursor"])
+        floors = {"text": 0.35, "image": 0.25, "video": 0.42, "audio": 0.35}
+        mock_settings.return_value = SimpleNamespace(search_min_scores=floors)
+        self.client.get("/search", params={"q": "회식", "size": 5})
+        self.assertEqual(mock_search.call_args.kwargs["min_scores"], floors)
+
+    @patch("src.app.portal_api.get_current_settings", side_effect=RuntimeError)
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_without_settings_falls_back_to_none(
+        self, mock_search, _mock_settings
+    ) -> None:
+        # settings 미초기화(라우팅 단위 테스트·오설정)에서는 min_scores=None 으로 보수 폴백한다 —
+        # 필터 비활성(기존 동작)이며 500 을 내지 않는다. 운영은 lifespan 이 init_settings 보장.
+        mock_search.return_value = _fake_search_result()
+        resp = self.client.get("/search", params={"q": "x", "size": 5})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(mock_search.call_args.kwargs["min_scores"])
 
 
 @patch("src.app.portal_api._run_in_db", _passthrough_db)
