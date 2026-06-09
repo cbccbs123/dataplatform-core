@@ -57,6 +57,34 @@ def _configure_logging() -> None:
     _LOG.propagate = False
 
 
+def _opensearch_index_best_effort(asset_id: Any, *, db: PostgresUtil, settings: Any) -> None:
+    """자산 finalize(PG 커밋) **직후** 그 자산을 OpenSearch 에 best-effort 증분 색인한다(spec 020, FR-002).
+
+    안전 게이트(프로덕션 적재 경로 — 회귀 0·격리):
+      · **opt-in off(기본)이면 즉시 반환** — ``opensearch_sync_enabled`` 미설정/False 면 아무 것도
+        하지 않고, ``src.search.opensearch_sync``·opensearch-py 를 **import 조차 하지 않는다**(아래 지연
+        import). 따라서 미도입 환경의 run_ingest 동작이 완전 불변(SC-001). 레거시 settings 에 필드가
+        없어도 ``getattr`` 폴백으로 off 취급.
+      · **격리**: enabled 여도 전체를 ``try/except Exception`` 으로 감싸 OS 미도달·색인 오류를
+        ``_LOG.warning`` 만 남기고 삼킨다 — ingest 를 중단하거나 PG 를 롤백하지 않는다(SC-003).
+        (이미 finalize 트랜잭션이 커밋된 뒤이므로 OS 색인은 본질적으로 PG 와 분리된 best-effort 작업.)
+    """
+    if not getattr(settings, "opensearch_sync_enabled", False):
+        return  # off(기본) — OpenSearch 코드 미접촉, 기존 동작 불변
+    try:
+        # 지연 import — 플래그 off 환경(opensearch-py 미설치 가능)의 순수성을 보존한다.
+        from src.config.settings import active_embed_channel
+        from src.search.opensearch_sync import get_client, index_asset
+
+        channel = active_embed_channel(settings)  # 적재·검색과 같은 활성 채널(018)을 색인
+        client = get_client(settings.opensearch_url)
+        # PG 는 읽기전용(SELECT만, FR-004) → OpenSearch 에만 쓰기(CQRS). finalize 커밋과 별도 트랜잭션.
+        with db.transaction() as conn:
+            index_asset(client, conn, str(asset_id), index=settings.opensearch_index, channel=channel)
+    except Exception as exc:  # noqa: BLE001 — OS 색인 실패가 적재를 막지 않는다(best-effort 격리)
+        _LOG.warning("opensearch 증분 색인 실패(무시): asset_id=%s (%s)", asset_id, exc)
+
+
 def run_ingest(
     files: list[str],
     *,
@@ -180,6 +208,11 @@ def run_ingest(
 
             _LOG.info("registered: asset_id=%s %s", asset_id, path)
             result["registered"].append(asset_id)
+
+            # 증분 색인(opt-in·격리) — 위 finalize 트랜잭션이 **PG 커밋된 직후** 호출한다(FR-002).
+            # off(기본)면 즉시 반환해 OpenSearch 코드를 전혀 건드리지 않으므로 기존 동작 불변(SC-001).
+            # 헬퍼 내부 try/except 로 OS 실패를 삼켜 적재를 중단·롤백하지 않는다(SC-003).
+            _opensearch_index_best_effort(asset_id, db=db, settings=cfg)
         except Exception as exc:  # noqa: BLE001 — route/create/추출/적재 모든 실패 흡수
             reason = f"{type(exc).__name__}: {exc}"
             _LOG.warning("failed: asset_id=%s %s (%s)", asset_id, path, reason)

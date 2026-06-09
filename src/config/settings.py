@@ -60,6 +60,12 @@ class PipelineSettings:
     chunk_agg: str
     chunk_agg_k: int        # topk_mean 상위 k(기본 3)
     chunk_agg_mix_w: float  # mix 가중치 w: w*MAX + (1-w)*AVG (기본 0.5)
+    # 020: OpenSearch 동기화(검색 엔진 도입·CQRS). 모두 선택 필드(018/019 동형) — 미설정 시 기존
+    # 동작 무영향(SC-001). opensearch_sync_enabled 기본 False 면 run_ingest 증분 훅이 실행되지 않고
+    # opensearch_sync/opensearch-py 를 import 조차 하지 않는다. url/index 는 증분 훅·복구 도구가 참조.
+    opensearch_url: str
+    opensearch_index: str
+    opensearch_sync_enabled: bool
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -116,6 +122,19 @@ def _env_float_default(name: str, default: float) -> float:
         raise ValueError(f"실수 환경변수 형식 오류: {name}={raw!r}") from e
 
 
+def _env_bool_default(name: str, default: bool) -> bool:
+    """불리언 선택 환경변수(미설정 시 기본값). ``_require_env_bool`` 의 선택 필드 판본(020)."""
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    low = str(raw).strip().lower()
+    if low in {"1", "true", "yes", "y", "on"}:
+        return True
+    if low in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"불리언 환경변수 형식 오류: {name}={raw!r}")
+
+
 # 검색이 쓰는 모달리티 버킷. relations 와 달리 모달리티마다 점수 스케일이 달라(텍스트 하이브리드 vs
 # 시각 2단계) 임계값을 모달리티별로 둔다.
 _SEARCH_MIN_SCORE_MODALITIES = ("text", "image", "video", "audio")
@@ -170,6 +189,10 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         chunk_agg=_env_str_default("SEARCH_CHUNK_AGG", "max"),
         chunk_agg_k=_env_int_default("SEARCH_CHUNK_AGG_K", 3),
         chunk_agg_mix_w=_env_float_default("SEARCH_CHUNK_AGG_MIX_W", 0.5),
+        # 020: OpenSearch 동기화 선택 설정. 미설정 시 url/index 기본값·sync off(기존 동작 불변).
+        opensearch_url=_env_str_default("OPENSEARCH_URL", "http://localhost:9200"),
+        opensearch_index=_env_str_default("OPENSEARCH_INDEX", "assets"),
+        opensearch_sync_enabled=_env_bool_default("OPENSEARCH_SYNC_ENABLED", False),
     )
 
 
