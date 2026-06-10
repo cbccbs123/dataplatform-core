@@ -1,16 +1,26 @@
-"""021 G1 — OpenSearch 검색 쿼리 빌더·결과 매핑 순수 함수 단위 테스트.
+"""021 G1·G2 — OpenSearch 검색 쿼리 빌더·결과 매핑·검색 seam 단위 테스트.
 
-OS·DB·opensearch-py 불필요(순수). ``build_search_body``(하이브리드 쿼리 본문)와
+G1(순수): OS·DB·opensearch-py 불필요. ``build_search_body``(하이브리드 쿼리 본문)와
 ``os_hit_to_row``(결과 행 매핑)가 020 인덱스 매핑(opensearch_sync.build_index_body)과
-일치하고 media_search 버킷 행과 동형(SC-005)인지 충실히 검증한다 — 테스트 위조·약화 금지
-(docs/테스트_가이드.md). 실제 OS 검색 실효는 G5(실OS e2e).
+일치하고 media_search 버킷 행과 동형(SC-005)인지 충실히 검증한다.
+
+G2(IO seam): ``ensure_search_pipeline``(정규화 검색 파이프라인 멱등 등록)·``search_assets_os``
+(질의 1회 임베딩 → modality 별 하이브리드 검색 → 버킷)을 **가짜 OS 클라이언트 주입**으로 OS 없이
+액션 조립을 검증한다(docs/테스트_가이드.md §2 seam 주입). OS 미도달은 예외 전파로 검증(FR-008).
+
+테스트 위조·약화 금지(docs/테스트_가이드.md). 실제 OS 검색 실효·결정성·의료배제는 G5(실OS e2e).
 """
 
 from __future__ import annotations
 
 import unittest
 
-from src.search.opensearch_search import build_search_body, os_hit_to_row
+from src.search.opensearch_search import (
+    build_search_body,
+    ensure_search_pipeline,
+    os_hit_to_row,
+    search_assets_os,
+)
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
 _NORI_TEXT_FIELDS = {"summary", "keywords", "labels", "file_name", "search_text"}
@@ -169,6 +179,198 @@ class OsHitToRowTest(unittest.TestCase):
         # _source.asset_id 부재 시 _id 로 폴백(OS 색인이 _id=asset_id 라 동일).
         row = os_hit_to_row({"_id": "fallback-id", "_score": 0.3, "_source": {"modality": "text"}})
         self.assertEqual(row["id"], "fallback-id")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# G2 — IO seam(검색 파이프라인·질의 임베딩·search_assets_os). 가짜 OS 클라이언트 주입.
+# 실제 opensearch-py 검색 파이프라인 API(client.search_pipeline.get/put·client.search(search_pipeline=))
+# 시그니처는 G5 실OS 에서 확정 검증한다 — 여기선 가짜 클라이언트가 그 인터페이스를 흉내내 액션 조립만 본다.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeSearchPipelineNS:
+    """opensearch-py ``client.search_pipeline`` 네임스페이스 대역(get/put).
+
+    ``get()``(id 미지정)은 전체 검색 파이프라인 dict 를 돌려준다(실 OS: 없으면 ``{}``) — 020
+    ``indices.exists`` 의 boolean-멱등 패턴과 동형으로, 멤버십 검사만으로 존재 여부를 판단한다.
+    ``put`` 호출은 (id, body) 로 기록해 멱등(존재 시 PUT 0회)을 단언한다.
+    """
+
+    def __init__(self, existing: dict | None = None) -> None:
+        self._existing: dict = dict(existing or {})
+        self.put_calls: list[tuple[str, dict]] = []
+
+    def get(self, *, id=None, **_kw):  # noqa: A002 (opensearch-py 시그니처 미러)
+        if id is None:
+            return dict(self._existing)
+        return {id: self._existing[id]}  # 미러용(미사용 경로) — 부재 시 KeyError
+
+    def put(self, *, id, body, **_kw):  # noqa: A002
+        self.put_calls.append((id, body))
+        self._existing[id] = body
+        return {"acknowledged": True}
+
+
+class _FakeSearchClient:
+    """opensearch-py OpenSearch 클라이언트 대역 — search_pipeline NS + search() 기록.
+
+    ``search`` 호출 인자를 기록하고 modality 별 canned hits 를 돌려준다. ``raise_on_search`` 가
+    주어지면 그 예외를 던져 OS 미도달(FR-008)을 흉내낸다.
+    """
+
+    def __init__(
+        self,
+        *,
+        existing_pipelines: dict | None = None,
+        hits_by_modality: dict | None = None,
+        raise_on_search: Exception | None = None,
+    ) -> None:
+        self.search_pipeline = _FakeSearchPipelineNS(existing_pipelines)
+        self._hits_by_modality = hits_by_modality or {}
+        self._raise_on_search = raise_on_search
+        self.search_calls: list[dict] = []
+
+    def search(self, *, index=None, body=None, search_pipeline=None, **_kw):
+        self.search_calls.append(
+            {"index": index, "body": body, "search_pipeline": search_pipeline}
+        )
+        if self._raise_on_search is not None:
+            raise self._raise_on_search
+        modality = body["query"]["hybrid"]["queries"][0]["bool"]["filter"][0]["term"][
+            "modality"
+        ]
+        hits = self._hits_by_modality.get(modality, [])
+        return {"hits": {"hits": hits}}
+
+
+def _os_hit(asset_id: str, score: float, modality: str) -> dict:
+    return {
+        "_id": asset_id,
+        "_score": score,
+        "_source": {"asset_id": asset_id, "modality": modality, "summary": f"요약 {asset_id}"},
+    }
+
+
+class EnsureSearchPipelineTest(unittest.TestCase):
+    """T003/FR-006: normalization-processor 검색 파이프라인을 멱등 등록(020 ensure_index 동형)."""
+
+    def test_puts_when_absent(self) -> None:
+        # 부재 → PUT 1회, 'created'. 본문에 normalization-processor + 가중치.
+        client = _FakeSearchClient(existing_pipelines={})
+        result = ensure_search_pipeline(client, "assets-hybrid", weights=(0.3, 0.7))
+        self.assertEqual(result, "created")
+        self.assertEqual(len(client.search_pipeline.put_calls), 1)
+        put_id, body = client.search_pipeline.put_calls[0]
+        self.assertEqual(put_id, "assets-hybrid")
+        procs = body["phase_results_processors"]
+        norm = procs[0]["normalization-processor"]
+        self.assertEqual(norm["normalization"]["technique"], "min_max")
+        self.assertEqual(
+            norm["combination"]["parameters"]["weights"], [0.3, 0.7]
+        )
+
+    def test_noop_when_exists(self) -> None:
+        # 존재 → PUT 0회(멱등), 'exists'.
+        client = _FakeSearchClient(existing_pipelines={"assets-hybrid": {"x": 1}})
+        result = ensure_search_pipeline(client, "assets-hybrid", weights=(0.5, 0.5))
+        self.assertEqual(result, "exists")
+        self.assertEqual(client.search_pipeline.put_calls, [])
+
+
+class SearchAssetsOsTest(unittest.TestCase):
+    """T003/FR-002: 질의 1회 임베딩 → modality 별 build_search_body → client.search → 버킷."""
+
+    def setUp(self) -> None:
+        self.query = "한국어 검색 질의"
+        self.vector = [0.11, 0.22, 0.33]
+        self.embed_calls: list[tuple[str, str]] = []
+
+        def fake_embed(q: str, *, channel: str) -> list[float]:
+            self.embed_calls.append((q, channel))
+            return list(self.vector)
+
+        self.fake_embed = fake_embed
+        self.client = _FakeSearchClient(
+            hits_by_modality={
+                "text": [_os_hit("t1", 0.9, "text"), _os_hit("t2", 0.7, "text")],
+                "audio": [_os_hit("a1", 0.8, "audio")],
+            }
+        )
+
+    def _run(self, **overrides):
+        kwargs = {
+            "modalities": ("text", "audio"),
+            "k": 20,
+            "channel": "st",
+            "weights": (0.4, 0.6),
+            "index": "assets",
+            "pipeline_name": "assets-hybrid",
+            "embed_fn": self.fake_embed,
+        }
+        kwargs.update(overrides)
+        return search_assets_os(self.client, self.query, **kwargs)
+
+    def test_embeds_query_once_and_reuses_vector(self) -> None:
+        # (a) embed_fn 으로 질의 1회만 임베딩(modality 마다 재임베딩 금지) — 활성 채널 전달.
+        self._run()
+        self.assertEqual(len(self.embed_calls), 1)
+        self.assertEqual(self.embed_calls[0], (self.query, "st"))
+
+    def test_searches_each_modality_with_pipeline(self) -> None:
+        # (b) modality 마다 client.search(index=, body=, search_pipeline=) 1회.
+        self._run()
+        self.assertEqual(len(self.client.search_calls), 2)
+        for call in self.client.search_calls:
+            self.assertEqual(call["index"], "assets")
+            self.assertEqual(call["search_pipeline"], "assets-hybrid")
+
+    def test_search_body_uses_builder_with_vector_and_modality(self) -> None:
+        # build_search_body 의 산출(하이브리드·knn 벡터·modality 필터·size=k)을 그대로 search body 로.
+        self._run()
+        modalities_searched = []
+        for call in self.client.search_calls:
+            body = call["body"]
+            self.assertEqual(body["size"], 20)
+            subs = body["query"]["hybrid"]["queries"]
+            _, knn = _find_with_clause(subs, "knn")
+            self.assertEqual(knn["knn"]["embedding"]["vector"], self.vector)
+            mod = subs[0]["bool"]["filter"][0]["term"]["modality"]
+            modalities_searched.append(mod)
+        self.assertEqual(set(modalities_searched), {"text", "audio"})
+
+    def test_returns_bucket_per_modality_mapped_rows(self) -> None:
+        # (c) {modality: [os_hit_to_row 행]} 버킷 — text 2건·audio 1건.
+        buckets = self._run()
+        self.assertEqual(set(buckets), {"text", "audio"})
+        self.assertEqual(len(buckets["text"]), 2)
+        self.assertEqual(len(buckets["audio"]), 1)
+        # os_hit_to_row 와 동형(id·similarity·modality·summary·file_uri).
+        row = buckets["text"][0]
+        self.assertEqual(set(row), {"id", "file_uri", "modality", "summary", "similarity"})
+        self.assertEqual(row["id"], "t1")
+        self.assertEqual(row["similarity"], 0.9)
+        self.assertEqual(row["modality"], "text")
+
+    def test_empty_bucket_when_no_hits(self) -> None:
+        # hits 없는 modality 는 빈 버킷(키는 존재).
+        buckets = self._run(modalities=("text", "video"))
+        self.assertEqual(buckets["video"], [])
+
+    def test_propagates_os_unreachable_error(self) -> None:
+        # FR-008: client.search 예외 → search_assets_os 가 전파(silent 폴백 없음).
+        client = _FakeSearchClient(raise_on_search=ConnectionError("OS 미도달"))
+        with self.assertRaises(ConnectionError):
+            search_assets_os(
+                client,
+                self.query,
+                modalities=("text",),
+                k=10,
+                channel="st",
+                weights=(0.5, 0.5),
+                index="assets",
+                pipeline_name="assets-hybrid",
+                embed_fn=self.fake_embed,
+            )
 
 
 if __name__ == "__main__":
