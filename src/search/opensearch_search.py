@@ -349,9 +349,10 @@ def search_assets_os(
         # FR-009 결정적 tiebreaker(헌법 3조): hybrid 쿼리는 OS sort(_score+필드)를 금지하므로 정렬을
         # 클라이언트에서 한다 — 정규화 융합 점수(similarity) desc, 동점은 id asc 로 결정적.
         rows.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
-        if cutoff_enabled:
+        if cutoff_enabled and rows:
             # 적합도 게이트(023): 정규화 랭킹은 불변, probe 신호로 버킷 유지/비움만 결정(FR-001·003).
-            # 게이트 off(기본)면 probe 미호출·버킷 그대로 — 021/022 동작 보존(회귀 0).
+            # 게이트 off(기본)면 probe 미호출·버킷 그대로 — 021/022 동작 보존(회귀 0). 이미 빈 버킷
+            # (rows==[])은 probe 해도 결과가 빈 채이므로 단락해 불필요한 모달리티당 +1 kNN IO 를 아낀다.
             top, mean = probe_fn(
                 client, query_vector, modality_values=values, k=cutoff_probe_k,
                 index=index, exclude_medical=exclude_medical,
