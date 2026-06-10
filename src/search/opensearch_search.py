@@ -34,6 +34,11 @@ _TEXT_FIELDS: tuple[str, ...] = (
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
 _MEDICAL_LABEL = "medical"
 
+# 게이트 기본값(진단 분포 provisional — G4 실OS calibration 이 확정). EPS=상대신호 하한, FLOOR=느슨한 절대 backstop.
+_DEFAULT_CUTOFF_EPS = 0.10
+_DEFAULT_CUTOFF_FLOOR = 0.65
+_DEFAULT_PROBE_K = 50
+
 # OS 검색 버킷 라벨 → 저장된 modality 값 집합(PG media_search 와 동일 분류). 요청 라벨('text')과
 # 저장 modality 값('txt')의 불일치를 흡수한다 — text 버킷은 ALLOWED_TEXT_META_FILE_KINDS(txt·json·
 # pdf·office), audio 는 'audio'. 단일 term 이 아니라 terms(집합) 필터를 써야 실데이터가 회수된다.
@@ -120,6 +125,60 @@ def build_search_body(
         # 정렬 없음: hybrid 쿼리는 _score+필드 sort 조합을 금지(실OS 400)하므로 정규화 융합 점수로만
         # 정렬한다. FR-009 결정적 tiebreaker(점수 desc·동점 id asc)는 search_assets_os 가 클라이언트에서.
     }
+
+
+def build_probe_body(
+    query_vector: list[float],
+    *,
+    modality_values: Collection[str],
+    k: int,
+    exclude_medical: bool = True,
+) -> dict[str, Any]:
+    """적합도 게이트용 plain kNN probe 본문(순수·결정적, 023 FR-002).
+
+    정규화 검색 파이프라인을 **적용하지 않는** 단일 knn 이다 — 그 modality 의 원시 코사인(lucene
+    cosinesimil _score)을 직접 얻어 게이트(passes_cutoff)에 쓴다. 하이브리드(BM25 융합)가 아니라
+    knn 단독이라 _score 가 코사인 단조다. modality terms·의료배제(FR-008)를 knn native filter(pre-
+    filter)로 적용해 **정규화 경로(build_search_body)와 같은 후보 집단**에서 신호를 잰다.
+    """
+    filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
+    knn_filter: dict[str, Any] = {"bool": {"filter": filters}}
+    if exclude_medical:
+        knn_filter["bool"]["must_not"] = [{"term": {"domain_label": _MEDICAL_LABEL}}]
+    return {
+        "size": int(k),
+        "query": {"knn": {"embedding": {"vector": list(query_vector), "k": int(k), "filter": knn_filter}}},
+    }
+
+
+def knn_score_to_cosine(score: Any) -> float:
+    """lucene cosinesimil knn ``_score``(=(1+cos)/2)를 원시 코사인으로 환산한다(순수·결정적).
+
+    020 인덱스 매핑이 ``space_type=cosinesimil``·``engine=lucene`` 이므로 lucene 의 코사인 knn 점수는
+    ``(1+cos)/2`` 다 → ``cos = 2·score − 1``. 비유한·범위 밖은 [-1,1] 로 안전 clamp. 실 OS 의 정확한
+    스케일·calibration 은 G4 실OS 에서 확정한다(여기선 환산식만 고정).
+
+    비유한 _score 의 안전 기본값은 0.0(코사인 -1)이 아니라 **0.5(코사인 0, 중립)**다 — 환산식이
+    ``score=0.5`` 에서 ``cos=0`` 이라, 무효 점수는 게이트를 끄는 쪽이 아니라 중립으로 떨어뜨려야 한다.
+    """
+    cos = 2.0 * _safe_float(score, 0.5) - 1.0
+    return max(-1.0, min(1.0, cos))
+
+
+# 게이트 경계 포용(>=) 부동소수 허용오차. 임계가 0.10·0.65 처럼 십진 근사라 0.75-0.65=0.0999…998
+# 같은 표현오차로 **경계값이 탈락**하지 않게 한다(결정적·관측 무영향한 미소값).
+_CUTOFF_TOL = 1e-9
+
+
+def passes_cutoff(top: float, mean: float, *, eps: float, floor: float) -> bool:
+    """적합도 게이트(순수·결정적, 023 FR-001·004): 그 modality 버킷을 유지할지 판정한다.
+
+    ``keep = (top − mean) ≥ eps AND top ≥ floor``. 상대 신호 ``top − mean``(이방성 baseline 흡수)이
+    주판정, 절대 ``floor`` 는 코퍼스 전체가 평평할 때의 느슨한 backstop. 둘 다 만족해야 유지(AND);
+    실패면 빈 버킷(no-match → 무관 결과 표출 차단). 비교는 ``_CUTOFF_TOL`` 로 경계를 포용한다.
+    """
+    t = _safe_float(top)
+    return (t - _safe_float(mean)) >= eps - _CUTOFF_TOL and t >= floor - _CUTOFF_TOL
 
 
 def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
@@ -210,6 +269,31 @@ def embed_query(query: str, *, channel: str) -> list[float]:
     return embed_query_for_media_search(query, model_name=model_for_channel(channel))
 
 
+def probe_relevance(
+    client: Any,
+    query_vector: list[float],
+    *,
+    modality_values: Collection[str],
+    k: int,
+    index: str,
+    exclude_medical: bool = True,
+) -> tuple[float, float]:
+    """그 modality 의 원시 코사인 top·baseline(표본 평균)을 plain kNN probe 로 얻는다(023 FR-002).
+
+    정규화 검색 파이프라인을 **적용하지 않고**(``search_pipeline`` 미지정) ``build_probe_body`` 로 knn
+    단독 검색을 1회 한다 — knn ``_score`` 를 ``knn_score_to_cosine`` 로 원시 코사인 환산한 뒤 top(최대)·
+    mean(표본 평균)을 돌려준다. hits 가 없으면 (0.0, 0.0)(게이트가 cut). OS 미도달은 그대로 전파(FR-007
+    동형). 실 opensearch-py knn 응답·스케일은 G4 실OS 확정.
+    """
+    body = build_probe_body(query_vector, modality_values=modality_values, k=k, exclude_medical=exclude_medical)
+    resp = client.search(index=index, body=body)
+    hits = ((resp or {}).get("hits") or {}).get("hits") or []
+    if not hits:
+        return (0.0, 0.0)
+    cosines = [knn_score_to_cosine(h.get("_score")) for h in hits]
+    return (max(cosines), sum(cosines) / len(cosines))
+
+
 def search_assets_os(
     client: Any,
     query: str,
@@ -222,6 +306,11 @@ def search_assets_os(
     pipeline_name: str,
     exclude_medical: bool = True,
     embed_fn: Callable[..., list[float]] = embed_query,
+    cutoff_enabled: bool = False,
+    cutoff_eps: float = _DEFAULT_CUTOFF_EPS,
+    cutoff_floor: float = _DEFAULT_CUTOFF_FLOOR,
+    cutoff_probe_k: int = _DEFAULT_PROBE_K,
+    probe_fn: Callable[..., tuple[float, float]] = probe_relevance,
 ) -> dict[str, list[dict[str, Any]]]:
     """text·audio 버킷을 020 OS 인덱스에서 하이브리드 검색한다(FR-002 — OS 경로 모달리티).
 
@@ -254,6 +343,15 @@ def search_assets_os(
         # FR-009 결정적 tiebreaker(헌법 3조): hybrid 쿼리는 OS sort(_score+필드)를 금지하므로 정렬을
         # 클라이언트에서 한다 — 정규화 융합 점수(similarity) desc, 동점은 id asc 로 결정적.
         rows.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
+        if cutoff_enabled:
+            # 적합도 게이트(023): 정규화 랭킹은 불변, probe 신호로 버킷 유지/비움만 결정(FR-001·003).
+            # 게이트 off(기본)면 probe 미호출·버킷 그대로 — 021/022 동작 보존(회귀 0).
+            top, mean = probe_fn(
+                client, query_vector, modality_values=values, k=cutoff_probe_k,
+                index=index, exclude_medical=exclude_medical,
+            )
+            if not passes_cutoff(top, mean, eps=cutoff_eps, floor=cutoff_floor):
+                rows = []  # no-match: 무관 결과 표출 대신 빈 버킷
         buckets[label] = rows
     return buckets
 

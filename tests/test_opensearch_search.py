@@ -23,9 +23,13 @@ import unittest
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.opensearch_search import (
     _MODALITY_VALUES,
+    build_probe_body,
     build_search_body,
     ensure_search_pipeline,
+    knn_score_to_cosine,
     os_hit_to_row,
+    passes_cutoff,
+    probe_relevance,
     search_assets_os,
 )
 
@@ -574,6 +578,181 @@ class SearchAssetsOsImageVideoTest(unittest.TestCase):
             embed_fn=self.fake_embed,
         )
         self.assertEqual([r["id"] for r in out["image"]], ["c", "a", "b"])
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 023 G1 — 적합도 게이트 순수 함수(probe 본문·코사인 환산·게이트). OS·DB·opensearch-py 불필요.
+# 정규화 파이프라인 없는 plain kNN probe 로 원시 코사인을 얻어 buckets 유지/비움을 결정한다.
+# 실 OS 의 정확한 스케일·calibration 은 G4(실OS e2e)에서 확정한다 — 여기선 결정적 로직만 고정.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class BuildProbeBodyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.vector = [0.1, 0.2, 0.3]
+
+    def test_plain_knn_no_pipeline_fields(self) -> None:
+        # probe 는 정규화 파이프라인 없는 plain knn 1개(하이브리드 아님) — size=k, embedding 벡터·k.
+        body = build_probe_body(self.vector, modality_values=["image"], k=50)
+        self.assertNotIn("hybrid", body["query"])
+        knn = body["query"]["knn"]["embedding"]
+        self.assertEqual(knn["vector"], self.vector)
+        self.assertEqual(knn["k"], 50)
+        self.assertEqual(body["size"], 50)
+
+    def test_modality_terms_prefilter(self) -> None:
+        # modality terms 필터(정렬·집합)가 knn native filter(pre-filter)에 들어간다 — 같은 후보 집단.
+        body = build_probe_body(self.vector, modality_values=["video", "image"], k=10)
+        flt = body["query"]["knn"]["embedding"]["filter"]["bool"]["filter"]
+        self.assertIn({"terms": {"modality": ["image", "video"]}}, flt)
+
+    def test_exclude_medical_must_not_default(self) -> None:
+        # FR-008: 의료배제 기본 — domain_label='medical' must_not(정규화 경로와 동일 후보).
+        body = build_probe_body(self.vector, modality_values=["text"], k=10)
+        self.assertIn(
+            {"term": {"domain_label": "medical"}},
+            body["query"]["knn"]["embedding"]["filter"]["bool"]["must_not"],
+        )
+
+    def test_include_medical_when_disabled(self) -> None:
+        body = build_probe_body(self.vector, modality_values=["text"], k=10, exclude_medical=False)
+        self.assertNotIn("must_not", body["query"]["knn"]["embedding"]["filter"]["bool"])
+
+
+class KnnScoreToCosineTest(unittest.TestCase):
+    def test_lucene_cosinesimil_inverse(self) -> None:
+        # 020 인덱스: space_type=cosinesimil·engine=lucene → _score=(1+cos)/2 → cos=2*score-1.
+        self.assertAlmostEqual(knn_score_to_cosine(1.0), 1.0)    # cos=1
+        self.assertAlmostEqual(knn_score_to_cosine(0.5), 0.0)    # cos=0
+        self.assertAlmostEqual(knn_score_to_cosine(0.85), 0.7)   # 진단 영역
+
+    def test_clamps_and_safe(self) -> None:
+        # 비유한·범위 밖 방어([-1,1] clamp) — 결정적.
+        self.assertEqual(knn_score_to_cosine(float("nan")), 0.0)
+        self.assertEqual(knn_score_to_cosine(2.0), 1.0)
+        self.assertEqual(knn_score_to_cosine(-1.0), -1.0)
+
+
+class PassesCutoffTest(unittest.TestCase):
+    # 진단: no-match max-mean ≤0.088·top ≤0.707 / match max-mean ≥0.116·top ≥0.745.
+    def test_keep_strong_relative_signal(self) -> None:  # match
+        self.assertTrue(passes_cutoff(0.78, 0.66, eps=0.10, floor=0.65))   # top-mean=0.12, top≥floor
+
+    def test_cut_flat_no_match(self) -> None:  # no-match: 상대신호 부족
+        self.assertFalse(passes_cutoff(0.70, 0.65, eps=0.10, floor=0.65))  # top-mean=0.05 < 0.10
+
+    def test_cut_below_floor_backstop(self) -> None:  # 전체 평평·낮음 → floor 가 차단
+        self.assertFalse(passes_cutoff(0.60, 0.30, eps=0.10, floor=0.65))  # top-mean ok, top<floor
+
+    def test_boundary_inclusive(self) -> None:  # 경계 포함(>=)
+        self.assertTrue(passes_cutoff(0.75, 0.65, eps=0.10, floor=0.65))   # =0.10, =0.65
+
+    def test_empty_probe_zero_cut(self) -> None:  # probe 빈(top=mean=0) → cut
+        self.assertFalse(passes_cutoff(0.0, 0.0, eps=0.10, floor=0.65))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 023 G2 — probe IO seam(probe_relevance) + search_assets_os 게이트 통합. 가짜 클라이언트·주입 probe_fn.
+# probe 는 정규화 검색과 분리된 plain kNN 1회다 — search_pipeline 인자 없이 호출됨을 단언한다.
+# 실 opensearch-py knn 응답·스케일은 G4(실OS) 확정(021 ensure_search_pipeline 동형).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _ProbeFakeClient:
+    """plain knn probe 용 가짜 — search(search_pipeline 미지정) 호출을 기록하고 canned hits 반환."""
+    def __init__(self, hits):
+        self._hits = hits
+        self.calls = []
+    def search(self, *, index=None, body=None, search_pipeline=None, **_kw):
+        self.calls.append({"index": index, "body": body, "search_pipeline": search_pipeline})
+        return {"hits": {"hits": self._hits}}
+
+
+class ProbeRelevanceTest(unittest.TestCase):
+    def test_returns_top_and_mean_cosine(self) -> None:
+        # _score (1+cos)/2: 0.9→cos0.8, 0.8→0.6, 0.75→0.5 ⇒ top=0.8, mean=(0.8+0.6+0.5)/3≈0.6333.
+        client = _ProbeFakeClient([{"_score": 0.9}, {"_score": 0.8}, {"_score": 0.75}])
+        top, mean = probe_relevance(client, [0.1, 0.2], modality_values=["image"], k=50, index="assets")
+        self.assertAlmostEqual(top, 0.8, places=4)
+        self.assertAlmostEqual(mean, (0.8 + 0.6 + 0.5) / 3, places=4)
+
+    def test_no_pipeline_and_probe_body(self) -> None:
+        # 정규화 파이프라인 미적용(search_pipeline=None) + build_probe_body 본문(plain knn).
+        client = _ProbeFakeClient([{"_score": 0.9}])
+        probe_relevance(client, [0.1], modality_values=["text"], k=5, index="assets")
+        call = client.calls[0]
+        self.assertIsNone(call["search_pipeline"])
+        self.assertIn("knn", call["body"]["query"])
+
+    def test_empty_hits_zero(self) -> None:
+        top, mean = probe_relevance(_ProbeFakeClient([]), [0.1], modality_values=["video"], k=5, index="assets")
+        self.assertEqual((top, mean), (0.0, 0.0))
+
+
+class SearchAssetsOsCutoffTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.vector = [0.1, 0.2]
+        def fake_embed(q, *, channel): return list(self.vector)
+        self.fake_embed = fake_embed
+        self.client = _FakeSearchClient(hits_by_modality={
+            "text": [_os_hit("t1", 0.9, "text"), _os_hit("t2", 0.7, "text")],
+            "image": [_os_hit("i1", 0.8, "image")],
+        })
+
+    def _run(self, probe_fn, **ov):
+        kw = {
+            "modalities": ("text", "image"), "index": "assets", "pipeline_name": "assets-hybrid",
+            "embed_fn": self.fake_embed, "cutoff_enabled": True, "cutoff_eps": 0.10,
+            "cutoff_floor": 0.65, "probe_fn": probe_fn,
+        }
+        kw.update(ov)
+        return search_assets_os(self.client, "질의", **kw)
+
+    def test_disabled_no_probe_unchanged(self) -> None:
+        # 회귀 0: cutoff_enabled=False(기본) → probe 미호출·버킷 그대로(021/022 동작).
+        calls = []
+        def probe_fn(*a, **k):
+            calls.append(1)
+            return (0.0, 0.0)
+        out = search_assets_os(self.client, "질의", modalities=("text",), index="assets",
+                               pipeline_name="assets-hybrid", embed_fn=self.fake_embed, probe_fn=probe_fn)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(out["text"]), 2)
+
+    def test_keep_bucket_when_signal_passes(self) -> None:
+        # 강한 신호(top-mean=0.12·top≥floor) → 버킷 유지(정규화 랭킹 그대로, FR-003).
+        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
+            return (0.78, 0.66)
+        out = self._run(probe_fn)
+        self.assertEqual([r["id"] for r in out["text"]], ["t1", "t2"])
+        self.assertEqual(len(out["image"]), 1)
+
+    def test_empty_bucket_when_signal_fails(self) -> None:
+        # 약한 신호(top-mean=0.05<eps) → 빈 버킷(no-match 차단, SC-003·SC-006 동형).
+        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
+            return (0.70, 0.65)
+        out = self._run(probe_fn)
+        self.assertEqual(out["text"], [])
+        self.assertEqual(out["image"], [])
+
+    def test_per_modality_gate_independent(self) -> None:
+        # modality 별 독립 판정 — text 통과·image 차단.
+        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
+            return (0.80, 0.66) if "image" not in set(modality_values) else (0.66, 0.64)
+        out = self._run(probe_fn)
+        self.assertEqual(len(out["text"]), 2)
+        self.assertEqual(out["image"], [])
+
+    def test_probe_receives_same_vector_and_modality(self) -> None:
+        # probe 는 질의 벡터 재사용(중복 임베딩 0)·같은 modality 값 집합을 받는다(FR-002).
+        seen = []
+        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
+            seen.append((tuple(vec), tuple(sorted(modality_values)), exclude_medical))
+            return (0.9, 0.6)
+        self._run(probe_fn, modalities=("image",))
+        self.assertEqual(seen[0][0], tuple(self.vector))
+        self.assertEqual(seen[0][1], ("image",))
+        self.assertTrue(seen[0][2])  # 의료배제 전달
 
 
 if __name__ == "__main__":
