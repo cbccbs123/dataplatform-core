@@ -154,7 +154,9 @@ def _grouped_via_opensearch(
         )
         for m in pg_visual:
             grouped[_MODALITY_BUCKETS[m]] = pg_grouped.get(_MODALITY_BUCKETS[m], [])
-        grouped["meta"] = pg_grouped.get("meta", {})
+        # PG meta(structured 등)를 보존하되 backend 표식은 **항상** 남긴다 — 시각 동반 요청에서도
+        # 소비자가 meta.backend 로 OS 사용 여부를 일관 판별(관측성, 코드리뷰 2026-06-10).
+        grouped["meta"] = {**pg_grouped.get("meta", {}), "backend": "opensearch"}
     else:
         grouped["meta"] = {"backend": "opensearch"}
 
@@ -292,6 +294,9 @@ def search_hybrid(
             chunk_agg=chunk_agg,
             include_visual=include_visual,
         )
+    # ⚠️ min_scores 는 PG 코사인/alpha 스케일로 보정된 값이다. backend='opensearch' 의 OS 버킷
+    # similarity 는 정규화 융합 점수(결과셋 내 min-max·top≈1.0)라 스케일이 달라 같은 임계가 과/소
+    # 필터를 유발할 수 있다 — 기본(None)·KPI 경로는 무영향, OS 전용 컷오프 보정은 후속(spec Non-Goals).
     results = {
         key: _filter_by_min_score(grouped.get(key, []), (min_scores or {}).get(label, 0.0))
         for label, key in label_keys

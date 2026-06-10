@@ -355,6 +355,24 @@ class TestBackendOpenSearchMerge(unittest.TestCase):
         self.assertEqual(set(out["results"].keys()), {"image"})
         self.assertEqual(out["results"]["image"], [{"id": "pg_i"}])
 
+    def test_meta_backend_preserved_with_visual(self) -> None:
+        # 시각(image/video) 동반 요청에도 meta.backend='opensearch' 표식 보존 + PG meta 다른 키 유지
+        # (관측성, 코드리뷰 2026-06-10 — 종전엔 시각 동반 시 backend 표식이 사라졌다).
+        fake_os, _ = _recording_os({"text": [{"id": "os_t"}], "audio": []})
+
+        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
+            return {"image": [{"id": "pg_i"}], "video": [], "meta": {"structured": {"q": 1}}}
+
+        out = search_hybrid(
+            "질의",
+            backend="opensearch",
+            _grouped_fn=fake_grouped,
+            _os_search_fn=fake_os,
+            _os_client_fn=lambda: "C",
+        )
+        self.assertEqual(out["meta"]["backend"], "opensearch")
+        self.assertEqual(out["meta"]["structured"], {"q": 1})  # PG meta 다른 키 보존
+
 
 class TestBackendOpenSearchNoLLM(unittest.TestCase):
     """(c·FR-004·SC-004) backend='opensearch' text·audio 경로는 structure_user_query(LLM) 미호출."""
