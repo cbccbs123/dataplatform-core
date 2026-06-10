@@ -39,12 +39,25 @@ def _subqueries(body: dict) -> list:
 
 
 def _find_with_clause(subqueries: list, clause_key: str):
-    """bool.must 에 주어진 절(clause_key)을 가진 서브쿼리·절을 찾는다(없으면 (None, None))."""
+    """주어진 절(clause_key)을 가진 서브쿼리·절을 찾는다(없으면 (None, None)).
+
+    텍스트 서브쿼리는 ``bool.must`` 안에 절이 있고(multi_match), knn 서브쿼리는 native filter 구조라
+    **top-level**(``{"knn": ...}``)이다 — 둘 다 찾는다.
+    """
     for sub in subqueries:
+        if clause_key in sub:  # top-level 서브쿼리(예: knn native filter)
+            return sub, sub
         for clause in sub.get("bool", {}).get("must", []):
             if clause_key in clause:
                 return sub, clause
     return None, None
+
+
+def _sub_bool(sub: dict) -> dict:
+    """서브쿼리의 modality/의료배제 bool 절 — text 는 ``bool``, knn 은 native ``filter.bool``."""
+    if "knn" in sub:
+        return sub["knn"]["embedding"]["filter"]["bool"]
+    return sub["bool"]
 
 
 class BuildSearchBodyTest(unittest.TestCase):
@@ -75,15 +88,25 @@ class BuildSearchBodyTest(unittest.TestCase):
         self.assertEqual(knn["k"], 50)
 
     def test_modality_filter_in_each_subquery(self) -> None:
-        # (2) modality keyword terms 필터(집합)가 각 서브쿼리 bool filter 에 포함 — 단일 term 아님.
+        # (2) modality terms 필터(집합)가 각 서브쿼리에 포함 — text 는 bool.filter, knn 은 native filter.
         for sub in _subqueries(self.body):
-            self.assertIn({"terms": {"modality": ["txt"]}}, sub["bool"]["filter"])
+            self.assertIn({"terms": {"modality": ["txt"]}}, _sub_bool(sub)["filter"])
+
+    def test_knn_uses_native_prefilter(self) -> None:
+        # (2') G3 교정: knn 은 modality 를 **native filter(pre-filter)**로 좁힌다(bool 사후필터 아님) —
+        # 작은 k(=버킷 한도)에서 비우세 모달리티(image 등)가 0 건이 되는 것을 막는다(실OS 발견).
+        _, knn_sub = _find_with_clause(_subqueries(self.body), "knn")
+        self.assertIn("filter", knn_sub["knn"]["embedding"], "knn 에 native filter 가 있어야 한다")
+        self.assertIn(
+            {"terms": {"modality": ["txt"]}},
+            knn_sub["knn"]["embedding"]["filter"]["bool"]["filter"],
+        )
 
     def test_exclude_medical_must_not_default(self) -> None:
-        # (3) exclude_medical=True(기본): domain_label='medical' must_not(FR-011).
+        # (3) exclude_medical=True(기본): domain_label='medical' must_not(FR-011). text=bool, knn=native filter.
         for sub in _subqueries(self.body):
             self.assertIn(
-                {"term": {"domain_label": "medical"}}, sub["bool"]["must_not"]
+                {"term": {"domain_label": "medical"}}, _sub_bool(sub)["must_not"]
             )
 
     def test_include_medical_when_disabled(self) -> None:
@@ -94,7 +117,7 @@ class BuildSearchBodyTest(unittest.TestCase):
         for sub in _subqueries(body):
             self.assertNotIn(
                 {"term": {"domain_label": "medical"}},
-                sub["bool"].get("must_not", []),
+                _sub_bool(sub).get("must_not", []),
             )
 
     def test_no_score_field_combined_sort(self) -> None:
@@ -112,7 +135,7 @@ class BuildSearchBodyTest(unittest.TestCase):
         # 모달리티 분담(text·audio→OS): audio 도 terms 필터(['audio'])로 들어간다.
         body = build_search_body(self.query, self.vector, modality_values=["audio"])
         for sub in _subqueries(body):
-            self.assertIn({"terms": {"modality": ["audio"]}}, sub["bool"]["filter"])
+            self.assertIn({"terms": {"modality": ["audio"]}}, _sub_bool(sub)["filter"])
 
     def test_text_modality_values_use_terms_set(self) -> None:
         # text 버킷은 다중 modality 값(txt·json·pdf·office)을 terms 집합으로 정렬해 거른다 —
@@ -124,7 +147,7 @@ class BuildSearchBodyTest(unittest.TestCase):
         )
         expected = {"terms": {"modality": sorted(ALLOWED_TEXT_META_FILE_KINDS)}}
         for sub in _subqueries(body):
-            self.assertIn(expected, sub["bool"]["filter"])
+            self.assertIn(expected, _sub_bool(sub)["filter"])
 
 
 class OsHitToRowTest(unittest.TestCase):
@@ -472,13 +495,14 @@ class ImageVideoHybridBodyTest(unittest.TestCase):
         _, knn = _find_with_clause(subs, "knn")
         self.assertIsNotNone(knn, "knn 서브쿼리가 있어야 한다")
         self.assertEqual(knn["knn"]["embedding"]["vector"], self.vector)
-        # (2) terms 필터(라벨→값 집합) + (3) 의료배제 must_not(FR-004)이 각 서브쿼리에 균일 적용.
+        # (2) terms 필터(라벨→값 집합) + (3) 의료배제 must_not(FR-004)이 각 서브쿼리에 적용 —
+        # text 는 bool, knn 은 native filter(pre-filter, G3 교정). _sub_bool 로 양쪽 다 꺼낸다.
         for sub in subs:
             self.assertIn(
-                {"terms": {"modality": [modality_value]}}, sub["bool"]["filter"]
+                {"terms": {"modality": [modality_value]}}, _sub_bool(sub)["filter"]
             )
             self.assertIn(
-                {"term": {"domain_label": "medical"}}, sub["bool"]["must_not"]
+                {"term": {"domain_label": "medical"}}, _sub_bool(sub)["must_not"]
             )
         self.assertEqual(body["size"], 30)
 

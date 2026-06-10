@@ -70,9 +70,11 @@ def build_search_body(
     """OpenSearch 하이브리드 검색 본문을 만든다(순수·결정적).
 
     nori 텍스트 ``multi_match``(BM25) ⊕ ``knn``(embedding, 질의 벡터)의 **hybrid 쿼리**다. 두
-    서브쿼리는 각각 ``bool`` 로 감싸 ① ``modality`` keyword **terms** 필터(``modality_values`` 집합 —
-    text 버킷은 txt·json·pdf·office 등 다중값이라 단일 term 이 아니라 terms 로 거른다), ②
-    ``exclude_medical`` 이면 ``domain_label='medical'`` ``must_not``(FR-011)을 균일 적용한다.
+    두 서브쿼리 모두 ① ``modality`` keyword **terms** 필터(``modality_values`` 집합 — text 버킷은 txt·
+    json·pdf·office 등 다중값이라 terms 로 거른다)와 ② ``exclude_medical`` 이면 ``domain_label='medical'``
+    ``must_not``(FR-011)을 적용하되, **적용 방식이 다르다**: 텍스트(BM25)는 ``bool`` 로 감싼 사후 필터로
+    충분하나(BM25 는 k 제한이 없다), **knn 은 native ``filter``(pre-filter)**로 그 모달리티 안에서 k 최근접을
+    뽑는다 — bool 사후필터는 전역 k 를 먼저 뽑고 걸러 작은 k 에서 비우세 모달리티가 비기 때문(G3 실OS 교정).
 
     점수 융합(BM25·kNN 의 min-max 정규화 + 가중평균)은 OpenSearch **검색 파이프라인**
     (normalization-processor, G2 ``ensure_search_pipeline``)이 담당하므로 본문은 hybrid 서브쿼리
@@ -100,7 +102,17 @@ def build_search_body(
         return {"bool": clause}
 
     text_sub = _wrap({"multi_match": {"query": query, "fields": list(_TEXT_FIELDS)}})
-    knn_sub = _wrap({"knn": {"embedding": {"vector": list(query_vector), "k": int(k)}}})
+    # knn 은 modality·의료배제를 **knn native filter**(pre-filter)로 적용한다 — bool 사후필터로 감싸면
+    # 전역 k 최근접을 먼저 뽑고 거르므로, 작은 k(=버킷 한도)에서 비우세 모달리티(image 등)가 0 건이
+    # 된다(G3 실OS 발견: image k=3 → 0건). filter 안에서 modality 로 좁혀 그 모달리티의 k 최근접을 뽑는다.
+    knn_prefilter: dict[str, Any] = {"bool": {"filter": list(filters)}}
+    if must_not:
+        knn_prefilter["bool"]["must_not"] = list(must_not)
+    knn_sub = {
+        "knn": {
+            "embedding": {"vector": list(query_vector), "k": int(k), "filter": knn_prefilter}
+        }
+    }
 
     return {
         "size": int(k),
