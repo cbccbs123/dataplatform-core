@@ -66,6 +66,14 @@ class PipelineSettings:
     opensearch_url: str
     opensearch_index: str
     opensearch_sync_enabled: bool
+    # 021: 검색 read path 백엔드 전환(CQRS·검색 엔진 도입). 모두 선택 필드(020 동형) — 미설정 시 기존
+    # 동작 무영향(SC-001). search_backend 기본 'pg' 면 search_service.search_hybrid 가 현 media_search
+    # 경로 그대로(회귀 0). 화이트리스트 밖 값은 _build_settings(=init_settings)에서 즉시 ValueError로
+    # 차단한다(fail-fast — 런타임까지 오설정이 숨지 않게, 백로그 '설정 fail-late' 교정).
+    # opensearch_search_pipeline/opensearch_fusion_weights 는 OS 정규화 융합 검색 파이프라인 메타.
+    search_backend: str
+    opensearch_search_pipeline: str
+    opensearch_fusion_weights: tuple[float, float]
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -150,6 +158,52 @@ def resolve_search_min_scores() -> dict[str, float]:
     }
 
 
+# 021: 검색 read path 백엔드 화이트리스트. 'pg'=현 media_search 경로(기본·회귀 0), 'opensearch'=020 OS
+# 인덱스 하이브리드. 그 외 값은 잘못된 백엔드로 검색하지 않도록 _resolve_search_backend 가 즉시 차단한다.
+_SEARCH_BACKENDS = ("pg", "opensearch")
+
+
+def _resolve_search_backend() -> str:
+    """검색 read path 백엔드(021, FR-010). ``SEARCH_BACKEND`` 미설정 시 기본 ``'pg'``(현 경로·동작 불변).
+
+    화이트리스트 ``{pg, opensearch}`` 밖 값은 **즉시 ValueError** 로 차단한다 — 오설정이 런타임까지
+    숨지 않게(fail-fast, 백로그 '설정 fail-late' 교정). 019 chunk_agg(헬퍼 지연 검증)와 달리 검증을
+    ``_build_settings`` 시점에 끌어와 프로세스 시작 시 빠르게 실패시킨다(잘못된 백엔드 선택 차단)."""
+    value = _env_str_default("SEARCH_BACKEND", "pg")
+    if value not in _SEARCH_BACKENDS:
+        raise ValueError(
+            f"지원하지 않는 검색 백엔드: SEARCH_BACKEND={value!r} (지원: {list(_SEARCH_BACKENDS)})"
+        )
+    return value
+
+
+def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
+    """OS 정규화 융합 가중치 (BM25, kNN)(021, FR-005). ``OPENSEARCH_FUSION_WEIGHTS="0.5,0.5"`` → 튜플.
+
+    미설정 시 기본 ``(0.5, 0.5)``(측정 근거 균형값). build_search_body 의 hybrid 서브쿼리 순서
+    ``[텍스트(BM25), knn]`` 와 동일 순서의 ``(w_bm25, w_knn)`` 이다. 정확히 2개(BM25·kNN)가 아니거나,
+    수치가 아니거나, 각 가중치가 ``0<=w<=1`` 범위를 벗어나면 **즉시 ValueError**(fail-fast — 잘못된
+    융합 가중치로 검색 품질이 조용히 붕괴하지 않게)."""
+    raw = os.getenv("OPENSEARCH_FUSION_WEIGHTS")
+    if raw is None or not raw.strip():
+        return (0.5, 0.5)
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 2:
+        raise ValueError(
+            f"융합 가중치 개수 오류: OPENSEARCH_FUSION_WEIGHTS={raw!r} (BM25,kNN 두 값 필요)"
+        )
+    try:
+        w_bm25, w_knn = (float(parts[0]), float(parts[1]))
+    except ValueError as e:
+        raise ValueError(f"융합 가중치 형식 오류: OPENSEARCH_FUSION_WEIGHTS={raw!r}") from e
+    for w in (w_bm25, w_knn):
+        if not (0.0 <= w <= 1.0):
+            raise ValueError(
+                f"융합 가중치 범위 오류: OPENSEARCH_FUSION_WEIGHTS={raw!r} (각 0<=w<=1)"
+            )
+    return (w_bm25, w_knn)
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -193,6 +247,11 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         opensearch_url=_env_str_default("OPENSEARCH_URL", "http://localhost:9200"),
         opensearch_index=_env_str_default("OPENSEARCH_INDEX", "assets"),
         opensearch_sync_enabled=_env_bool_default("OPENSEARCH_SYNC_ENABLED", False),
+        # 021: 검색 백엔드 선택. 미설정 시 기본 pg(현 경로·회귀 0). search_backend 화이트리스트 검증·
+        # 융합 가중치 범위검증은 _resolve_* 헬퍼가 _build_settings 시점에 수행한다(fail-fast).
+        search_backend=_resolve_search_backend(),
+        opensearch_search_pipeline=_env_str_default("OPENSEARCH_SEARCH_PIPELINE", "assets-hybrid"),
+        opensearch_fusion_weights=_resolve_opensearch_fusion_weights(),
     )
 
 

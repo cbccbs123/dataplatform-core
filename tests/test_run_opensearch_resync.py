@@ -40,6 +40,51 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.index, "assets_bge")
         self.assertTrue(args.recreate)
 
+    def test_ensure_pipeline_flag_defaults_false(self) -> None:
+        # 021 G4·T008: 미지정이면 종전 동작 그대로(파이프라인 등록 안 함).
+        args = rr._build_parser().parse_args([])
+        self.assertFalse(args.ensure_pipeline)
+
+    def test_ensure_pipeline_flag_set(self) -> None:
+        args = rr._build_parser().parse_args(["--ensure-pipeline"])
+        self.assertTrue(args.ensure_pipeline)
+
+
+class TestRunEnsurePipeline(unittest.TestCase):
+    """순수 조립부 run_ensure_pipeline(021 G4·T008, FR-006) — ensure_fn 주입으로 OS 없이 검증.
+
+    검색 정규화 파이프라인(normalization-processor)을 멱등 등록하는 셋업 경로를, 가짜 client/ensure_fn
+    으로 인자 전달(name·weights)·결과 보고만 단위로 덮는다. 실제 OS 등록은 G5(사람)."""
+
+    def test_calls_ensure_fn_with_name_and_weights_and_reports(self) -> None:
+        client = mock.MagicMock(name="client")
+        ensure_fn = mock.MagicMock(return_value="created")
+
+        result = rr.run_ensure_pipeline(
+            client, name="assets-hybrid", weights=(0.3, 0.7), ensure_fn=ensure_fn
+        )
+
+        # (client, name) 위치인자 + weights 키워드로 정확히 1회 호출(조립 정확성·멱등 위임).
+        ensure_fn.assert_called_once_with(client, "assets-hybrid", weights=(0.3, 0.7))
+        self.assertEqual(result, "created")
+
+    def test_reports_exists_noop(self) -> None:
+        # 이미 존재하면 코어가 'exists'(no-op)를 돌려주고 그대로 보고한다(재실행 멱등).
+        ensure_fn = mock.MagicMock(return_value="exists")
+        result = rr.run_ensure_pipeline(
+            mock.MagicMock(), name="assets-hybrid", weights=(0.5, 0.5), ensure_fn=ensure_fn
+        )
+        self.assertEqual(result, "exists")
+
+    def test_default_ensure_fn_is_ensure_search_pipeline(self) -> None:
+        # 미주입 시 기본값은 opensearch_search.ensure_search_pipeline(멱등 등록 코어)이어야 한다.
+        from src.search.opensearch_search import ensure_search_pipeline
+
+        self.assertIs(
+            inspect.signature(rr.run_ensure_pipeline).parameters["ensure_fn"].default,
+            ensure_search_pipeline,
+        )
+
 
 class TestRunResync(unittest.TestCase):
     """순수 조립부 run_resync — sync_fn 주입으로 OS·DB 없이 인자 전달·결과 보고를 검증."""

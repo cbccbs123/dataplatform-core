@@ -31,6 +31,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+# 021 G4·T008: 검색 정규화 파이프라인 멱등 등록 코어. opensearch_search 모듈 상단도 순수(opensearch-py·
+# 임베더는 함수 내부 지연 import)라 모듈 상단에서 안전하게 가져올 수 있다 — run_ensure_pipeline 의 기본
+# ensure_fn. 실제 client.search_pipeline IO 는 ensure_search_pipeline 호출 시에만 발생한다.
+from src.search.opensearch_search import ensure_search_pipeline
+
 # sync_all 은 opensearch_sync 의 순수/지연 import 설계상 모듈 상단에서 안전하게 가져올 수 있다
 # (opensearch-py 는 sync_all 내부에서 실제 호출 시에만 지연 import). 따라서 본 모듈 import 만으로는
 # opensearch-py 미설치 환경에서도 깨지지 않는다 — 단위 테스트가 OS 없이 run_resync 를 덮을 수 있는 이유.
@@ -50,6 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--recreate",
         action="store_true",
         help="인덱스를 삭제 후 재생성(파괴적·스키마 변경 시만). 기본은 비파괴 upsert.",
+    )
+    # 021 G4·T008: 검색 정규화 융합 파이프라인(normalization-processor)을 멱등 등록(FR-006). 재색인과
+    # 독립한 셋업 경로 — 미지정이면 종전 동작 그대로(파이프라인 미등록). 멱등이라 재실행 안전.
+    p.add_argument(
+        "--ensure-pipeline",
+        action="store_true",
+        help="검색 정규화 파이프라인을 멱등 등록(FR-006·021). 재색인과 독립한 셋업 경로.",
     )
     return p
 
@@ -79,6 +91,25 @@ def run_resync(
         "index": index,
         "recreate": recreate,
     }
+
+
+def run_ensure_pipeline(
+    client: Any,
+    *,
+    name: str,
+    weights: tuple[float, float],
+    ensure_fn: Callable[..., str] = ensure_search_pipeline,
+) -> str:
+    """검색 정규화 파이프라인을 멱등 등록하는 **순수 조립부**(021 G4·T008, FR-006).
+
+    `ensure_fn`(기본 `opensearch_search.ensure_search_pipeline`)을 **주입 seam** 으로 1회 호출해
+    normalization-processor 파이프라인(min-max 정규화 + 가중평균)을 멱등 등록(없으면 PUT·있으면
+    no-op)하고 결과(`'created'` | `'exists'`)를 그대로 반환한다. 단위 테스트는 가짜 client/ensure_fn
+    으로 OS 없이 인자 전달(name·weights)·결과 보고를 검증한다 — 실제 OS 등록은 G5(사람).
+
+    `name`/`weights` 는 (이미 해소된) `settings.opensearch_search_pipeline`/`opensearch_fusion_weights`
+    이며, 여기서는 그대로 흘려보내고 멱등 등록은 코어(`ensure_fn`)의 책임이다(run_resync 동형)."""
+    return ensure_fn(client, name, weights=weights)
 
 
 def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> str:
@@ -123,6 +154,16 @@ def main() -> int:
         f"[OpenSearch 복구 재색인] {cfg.opensearch_url} (v{info['version']['number']}) "
         f"→ index='{index}' channel='{channel}' recreate={args.recreate}"
     )
+
+    # 021 G4·T008: --ensure-pipeline 지정 시 검색 정규화 융합 파이프라인을 멱등 등록(FR-006) —
+    # 재색인과 독립한 셋업 경로. 미지정이면 이 블록을 건너뛰어 종전 동작 그대로(파이프라인 미등록).
+    if args.ensure_pipeline:
+        pipe_status = run_ensure_pipeline(
+            client,
+            name=cfg.opensearch_search_pipeline,
+            weights=cfg.opensearch_fusion_weights,
+        )
+        print(f"  검색 파이프라인 '{cfg.opensearch_search_pipeline}': {pipe_status}")
 
     db = PostgresUtil()
 
