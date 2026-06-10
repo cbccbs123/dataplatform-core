@@ -18,6 +18,7 @@ PG 는 **읽기 전용**(SELECT 만), OpenSearch 에만 색인을 쓴다(CQRS �
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -227,7 +228,11 @@ def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> s
             "(pgvector>=0.5)를 요구한다. 'CREATE EXTENSION vector' 후 재시도."
         )
     version = str(row["extversion"])
-    parts = tuple(int(p) for p in version.split(".")[:2] if p.isdigit())
+    # 앞 두 컴포넌트(major.minor)를 **위치 보존**해 파싱한다. 'v' 접두는 허용하되, 비숫자 컴포넌트로
+    # minor 가 major 자리로 밀려 0.4 가 4.x 로 오인·통과되는 일을 막는다. semver 로 못 읽으면 (0,0)
+    # 으로 두어 보수적 차단(모호한 통과보다 명확한 거부). pgvector 는 깨끗한 semver 만 내지만 견고성용.
+    m = re.match(r"\s*v?(\d+)\.(\d+)", version)
+    parts = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
     if parts < minimum:
         need = ".".join(str(n) for n in minimum)
         raise RuntimeError(

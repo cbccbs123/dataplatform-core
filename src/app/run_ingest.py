@@ -67,9 +67,12 @@ def _make_opensearch_indexer(*, db: PostgresUtil, settings: Any) -> Callable[[An
         것도 하지 않고, ``src.search.opensearch_sync``·opensearch-py 를 **import 조차 하지 않는다**(아래
         지연 import). 미도입 환경의 run_ingest 동작이 완전 불변(SC-001). 레거시 settings 에 필드가
         없어도 ``getattr`` 폴백으로 off 취급.
-      · **클라이언트 재사용**: OpenSearch 클라이언트·활성 채널은 **첫 색인에서 1회** 만들어 ``cache``
-        에 담아 배치 전체에서 재사용한다 — 디렉터리/파일리스트 수집에서 자산마다 새 연결을 열던 낭비를
-        없앤다(배치당 1회 셋업).
+      · **클라이언트 재사용**: OpenSearch 클라이언트·활성 채널은 **첫 색인 성공에서 1회** 만들어
+        ``cache`` 에 담아 배치 전체에서 재사용한다 — 디렉터리/파일리스트 수집에서 자산마다 새 연결을
+        열던 낭비를 없앤다. "배치당 1회"는 **성공 경로 보증**이다: OS 가 **지속 다운**이면 ``get_client``
+        실패로 ``cache['client']`` 가 미설정이라 자산마다 셋업을 재시도한다(상한 = 배치 크기, 무한 아님).
+        이는 OS 가 배치 도중 복구되면 그때부터 재사용을 재개하는 **일과성 복구**가 의도다. 부분 캐시
+        손상은 없다(게이트는 ``'client'`` 단일 키 기준, ``channel``/``index_asset`` 은 멱등 재대입).
       · **격리**: 각 색인을 ``try/except Exception`` 으로 감싸 OS 미도달·색인 오류를 ``_LOG.warning``
         만 남기고 삼킨다 — ingest 를 중단·롤백하지 않는다(SC-003). finalize 트랜잭션 커밋 뒤라 OS
         색인은 본질적으로 PG 와 분리된 best-effort 작업이다.

@@ -344,6 +344,21 @@ class TestCheckPgvectorVersion(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             check_pgvector_version(_FakeConn([{"extversion": "0.4.4"}]))
 
+    def test_rejects_below_minimum_with_nonnumeric_prefix(self) -> None:
+        # 비숫자 접두('v0.4' 등)도 **위치 보존** 파싱 — minor 가 major 자리로 밀려 0.4 가 4.x 로
+        # 오인·통과되면 안 된다. 0.5 미만이므로 정확히 차단돼야 한다(파싱 견고성).
+        from src.search.opensearch_sync import check_pgvector_version
+
+        with self.assertRaises(RuntimeError):
+            check_pgvector_version(_FakeConn([{"extversion": "v0.4"}]))
+
+    def test_rejects_unparseable_version_conservatively(self) -> None:
+        # semver 로 파싱 불가한 값은 보수적으로 차단(미달 취급) — 모호한 통과보다 명확한 거부.
+        from src.search.opensearch_sync import check_pgvector_version
+
+        with self.assertRaises(RuntimeError):
+            check_pgvector_version(_FakeConn([{"extversion": "garbage"}]))
+
     def test_raises_when_not_installed(self) -> None:
         # pg_extension 에 vector 행 없음(미설치) → 명확한 RuntimeError.
         from src.search.opensearch_sync import check_pgvector_version
