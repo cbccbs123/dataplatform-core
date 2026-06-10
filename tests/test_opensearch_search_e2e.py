@@ -84,6 +84,21 @@ _ID_MED = "021e2e-text-med"     # 의료(domain_label='medical', text) — 검�
 _ID_TWIN_A = "021e2e-twin-a"    # 동점쌍 — 동일 내용/임베딩, asset_id 만 다름
 _ID_TWIN_B = "021e2e-twin-b"
 
+# ── 022 G3: image/video OS 회수 + 작은 k 비우세 모달리티 가드용 코퍼스 ────────────────
+# knn pre-filter 회귀 가드의 핵심: **다수 text(강아지) + 소수 image(반려견/고양이)**. 작은 k(=버킷
+# 한도)에서 전역 top-k 가 강아지 다수 text 로 채워지므로, knn 을 bool 사후필터로 감싸면(회귀) image
+# 버킷이 0건이 된다 — knn native filter(pre-filter)로 모달리티 안에서 k 최근접을 뽑아야 image 가 회수된다.
+# image 캡션은 질의(강아지)와 **어휘가 겹치지 않게**(반려견/고양이) 설계해, BM25(어휘) 가 image 를
+# 끌어올려 회귀를 가리지 못하게 한다 — 오직 knn pre-filter 만이 image 를 회수하는 시나리오.
+_ID_PET1 = "022e2e-text-pet1"   # 강아지 다수 text(전역 top-k 점유) — 사후필터 회귀 시 image 를 밀어냄
+_ID_PET2 = "022e2e-text-pet2"
+_ID_PET3 = "022e2e-text-pet3"
+_ID_IMG_DOG = "022e2e-image-dog"   # image(general) — 캡션 '반려견'(질의 '강아지'와 어휘 무겹침·의미 인접)
+_ID_IMG_CAT = "022e2e-image-cat"   # image(general)
+_ID_VID_DOG = "022e2e-video-dog"   # video(general)
+_ID_IMG_MED = "022e2e-image-med"   # 의료 image(domain_label='medical') — 결과 배제돼야 함(FR-004)
+_ID_VID_MED = "022e2e-video-med"   # 의료 video(domain_label='medical') — 결과 배제돼야 함(FR-004)
+
 
 def _os_reachable() -> bool:
     """``RUN_OS_E2E=1`` 이고 OpenSearch 가 응답하면 True(020 e2e 게이트 패턴 동형, 게이트만 RUN_OS_E2E)."""
@@ -104,6 +119,9 @@ def _os_reachable() -> bool:
 
 # 작은 알려진 코퍼스. 각 질의의 키워드는 **목표 문서에만** 등장하도록 토픽을 분리해, nori BM25 가
 # 결정적으로 목표를 상위로 올린다(recall sanity 의 안정성). (asset_id, modality, domain_label, summary, keywords, labels)
+# 022 G3: image/video 자산을 text/audio 와 동일하게 asset_to_doc 로 색인한다(저장 modality 값 'image'/
+# 'video', 한국어 캡션·KoSimCSE 캡션 임베딩 — CLIP 아님). image/video 검색이 020 동일 하이브리드로
+# 회수되는지(FR-001)와 작은 k 비우세 모달리티 가드(knn pre-filter 회귀)를 검증한다.
 _CORPUS: tuple[tuple[str, str, str | None, str, list[str], list[str]], ...] = (
     (_ID_FIN, "txt", "general", "2024년 분기 재무 보고서 매출 영업이익 분석 자료", ["재무", "매출", "영업이익"], ["보고서"]),
     (_ID_COOK, "txt", "general", "김치찌개 끓이는 요리법 재료 손질 방법 정리", ["요리", "김치찌개", "레시피"], ["가이드"]),
@@ -113,6 +131,20 @@ _CORPUS: tuple[tuple[str, str, str | None, str, list[str], list[str]], ...] = (
     (_ID_MED, "txt", "medical", "환자 진료 기록 처방 내역 병원 검사 결과 소견", ["환자", "진료", "처방"], ["의무기록"]),
     (_ID_TWIN_A, "txt", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
     (_ID_TWIN_B, "txt", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
+    # 022 — 강아지 다수 text(전역 top-k 점유) : 작은 k 가드의 'text 다수' 측. 질의 '강아지 키우기 사료'에
+    # 어휘·의미로 강하게 매칭돼 전역 knn 최근접을 채운다(사후필터 회귀 시 image 를 전역에서 밀어냄).
+    (_ID_PET1, "txt", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
+    (_ID_PET2, "txt", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
+    (_ID_PET3, "txt", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
+    # 022 — 소수 image(general). 캡션은 '반려견'/'고양이'로 질의 '강아지'와 **어휘 무겹침**(BM25 미회수)
+    # 이나 의미 인접 → knn pre-filter 만이 회수한다(작은 k 가드가 잡는 정확한 시나리오).
+    (_ID_IMG_DOG, "image", "general", "반려견 공원 야외 풍경 잔디밭 산책", ["반려견", "공원", "풍경"], ["사진"]),
+    (_ID_IMG_CAT, "image", "general", "고양이 창가 햇살 낮잠 실내 모습", ["고양이", "낮잠", "실내"], ["사진"]),
+    # 022 — 소수 video(general). FR-001 영상 회수·결정성 검증용(어휘 '영상' 매칭으로 명확히 회수).
+    (_ID_VID_DOG, "video", "general", "강아지 산책 훈련 영상 클립 야외 장면", ["강아지", "훈련", "영상"], ["영상"]),
+    # 022 — 의료 image/video(domain_label='medical') : 색인돼 있어도 결과에서 배제돼야 한다(FR-004).
+    (_ID_IMG_MED, "image", "medical", "흉부 엑스레이 방사선 판독 의료 영상", ["엑스레이", "방사선", "판독"], ["의료영상"]),
+    (_ID_VID_MED, "video", "medical", "초음파 검사 동영상 의료 진단 기록", ["초음파", "진단", "검사"], ["의료영상"]),
 )
 
 
@@ -277,6 +309,102 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         # 점수 단조 비증가(정렬 일관성 — _score desc).
         sims = [r["similarity"] for r in rows]
         self.assertEqual(sims, sorted(sims, reverse=True), "결과는 점수 내림차순이어야 한다")
+
+    # ── 022 G3) image/video OS 회수 (FR-001 · 캡션 하이브리드) ────────────────
+    def test_image_video_os_retrieval(self) -> None:
+        """FR-001: image·video 버킷이 020 과 **동일 하이브리드**(캡션 nori + KoSimCSE kNN)로 회수된다(≥1).
+
+        image/video 도 text/audio 처럼 ``asset_to_doc`` 로 색인(저장 modality 'image'/'video', 한국어
+        캡션·임베딩)돼 ``search_assets_os`` 가 같은 경로로 검색한다 — CLIP 아님. knn pre-filter 라
+        비우세 모달리티도 자기 모달리티의 k 최근접을 회수한다(사후필터 회귀 시 0건 → 실패).
+        """
+        buckets = self._search("반려동물 산책 사진 영상", ["image", "video"], k=5)
+        self.assertTrue(buckets["image"], "image 버킷에 결과가 있어야 한다(FR-001)")
+        self.assertTrue(buckets["video"], "video 버킷에 결과가 있어야 한다(FR-001)")
+        # 저장 modality 값이 라벨과 동일('image'/'video')로 회수된다.
+        self.assertTrue(all(r["modality"] == "image" for r in buckets["image"]))
+        self.assertTrue(all(r["modality"] == "video" for r in buckets["video"]))
+        # 의료 image/video 는 어느 버킷에도 없어야 한다(FR-004).
+        found = {r["id"] for rows in buckets.values() for r in rows}
+        self.assertNotIn(_ID_IMG_MED, found, "의료 image 는 결과에 없어야 한다(FR-004)")
+        self.assertNotIn(_ID_VID_MED, found, "의료 video 는 결과에 없어야 한다(FR-004)")
+
+    # ── 022 G3) 작은 k 비우세 모달리티 가드 (핵심 회귀 가드 — knn pre-filter) ────
+    def test_small_k_nondominant_image_bucket_not_empty(self) -> None:
+        """핵심 회귀 가드: 다수 text + 소수 image 코퍼스에서 작은 k(=버킷 한도)로도 image 버킷이 0건이 아니다.
+
+        knn 을 **native filter(pre-filter)** 로 모달리티 안에서 k 최근접을 뽑으므로, 전역 top-k 가
+        다수 강아지 text 로 채워져도 image 버킷은 자기 모달리티의 k 최근접(반려견/고양이)을 회수한다.
+        (사후필터 회귀 시: knn 이 전역 k 최근접을 먼저 뽑고 modality 로 거르므로 — 강아지 다수 text 가
+        전역 top-k 를 점유 → image 0건으로 **실패**한다. image 캡션은 질의 '강아지'와 어휘가 겹치지
+        않아 BM25 가 image 를 끌어올려 회귀를 가리지도 못한다 → 오직 knn pre-filter 만이 image 를 회수.)
+        """
+        query = "강아지 키우기 사료 추천 정보"
+
+        # 전제 증명: 같은 질의로 text 버킷을 보면 강아지 다수 text 가 상위를 점유한다(전역 top-k 를 text
+        # 가 채운다는 회귀 시나리오의 전제 — 사후필터였다면 이 다수 text 가 image 의 전역 자리를 밀어냄).
+        text_ids = [r["id"] for r in self._search(query, ["text"], k=3)["text"]]
+        self.assertTrue(
+            set(text_ids) & {_ID_PET1, _ID_PET2, _ID_PET3},
+            "강아지 다수 text 가 상위로 회수돼야 한다(가드의 전제: text 다수 점유)",
+        )
+
+        # 핵심 단언: k=2(작은 버킷 한도)에서도 image 버킷이 0건이 아니다(knn pre-filter 가드).
+        image = self._search(query, ["image"], k=2)["image"]
+        self.assertTrue(
+            image,
+            "작은 k 에서도 비우세 모달리티(image) 버킷은 0건이 아니어야 한다 — knn pre-filter 가드"
+            "(사후필터 회귀 시 전역 top-k 를 다수 text 가 점유해 image 0건이 되어 실패)",
+        )
+        for r in image:
+            self.assertEqual(r["modality"], "image")
+            self.assertNotIn(r["id"], {_ID_IMG_MED}, "의료 image 는 배제돼야 한다(FR-004)")
+
+    # ── 022 G3) image/video 결정성 (헌법 3조 · SC-004) ──────────────────────
+    def test_determinism_image_video(self) -> None:
+        """같은 질의 2회 → image·video 버킷도 동일 top-k 순서(결정성·FR-006 tiebreaker)."""
+        query = "반려동물 산책 사진 영상"
+        run1 = self._search(query, ["image", "video"], k=5)
+        run2 = self._search(query, ["image", "video"], k=5)
+        self.assertEqual(
+            [r["id"] for r in run1["image"]], [r["id"] for r in run2["image"]],
+            "image 버킷은 2회 동일 순서여야 한다(결정성)",
+        )
+        self.assertEqual(
+            [r["id"] for r in run1["video"]], [r["id"] for r in run2["video"]],
+            "video 버킷은 2회 동일 순서여야 한다(결정성)",
+        )
+
+    # ── 022 G3) 의료 image/video 배제 (FR-004 · 헌법 10조) ───────────────────
+    def test_medical_image_video_excluded(self) -> None:
+        """의료(domain_label='medical') image/video 는 색인돼 있어도 검색 결과에서 제외된다(쿼리 단 실효)."""
+        # 의료 image/video 가 인덱스엔 존재함(배제가 '없어서'가 아니라 '필터'임을 증명).
+        for asset_id in (_ID_IMG_MED, _ID_VID_MED):
+            src = self.client.get(index=_INDEX, id=asset_id)["_source"]
+            self.assertEqual(src.get("domain_label"), "medical")
+
+        # 의료 영상/사진에 들어맞는 질의로도 의료 자산이 어느 버킷에도 안 나와야 한다.
+        buckets = self._search("엑스레이 초음파 의료 진단 검사", ["image", "video"], k=10)
+        found = {r["id"] for rows in buckets.values() for r in rows}
+        self.assertNotIn(_ID_IMG_MED, found, "의료 image 는 검색 결과에 없어야 한다(FR-004)")
+        self.assertNotIn(_ID_VID_MED, found, "의료 video 는 검색 결과에 없어야 한다(FR-004)")
+
+    # ── 022 G3) LLM 0 — image/video 경로 (SC-004 · FR-002) ──────────────────
+    def test_search_hybrid_opensearch_image_video_no_llm(self) -> None:
+        """search_hybrid(backend='opensearch') image/video 경로도 LLM 질의 구조화 0회(seam 미접촉)."""
+        from src.search import search_service
+
+        with mock.patch("src.search.media_search.structure_user_query") as m_llm:
+            result = search_service.search_hybrid(
+                "반려동물 산책 사진 영상",
+                modalities=["image", "video"],
+                backend="opensearch",
+            )
+        self.assertEqual(m_llm.call_count, 0, "OS image/video 경로는 LLM 질의 구조화 0(FR-002·SC-004)")
+        # 응답 동형(SC-005): backend 무관 같은 버킷 키.
+        self.assertIn("image", result["results"])
+        self.assertIn("video", result["results"])
+        self.assertEqual(result["meta"].get("backend"), "opensearch")
 
 
 if __name__ == "__main__":
