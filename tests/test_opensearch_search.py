@@ -8,6 +8,11 @@ G2(IO seam): ``ensure_search_pipeline``(정규화 검색 파이프라인 멱등 
 (질의 1회 임베딩 → modality 별 하이브리드 검색 → 버킷)을 **가짜 OS 클라이언트 주입**으로 OS 없이
 액션 조립을 검증한다(docs/테스트_가이드.md §2 seam 주입). OS 미도달은 예외 전파로 검증(FR-008).
 
+022 G1(image/video): image·video 도 020 assets 인덱스에 한국어 VLM 캡션(nori) + KoSimCSE 캡션
+임베딩(``embedding``)으로 색인돼 있어 text/audio 와 **동일 OS 하이브리드**로 검색한다(CLIP 아님).
+``_MODALITY_VALUES`` 의 image·video 명시 등재(저장값=라벨)와 그 하이브리드 본문·의료배제·결정 정렬을
+고정한다(spec 022 FR-001·004).
+
 테스트 위조·약화 금지(docs/테스트_가이드.md). 실제 OS 검색 실효·결정성·의료배제는 G5(실OS e2e).
 """
 
@@ -15,7 +20,9 @@ from __future__ import annotations
 
 import unittest
 
+from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.opensearch_search import (
+    _MODALITY_VALUES,
     build_search_body,
     ensure_search_pipeline,
     os_hit_to_row,
@@ -251,11 +258,13 @@ class _FakeSearchClient:
         terms = body["query"]["hybrid"]["queries"][0]["bool"]["filter"][0]["terms"][
             "modality"
         ]
-        # 저장값 집합(terms) → canned hits 버킷 라벨. audio/video 는 단일값, 그 외(txt·json…)는 text.
+        # 저장값 집합(terms) → canned hits 버킷 라벨. audio/video/image 는 단일값, 그 외(txt·json…)는 text.
         if "audio" in terms:
             label = "audio"
         elif "video" in terms:
             label = "video"
+        elif "image" in terms:
+            label = "image"
         else:
             label = "text"
         hits = self._hits_by_modality.get(label, [])
@@ -412,6 +421,135 @@ class SearchAssetsOsTest(unittest.TestCase):
                 pipeline_name="assets-hybrid",
                 embed_fn=self.fake_embed,
             )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 022 G1 — image/video 모달리티 값 매핑(순수·seam). image/video 는 020 assets 인덱스에 캡션 nori +
+# KoSimCSE 캡션 임베딩으로 이미 색인돼 있어 text/audio 와 동일 OS 하이브리드로 검색한다(CLIP 아님).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class ModalityValuesMappingTest(unittest.TestCase):
+    """T001/FR-001: image·video 라벨이 저장값 집합으로 _MODALITY_VALUES 에 명시 해소되는지."""
+
+    def test_image_video_explicit_in_modality_values(self) -> None:
+        # image/video 는 020 인덱스에 라벨과 동일한 modality 값('image'/'video')으로 색인된다.
+        # search_assets_os 의 fallback frozenset({label}) 로도 동작하지만, 022 는 지원 모달리티를
+        # 문서화·가독화하려 _MODALITY_VALUES 에 명시 등재한다 — 그 등재를 직접 단언(명시 전 RED: KeyError).
+        self.assertEqual(_MODALITY_VALUES[MediaKind.IMAGE.value], frozenset({"image"}))
+        self.assertEqual(_MODALITY_VALUES[MediaKind.VIDEO.value], frozenset({"video"}))
+
+    def test_text_audio_mapping_unchanged(self) -> None:
+        # 021 매핑 무손상(회귀 0): text=ALLOWED_TEXT_META_FILE_KINDS, audio={'audio'}.
+        self.assertEqual(
+            _MODALITY_VALUES["text"], frozenset(ALLOWED_TEXT_META_FILE_KINDS)
+        )
+        self.assertEqual(_MODALITY_VALUES[MediaKind.AUDIO.value], frozenset({"audio"}))
+
+
+class ImageVideoHybridBodyTest(unittest.TestCase):
+    """T001/FR-001·004: image·video 도 text/audio 와 동일 OS 하이브리드(캡션 nori + 캡션 임베딩 knn).
+
+    image/video 자산의 ``embedding`` 은 KoSimCSE 캡션 임베딩(텍스트 의미)이고 질의도 같은 채널로
+    임베딩하므로 같은 벡터 공간(plan §R3). CLIP·새 필드 없이 build_search_body 로 동형 본문을 만든다.
+    """
+
+    def setUp(self) -> None:
+        self.query = "아이폰으로 찍은 사진"
+        self.vector = [0.5, 0.6, 0.7]
+
+    def _check_modality(self, modality_value: str) -> None:
+        body = build_search_body(
+            self.query, self.vector, modality_values=[modality_value], k=30
+        )
+        subs = _subqueries(body)
+        # (1) 하이브리드 서브쿼리 2개(nori multi_match + embedding knn) — text/audio 와 동일.
+        self.assertEqual(len(subs), 2)
+        _, mm = _find_with_clause(subs, "multi_match")
+        self.assertIsNotNone(mm, "nori multi_match 서브쿼리가 있어야 한다")
+        self.assertEqual(mm["multi_match"]["query"], self.query)
+        self.assertEqual(set(mm["multi_match"]["fields"]), _NORI_TEXT_FIELDS)
+        _, knn = _find_with_clause(subs, "knn")
+        self.assertIsNotNone(knn, "knn 서브쿼리가 있어야 한다")
+        self.assertEqual(knn["knn"]["embedding"]["vector"], self.vector)
+        # (2) terms 필터(라벨→값 집합) + (3) 의료배제 must_not(FR-004)이 각 서브쿼리에 균일 적용.
+        for sub in subs:
+            self.assertIn(
+                {"terms": {"modality": [modality_value]}}, sub["bool"]["filter"]
+            )
+            self.assertIn(
+                {"term": {"domain_label": "medical"}}, sub["bool"]["must_not"]
+            )
+        self.assertEqual(body["size"], 30)
+
+    def test_image_hybrid_body(self) -> None:
+        self._check_modality("image")
+
+    def test_video_hybrid_body(self) -> None:
+        self._check_modality("video")
+
+
+class SearchAssetsOsImageVideoTest(unittest.TestCase):
+    """T001/FR-001·006: search_assets_os 가 image·video 라벨을 terms 필터로 해소·하이브리드 검색·결정 정렬."""
+
+    def setUp(self) -> None:
+        self.query = "강아지 영상"
+        self.vector = [0.1, 0.9]
+
+        def fake_embed(q: str, *, channel: str) -> list[float]:
+            return list(self.vector)
+
+        self.fake_embed = fake_embed
+
+    def test_image_video_resolve_to_terms_filter(self) -> None:
+        # 라벨('image'/'video') → 저장값 집합 terms 필터로 해소돼 그 버킷에서 회수된다(FR-001).
+        client = _FakeSearchClient(
+            hits_by_modality={
+                "image": [_os_hit("i1", 0.9, "image")],
+                "video": [_os_hit("v1", 0.8, "video"), _os_hit("v2", 0.6, "video")],
+            }
+        )
+        buckets = search_assets_os(
+            client,
+            self.query,
+            modalities=("image", "video"),
+            index="assets",
+            pipeline_name="assets-hybrid",
+            embed_fn=self.fake_embed,
+        )
+        self.assertEqual(set(buckets), {"image", "video"})
+        self.assertEqual([r["id"] for r in buckets["image"]], ["i1"])
+        self.assertEqual([r["id"] for r in buckets["video"]], ["v1", "v2"])
+        # 각 search 본문의 terms 필터가 라벨→값 집합으로 해소됐는지(image→['image'], video→['video']).
+        searched = []
+        for call in client.search_calls:
+            terms = call["body"]["query"]["hybrid"]["queries"][0]["bool"]["filter"][0][
+                "terms"
+            ]["modality"]
+            searched.append(tuple(terms))
+        self.assertIn(("image",), searched)
+        self.assertIn(("video",), searched)
+
+    def test_image_deterministic_tiebreaker(self) -> None:
+        # FR-006(021 동형): 동점에서 (-similarity, id) 결정 정렬이 image 버킷에도 그대로 적용.
+        client = _FakeSearchClient(
+            hits_by_modality={
+                "image": [
+                    _os_hit("b", 0.5, "image"),
+                    _os_hit("c", 0.9, "image"),
+                    _os_hit("a", 0.5, "image"),
+                ]
+            }
+        )
+        out = search_assets_os(
+            client,
+            self.query,
+            modalities=("image",),
+            index="assets",
+            pipeline_name="assets-hybrid",
+            embed_fn=self.fake_embed,
+        )
+        self.assertEqual([r["id"] for r in out["image"]], ["c", "a", "b"])
 
 
 if __name__ == "__main__":
