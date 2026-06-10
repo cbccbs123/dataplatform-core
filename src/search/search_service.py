@@ -53,8 +53,8 @@ _DEFAULT_OS_FUSION_WEIGHTS: tuple[float, float] = (0.5, 0.5)
 # 미초기화 시 안전(무게이트) — 실 settings 기본은 True 이나 search_backend='pg'(기본)면 OS 경로 미실행
 # 이라 무관하다. eps/floor/probe_k 는 settings 기본과 같은 측정 근거값(opensearch_search 의 G1/G2 상수 동치).
 _DEFAULT_OS_CUTOFF_ENABLED: bool = False
-_DEFAULT_OS_CUTOFF_EPS: float = 0.10
-_DEFAULT_OS_CUTOFF_FLOOR: float = 0.65
+_DEFAULT_OS_CUTOFF_EPS: float = 0.15  # G4 calibration 확정(opensearch_search 상수 동치)
+_DEFAULT_OS_CUTOFF_FLOOR: float = 0.43
 _DEFAULT_OS_PROBE_K: int = 50
 
 

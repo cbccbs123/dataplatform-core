@@ -174,18 +174,18 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
     ValueError** — 잘못된 임계로 검색하지 않게(fail-fast, _resolve_search_backend 동형).
 
       - ``search_os_cutoff_enabled`` : 기본 True (bool). pg 백엔드(기본)엔 무영향, OS 백엔드에만 적용.
-      - ``search_os_cutoff_eps``     : 기본 0.10, 범위 ``[0,1)`` (상대신호 하한).
-      - ``search_os_cutoff_floor``   : 기본 0.65, 범위 ``[-1,1]`` (코사인 절대 backstop).
+      - ``search_os_cutoff_eps``     : 기본 0.15(G4 calibration), 범위 ``[0,1)`` (상대신호 하한).
+      - ``search_os_cutoff_floor``   : 기본 0.43(G4 calibration), 범위 ``[-1,1]`` (코사인 절대 backstop·주분리축).
       - ``search_os_probe_k``        : 기본 50, ``>=1`` 정수 (probe 표본 수).
     """
 
-    # (a) 기본값 — env 미설정 시.
+    # (a) 기본값 — env 미설정 시(G4 실OS calibration 으로 확정한 값).
     def test_defaults_when_unset(self) -> None:
         with _env():
             settings = _build_settings("dev")
         self.assertIs(settings.search_os_cutoff_enabled, True)
-        self.assertEqual(settings.search_os_cutoff_eps, 0.10)
-        self.assertEqual(settings.search_os_cutoff_floor, 0.65)
+        self.assertEqual(settings.search_os_cutoff_eps, 0.15)
+        self.assertEqual(settings.search_os_cutoff_floor, 0.43)
         self.assertEqual(settings.search_os_probe_k, 50)
 
     # (b) 환경 오버라이드.

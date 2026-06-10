@@ -462,8 +462,8 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
             _grouped_fn=_fake_grouped,
         )
         self.assertIs(os_cap["cutoff_enabled"], False)  # 미초기화 안전(무게이트)
-        self.assertEqual(os_cap["cutoff_eps"], 0.10)
-        self.assertEqual(os_cap["cutoff_floor"], 0.65)
+        self.assertEqual(os_cap["cutoff_eps"], 0.15)  # G4 calibration 확정(모듈 fallback)
+        self.assertEqual(os_cap["cutoff_floor"], 0.43)
         self.assertEqual(os_cap["cutoff_probe_k"], 50)
         self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
 

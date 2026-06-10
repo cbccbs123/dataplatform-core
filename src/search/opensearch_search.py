@@ -34,9 +34,15 @@ _TEXT_FIELDS: tuple[str, ...] = (
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
 _MEDICAL_LABEL = "medical"
 
-# 게이트 기본값(진단 분포 provisional — G4 실OS calibration 이 확정). EPS=상대신호 하한, FLOOR=느슨한 절대 backstop.
-_DEFAULT_CUTOFF_EPS = 0.10
-_DEFAULT_CUTOFF_FLOOR = 0.65
+# 게이트 기본값 — G4 실OS calibration 으로 확정(2026-06-10, dev 318자산·lucene cosinesimil probe).
+# 검증 라벨셋(있음 9·없음 6)에서 probe 원시 코사인 top: 있음 최소 0.490 vs 없음 최대 0.365 → 갭 0.125,
+# Δ(top-mean): 있음 최소 0.273 vs 없음 최대 0.179 → 갭 0.094 로 깨끗이 분리. FLOOR=0.43(top 갭 중앙·
+# 양쪽 마진 ~0.06), EPS=0.15(없음 Δ는 차단하되 있음 약모달리티는 과필터 안 하도록 보수적·갭 하단).
+# 절대 FLOOR 가 주분리축이고 상대 EPS 는 코퍼스 평탄 시 보강(AND). 임계는 probe 출력 스케일에 보정됨.
+# ⚠️ 토픽 인접 없음(예: '양자컴퓨터'→과학 콘텐츠)은 코사인이 있음과 동률이라 게이트로 못 막는다 —
+# nori 외래어 분해·임베딩 교정(Non-Goal·후속) 영역. 어휘적으로 무관한 없음(아이패드 등)은 확실히 차단.
+_DEFAULT_CUTOFF_EPS = 0.15
+_DEFAULT_CUTOFF_FLOOR = 0.43
 _DEFAULT_PROBE_K = 50
 
 # OS 검색 버킷 라벨 → 저장된 modality 값 집합(PG media_search 와 동일 분류). 요청 라벨('text')과

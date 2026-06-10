@@ -225,22 +225,23 @@ def _resolve_os_cutoff_enabled() -> bool:
 
 
 def _resolve_os_cutoff_eps() -> float:
-    """컷오프 상대신호 하한 eps(023, FR-001). 기본 ``0.10``. 범위 ``[0,1)`` 밖이면 **즉시 ValueError**.
+    """컷오프 상대신호 하한 eps(023, FR-001). 기본 ``0.15``(G4 calibration 확정). 범위 ``[0,1)`` 밖이면 **즉시 ValueError**.
 
     eps 는 ``top − mean``(코사인 차) 의 하한이라 0 이상·1 미만이어야 의미가 있다(코사인 차의 유효 폭).
     범위 밖은 잘못된 임계로 검색하지 않도록 fail-fast(``_resolve_search_backend`` 동형)."""
-    value = _env_float_default("SEARCH_OS_CUTOFF_EPS", 0.10)
+    value = _env_float_default("SEARCH_OS_CUTOFF_EPS", 0.15)
     if not (0.0 <= value < 1.0):
         raise ValueError(f"컷오프 eps 범위 오류: SEARCH_OS_CUTOFF_EPS={value!r} (0<=eps<1)")
     return value
 
 
 def _resolve_os_cutoff_floor() -> float:
-    """컷오프 절대 backstop floor(023, FR-004). 기본 ``0.65``. 범위 ``[-1,1]`` 밖이면 **즉시 ValueError**.
+    """컷오프 절대 backstop floor(023, FR-004). 기본 ``0.43``(G4 calibration 확정). 범위 ``[-1,1]`` 밖이면 **즉시 ValueError**.
 
     floor 는 top 코사인의 절대 하한이라 코사인 정의역 ``[-1,1]`` 안이어야 한다(경계 포함). 범위 밖은
-    잘못된 임계로 검색하지 않도록 fail-fast."""
-    value = _env_float_default("SEARCH_OS_CUTOFF_FLOOR", 0.65)
+    잘못된 임계로 검색하지 않도록 fail-fast. 0.43 = 실OS 검증 라벨셋의 있음 top 최소(0.490)·없음 top
+    최대(0.365) 갭 중앙(주분리축)."""
+    value = _env_float_default("SEARCH_OS_CUTOFF_FLOOR", 0.43)
     if not (-1.0 <= value <= 1.0):
         raise ValueError(f"컷오프 floor 범위 오류: SEARCH_OS_CUTOFF_FLOOR={value!r} (-1<=floor<=1)")
     return value

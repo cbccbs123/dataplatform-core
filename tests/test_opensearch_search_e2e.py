@@ -406,6 +406,102 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         self.assertIn("video", result["results"])
         self.assertEqual(result["meta"].get("backend"), "opensearch")
 
+    # ── 023) 적합도 컷오프 게이트 — 실 probe·empty/keep·결정성·의료배제 ──────────────
+    # 주의: production 기본 임계(FLOOR=0.43·EPS=0.15)는 실 318자산 코퍼스로 보정된 값이라, 이 작은
+    # 자체색인 코퍼스에는 그대로 전이하지 않는다(절대 코사인 스케일·baseline 이 다름). 따라서 e2e 는
+    # **production 임계를 재검증하지 않고**(그건 scripts/calibrate_search_cutoff.py 가 실코퍼스로 수행)
+    # 실 OS 경로의 게이트 *메커니즘*(실 probe_relevance → passes_cutoff → 빈/유지)을 코퍼스에서 측정한
+    # 신호로 결정적으로 검증한다. 즉 매칭>무관 불변식과, 두 top 사이 floor 로 empty/keep 분기를 단언한다.
+
+    def _probe_top(self, query: str, label: str) -> tuple[float, float]:
+        """실 probe_relevance 로 그 modality 의 (top, mean) 원시 코사인을 잰다(임시 인덱스)."""
+        from src.search.opensearch_search import (
+            _MODALITY_VALUES,
+            embed_query,
+            probe_relevance,
+        )
+
+        vec = embed_query(query, channel=self.channel)
+        values = _MODALITY_VALUES.get(label, frozenset({label}))
+        return probe_relevance(self.client, vec, modality_values=values, k=10, index=_INDEX)
+
+    def test_cutoff_probe_matching_above_foreign(self) -> None:
+        """실 probe: 코퍼스에 있는 토픽(강아지) top > 무관 토픽(양자역학) top — 매칭>무관 불변식(FR-002)."""
+        present_top, _ = self._probe_top("강아지 키우기 사료", "text")
+        foreign_top, _ = self._probe_top("양자역학 입자 가속기 실험", "text")
+        self.assertGreater(
+            present_top, foreign_top,
+            f"매칭 질의 top({present_top:.3f})이 무관 질의 top({foreign_top:.3f})보다 커야 한다",
+        )
+
+    def test_cutoff_empties_foreign_keeps_present(self) -> None:
+        """게이트 메커니즘(FR-001·003): 두 top 사이 floor 로 무관 질의는 빈 버킷·매칭 질의는 유지.
+
+        eps=0.0 으로 상대신호를 끄고 floor 만으로 분기 — 실 probe 가 잰 두 top 의 중앙을 floor 로 써
+        production 기본값 의존 없이 메커니즘만 본다. cutoff off 면 둘 다 비지 않음(게이트가 원인임을 격리).
+        """
+        from src.search.opensearch_search import search_assets_os
+
+        present_top, _ = self._probe_top("강아지 키우기 사료", "text")
+        foreign_top, _ = self._probe_top("양자역학 입자 가속기 실험", "text")
+        floor = (present_top + foreign_top) / 2.0  # 두 top 사이 → 매칭 유지·무관 차단
+
+        def buckets(query: str, enabled: bool) -> dict:
+            return search_assets_os(
+                self.client, query, modalities=["text"], k=10, channel=self.channel,
+                index=_INDEX, pipeline_name=_PIPELINE, cutoff_enabled=enabled,
+                cutoff_eps=0.0, cutoff_floor=floor, cutoff_probe_k=10,
+            )
+
+        # cutoff OFF: 무관 질의도 정규화 랭킹으로 결과가 나온다(게이트 없음 → no-match 노이즈).
+        self.assertTrue(buckets("양자역학 입자 가속기 실험", False)["text"], "게이트 off 면 무관 질의도 결과")
+        # cutoff ON: 무관 질의 → 빈 버킷, 매칭 질의 → 유지.
+        self.assertEqual(buckets("양자역학 입자 가속기 실험", True)["text"], [], "무관 질의는 빈 버킷")
+        self.assertTrue(buckets("강아지 키우기 사료", True)["text"], "매칭 질의는 유지(과필터 0)")
+
+    def test_cutoff_deterministic(self) -> None:
+        """결정성(헌법 3조·SC-004): 같은 질의·게이트 2회 → 동일 버킷(빈/유지)."""
+        from src.search.opensearch_search import search_assets_os
+
+        foreign_top, _ = self._probe_top("양자역학 입자 가속기 실험", "text")
+        present_top, _ = self._probe_top("강아지 키우기 사료", "text")
+        floor = (present_top + foreign_top) / 2.0
+
+        def run(query: str) -> list:
+            out = search_assets_os(
+                self.client, query, modalities=["text"], k=10, channel=self.channel,
+                index=_INDEX, pipeline_name=_PIPELINE, cutoff_enabled=True,
+                cutoff_eps=0.0, cutoff_floor=floor, cutoff_probe_k=10,
+            )
+            return [r["id"] for r in out["text"]]
+
+        self.assertEqual(run("양자역학 입자 가속기 실험"), run("양자역학 입자 가속기 실험"))
+        self.assertEqual(run("강아지 키우기 사료"), run("강아지 키우기 사료"))
+
+    def test_cutoff_probe_excludes_medical(self) -> None:
+        """probe 의료배제(FR-008·헌법 10조): 의료 토픽만 매칭하는 질의는 probe 후보에서 의료가 빠져 top↓.
+
+        '환자 진료 처방' 은 코퍼스에서 의료 문서(_ID_MED)에만 매칭한다 — exclude_medical=True(probe 기본)면
+        그 후보가 빠져, 포함했을 때보다 top 코사인이 낮아야 한다(같은 후보 집단에서 의료 격리)."""
+        from src.search.opensearch_search import (
+            _MODALITY_VALUES,
+            embed_query,
+            probe_relevance,
+        )
+
+        vec = embed_query("환자 진료 처방 병원 검사", channel=self.channel)
+        values = _MODALITY_VALUES.get("text", frozenset({"text"}))
+        top_excl, _ = probe_relevance(
+            self.client, vec, modality_values=values, k=10, index=_INDEX, exclude_medical=True
+        )
+        top_incl, _ = probe_relevance(
+            self.client, vec, modality_values=values, k=10, index=_INDEX, exclude_medical=False
+        )
+        self.assertLess(
+            top_excl, top_incl,
+            f"의료배제 top({top_excl:.3f})은 의료포함 top({top_incl:.3f})보다 낮아야 한다(의료 격리)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
