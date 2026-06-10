@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import types
 import unittest
 from unittest import mock
 
@@ -408,6 +409,80 @@ class TestBackendOpenSearchMerge(unittest.TestCase):
         )
         self.assertEqual(out["meta"], {"backend": "opensearch"})
         self.assertNotIn("structured", out["meta"])  # PG meta 통과 없음(grouped 미호출)
+
+
+class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
+    """T008(023 G3) — backend='opensearch' 경로가 cfg 의 컷오프 4종을 ``os_search_fn`` 에 전달한다.
+
+    021 fusion_weights·index·pipeline 배선(``getattr(cfg, ...)``)과 동형으로, search_service 상단
+    fallback 상수 + ``getattr`` 폴백으로 ``cutoff_enabled``/``cutoff_eps``/``cutoff_floor``/
+    ``cutoff_probe_k`` 를 G1/G2 ``search_assets_os`` seam 에 넘긴다(cross-module private import 안 함).
+    """
+
+    def test_cutoff_settings_forwarded_from_cfg(self) -> None:
+        import src.search.search_service as svc
+
+        # 컷오프 값을 모듈 fallback 기본 상수와 다르게 둔 가짜 cfg — 전달이 폴백이 아니라 cfg 에서
+        # 옴을 증명한다. search_backend='opensearch' 가 경로를 결정(진입점은 backend 인자 미전달).
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch",
+            search_os_cutoff_enabled=True,
+            search_os_cutoff_eps=0.22,
+            search_os_cutoff_floor=0.55,
+            search_os_probe_k=33,
+        )
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+
+        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
+            raise AssertionError("opensearch 백엔드에서 pg grouped 가 호출되면 안 됨")
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의",
+                modalities=["text"],
+                _os_search_fn=fake_os,
+                _os_client_fn=lambda: "C",
+                _grouped_fn=fake_grouped,
+            )
+        # os_search_fn 가 cfg 값 그대로 받음(기본 상수 폴백 아님)
+        self.assertIs(os_cap["cutoff_enabled"], True)
+        self.assertEqual(os_cap["cutoff_eps"], 0.22)
+        self.assertEqual(os_cap["cutoff_floor"], 0.55)
+        self.assertEqual(os_cap["cutoff_probe_k"], 33)
+
+    def test_cutoff_falls_back_to_module_defaults_when_cfg_missing(self) -> None:
+        # settings 미초기화(순수 단위) → cfg=None → 모듈 fallback 상수(무게이트·기본값)로 전달.
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        out = search_hybrid(
+            "질의",
+            modalities=["text"],
+            backend="opensearch",  # cfg 없이 명시 라우팅
+            _os_search_fn=fake_os,
+            _os_client_fn=lambda: "C",
+            _grouped_fn=_fake_grouped,
+        )
+        self.assertIs(os_cap["cutoff_enabled"], False)  # 미초기화 안전(무게이트)
+        self.assertEqual(os_cap["cutoff_eps"], 0.10)
+        self.assertEqual(os_cap["cutoff_floor"], 0.65)
+        self.assertEqual(os_cap["cutoff_probe_k"], 50)
+        self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
+
+    def test_pg_default_never_touches_os_cutoff(self) -> None:
+        # (SC-001) backend=pg(기본) → OS seam(컷오프 포함) 미접촉·동작 동치(회귀 0).
+        os_calls: list[object] = []
+
+        def boom_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+            os_calls.append(k)
+            raise AssertionError("pg 기본 경로에서 OS seam 이 호출되면 안 됨")
+
+        out = search_hybrid(
+            "질의",
+            _grouped_fn=_fake_grouped,
+            _os_search_fn=boom_os,
+            _os_client_fn=lambda: None,
+        )
+        self.assertEqual(os_calls, [])
+        self.assertEqual(out["results"]["text_documents"], [{"id": "t1"}])
 
 
 class TestBackendOpenSearchNoLLM(unittest.TestCase):

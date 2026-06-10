@@ -74,6 +74,15 @@ class PipelineSettings:
     search_backend: str
     opensearch_search_pipeline: str
     opensearch_fusion_weights: tuple[float, float]
+    # 023: OS 검색 적합도 컷오프(probe 게이트) 설정. 모두 선택 필드(021 동형) — 미설정 시 측정 근거
+    # 기본값. 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로 enabled 기본 True 라도 search_backend='pg'
+    # (기본)면 OS 경로 자체가 실행되지 않아 동작 불변(SC-001). eps=상대신호(top-mean) 하한·floor=코사인
+    # 절대 backstop·probe_k=probe 표본 수. 범위 밖 값은 _resolve_* 헬퍼가 _build_settings 시점에 즉시
+    # ValueError 로 차단한다(잘못된 임계로 검색하지 않게 — _resolve_search_backend fail-fast 동형).
+    search_os_cutoff_enabled: bool
+    search_os_cutoff_eps: float
+    search_os_cutoff_floor: float
+    search_os_probe_k: int
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -204,6 +213,50 @@ def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
     return (w_bm25, w_knn)
 
 
+# 023: OS 검색 적합도 컷오프(probe 게이트) 4종 해소. 021 _resolve_opensearch_fusion_weights 와 동형으로
+# 환경 파싱·범위 검증·fail-fast 를 _build_settings 시점에 끌어와, 잘못된 임계로 검색하지 않도록 프로세스
+# 시작 시 즉시 실패시킨다. enabled 기본 True 라도 search_backend='pg'(기본)면 OS 경로 미실행 → 동작 불변.
+def _resolve_os_cutoff_enabled() -> bool:
+    """OS 검색 컷오프 활성 여부(023, FR-001). ``SEARCH_OS_CUTOFF_ENABLED`` 미설정 시 기본 ``True``.
+
+    bool 파싱은 020 ``_env_bool_default`` 재사용. 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로
+    기본 True 라도 ``search_backend='pg'``(기본)면 OS 경로 자체가 실행되지 않아 동작 불변(SC-001)."""
+    return _env_bool_default("SEARCH_OS_CUTOFF_ENABLED", True)
+
+
+def _resolve_os_cutoff_eps() -> float:
+    """컷오프 상대신호 하한 eps(023, FR-001). 기본 ``0.10``. 범위 ``[0,1)`` 밖이면 **즉시 ValueError**.
+
+    eps 는 ``top − mean``(코사인 차) 의 하한이라 0 이상·1 미만이어야 의미가 있다(코사인 차의 유효 폭).
+    범위 밖은 잘못된 임계로 검색하지 않도록 fail-fast(``_resolve_search_backend`` 동형)."""
+    value = _env_float_default("SEARCH_OS_CUTOFF_EPS", 0.10)
+    if not (0.0 <= value < 1.0):
+        raise ValueError(f"컷오프 eps 범위 오류: SEARCH_OS_CUTOFF_EPS={value!r} (0<=eps<1)")
+    return value
+
+
+def _resolve_os_cutoff_floor() -> float:
+    """컷오프 절대 backstop floor(023, FR-004). 기본 ``0.65``. 범위 ``[-1,1]`` 밖이면 **즉시 ValueError**.
+
+    floor 는 top 코사인의 절대 하한이라 코사인 정의역 ``[-1,1]`` 안이어야 한다(경계 포함). 범위 밖은
+    잘못된 임계로 검색하지 않도록 fail-fast."""
+    value = _env_float_default("SEARCH_OS_CUTOFF_FLOOR", 0.65)
+    if not (-1.0 <= value <= 1.0):
+        raise ValueError(f"컷오프 floor 범위 오류: SEARCH_OS_CUTOFF_FLOOR={value!r} (-1<=floor<=1)")
+    return value
+
+
+def _resolve_os_probe_k() -> int:
+    """probe 표본 수 probe_k(023, FR-002). 기본 ``50``. ``1`` 미만이면 **즉시 ValueError**.
+
+    probe_k 는 baseline(표본 평균) 추정의 표본 크기라 최소 1 이상이어야 한다(0·음수는 무의미). 정수
+    형식 오류는 ``_env_int_default`` 가, 범위(>=1)는 여기서 fail-fast 로 차단한다."""
+    value = _env_int_default("SEARCH_OS_PROBE_K", 50)
+    if value < 1:
+        raise ValueError(f"컷오프 probe_k 범위 오류: SEARCH_OS_PROBE_K={value!r} (probe_k>=1)")
+    return value
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -252,6 +305,12 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_backend=_resolve_search_backend(),
         opensearch_search_pipeline=_env_str_default("OPENSEARCH_SEARCH_PIPELINE", "assets-hybrid"),
         opensearch_fusion_weights=_resolve_opensearch_fusion_weights(),
+        # 023: OS 검색 컷오프 4종. 범위 검증·fail-fast 는 _resolve_* 헬퍼가 _build_settings 시점에 수행
+        # (021 fusion_weights 동형). 기본 enabled=True 라도 pg 백엔드(기본)면 OS 경로 미실행 → 회귀 0.
+        search_os_cutoff_enabled=_resolve_os_cutoff_enabled(),
+        search_os_cutoff_eps=_resolve_os_cutoff_eps(),
+        search_os_cutoff_floor=_resolve_os_cutoff_floor(),
+        search_os_probe_k=_resolve_os_probe_k(),
     )
 
 

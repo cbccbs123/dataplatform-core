@@ -45,10 +45,16 @@ _REQUIRED_ENV = {
 }
 
 # 021 G4 가 추가하는 검색 백엔드 선택 env 키(테스트 격리를 위해 매 케이스 깨끗이 비운다).
+# 023 G3 가 추가하는 OS 검색 컷오프(probe 게이트) 선택 env 키도 함께 비워, 실행 환경에 남은 값이
+# 기본값 단언을 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
 _BACKEND_KEYS = (
     "SEARCH_BACKEND",
     "OPENSEARCH_SEARCH_PIPELINE",
     "OPENSEARCH_FUSION_WEIGHTS",
+    "SEARCH_OS_CUTOFF_ENABLED",
+    "SEARCH_OS_CUTOFF_EPS",
+    "SEARCH_OS_CUTOFF_FLOOR",
+    "SEARCH_OS_PROBE_K",
 )
 
 
@@ -156,6 +162,98 @@ class TestOpenSearchFusionWeights(unittest.TestCase):
 
     def test_non_numeric_raises(self) -> None:
         with _env(OPENSEARCH_FUSION_WEIGHTS="a,b"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestSearchOsCutoffSettings(unittest.TestCase):
+    """023 G3 — OS 검색 적합도 컷오프(probe 게이트) 4종 정식화 + fail-fast 검증.
+
+    021 ``_resolve_opensearch_fusion_weights`` 패턴 미러: dataclass 필드 + ``_resolve_*`` 환경 파싱·
+    범위 검증 + ``_build_settings`` 배선. 범위 밖 값은 init_settings(=_build_settings) 에서 **즉시
+    ValueError** — 잘못된 임계로 검색하지 않게(fail-fast, _resolve_search_backend 동형).
+
+      - ``search_os_cutoff_enabled`` : 기본 True (bool). pg 백엔드(기본)엔 무영향, OS 백엔드에만 적용.
+      - ``search_os_cutoff_eps``     : 기본 0.10, 범위 ``[0,1)`` (상대신호 하한).
+      - ``search_os_cutoff_floor``   : 기본 0.65, 범위 ``[-1,1]`` (코사인 절대 backstop).
+      - ``search_os_probe_k``        : 기본 50, ``>=1`` 정수 (probe 표본 수).
+    """
+
+    # (a) 기본값 — env 미설정 시.
+    def test_defaults_when_unset(self) -> None:
+        with _env():
+            settings = _build_settings("dev")
+        self.assertIs(settings.search_os_cutoff_enabled, True)
+        self.assertEqual(settings.search_os_cutoff_eps, 0.10)
+        self.assertEqual(settings.search_os_cutoff_floor, 0.65)
+        self.assertEqual(settings.search_os_probe_k, 50)
+
+    # (b) 환경 오버라이드.
+    def test_enabled_env_override_false(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_ENABLED="false"):
+            settings = _build_settings("dev")
+        self.assertIs(settings.search_os_cutoff_enabled, False)
+
+    def test_eps_env_override(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_EPS="0.2"):
+            settings = _build_settings("dev")
+        self.assertEqual(settings.search_os_cutoff_eps, 0.2)
+
+    def test_floor_env_override(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_FLOOR="0.7"):
+            settings = _build_settings("dev")
+        self.assertEqual(settings.search_os_cutoff_floor, 0.7)
+
+    def test_probe_k_env_override(self) -> None:
+        with _env(SEARCH_OS_PROBE_K="80"):
+            settings = _build_settings("dev")
+        self.assertEqual(settings.search_os_probe_k, 80)
+
+    # 경계 포함/제외 — eps∈[0,1)·floor∈[-1,1]·probe_k>=1.
+    def test_eps_boundary_zero_ok_one_excluded(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_EPS="0"):
+            self.assertEqual(_build_settings("dev").search_os_cutoff_eps, 0.0)
+        with _env(SEARCH_OS_CUTOFF_EPS="1"):  # 1.0 은 범위 밖([0,1))
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_floor_boundary_inclusive(self) -> None:
+        for v in ("-1", "1"):
+            with _env(SEARCH_OS_CUTOFF_FLOOR=v):
+                _build_settings("dev")  # [-1,1] 경계 포함 — 예외 없음
+
+    def test_probe_k_boundary_one_ok(self) -> None:
+        with _env(SEARCH_OS_PROBE_K="1"):
+            self.assertEqual(_build_settings("dev").search_os_probe_k, 1)
+
+    # (c) fail-fast — 범위 밖은 즉시 ValueError.
+    def test_eps_negative_raises(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_EPS="-0.1"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_probe_k_zero_raises(self) -> None:
+        with _env(SEARCH_OS_PROBE_K="0"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_floor_above_one_raises(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_FLOOR="2"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_floor_below_minus_one_raises(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_FLOOR="-1.5"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_eps_non_numeric_raises(self) -> None:
+        with _env(SEARCH_OS_CUTOFF_EPS="abc"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_probe_k_non_integer_raises(self) -> None:
+        with _env(SEARCH_OS_PROBE_K="3.5"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 

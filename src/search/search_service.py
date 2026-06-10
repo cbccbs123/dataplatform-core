@@ -48,6 +48,15 @@ _MODALITY_BUCKETS: dict[str, str] = {
 # G4(T007) — 미설정이면 이 측정 근거 균형값으로 폴백(getattr). 동작 불변(SC-001): pg 경로 무관.
 _DEFAULT_OS_FUSION_WEIGHTS: tuple[float, float] = (0.5, 0.5)
 
+# 023: OS 검색 적합도 컷오프(probe 게이트) 기본값. _DEFAULT_OS_FUSION_WEIGHTS 동형 — settings 미초기화
+# (순수 단위 등)에서 getattr 폴백으로 쓴다(cross-module private import 안 함). enabled 기본 False 는
+# 미초기화 시 안전(무게이트) — 실 settings 기본은 True 이나 search_backend='pg'(기본)면 OS 경로 미실행
+# 이라 무관하다. eps/floor/probe_k 는 settings 기본과 같은 측정 근거값(opensearch_search 의 G1/G2 상수 동치).
+_DEFAULT_OS_CUTOFF_ENABLED: bool = False
+_DEFAULT_OS_CUTOFF_EPS: float = 0.10
+_DEFAULT_OS_CUTOFF_FLOOR: float = 0.65
+_DEFAULT_OS_PROBE_K: int = 50
+
 
 def _row_similarity(row: dict[str, Any]) -> float:
     """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
@@ -125,6 +134,13 @@ def _grouped_via_opensearch(
         index=getattr(cfg, "opensearch_index", "assets"),
         pipeline_name=getattr(cfg, "opensearch_search_pipeline", "assets-hybrid"),
         exclude_medical=True,
+        # 023: 적합도 컷오프(probe 게이트) 설정을 cfg 에서 읽어 OS seam 에 전달한다(fusion_weights 동형
+        # getattr 폴백 — settings 미초기화 순수 단위 방어). cutoff_enabled=False(미초기화 기본)면
+        # search_assets_os 가 probe 미호출·버킷 그대로라 021/022 동작 동치다(회귀 0).
+        cutoff_enabled=getattr(cfg, "search_os_cutoff_enabled", _DEFAULT_OS_CUTOFF_ENABLED),
+        cutoff_eps=getattr(cfg, "search_os_cutoff_eps", _DEFAULT_OS_CUTOFF_EPS),
+        cutoff_floor=getattr(cfg, "search_os_cutoff_floor", _DEFAULT_OS_CUTOFF_FLOOR),
+        cutoff_probe_k=getattr(cfg, "search_os_probe_k", _DEFAULT_OS_PROBE_K),
     )  # client.search 미도달 예외도 전파(FR-007)
     # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
     for m in requested:
