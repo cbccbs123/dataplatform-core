@@ -14,7 +14,7 @@ Features:
 - Configurable logging
 - Explicit transaction context manager
 - Server version detection and minimum-version guard
-- Convenience query helpers (execute, execute_in_transaction)
+- 편의 쿼리 헬퍼 (execute, execute_in_transaction)
 """
 
 from __future__ import annotations
