@@ -38,11 +38,11 @@ _MODALITY_BUCKETS: dict[str, str] = {
     "video": "video",
 }
 
-# 021 G3 백엔드 분담: backend='opensearch' 일 때 text·audio 버킷은 020 OS 인덱스(하이브리드), image·video
-# 버킷은 현 PG CLIP 2단계 경로(022 까지 PG 유지). 020 인덱스는 활성 텍스트 채널 임베딩 자산만 포함하므로
-# (시각 CLIP 채널은 OS 미포함) 이 경계와 자연 정합한다(spec Clarifications).
-_OS_MODALITIES: frozenset[str] = frozenset({"text", "audio"})
-_PG_VISUAL_MODALITIES: frozenset[str] = frozenset({"image", "video"})
+# 022 백엔드 분담: backend='opensearch' 면 text·audio·**image·video 모두** 020 OS 인덱스(하이브리드)에서
+# 검색한다(021 의 image/video→PG CLIP 경로를 OS 로 전환). image/video 는 020 assets 인덱스에 한국어 VLM
+# 캡션(nori) + KoSimCSE 캡션 임베딩(embedding)으로 이미 색인돼 있어 text/audio 와 동일 하이브리드로
+# 회수된다(CLIP 아님 — 시각-내용 매칭은 후속 spec). 따라서 OS 경로는 요청 모달리티 전체를 한 번의
+# search_assets_os 호출로 처리하며, PG/모달리티 분기(021 의 _OS_MODALITIES·_PG_VISUAL_MODALITIES)는 제거됐다.
 
 # OS 정규화 융합 가중치 (BM25, kNN) 기본값. 설정 필드(opensearch_fusion_weights) 정식화·범위검증은
 # G4(T007) — 미설정이면 이 측정 근거 균형값으로 폴백(getattr). 동작 불변(SC-001): pg 경로 무관.
@@ -82,83 +82,53 @@ def _grouped_via_opensearch(
     modalities: list[str] | None,
     limit_per_bucket: int,
     text_channel: str,
-    query_model_name: str | None,
-    structured: dict[str, Any] | None,
-    text_hybrid_alpha: float,
-    image_search_alpha: float,
-    fusion: str,
-    chunk_agg: ChunkAggConfig | None,
     cfg: Any,
     os_search_fn: Callable[..., dict[str, list[dict[str, Any]]]],
     os_client_fn: Callable[..., Any],
-    grouped_fn: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
-    """backend='opensearch' 경로의 모달리티 버킷을 조립한다(021 G3, FR-003·SC-005).
+    """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022, FR-002·FR-003·SC-005).
 
-    text·audio 버킷은 020 OS 인덱스를 ``os_search_fn`` 으로 하이브리드 검색(nori BM25 + kNN + 정규화
-    융합)하고, image·video 버킷은 현 PG CLIP 2단계 경로(``grouped_fn``, 022 까지 PG 유지)에서 가져와
-    **현 pg 분기와 같은 키**(text_documents·audio·image·video·meta)로 병합한다. 반환 grouped 는 pg
-    분기와 동일 모양이라 호출부의 ``_filter_by_min_score`` 공유 코드가 그대로 처리한다(응답 동형).
+    text·audio·**image·video 모든 버킷**을 020 OS 인덱스에서 동일 하이브리드(nori BM25 캡션·라벨 +
+    ``embedding`` kNN + 정규화 융합)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM 캡션·
+    KoSimCSE 캡션 임베딩으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속 spec).
+    요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 현 pg 분기와 같은
+    키(text_documents·audio·image·video·meta)로 담는다 — 반환 grouped 는 pg 분기와 동일 모양이라 호출부의
+    ``_filter_by_min_score`` 공유 코드가 그대로 처리한다(응답 동형).
 
     설계 판단:
-    - **모달리티 키 매핑**: ``os_search_fn`` 버킷 키는 모달리티명('text'/'audio')이고 응답 grouped 키는
-      ('text_documents'/'audio')이므로 ``_MODALITY_BUCKETS`` 로 변환해 담는다.
-    - **LLM 미호출(FR-004)**: OS 검색에는 원문 ``query`` 만 넘기고 ``structured``/``structure_user_query``
-      를 전달하지 않는다(LLM 질의 구조화 0). ``structured`` 는 image/video 의 현 PG 경로에만 그대로 흘려
-      pg 동작을 보존한다(pg structured 처리 무변경).
-    - **불필요 CLIP 회피**: image/video 미요청이면 ``grouped_fn``(PG CLIP)을 아예 호출하지 않는다 —
-      이때 meta 는 ``{"backend": "opensearch"}``. image/video 요청 시엔 그 PG 호출의 meta 를 쓴다.
-    - **OS 미도달(FR-008)**: ``os_client_fn``/``os_search_fn`` 예외를 try/except 로 감싸지 않아 그대로
+    - **PG·LLM 미접촉(FR-002·SC-004)**: PG grouped(시각 CLIP 2단계)·``structure_user_query``(LLM)를
+      호출하지 않는다 — 원문 ``query`` 만 OS 에 넘긴다(멀티모달 LLM 0·ms). 따라서 PG 전용 파라미터
+      (structured·alpha·fusion·query_model_name·chunk_agg·grouped_fn)는 이 경로에서 제거됐다.
+    - **모달리티 키 매핑**: ``os_search_fn`` 버킷 키는 모달리티명('text'/'image')이고 응답 grouped 키는
+      ('text_documents'/'image')이므로 ``_MODALITY_BUCKETS`` 로 변환해 담는다.
+    - **meta**: 항상 ``{"backend": "opensearch"}`` 단일(PG meta 통과 없음 — grouped 미호출).
+    - **OS 미도달(FR-007)**: ``os_client_fn``/``os_search_fn`` 예외를 try/except 로 감싸지 않아 그대로
       전파한다(silent pg 폴백 금지 — 결과가 백엔드 가용성에 따라 달라지지 않게).
 
     ⚠️ 결정성(헌법 3조): 최종 응답 버킷 순서는 호출부의 ``label_keys`` 가 정하므로 여기 grouped 의
-    삽입 순서(OS→PG)는 출력 순서에 영향하지 않는다.
+    삽입 순서는 출력 순서에 영향하지 않는다.
     """
     requested = modalities if modalities is not None else list(_MODALITY_BUCKETS)
-    os_modalities = [m for m in requested if m in _OS_MODALITIES]
-    pg_visual = [m for m in requested if m in _PG_VISUAL_MODALITIES]
 
-    grouped: dict[str, Any] = {}
+    grouped: dict[str, Any] = {"meta": {"backend": "opensearch"}}
+    if not requested:
+        return grouped  # 빈 요청: OS 미접촉(불필요 IO 회피)
 
-    # text·audio 버킷 = 020 OS 인덱스 하이브리드 검색(원문 query — LLM 미호출, FR-004).
-    if os_modalities:
-        client = os_client_fn()  # OS 클라이언트 생성 실패 시 예외 전파(FR-008)
-        os_buckets = os_search_fn(
-            client,
-            query,
-            modalities=os_modalities,
-            k=limit_per_bucket,
-            channel=text_channel,
-            weights=getattr(cfg, "opensearch_fusion_weights", _DEFAULT_OS_FUSION_WEIGHTS),
-            index=getattr(cfg, "opensearch_index", "assets"),
-            pipeline_name=getattr(cfg, "opensearch_search_pipeline", "assets-hybrid"),
-            exclude_medical=True,
-        )  # client.search 미도달 예외도 전파(FR-008)
-        # 모달리티명('text'/'audio') → grouped 버킷 키('text_documents'/'audio') 매핑.
-        for m in os_modalities:
-            grouped[_MODALITY_BUCKETS[m]] = os_buckets.get(m, [])
-
-    # image·video 버킷 = 현 PG CLIP 2단계 경로. 미요청이면 호출 생략(불필요 CLIP 회피).
-    if pg_visual:
-        pg_grouped = grouped_fn(
-            query,
-            structured=structured,
-            limit_per_bucket=limit_per_bucket,
-            text_hybrid_alpha=text_hybrid_alpha,
-            image_search_alpha=image_search_alpha,
-            fusion=fusion,
-            channel=text_channel,
-            query_model_name=query_model_name,
-            chunk_agg=chunk_agg,
-            include_visual=True,
-        )
-        for m in pg_visual:
-            grouped[_MODALITY_BUCKETS[m]] = pg_grouped.get(_MODALITY_BUCKETS[m], [])
-        # PG meta(structured 등)를 보존하되 backend 표식은 **항상** 남긴다 — 시각 동반 요청에서도
-        # 소비자가 meta.backend 로 OS 사용 여부를 일관 판별(관측성, 코드리뷰 2026-06-10).
-        grouped["meta"] = {**pg_grouped.get("meta", {}), "backend": "opensearch"}
-    else:
-        grouped["meta"] = {"backend": "opensearch"}
+    client = os_client_fn()  # OS 클라이언트 생성 실패 시 예외 전파(FR-007)
+    os_buckets = os_search_fn(
+        client,
+        query,
+        modalities=requested,  # 요청 전 모달리티(image/video 포함)를 한 번에 OS 검색
+        k=limit_per_bucket,
+        channel=text_channel,
+        weights=getattr(cfg, "opensearch_fusion_weights", _DEFAULT_OS_FUSION_WEIGHTS),
+        index=getattr(cfg, "opensearch_index", "assets"),
+        pipeline_name=getattr(cfg, "opensearch_search_pipeline", "assets-hybrid"),
+        exclude_medical=True,
+    )  # client.search 미도달 예외도 전파(FR-007)
+    # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
+    for m in requested:
+        grouped[_MODALITY_BUCKETS[m]] = os_buckets.get(m, [])
 
     return grouped
 
@@ -212,13 +182,14 @@ def search_hybrid(
 
     ``backend`` 는 검색 read path 백엔드(021)다. **미지정(None)** 이면 ``settings.search_backend``
     (없으면 ``'pg'`` — 020 opt-in 폴백 동형, 필드 정식화는 G4)로 해소한다. ``'opensearch'`` **외엔
-    전부 현 pg 경로**(``_grouped_fn`` 무변경 → 회귀 0·SC-001). ``'opensearch'`` 면 text·audio 버킷은
-    020 OS 인덱스(nori BM25 + kNN + 정규화 융합)를 ``_os_search_fn`` 으로, image·video 버킷은 현 PG
-    CLIP 2단계 경로(``_grouped_fn``)에서 가져와 **같은 키**(text_documents·audio·image·video)로 병합
-    한다(SC-005 응답 동형). OS 경로는 ``structure_user_query``(LLM)·``structured`` 를 OS 검색에 넘기지
-    않고 원문 ``query`` 를 쓴다(FR-004·SC-004). OS 미도달이면 ``_os_search_fn``/``_os_client_fn`` 예외를
-    **그대로 전파**한다(FR-008·SC-006 — silent pg 폴백 금지). ``_os_search_fn``/``_os_client_fn`` 은
-    테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/``get_client``).
+    전부 현 pg 경로**(``_grouped_fn`` 무변경 → 회귀 0·SC-001). ``'opensearch'`` 면 **text·audio·image·
+    video 모든 버킷**을 020 OS 인덱스(nori BM25 캡션·라벨 + ``embedding`` kNN + 정규화 융합)에서
+    ``_os_search_fn`` 으로 검색해 **같은 키**(text_documents·audio·image·video)로 반환한다(022 — image/
+    video 를 더 이상 PG CLIP 으로 보내지 않음, FR-003·SC-005 응답 동형). OS 경로는 PG grouped(시각
+    CLIP)·``structure_user_query``(LLM)·``structured`` 를 호출하지 않고 원문 ``query`` 를 쓴다(멀티모달
+    LLM 0 — FR-002·SC-004). OS 미도달이면 ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다
+    (FR-007·SC-006 — silent pg 폴백 금지). ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam
+    (기본 ``opensearch_search.search_assets_os``/``get_client``).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -263,22 +234,17 @@ def search_hybrid(
     backend_name = backend if backend is not None else getattr(cfg, "search_backend", "pg")
 
     if backend_name == "opensearch":
-        # text·audio=OS(020 인덱스) + image·video=현 PG 병합. OS 미도달 예외는 전파(FR-008).
+        # 022: text·audio·image·video 전 모달리티를 OS(020 인덱스)로 검색(PG CLIP·LLM 미접촉).
+        # OS 미도달 예외는 전파(FR-007). PG 전용 인자(structured·alpha·fusion·query_model_name·
+        # chunk_agg·_grouped_fn)는 OS 경로 미사용이라 넘기지 않는다(아래 else pg 분기에서만 사용).
         grouped = _grouped_via_opensearch(
             query,
             modalities=modalities,
             limit_per_bucket=limit_per_bucket,
             text_channel=text_channel,
-            query_model_name=query_model_name,
-            structured=structured,
-            text_hybrid_alpha=text_hybrid_alpha,
-            image_search_alpha=image_search_alpha,
-            fusion=fusion,
-            chunk_agg=chunk_agg,
             cfg=cfg,
             os_search_fn=_os_search_fn,
             os_client_fn=_os_client_fn,
-            grouped_fn=_grouped_fn,
         )
     else:
         # backend != 'opensearch'(기본 pg): 기존 코드 경로 그대로 — 한 줄도 바꾸지 않는다(회귀 0·SC-001).
