@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from typing import Any
+
+from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
 # 주의: labels 는 매핑상 keyword 지만 plan §1 이 multi_match 대상에 포함한다 — multi_match 는 keyword
@@ -32,6 +34,14 @@ _TEXT_FIELDS: tuple[str, ...] = (
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
 _MEDICAL_LABEL = "medical"
 
+# OS 검색 버킷 라벨 → 저장된 modality 값 집합(PG media_search 와 동일 분류). 요청 라벨('text')과
+# 저장 modality 값('txt')의 불일치를 흡수한다 — text 버킷은 ALLOWED_TEXT_META_FILE_KINDS(txt·json·
+# pdf·office), audio 는 'audio'. 단일 term 이 아니라 terms(집합) 필터를 써야 실데이터가 회수된다.
+_MODALITY_VALUES: dict[str, frozenset[str]] = {
+    "text": frozenset(ALLOWED_TEXT_META_FILE_KINDS),
+    "audio": frozenset({MediaKind.AUDIO.value}),
+}
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     """None·비수치·NaN·inf 를 안전한 유한 실수로 정규화(결정적·순수)."""
@@ -46,7 +56,7 @@ def build_search_body(
     query: str,
     query_vector: list[float],
     *,
-    modality: str,
+    modality_values: Collection[str],
     k: int = 100,
     weights: tuple[float, float] = (0.5, 0.5),
     exclude_medical: bool = True,
@@ -54,8 +64,9 @@ def build_search_body(
     """OpenSearch 하이브리드 검색 본문을 만든다(순수·결정적).
 
     nori 텍스트 ``multi_match``(BM25) ⊕ ``knn``(embedding, 질의 벡터)의 **hybrid 쿼리**다. 두
-    서브쿼리는 각각 ``bool`` 로 감싸 ① ``modality`` keyword term 필터, ② ``exclude_medical`` 이면
-    ``domain_label='medical'`` ``must_not``(FR-011)을 균일 적용한다.
+    서브쿼리는 각각 ``bool`` 로 감싸 ① ``modality`` keyword **terms** 필터(``modality_values`` 집합 —
+    text 버킷은 txt·json·pdf·office 등 다중값이라 단일 term 이 아니라 terms 로 거른다), ②
+    ``exclude_medical`` 이면 ``domain_label='medical'`` ``must_not``(FR-011)을 균일 적용한다.
 
     점수 융합(BM25·kNN 의 min-max 정규화 + 가중평균)은 OpenSearch **검색 파이프라인**
     (normalization-processor, G2 ``ensure_search_pipeline``)이 담당하므로 본문은 hybrid 서브쿼리
@@ -69,7 +80,8 @@ def build_search_body(
     정규화 융합 점수로 정렬되고, FR-009 결정적 tiebreaker(점수 desc·동점 ``id`` asc)는
     ``search_assets_os`` 가 클라이언트에서 적용한다(헌법 3조). (G5 실OS 검증으로 교정.)
     """
-    filters: list[dict[str, Any]] = [{"term": {"modality": modality}}]
+    # terms(집합) 필터 — 라벨↔저장값 불일치(text→txt·json…) 흡수. sorted 로 결정적 본문(헌법 3조).
+    filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
     must_not: list[dict[str, Any]] = []
     if exclude_medical:
         must_not.append({"term": {"domain_label": _MEDICAL_LABEL}})
@@ -206,11 +218,14 @@ def search_assets_os(
     """
     query_vector = embed_fn(query, channel=channel)
     buckets: dict[str, list[dict[str, Any]]] = {}
-    for modality in modalities:
+    for label in modalities:
+        # 요청 라벨('text'/'audio') → 저장된 modality 값 집합으로 해소(text=txt·json·pdf·office).
+        # 매핑에 없는 라벨은 라벨 자체를 값으로 본다(미래 모달리티 안전 폴백).
+        values = _MODALITY_VALUES.get(label, frozenset({label}))
         body = build_search_body(
             query,
             query_vector,
-            modality=modality,
+            modality_values=values,
             k=k,
             weights=weights,
             exclude_medical=exclude_medical,
@@ -221,7 +236,7 @@ def search_assets_os(
         # FR-009 결정적 tiebreaker(헌법 3조): hybrid 쿼리는 OS sort(_score+필드)를 금지하므로 정렬을
         # 클라이언트에서 한다 — 정규화 융합 점수(similarity) desc, 동점은 id asc 로 결정적.
         rows.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
-        buckets[modality] = rows
+        buckets[label] = rows
     return buckets
 
 

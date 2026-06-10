@@ -105,14 +105,14 @@ def _os_reachable() -> bool:
 # 작은 알려진 코퍼스. 각 질의의 키워드는 **목표 문서에만** 등장하도록 토픽을 분리해, nori BM25 가
 # 결정적으로 목표를 상위로 올린다(recall sanity 의 안정성). (asset_id, modality, domain_label, summary, keywords, labels)
 _CORPUS: tuple[tuple[str, str, str | None, str, list[str], list[str]], ...] = (
-    (_ID_FIN, "text", "general", "2024년 분기 재무 보고서 매출 영업이익 분석 자료", ["재무", "매출", "영업이익"], ["보고서"]),
-    (_ID_COOK, "text", "general", "김치찌개 끓이는 요리법 재료 손질 방법 정리", ["요리", "김치찌개", "레시피"], ["가이드"]),
-    (_ID_TRIP, "text", "general", "제주도 여행 일정 관광 명소 추천 코스 안내", ["여행", "제주도", "관광"], ["여행기"]),
+    (_ID_FIN, "txt", "general", "2024년 분기 재무 보고서 매출 영업이익 분석 자료", ["재무", "매출", "영업이익"], ["보고서"]),
+    (_ID_COOK, "txt", "general", "김치찌개 끓이는 요리법 재료 손질 방법 정리", ["요리", "김치찌개", "레시피"], ["가이드"]),
+    (_ID_TRIP, "txt", "general", "제주도 여행 일정 관광 명소 추천 코스 안내", ["여행", "제주도", "관광"], ["여행기"]),
     (_ID_MEET, "audio", "general", "프로젝트 주간 회의 녹취록 일정 공유 결정사항", ["회의", "녹취", "일정"], ["회의록"]),
     (_ID_MUSIC, "audio", "general", "인디 음악 팟캐스트 인터뷰 방송 에피소드", ["음악", "팟캐스트", "방송"], ["방송"]),
-    (_ID_MED, "text", "medical", "환자 진료 기록 처방 내역 병원 검사 결과 소견", ["환자", "진료", "처방"], ["의무기록"]),
-    (_ID_TWIN_A, "text", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
-    (_ID_TWIN_B, "text", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
+    (_ID_MED, "txt", "medical", "환자 진료 기록 처방 내역 병원 검사 결과 소견", ["환자", "진료", "처방"], ["의무기록"]),
+    (_ID_TWIN_A, "txt", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
+    (_ID_TWIN_B, "txt", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
 )
 
 
@@ -206,7 +206,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         text = self._search("재무 매출 보고서", ["text"])["text"]
         self.assertTrue(text, "text 버킷에 결과가 있어야 한다")
         self.assertEqual(text[0]["id"], _ID_FIN, "재무 질의의 top1 은 재무 문서여야 한다")
-        self.assertEqual(text[0]["modality"], "text")
+        self.assertEqual(text[0]["modality"], "txt")  # 저장 modality 값(라벨 'text' → 값 'txt')
 
         audio = self._search("회의 녹취 일정", ["audio"])["audio"]
         self.assertTrue(audio, "audio 버킷에 결과가 있어야 한다")

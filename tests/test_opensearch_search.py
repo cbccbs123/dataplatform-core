@@ -44,7 +44,7 @@ class BuildSearchBodyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.query = "한국어 검색 질의"
         self.vector = [0.1, 0.2, 0.3, 0.4]
-        self.body = build_search_body(self.query, self.vector, modality="text", k=50)
+        self.body = build_search_body(self.query, self.vector, modality_values=["txt"], k=50)
 
     def test_hybrid_with_two_subqueries(self) -> None:
         # (1) OpenSearch hybrid 쿼리 + 서브쿼리 2개(텍스트·knn).
@@ -68,9 +68,9 @@ class BuildSearchBodyTest(unittest.TestCase):
         self.assertEqual(knn["k"], 50)
 
     def test_modality_filter_in_each_subquery(self) -> None:
-        # (2) modality keyword term 필터가 각 서브쿼리 bool filter 에 포함.
+        # (2) modality keyword terms 필터(집합)가 각 서브쿼리 bool filter 에 포함 — 단일 term 아님.
         for sub in _subqueries(self.body):
-            self.assertIn({"term": {"modality": "text"}}, sub["bool"]["filter"])
+            self.assertIn({"terms": {"modality": ["txt"]}}, sub["bool"]["filter"])
 
     def test_exclude_medical_must_not_default(self) -> None:
         # (3) exclude_medical=True(기본): domain_label='medical' must_not(FR-011).
@@ -82,7 +82,7 @@ class BuildSearchBodyTest(unittest.TestCase):
     def test_include_medical_when_disabled(self) -> None:
         # (3) exclude_medical=False: 의료 배제 미포함.
         body = build_search_body(
-            self.query, self.vector, modality="text", exclude_medical=False
+            self.query, self.vector, modality_values=["txt"], exclude_medical=False
         )
         for sub in _subqueries(body):
             self.assertNotIn(
@@ -102,10 +102,22 @@ class BuildSearchBodyTest(unittest.TestCase):
         self.assertEqual(self.body["size"], 50)
 
     def test_audio_modality_filter(self) -> None:
-        # 모달리티 분담(text·audio→OS): audio 도 term 필터가 그 값으로 들어간다.
-        body = build_search_body(self.query, self.vector, modality="audio")
+        # 모달리티 분담(text·audio→OS): audio 도 terms 필터(['audio'])로 들어간다.
+        body = build_search_body(self.query, self.vector, modality_values=["audio"])
         for sub in _subqueries(body):
-            self.assertIn({"term": {"modality": "audio"}}, sub["bool"]["filter"])
+            self.assertIn({"terms": {"modality": ["audio"]}}, sub["bool"]["filter"])
+
+    def test_text_modality_values_use_terms_set(self) -> None:
+        # text 버킷은 다중 modality 값(txt·json·pdf·office)을 terms 집합으로 정렬해 거른다 —
+        # 실데이터의 'txt' 가 'text' 라벨로 색인되지 않는 불일치를 흡수(실OS A/B 에서 발견·교정).
+        from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS
+
+        body = build_search_body(
+            self.query, self.vector, modality_values=ALLOWED_TEXT_META_FILE_KINDS
+        )
+        expected = {"terms": {"modality": sorted(ALLOWED_TEXT_META_FILE_KINDS)}}
+        for sub in _subqueries(body):
+            self.assertIn(expected, sub["bool"]["filter"])
 
 
 class OsHitToRowTest(unittest.TestCase):
@@ -236,10 +248,17 @@ class _FakeSearchClient:
         )
         if self._raise_on_search is not None:
             raise self._raise_on_search
-        modality = body["query"]["hybrid"]["queries"][0]["bool"]["filter"][0]["term"][
+        terms = body["query"]["hybrid"]["queries"][0]["bool"]["filter"][0]["terms"][
             "modality"
         ]
-        hits = self._hits_by_modality.get(modality, [])
+        # 저장값 집합(terms) → canned hits 버킷 라벨. audio/video 는 단일값, 그 외(txt·json…)는 text.
+        if "audio" in terms:
+            label = "audio"
+        elif "video" in terms:
+            label = "video"
+        else:
+            label = "text"
+        hits = self._hits_by_modality.get(label, [])
         return {"hits": {"hits": hits}}
 
 
@@ -334,8 +353,8 @@ class SearchAssetsOsTest(unittest.TestCase):
             subs = body["query"]["hybrid"]["queries"]
             _, knn = _find_with_clause(subs, "knn")
             self.assertEqual(knn["knn"]["embedding"]["vector"], self.vector)
-            mod = subs[0]["bool"]["filter"][0]["term"]["modality"]
-            modalities_searched.append(mod)
+            terms = subs[0]["bool"]["filter"][0]["terms"]["modality"]
+            modalities_searched.append("audio" if "audio" in terms else "text")
         self.assertEqual(set(modalities_searched), {"text", "audio"})
 
     def test_results_deterministic_tiebreaker(self) -> None:
