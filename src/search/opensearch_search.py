@@ -62,8 +62,12 @@ def build_search_body(
     구성까지만 책임진다 — ``weights`` 는 그 파이프라인 등록용 융합 가중치 메타로, 쿼리 본문에는
     반영하지 않는다(호출부 search_assets_os 가 파이프라인에 전달, G2).
 
-    정렬은 점수 내림차순 + **동점 ``asset_id`` 오름차순**(FR-009 결정적 tiebreaker, 헌법 3조).
     ``size`` 는 ``k``. 필드명·차원은 020 인덱스 매핑(`opensearch_sync.build_index_body`)과 일치.
+
+    **정렬**: OpenSearch hybrid 쿼리는 ``_score`` 와 필드 정렬 조합을 금지(실OS 400: "_score sort
+    criteria cannot be applied with any other criteria")하므로 본문에 ``sort`` 를 두지 않는다 —
+    정규화 융합 점수로 정렬되고, FR-009 결정적 tiebreaker(점수 desc·동점 ``id`` asc)는
+    ``search_assets_os`` 가 클라이언트에서 적용한다(헌법 3조). (G5 실OS 검증으로 교정.)
     """
     filters: list[dict[str, Any]] = [{"term": {"modality": modality}}]
     must_not: list[dict[str, Any]] = []
@@ -83,8 +87,8 @@ def build_search_body(
     return {
         "size": int(k),
         "query": {"hybrid": {"queries": [text_sub, knn_sub]}},
-        # 결정적 tiebreaker(FR-009): 정규화 점수 desc → 동점 asset_id(keyword) asc.
-        "sort": [{"_score": {"order": "desc"}}, {"asset_id": {"order": "asc"}}],
+        # 정렬 없음: hybrid 쿼리는 _score+필드 sort 조합을 금지(실OS 400)하므로 정규화 융합 점수로만
+        # 정렬한다. FR-009 결정적 tiebreaker(점수 desc·동점 id asc)는 search_assets_os 가 클라이언트에서.
     }
 
 
@@ -213,7 +217,11 @@ def search_assets_os(
         )
         resp = client.search(index=index, body=body, search_pipeline=pipeline_name)
         hits = ((resp or {}).get("hits") or {}).get("hits") or []
-        buckets[modality] = [os_hit_to_row(h) for h in hits]
+        rows = [os_hit_to_row(h) for h in hits]
+        # FR-009 결정적 tiebreaker(헌법 3조): hybrid 쿼리는 OS sort(_score+필드)를 금지하므로 정렬을
+        # 클라이언트에서 한다 — 정규화 융합 점수(similarity) desc, 동점은 id asc 로 결정적.
+        rows.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
+        buckets[modality] = rows
     return buckets
 
 

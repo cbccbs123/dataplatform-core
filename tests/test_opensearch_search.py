@@ -90,12 +90,12 @@ class BuildSearchBodyTest(unittest.TestCase):
                 sub["bool"].get("must_not", []),
             )
 
-    def test_deterministic_tiebreaker_sort(self) -> None:
-        # (4) 결정적 tiebreaker(FR-009): 점수 desc → 동점 asset_id asc.
-        self.assertEqual(
-            self.body["sort"],
-            [{"_score": {"order": "desc"}}, {"asset_id": {"order": "asc"}}],
-        )
+    def test_no_score_field_combined_sort(self) -> None:
+        # (4) FR-009 결정적 tiebreaker 는 OS sort 가 아니라 클라이언트(search_assets_os)에서 적용한다.
+        # OpenSearch hybrid 쿼리는 _score 와 필드 정렬 조합을 금지(실OS 400: "_score sort criteria
+        # cannot be applied with any other criteria")하므로, build_search_body 본문에는 sort 를 두지
+        # 않고 정규화 융합 점수(_score)로만 정렬한다(G5 실OS 검증으로 교정).
+        self.assertNotIn("sort", self.body)
 
     def test_size_equals_k(self) -> None:
         # (5) size=k.
@@ -337,6 +337,28 @@ class SearchAssetsOsTest(unittest.TestCase):
             mod = subs[0]["bool"]["filter"][0]["term"]["modality"]
             modalities_searched.append(mod)
         self.assertEqual(set(modalities_searched), {"text", "audio"})
+
+    def test_results_deterministic_tiebreaker(self) -> None:
+        # FR-009(헌법 3조): OS sort 불가(hybrid 제약) → 클라이언트에서 (-similarity, id) 결정적 정렬.
+        # OS 가 동점·뒤섞인 순서로 hit 을 줘도 출력은 점수 desc·동점 id asc 로 고정된다.
+        client = _FakeSearchClient(
+            hits_by_modality={
+                "text": [
+                    _os_hit("b", 0.5, "text"),
+                    _os_hit("c", 0.9, "text"),
+                    _os_hit("a", 0.5, "text"),
+                ]
+            }
+        )
+        out = search_assets_os(
+            client,
+            self.query,
+            modalities=("text",),
+            index="assets",
+            pipeline_name="assets-hybrid",
+            embed_fn=self.fake_embed,
+        )
+        self.assertEqual([r["id"] for r in out["text"]], ["c", "a", "b"])
 
     def test_returns_bucket_per_modality_mapped_rows(self) -> None:
         # (c) {modality: [os_hit_to_row 행]} 버킷 — text 2건·audio 1건.
