@@ -1,7 +1,8 @@
 """F-5.1 분류 결과 영속화.
 
 ``asset_classification`` 적재 + ``asset.domain_label``/``domain_confidence`` 갱신.
-final_label == 'review' 면 ``unresolved_pool`` 에 등록(HITL 대상).
+final_label == 'review' 는 별도 큐 없이 ``asset.domain_label='review'`` 표식만 남긴다
+(unresolved_pool 테이블은 드롭됨 — HITL 큐는 단계 D에서 결정, spec 003 FR-013).
 psycopg ``Connection`` 을 받아 오케스트레이터 트랜잭션에서 조합한다.
 """
 
@@ -13,11 +14,8 @@ from typing import Any
 
 from psycopg import Connection
 
-from src.classify.types import DOMAIN_REVIEW, ClassificationResult
+from src.classify.types import ClassificationResult
 from src.database.ids import uuid7
-
-# unresolved_pool.reason 값 — run_ingest 팩 선택 로직이 이 reason 으로 HITL 대상을 식별한다.
-_REASON_CLASSIFICATION_REVIEW = "classification_review"
 
 
 def record_classification(conn: Connection[Any], asset_id: uuid.UUID, result: ClassificationResult) -> None:
@@ -51,19 +49,9 @@ def record_classification(conn: Connection[Any], asset_id: uuid.UUID, result: Cl
                 result.final_label, result.confidence, result.decided_stage, result.policy_version,
             ),
         )
-        # asset 테이블도 동기화 — run_ingest 가 domain_label 로 팩 선택·deferred 판별
+        # asset 테이블도 동기화 — run_ingest 가 domain_label 로 팩 선택·deferred 판별.
+        # 'review' 판정도 이 표식이 전부다(드롭된 unresolved_pool 에 INSERT 금지 — FR-013).
         cur.execute(
             "UPDATE asset SET domain_label = %s, domain_confidence = %s, updated_at = now() WHERE asset_id = %s",
             (result.final_label, result.confidence, asset_id),
         )
-        if result.final_label == DOMAIN_REVIEW:
-            # 'review' 판정 자산은 HITL 대기열(unresolved_pool) 에 등록.
-            # ON CONFLICT DO NOTHING: 중복 실행해도 풀 항목은 한 번만 생성된다.
-            cur.execute(
-                """
-                INSERT INTO unresolved_pool (pool_id, asset_id, reason, payload)
-                VALUES (%s, %s, %s, %s::jsonb)
-                ON CONFLICT (asset_id) DO NOTHING
-                """,
-                (uuid7(), asset_id, _REASON_CLASSIFICATION_REVIEW, json.dumps({"decided_stage": result.decided_stage})),
-            )

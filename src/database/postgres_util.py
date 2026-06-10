@@ -14,8 +14,7 @@ Features:
 - Configurable logging
 - Explicit transaction context manager
 - Server version detection and minimum-version guard
-- Convenience query helpers (execute, fetch_one)
-- Health check utility
+- Convenience query helpers (execute, execute_in_transaction)
 """
 
 from __future__ import annotations
@@ -132,7 +131,6 @@ class PostgresUtil:
         self.dsn = dsn
         self.min_server_version = _resolve_min_server_version(min_server_version)
         self.logger = logger or logging.getLogger(__name__)
-        self._conn: Connection[Any] | None = None
         self._pool: Any = None
         self._version_checked = False
         self._on_retry = on_retry
@@ -199,15 +197,11 @@ class PostgresUtil:
                 return False
             if sqlstate in self.config.retry_on_sqlstates:
                 return True
-        if isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError)):
+        if isinstance(exc, psycopg.OperationalError | psycopg.InterfaceError):
             return True
         if isinstance(
             exc,
-            (
-                errors.SerializationFailure,
-                errors.DeadlockDetected,
-                errors.ConnectionException,
-            ),
+            errors.SerializationFailure | errors.DeadlockDetected | errors.ConnectionException,
         ):
             return True
         return False
@@ -296,14 +290,6 @@ class PostgresUtil:
             raise last_error
         raise RuntimeError("run_with_retry reached unexpected state.")
 
-    def connect(self) -> Connection[Any]:
-        if self._conn is None or self._conn.closed:
-            self.logger.debug("Opening single PostgreSQL connection.")
-            conn = psycopg.connect(self._build_conninfo())
-            self._validate_server_version(conn)
-            self._conn = conn
-        return self._conn
-
     def open_pool(self) -> Any:
         if self._pool is None:
             from psycopg_pool import ConnectionPool  # pyright: ignore[reportMissingImports]
@@ -325,31 +311,21 @@ class PostgresUtil:
         return self._pool
 
     @contextmanager
-    def connection(self, *, use_pool: bool = True) -> Iterator[Connection[Any]]:
-        """
-        Provide a DB connection.
-
-        - use_pool=True: borrow and return connection from pool.
-        - use_pool=False: use single persistent connection.
-        """
-        if use_pool:
-            pool = self.open_pool()
-            with pool.connection() as conn:
-                self._ensure_version_checked(conn)
-                yield conn
-        else:
-            conn = self.connect()
+    def connection(self) -> Iterator[Connection[Any]]:
+        """풀에서 커넥션을 빌려 제공하고, 블록 종료 시 풀에 반환한다."""
+        pool = self.open_pool()
+        with pool.connection() as conn:
             self._ensure_version_checked(conn)
             yield conn
 
     @contextmanager
-    def transaction(self, *, use_pool: bool = True) -> Iterator[Connection[Any]]:
+    def transaction(self) -> Iterator[Connection[Any]]:
         """
         Transaction context manager.
 
         Commits on success and rolls back on error.
         """
-        with self.connection(use_pool=use_pool) as conn:
+        with self.connection() as conn:
             self.logger.debug("Starting transaction.")
             try:
                 with conn.transaction():
@@ -361,10 +337,6 @@ class PostgresUtil:
                 self.logger.debug("Transaction committed.")
 
     def close(self) -> None:
-        if self._conn is not None and not self._conn.closed:
-            self.logger.debug("Closing single PostgreSQL connection.")
-            self._conn.close()
-        self._conn = None
         if self._pool is not None:
             self.logger.debug("Closing PostgreSQL connection pool.")
             self._pool.close()
@@ -392,37 +364,16 @@ class PostgresUtil:
         if not self._version_checked:
             self._validate_server_version(conn)
 
-    def server_version(self) -> Mapping[str, Any]:
-        row = self.fetch_one("SHOW server_version;")
-        return {"server_version": row["server_version"]}
-
-    def health_check(self) -> Mapping[str, Any]:
-        with self.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    cast(Any, "SELECT 1 AS ok, NOW() AS server_time, current_setting('application_name') AS app_name;")
-                )
-                row = cur.fetchone()
-            if row is None:
-                return {"ok": False}
-            return {
-                "ok": bool(row["ok"] == 1),
-                "server_time": row["server_time"],
-                "server_version_num": conn.info.server_version,
-                "application_name": row["app_name"],
-            }
-
     def execute(
         self,
         query: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
-        use_pool: bool = True,
         idempotent: bool = False,
     ) -> int:
         def _op() -> int:
             self.logger.debug("Execute query: %s", query)
-            with self.connection(use_pool=use_pool) as conn:
+            with self.connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     cur.execute(cast(Any, query), params)
                     affected = cur.rowcount
@@ -442,7 +393,6 @@ class PostgresUtil:
         self,
         callback: Callable[[Connection[Any]], Any],
         *,
-        use_pool: bool = True,
         idempotent: bool = False,
     ) -> Any:
         """
@@ -451,7 +401,7 @@ class PostgresUtil:
         Useful in services where multiple statements must succeed/fail together.
         """
         def _op() -> Any:
-            with self.transaction(use_pool=use_pool) as conn:
+            with self.transaction() as conn:
                 return callback(conn)
 
         return self.run_with_retry(
@@ -459,36 +409,3 @@ class PostgresUtil:
             operation_name="execute_in_transaction",
             idempotent=idempotent,
         )
-
-    def fetch_one(
-        self,
-        query: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        use_pool: bool = True,
-    ) -> Mapping[str, Any]:
-        def _op() -> Mapping[str, Any]:
-            self.logger.debug("Fetch one query: %s", query)
-            with self.connection(use_pool=use_pool) as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(cast(Any, query), params)
-                    row = cur.fetchone()
-            if row is None:
-                return {}
-            return cast(Mapping[str, Any], row)
-
-        return cast(
-            Mapping[str, Any],
-            self.run_with_retry(_op, operation_name="fetch_one", idempotent=True),
-        )
-
-
-# if __name__ == "__main__":
-#     logging.basicConfig(
-#         level=logging.INFO,
-#         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-#     )
-#     util = PostgresUtil()
-#     with util:
-#         print("Connected:", util.server_version())
-#         print("Health:", util.health_check())

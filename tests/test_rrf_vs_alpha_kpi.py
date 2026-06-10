@@ -75,7 +75,7 @@ class TestRRFvsAlpha(unittest.TestCase):
                 agg[fusion]["nDCG@5"].append(ndcg_at_k(rk, rel, 5))
                 agg[fusion]["L_recall"].append(recall_at_k(rk, lset, 5))
 
-        print("\n[RRF vs alpha KPI] (충돌 코퍼스, 질의 %d)" % len(self.goldens))
+        print(f"\n[RRF vs alpha KPI] (충돌 코퍼스, 질의 {len(self.goldens)})")
         for m in _METRICS:
             a, r = st.mean(agg["alpha"][m]), st.mean(agg["rrf"][m])
             print(f"  {m:<9} alpha={a:.3f}  rrf={r:.3f}  Δ={r - a:+.3f}")

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from io import BytesIO
 from typing import TypedDict
 
-import numpy as np
 from PIL import Image
 
 from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
@@ -30,18 +28,9 @@ class KeyframeClipEmbedding(TypedDict):
 
 
 class VideoClipEmbeddingsResult(TypedDict):
-    """대표 프레임별 CLIP 임베딩·라벨 + 구간 길이 가중으로 합친 영상 단일 벡터."""
+    """대표 프레임별 CLIP 임베딩·라벨."""
 
     keyframes: list[KeyframeClipEmbedding]
-    clip_video_embedding: list[float] | None
-
-
-def _scene_weights(items: Sequence[KeyframeBytesResult]) -> list[float]:
-    weights: list[float] = []
-    for it in items:
-        w = float(it["end_sec"]) - float(it["start_sec"])
-        weights.append(w if w > 0.0 else 1.0)
-    return weights
 
 
 def embed_video_keyframes_clip(
@@ -54,22 +43,18 @@ def embed_video_keyframes_clip(
     """
     각 키프레임 JPEG에 대해 CLIP 이미지 임베딩(1536)과,
     ``korean_labels_per_frame``(보통 VLM objects)가 있으면 제로샷 라벨 점수를 붙인다.
-    이미지 인코딩은 프레임당 1회. 장면 구간 길이로 가중 평균·L2 정규화 후 ``clip_video_embedding``.
+    이미지 인코딩은 프레임당 1회.
     """
     if not frame_items:
-        return {"keyframes": [], "clip_video_embedding": None}
+        return {"keyframes": []}
 
     processor, model = get_clip(model_name)
-    weights = _scene_weights(frame_items)
-    rows: list[np.ndarray] = []
     keyframes: list[KeyframeClipEmbedding] = []
 
     for i, it in enumerate(frame_items):
         with Image.open(BytesIO(it["jpeg_bytes"])) as img:
             rgb = img.convert("RGB")
         image_emb = clip_image_embedding_normalized(processor, model, rgb)
-        row = image_emb[0].detach().cpu().numpy().astype(np.float32).ravel()
-        rows.append(row)
 
         cleaned: list[str] = []
         if korean_labels_per_frame is not None and i < len(korean_labels_per_frame):
@@ -98,16 +83,4 @@ def embed_video_keyframes_clip(
             }
         )
 
-    w_arr = np.asarray(weights, dtype=np.float64)
-    s = float(w_arr.sum())
-    if s <= 0.0:
-        w_arr = np.ones(len(rows), dtype=np.float64)
-        s = float(w_arr.sum())
-    w_arr = w_arr / s
-    stacked = np.stack([r.astype(np.float64) for r in rows], axis=0)
-    agg = (w_arr[:, None] * stacked).sum(axis=0)
-    nrm = float(np.linalg.norm(agg)) + 1e-12
-    agg_unit = (agg / nrm).astype(np.float32)
-    clip_video = clip_image_row_to_embedding_1536(agg_unit)
-
-    return {"keyframes": keyframes, "clip_video_embedding": clip_video}
+    return {"keyframes": keyframes}

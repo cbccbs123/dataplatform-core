@@ -1,11 +1,10 @@
-"""relations: schema 파서·검증·리졸버 단위 테스트."""
+"""relations: schema 파서·검증 단위 테스트."""
 
 from __future__ import annotations
 
 import unittest
 
 from src.relations.prompt import build_relation_proposal_prompt
-from src.relations.resolve_relation_type import resolve_relation_type_code
 from src.relations.schema import (
     coerce_topic_fields_mvp,
     description_ko_from_type_name_ko,
@@ -164,62 +163,6 @@ class TestSanitizeLlmProposedTypeCode(unittest.TestCase):
 
     def test_max_length_100(self) -> None:
         self.assertEqual(sanitize_llm_proposed_type_code("a" + "b" * 99), "a" + "b" * 99)
-
-
-class TestResolveRelationType(unittest.TestCase):
-    def setUp(self) -> None:
-        self.allowed = frozenset(
-            {"same_domain", "same_series", "duplicate_near", "references", "derived_from"}
-        )
-
-    def test_candidate_with_kind_code(self) -> None:
-        self.assertEqual(
-            resolve_relation_type_code(
-                target_in_candidate_set=True,
-                llm_relation_kind_code="same_domain",
-                allowed_relation_kind_codes=self.allowed,
-            ),
-            "same_domain",
-        )
-
-    def test_derived_wins_over_kind(self) -> None:
-        self.assertEqual(
-            resolve_relation_type_code(
-                target_in_candidate_set=False,
-                derived_path_detected=True,
-                llm_relation_kind_code="same_domain",
-                allowed_relation_kind_codes=self.allowed,
-            ),
-            "derived_from",
-        )
-
-    def test_citation_wins(self) -> None:
-        self.assertEqual(
-            resolve_relation_type_code(
-                target_in_candidate_set=False,
-                citation_detected=True,
-                allowed_relation_kind_codes=self.allowed,
-            ),
-            "references",
-        )
-
-    def test_outside_candidate_none_even_with_kind(self) -> None:
-        self.assertIsNone(
-            resolve_relation_type_code(
-                target_in_candidate_set=False,
-                llm_relation_kind_code="same_domain",
-                allowed_relation_kind_codes=self.allowed,
-            )
-        )
-
-    def test_not_in_allowed_returns_none(self) -> None:
-        self.assertIsNone(
-            resolve_relation_type_code(
-                target_in_candidate_set=True,
-                llm_relation_kind_code="finance",
-                allowed_relation_kind_codes=self.allowed,
-            )
-        )
 
 
 class TestStructuralCodes(unittest.TestCase):

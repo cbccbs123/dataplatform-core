@@ -50,7 +50,7 @@ _ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s AND a.status = 'register
 
 def parse_vector(value: Any) -> list[float]:
     """pgvector 반환값(리스트 또는 ``'[0.1,0.2,...]'`` 문자열)을 float 리스트로 정규화(순수)."""
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [float(x) for x in value]
     s = str(value).strip()
     inner = s[1:-1] if s.startswith("[") and s.endswith("]") else s

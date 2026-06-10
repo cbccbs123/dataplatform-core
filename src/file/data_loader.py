@@ -259,12 +259,6 @@ choose_encoding = _choose_encoding
 iter_document_chunks = _iter_document_chunks
 MAX_INPUT_CHARS = _MAX_INPUT_CHARS
 
-# Backward-compatible private aliases
-_normalize_file_kind = normalize_file_kind
-_choose_encoding = choose_encoding
-_iter_document_chunks = iter_document_chunks
-_MAX_INPUT_CHARS = MAX_INPUT_CHARS
-
 __all__ = [
     "MAX_INPUT_CHARS",
     "choose_encoding",

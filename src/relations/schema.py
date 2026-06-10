@@ -69,7 +69,7 @@ def parse_llm_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
         raw = data["items"]
     if isinstance(raw, list):
         return [e for e in raw if isinstance(e, dict)]
-    if isinstance(data.get("target_media_item_id"), (int, str)):
+    if isinstance(data.get("target_media_item_id"), int | str):
         return [data]
     return []
 

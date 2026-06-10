@@ -12,7 +12,7 @@
     ``from src.relations import X`` 는 ``__getattr__`` 로 **지연 import** 한다(순환 참조·기동 비용 완화).
 
 테스트
-    DB 없이 돌리려면 ``schema``, ``resolve_relation_type`` 등을 직접 import 한다.
+    DB 없이 돌리려면 ``schema`` 등을 직접 import 한다.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ __all__ = [
     "parse_and_normalize_edges",
     "propose_edges_json",
     "register_new_relation_kinds",
-    "resolve_relation_type_code",
     "fetch_active_relations_for_asset",
 ]
 
@@ -55,10 +54,6 @@ def __getattr__(name: str) -> Any:
         return fn
     if name == "register_new_relation_kinds":
         from src.relations.persist import register_new_relation_kinds as fn
-
-        return fn
-    if name == "resolve_relation_type_code":
-        from src.relations.resolve_relation_type import resolve_relation_type_code as fn
 
         return fn
     if name == "fetch_active_relations_for_asset":

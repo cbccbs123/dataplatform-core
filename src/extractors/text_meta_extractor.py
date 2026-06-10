@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
@@ -35,22 +34,6 @@ def count_tokens(text: str, *, model_name: str) -> int:
     model = get_embedding_model(model_name)
     token_ids = model.tokenizer.encode(text, add_special_tokens=False)
     return len(token_ids)
-
-
-def embed_texts(
-    texts: Sequence[str],
-    *,
-    model_name: str,
-    normalize_embeddings: bool = True,
-) -> list[list[float]]:
-    if not texts:
-        return []
-    model = get_embedding_model(model_name)
-    vectors = model.encode(
-        list(texts),
-        normalize_embeddings=normalize_embeddings,
-    )
-    return vectors.tolist()
 
 
 def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:

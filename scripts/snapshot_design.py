@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -126,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"✅ 스냅샷 생성: design-history/{fname}")
     print(f"   원본: {source.relative_to(ROOT)} → 동결본(불변)")
-    print(f"   인덱스 갱신: design-history/README.md")
+    print("   인덱스 갱신: design-history/README.md")
     return 0
 
 

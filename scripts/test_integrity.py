@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -76,7 +75,9 @@ def _aggregate(ref: str | None) -> tuple[int, int, int]:
         text = (ROOT / f).read_text(encoding="utf-8") if ref is None and (ROOT / f).exists() \
             else _git_show(ref, f) if ref else ""
         a, b, c = _counts(text)
-        td += a; ta += b; ts += c
+        td += a
+        ta += b
+        ts += c
     return td, ta, ts
 
 

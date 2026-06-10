@@ -6,7 +6,7 @@
 - 미지원/판별 불가(unknown) → routable=False, reason='unknown_modality'
 - 그 외(txt/pdf/json/word/excel/powerpoint/image/video/audio) → routable=True
 
-DB 를 직접 만지지 않는다(순수 판정). unresolved_pool 적재 등은 오케스트레이터(run_ingest)가
+DB 를 직접 만지지 않는다(순수 판정). 적재·격리 등 후속 처리는 오케스트레이터(run_ingest)가
 이 결과를 보고 결정한다. domain 은 기본 'general' 이며, 실제 도메인 분류(F-5.1)는
 라우팅 이후 단계에서 채운다.
 """
