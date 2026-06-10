@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from src.search.search_service import search_hybrid
 
@@ -197,6 +198,232 @@ class TestIncludeVisualWiring(unittest.TestCase):
         out = search_hybrid("질의", modalities=["text", "video"], _grouped_fn=grouped)
         self.assertEqual([r["id"] for r in out["results"]["video"]], ["vid1"])
         self.assertNotIn("image", out["results"])  # 미요청 버킷은 반환 안 함
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 021 G3 — 검색 서비스 백엔드 분기(search_hybrid 의 SEARCH_BACKEND). pg(기본)=현 경로 동치(회귀 0·
+# SC-001), opensearch=text·audio(OS)+image·video(현 PG) 병합·LLM 미호출(FR-004)·OS 미도달 명확 실패
+# (FR-008). 실제 OS 검색은 가짜 seam(_os_search_fn·_os_client_fn) 주입으로 네트워크 없이 검증한다.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _recording_os(buckets: dict[str, list[dict[str, object]]]) -> tuple[object, dict[str, object]]:
+    """주입용 가짜 OS 검색 seam. 호출 인자를 캡처하고 주어진 버킷을 그대로 돌려준다."""
+    captured: dict[str, object] = {}
+
+    def _os(client: object, query: str, **kw: object) -> dict[str, list[dict[str, object]]]:
+        captured["client"] = client
+        captured["query"] = query
+        captured.update(kw)
+        return buckets
+
+    return _os, captured
+
+
+class TestBackendPgRegression(unittest.TestCase):
+    """(a·SC-001) backend 미지정/'pg' → 현 PG grouped 경로와 동치, OS seam 미접촉(회귀 0)."""
+
+    def test_default_backend_uses_grouped_not_os(self) -> None:
+        os_calls: list[object] = []
+        client_calls: list[object] = []
+
+        def fake_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+            os_calls.append((a, k))
+            return {}
+
+        def fake_client() -> object:
+            client_calls.append(1)
+            return None
+
+        out = search_hybrid(
+            "질의", _grouped_fn=_fake_grouped, _os_search_fn=fake_os, _os_client_fn=fake_client
+        )
+        # OS seam(검색·클라이언트) 미호출 — pg 기본 경로
+        self.assertEqual(os_calls, [])
+        self.assertEqual(client_calls, [])
+        # 응답은 기존 동작과 동치(전체 버킷)
+        self.assertEqual(
+            set(out["results"].keys()), {"text_documents", "audio", "image", "video"}
+        )
+        self.assertEqual(out["results"]["text_documents"], [{"id": "t1"}])
+
+    def test_explicit_pg_backend_uses_grouped_not_os(self) -> None:
+        os_calls: list[object] = []
+
+        def fake_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+            os_calls.append(1)
+            return {}
+
+        out = search_hybrid(
+            "질의", backend="pg", _grouped_fn=_fake_grouped, _os_search_fn=fake_os
+        )
+        self.assertEqual(os_calls, [])
+        self.assertEqual(out["results"]["image"], [{"id": "i1"}])
+
+
+class TestBackendOpenSearchMerge(unittest.TestCase):
+    """(b·FR-003·SC-005) backend='opensearch' → text·audio=OS, image·video=현 PG 병합·응답 동형."""
+
+    def test_merges_os_text_audio_and_pg_image_video(self) -> None:
+        fake_os, os_cap = _recording_os(
+            {
+                "text": [{"id": "os_t", "similarity": 0.9}],
+                "audio": [{"id": "os_a", "similarity": 0.8}],
+            }
+        )
+        pg_cap: dict[str, object] = {}
+
+        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
+            pg_cap.update(kw)
+            return {
+                "text_documents": [{"id": "pg_t"}],  # OS 가 대체 — 무시돼야 함
+                "audio": [{"id": "pg_a"}],
+                "image": [{"id": "pg_i", "similarity": 0.5}],
+                "video": [{"id": "pg_v", "similarity": 0.4}],
+                "meta": {"backend": "pg-grouped"},
+            }
+
+        client_calls: list[object] = []
+
+        def fake_client() -> str:
+            client_calls.append(1)
+            return "FAKE_CLIENT"
+
+        out = search_hybrid(
+            "질의",
+            backend="opensearch",
+            _grouped_fn=fake_grouped,
+            _os_search_fn=fake_os,
+            _os_client_fn=fake_client,
+        )
+        # 응답 키가 기존과 동일(SC-005)
+        self.assertEqual(
+            set(out["results"].keys()), {"text_documents", "audio", "image", "video"}
+        )
+        # text·audio 는 OS 버킷
+        self.assertEqual(out["results"]["text_documents"], [{"id": "os_t", "similarity": 0.9}])
+        self.assertEqual(out["results"]["audio"], [{"id": "os_a", "similarity": 0.8}])
+        # image·video 는 현 PG 버킷
+        self.assertEqual(out["results"]["image"], [{"id": "pg_i", "similarity": 0.5}])
+        self.assertEqual(out["results"]["video"], [{"id": "pg_v", "similarity": 0.4}])
+        # OS seam 가 text·audio 모달리티로, 주입 클라이언트로 호출됨
+        self.assertEqual(set(os_cap["modalities"]), {"text", "audio"})  # type: ignore[arg-type]
+        self.assertEqual(os_cap["client"], "FAKE_CLIENT")
+        self.assertEqual(client_calls, [1])
+
+    def test_text_only_skips_pg_grouped(self) -> None:
+        # image/video 미요청 → 불필요 CLIP(현 PG grouped) 호출 회피.
+        grouped_calls: list[object] = []
+
+        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
+            grouped_calls.append(1)
+            return {"image": [], "video": [], "meta": {}}
+
+        fake_os, _ = _recording_os({"text": [{"id": "os_t"}]})
+        out = search_hybrid(
+            "질의",
+            modalities=["text"],
+            backend="opensearch",
+            _grouped_fn=fake_grouped,
+            _os_search_fn=fake_os,
+            _os_client_fn=lambda: None,
+        )
+        self.assertEqual(grouped_calls, [])  # PG grouped 미호출
+        self.assertEqual(set(out["results"].keys()), {"text_documents"})
+        self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
+
+    def test_image_only_skips_os(self) -> None:
+        # text/audio 미요청 → OS seam 미호출(시각만이면 OS 미접촉).
+        os_calls: list[object] = []
+
+        def fake_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+            os_calls.append(1)
+            return {}
+
+        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
+            return {"image": [{"id": "pg_i"}], "video": [], "meta": {}}
+
+        out = search_hybrid(
+            "질의",
+            modalities=["image"],
+            backend="opensearch",
+            _grouped_fn=fake_grouped,
+            _os_search_fn=fake_os,
+            _os_client_fn=lambda: None,
+        )
+        self.assertEqual(os_calls, [])
+        self.assertEqual(set(out["results"].keys()), {"image"})
+        self.assertEqual(out["results"]["image"], [{"id": "pg_i"}])
+
+
+class TestBackendOpenSearchNoLLM(unittest.TestCase):
+    """(c·FR-004·SC-004) backend='opensearch' text·audio 경로는 structure_user_query(LLM) 미호출."""
+
+    def test_opensearch_path_does_not_call_structure_user_query(self) -> None:
+        import src.search.media_search as ms
+
+        fake_os, _ = _recording_os({"text": [{"id": "os_t"}], "audio": [{"id": "os_a"}]})
+        with mock.patch.object(ms, "structure_user_query") as m:
+            search_hybrid(
+                "질의",
+                modalities=["text", "audio"],
+                backend="opensearch",
+                _os_search_fn=fake_os,
+                _os_client_fn=lambda: None,
+                _grouped_fn=_fake_grouped,
+            )
+        m.assert_not_called()  # SC-004: LLM 질의 구조화 0
+
+
+class TestBackendOpenSearchUnreachable(unittest.TestCase):
+    """(d·FR-008·SC-006) backend='opensearch' OS 미도달 → 예외 전파(silent pg 폴백 없음)."""
+
+    def test_os_search_exception_propagates(self) -> None:
+        def boom_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+            raise ConnectionError("OS 미도달")
+
+        with self.assertRaises(ConnectionError):
+            search_hybrid(
+                "질의",
+                modalities=["text"],
+                backend="opensearch",
+                _os_search_fn=boom_os,
+                _os_client_fn=lambda: None,
+                _grouped_fn=_fake_grouped,
+            )
+
+    def test_os_client_exception_propagates(self) -> None:
+        def boom_client() -> object:
+            raise ConnectionError("OS 클라이언트 생성 실패")
+
+        fake_os, _ = _recording_os({"text": []})
+        with self.assertRaises(ConnectionError):
+            search_hybrid(
+                "질의",
+                modalities=["text"],
+                backend="opensearch",
+                _os_search_fn=fake_os,
+                _os_client_fn=boom_client,
+                _grouped_fn=_fake_grouped,
+            )
+
+    def test_pg_backend_unaffected_by_os_failure(self) -> None:
+        # 같은 입력이라도 backend='pg' 면 OS seam 미접촉 → 정상 응답(SC-006 격리).
+        def boom_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+            raise ConnectionError("OS 미도달")
+
+        def boom_client() -> object:
+            raise ConnectionError("OS 클라이언트 생성 실패")
+
+        out = search_hybrid(
+            "질의",
+            modalities=["text"],
+            backend="pg",
+            _os_search_fn=boom_os,
+            _os_client_fn=boom_client,
+            _grouped_fn=_fake_grouped,
+        )
+        self.assertEqual(out["results"]["text_documents"], [{"id": "t1"}])
 
 
 if __name__ == "__main__":
