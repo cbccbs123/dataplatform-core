@@ -455,6 +455,8 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
                 self.client, query, modalities=["text"], k=10, channel=self.channel,
                 index=_INDEX, cutoff_enabled=enabled,
                 cutoff_eps=0.0, cutoff_floor=floor, result_floor=-1.0,
+                bm25_operator="and",  # production(.env) 동일 — 'or'면 부분 토큰 어휘가 구제 규칙을 타서
+                # 게이트 메커니즘 검증이 흐려진다(027 어휘 구제는 전 토큰 증거 기준).
             )
             return out
 
@@ -477,6 +479,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
                 self.client, query, modalities=["text"], k=10, channel=self.channel,
                 index=_INDEX, cutoff_enabled=True,
                 cutoff_eps=0.0, cutoff_floor=floor, result_floor=-1.0,
+                bm25_operator="and",
             )
             return [r["id"] for r in out["text"]]
 

@@ -702,11 +702,12 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertAlmostEqual(gate_meta["text"]["baseline"], (0.28 + 0.30) / 2)
 
     def test_gate_fail_empties_bucket_but_records_meta(self) -> None:
-        # 약한 신호(평탄·낮음) → 빈 버킷 + meta 기록(F4 관측성: no-match 사유 보존).
+        # 약한 신호(평탄·낮음)·어휘 증거 없음 → 빈 버킷 + meta 기록(F4 관측성: no-match 사유 보존).
+        # (어휘 증거가 있으면 구제 규칙 적용 — test_lexical_rescue_* 가 그 경로를 검증.)
         client = _FakeMsearchClient(
             knn_by_label={"text": [_knn_hit_os("x1", 0.40), _knn_hit_os("x2", 0.39),
                                    _knn_hit_os("x3", 0.38), _knn_hit_os("x4", 0.37)]},
-            bm25_by_label={"text": [_bm25_hit_os("x1", 3.0)]},
+            bm25_by_label={"text": []},
         )
         buckets, gate_meta = search_assets_os(
             client, self.query, modalities=("text",), index="assets", embed_fn=self.fake_embed,
@@ -737,6 +738,58 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertIn("seed", kept_ids)   # 양쪽
         self.assertNotIn("n1", kept_ids)  # cos<floor·BM25 미매칭 → 컷
         self.assertNotIn("low", kept_ids)
+
+    def test_fusion_uses_topk_knn_rows_not_gate_sample(self) -> None:
+        # 융합 입력은 kNN **상위 k행만**(서버 융합 시절의 결과셋 범위와 동치) — 게이트 표본(50)을
+        # 그대로 정규화에 쓰면 분모가 넓어져 상위 경계 순위가 흔들린다(골든 실측 -0.008 회귀 교정).
+        # k=2 요청: kNN 표본엔 4행이 와도 융합·정규화는 상위 2행(n1·n2) 기준이어야 한다 —
+        # n2 의 정규화 코사인이 (표본 최솟값이 아니라) 상위 2행 내 최솟값으로 0.0 이 되는지로 식별.
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("n1", 0.90), _knn_hit_os("n2", 0.80),
+                                   _knn_hit_os("n3", 0.40), _knn_hit_os("n4", 0.30)]},
+            bm25_by_label={"text": []},
+        )
+        buckets, _meta = search_assets_os(
+            client, self.query, modalities=("text",), k=2, index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=False,
+        )
+        rows = buckets["text"]
+        self.assertEqual([r["id"] for r in rows], ["n1", "n2"])
+        # 상위 2행 기준 min-max: n1=1.0, n2=0.0 → 가중 0.5 적용 시 similarity 0.5·0.0.
+        self.assertAlmostEqual(rows[0]["similarity"], 0.5)
+        self.assertAlmostEqual(rows[1]["similarity"], 0.0)
+
+    def test_lexical_rescue_keeps_only_bm25_rows_when_gate_fails(self) -> None:
+        # 어휘 구제(027 정밀화): 코사인 게이트가 실패해도 BM25(전 토큰 어휘) 증거 행이 있으면
+        # 버킷을 통째로 죽이지 않는다 — 단 구제 시엔 **어휘 증거 행만** 남긴다(의미-노이즈 배제).
+        # 근거: 약한-있음 토픽(예: '회식' — 자산 4개·코사인 약함·어휘 정확 매칭)이 버킷 통계로는
+        # 인접-없음(자동차보험)보다 약해 어떤 임계로도 못 가르는 역전을 행 단위 증거로 해소.
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("n1", 0.70), _knn_hit_os("n2", 0.69)]},  # cos 0.40·0.38 — 약함
+            bm25_by_label={"text": [_bm25_hit_os("b1", 3.2)]},  # 어휘 증거
+        )
+        buckets, meta = search_assets_os(
+            client, "회식 술자리", modalities=("text",), index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=True,
+            cutoff_eps=0.9, cutoff_floor=0.9,  # 게이트 확실 실패
+            result_floor=0.99,  # cos 행은 전부 컷 — 어휘 행만 생존해야 함
+        )
+        self.assertEqual([r["id"] for r in buckets["text"]], ["b1"])  # 어휘 증거 행만
+        self.assertFalse(meta["text"]["gate_passed"])
+        self.assertTrue(meta["text"]["lexical_evidence"])
+
+    def test_no_lexical_no_gate_means_empty(self) -> None:
+        # 어휘 증거도 없고 게이트도 실패 → 빈 버킷(no-match 차단 불변).
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("n1", 0.70)]}, bm25_by_label={"text": []}
+        )
+        buckets, meta = search_assets_os(
+            client, "아이패드", modalities=("text",), index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=True,
+            cutoff_eps=0.9, cutoff_floor=0.9, result_floor=0.0,
+        )
+        self.assertEqual(buckets["text"], [])
+        self.assertFalse(meta["text"]["lexical_evidence"])
 
     def test_cutoff_disabled_no_gate_no_cut(self) -> None:
         # 디버그 우회(cutoff_enabled=False): 게이트·per-result 컷 모두 off → 융합 전체 노출, gate_passed True.

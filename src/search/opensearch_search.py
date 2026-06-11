@@ -429,19 +429,30 @@ def search_assets_os(
         knn_hits = _resp_hits(responses[2 * i]) if 2 * i < len(responses) else []
         bm25_hits = _resp_hits(responses[2 * i + 1]) if 2 * i + 1 < len(responses) else []
 
-        fused = fuse_hybrid(bm25_hits, knn_hits, weights=weights)
-        # 게이트 신호는 kNN 원시 코사인 표본에서 직접(probe 추가 호출 0 — 같은 표본 재사용).
+        # 융합 입력은 kNN **상위 k행만** — 게이트 표본(OS_KNN_SAMPLE_K)을 그대로 정규화에 쓰면
+        # 분모가 넓어져 상위 경계(top-k) 순위가 흔들린다(서버 융합 시절의 결과셋 범위와 동치 유지).
+        fused = fuse_hybrid(bm25_hits, knn_hits[: int(k)], weights=weights)
+        # 게이트 신호는 kNN 원시 코사인 **전체 표본**에서 직접(probe 추가 호출 0 — robust baseline 용).
         knn_cosines = [knn_score_to_cosine(h.get("_score")) for h in knn_hits]
         top, baseline = gate_signal(knn_cosines)
 
+        has_lexical = any(r.get("_bm25") for r in fused)
         if not cutoff_enabled:
             # 디버그 우회: 게이트·per-result 컷 모두 off → 융합 전체 노출.
             kept = fused
             gate_passed = True
         else:
             gate_passed = passes_cutoff(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
-            # 게이트 통과면 per-result 컷, 실패면 빈 버킷(no-match).
-            kept = cut_rows(fused, result_floor=result_floor) if gate_passed else []
+            if gate_passed:
+                kept = cut_rows(fused, result_floor=result_floor)
+            elif has_lexical:
+                # 어휘 구제(027 정밀화): 코사인 게이트가 실패해도 BM25(전 토큰 어휘) 증거 행은
+                # 살린다 — 약한-있음 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음
+                # 보다 버킷 통계상 약해지는 역전을 행 단위 증거로 해소. 단 의미-노이즈 유입을 막기
+                # 위해 구제 시엔 **어휘 증거 행만** 남긴다(cos-only 행 배제).
+                kept = [r for r in fused if r.get("_bm25")]
+            else:
+                kept = []  # 어휘 증거도 없음 → 빈 버킷(no-match)
 
         cut_count = len(fused) - len(kept)  # 게이트·컷으로 제거된 행 수(상한 절삭 제외 — 컷 효과만).
         # 내부키(_cos·_bm25) 제거 + 요청 k 상한(응답 동형·구 size=k 계약 보존).
@@ -451,7 +462,8 @@ def search_assets_os(
         ]
         buckets[label] = clean
         gate_meta[label] = {
-            "top": top, "baseline": baseline, "gate_passed": gate_passed, "cut_count": cut_count,
+            "top": top, "baseline": baseline, "gate_passed": gate_passed,
+            "lexical_evidence": has_lexical, "cut_count": cut_count,
         }
     return buckets, gate_meta
 
