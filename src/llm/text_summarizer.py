@@ -18,20 +18,64 @@ class SummaryKeywords(TypedDict):
     stt: str  # 오디오 전용 필드. 텍스트/이미지/영상 경로에서는 채우지 않는다.
 
 
+# 요약 토픽화 지시(spec 026 FR-001) — image/video summarizer 와 동일 의도. 텍스트·STT 요약도
+# 임베딩·BM25 의 단일 원천이라 매체 문형을 막고 내용·주제 중심으로 강제한다. 산출 JSON 키·파싱은
+# 불변, 이 지시 문구만 추가한다.
+_SUMMARY_TOPIC_INSTRUCTION = (
+    "- summary 는 매체 자체를 언급하지 말 것 — '이미지입니다/사진입니다/영상입니다/썸네일' 같은 "
+    "매체 단어·문형 금지\n"
+    "- 담긴 내용·주제·개체를 명사구 중심으로 서술\n"
+)
+
+
+def _build_chunk_summary_prompt(chunk_text: str, *, summary_max_chars: int) -> str:
+    """청크 1개 요약(map) 프롬프트(순수 — LLM·settings 미접촉). 토픽화 지시를 단위로 가드 가능하게 노출."""
+    return (
+        "다음 텍스트를 간단히 요약해서 반드시 JSON만 출력해.\n"
+        "형식:\n"
+        '{ "summary": "요약" }\n'
+        f"- summary는 {summary_max_chars}자 이내\n"
+        + _SUMMARY_TOPIC_INSTRUCTION
+        + f"\n텍스트:\n{chunk_text}"
+        + "개수/비율/합계 같은 통계 표현 금지."
+    )
+
+
+def _build_reduce_prompt(merged: str, *, summary_max_chars: int, top_k_keywords: int) -> str:
+    """청크 요약 목록 종합(reduce) 프롬프트(순수). 토픽화 지시를 단위로 가드 가능하게 노출."""
+    return (
+        "아래는 긴 문서의 청크별 요약 목록이다. 이를 종합해 반드시 JSON만 출력해.\n"
+        "형식:\n"
+        '{ "summary": "최종 요약", "keywords": ["키워드1", "키워드2"] }\n'
+        f"- summary는 {summary_max_chars}자 이내\n"
+        f"- keywords는 핵심 키워드 최대 {top_k_keywords}개\n"
+        + _SUMMARY_TOPIC_INSTRUCTION
+        + f"\n청크 요약 목록:\n{merged}"
+        + "개수/비율/합계 같은 통계 표현 금지."
+    )
+
+
+def _build_audio_prompt(text: str, *, summary_max_chars: int, top_k_keywords: int) -> str:
+    """STT 전사 전문 요약·키워드 프롬프트(순수). 토픽화 지시를 단위로 가드 가능하게 노출."""
+    return (
+        "아래는 긴 문서의 청크별 요약 목록이다. 이를 종합해 반드시 JSON만 출력해.\n"
+        "형식:\n"
+        '{ "summary": "최종 요약", "keywords": ["키워드1", "키워드2"] }\n'
+        f"- summary는 {summary_max_chars}자 이내\n"
+        f"- keywords는 핵심 키워드 최대 {top_k_keywords}개\n"
+        + _SUMMARY_TOPIC_INSTRUCTION
+        + f"\n텍스트:\n{text}"
+        + "개수/비율/합계 같은 통계 표현 금지."
+    )
+
+
 def _summarize_chunk_only(
     chunk_text: str,
     *,
     summary_max_chars: int,
 ) -> str:
     """청크 하나를 요약해 문자열로 반환한다. 공통 seam(complete_json) 사용."""
-    prompt = (
-        "다음 텍스트를 간단히 요약해서 반드시 JSON만 출력해.\n"
-        "형식:\n"
-        '{ "summary": "요약" }\n'
-        f"- summary는 {summary_max_chars}자 이내\n\n"
-        f"텍스트:\n{chunk_text}"
-        "개수/비율/합계 같은 통계 표현 금지."
-    )
+    prompt = _build_chunk_summary_prompt(chunk_text, summary_max_chars=summary_max_chars)
     data = complete_json(prompt)
     return str(data.get("summary", "")).strip()[:summary_max_chars]
 
@@ -79,14 +123,8 @@ def summarize_and_extract_keywords(
         return {"summary": "", "keywords": []}
 
     merged = "\n".join(f"- {s}" for s in partial_summaries)
-    final_prompt = (
-        "아래는 긴 문서의 청크별 요약 목록이다. 이를 종합해 반드시 JSON만 출력해.\n"
-        "형식:\n"
-        '{ "summary": "최종 요약", "keywords": ["키워드1", "키워드2"] }\n'
-        f"- summary는 {cfg.summary_max_chars}자 이내\n"
-        f"- keywords는 핵심 키워드 최대 {cfg.top_k_keywords}개\n\n"
-        f"청크 요약 목록:\n{merged}"
-        "개수/비율/합계 같은 통계 표현 금지."
+    final_prompt = _build_reduce_prompt(
+        merged, summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords
     )
     data = complete_json(final_prompt)
 
@@ -117,14 +155,8 @@ def summarize_and_extract_keywords_from_audio(
     """
     cfg = get_current_settings()
 
-    final_prompt = (
-        "아래는 긴 문서의 청크별 요약 목록이다. 이를 종합해 반드시 JSON만 출력해.\n"
-        "형식:\n"
-        '{ "summary": "최종 요약", "keywords": ["키워드1", "키워드2"] }\n'
-        f"- summary는 {cfg.summary_max_chars}자 이내\n"
-        f"- keywords는 핵심 키워드 최대 {cfg.top_k_keywords}개\n\n"
-        f"텍스트:\n{text}"
-        "개수/비율/합계 같은 통계 표현 금지."
+    final_prompt = _build_audio_prompt(
+        text, summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords
     )
     data = complete_json(final_prompt)
 

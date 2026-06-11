@@ -55,6 +55,10 @@ _BACKEND_KEYS = (
     "SEARCH_OS_CUTOFF_EPS",
     "SEARCH_OS_CUTOFF_FLOOR",
     "SEARCH_OS_PROBE_K",
+    # 026 T006/T004 가 추가하는 색인 빌더 선택 env 키도 함께 비워, 실행 환경 잔존값이 기본값 단언을
+    # 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
+    "OPENSEARCH_NORI_USER_WORDS",
+    "OPENSEARCH_FILENAME_NOISE_PATTERNS",
 )
 
 
@@ -309,6 +313,65 @@ class TestSearchOsBm25Operator(unittest.TestCase):
 
     def test_whitelist_fail_fast(self) -> None:
         with _env(SEARCH_OS_BM25_OPERATOR="xor"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestOpenSearchNoriUserWords(unittest.TestCase):
+    """026 T006(FR-004): nori user_dictionary 외래어 목록 — 기본 7종·CSV 오버라이드·빈 항목 fail-fast.
+
+    인덱스 빌더가 분해 방지용으로 쓰는 단일 출처. 공백 항목은 nori user_dictionary 규칙으로 무의미·
+    거부 대상이라 즉시 ValueError(fail-fast — _resolve_search_backend 동형).
+    """
+
+    def test_default_when_unset(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(
+            s.opensearch_nori_user_words,
+            ("아이패드", "아이폰", "스마트워치", "맥세이프", "에어팟", "갤럭시", "애플워치"),
+        )
+
+    def test_csv_override(self) -> None:
+        with _env(OPENSEARCH_NORI_USER_WORDS="갤럭시탭, 버즈 ,에어팟맥스"):
+            s = _build_settings("dev")
+        self.assertEqual(s.opensearch_nori_user_words, ("갤럭시탭", "버즈", "에어팟맥스"))
+
+    def test_blank_entry_fail_fast(self) -> None:
+        with _env(OPENSEARCH_NORI_USER_WORDS="아이폰,,갤럭시"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_default_matches_build_index_body_default(self) -> None:
+        # 단일 출처 계약: settings 기본 = opensearch_sync.build_index_body 기본 외래어 목록(드리프트 차단).
+        from src.search.opensearch_sync import _DEFAULT_NORI_USER_WORDS
+
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(tuple(s.opensearch_nori_user_words), tuple(_DEFAULT_NORI_USER_WORDS))
+
+
+class TestOpenSearchFilenameNoisePatterns(unittest.TestCase):
+    """026 T004(FR-003③): 파일명 정제 추가 잡음 패턴(regex) 목록 — 기본 빈 목록·CSV·컴파일 검증."""
+
+    def test_default_empty(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.opensearch_filename_noise_patterns, ())
+
+    def test_csv_override(self) -> None:
+        with _env(OPENSEARCH_FILENAME_NOISE_PATTERNS=r"^shorts$, ^clip\d+$"):
+            s = _build_settings("dev")
+        self.assertEqual(s.opensearch_filename_noise_patterns, (r"^shorts$", r"^clip\d+$"))
+
+    def test_blank_entry_fail_fast(self) -> None:
+        with _env(OPENSEARCH_FILENAME_NOISE_PATTERNS="^a$,,^b$"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_invalid_regex_fail_fast(self) -> None:
+        # 컴파일 불가 패턴은 잘못된 정제로 색인하지 않도록 즉시 ValueError.
+        with _env(OPENSEARCH_FILENAME_NOISE_PATTERNS="[unterminated"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 

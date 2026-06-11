@@ -12,7 +12,12 @@ from __future__ import annotations
 import unittest
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
-from src.search.opensearch_sync import asset_to_doc, build_index_body, parse_vector
+from src.search.opensearch_sync import (
+    asset_to_doc,
+    build_index_body,
+    clean_file_name,
+    parse_vector,
+)
 
 
 class TestParseVector(unittest.TestCase):
@@ -56,8 +61,10 @@ class TestAssetToDoc(unittest.TestCase):
         self.assertEqual(doc["domain_label"], "general")
         self.assertEqual(doc["status"], "registered")
         self.assertEqual(doc["channel"], "st")
-        self.assertEqual(doc["file_name"], "무선_충전기_xyz.mp4")
-        self.assertEqual(doc["fs_uri"], "/data/sub/무선_충전기_xyz.mp4")
+        # T004: file_name 은 clean_file_name 적용 값(확장자 제거·'_'→공백·ID 토큰 제거). 'xyz'(<8)
+        # 는 보존된다.
+        self.assertEqual(doc["file_name"], "무선 충전기 xyz")
+        self.assertEqual(doc["fs_uri"], "/data/sub/무선_충전기_xyz.mp4")  # 원본 경로는 보존
         self.assertEqual(doc["summary"], "무선 충전기 리뷰")
         self.assertEqual(doc["keywords"], ["충전기", "Qi2"])
         self.assertEqual(doc["labels"], ["전자제품"])
@@ -75,10 +82,49 @@ class TestAssetToDoc(unittest.TestCase):
         self.assertTrue(expected.issubset(doc.keys()))
 
     def test_search_text_concatenates(self) -> None:
-        # BM25 대상 search_text 가 summary·file_name·keywords·labels 를 모두 포함.
+        # T005(FR-003①): search_text 는 summary+keywords+labels(평탄)로만 구성. file_name 은 **제외**
+        # (G3 boost 가 별도 file_name 필드로 흡수) — 파일명 노이즈가 search_text(boost 1) 를 오염시키지
+        # 않게 한다.
         st = asset_to_doc(self._row(), channel="st")["search_text"]
-        for token in ("무선 충전기 리뷰", "무선_충전기_xyz.mp4", "충전기", "Qi2", "전자제품"):
+        for token in ("무선 충전기 리뷰", "충전기", "Qi2", "전자제품"):
             self.assertIn(token, st)
+        # file_name 전용 토큰('xyz')·확장자('.mp4')는 search_text 에 들어오지 않는다.
+        self.assertNotIn("xyz", st)
+        self.assertNotIn(".mp4", st)
+
+    def test_search_text_excludes_file_name_field(self) -> None:
+        # T005: file_name 에만 있는 토큰은 search_text 에서 배제됨을 직접 봉인(파일명 노이즈 격리).
+        row = self._row(
+            fs_path="/data/NOISETOKEN12.mp4",
+            ext_meta={"summary": "주제 요약", "keywords": ["키워드"], "labels": ["라벨"]},
+        )
+        doc = asset_to_doc(row, channel="st")
+        self.assertIn("주제 요약", doc["search_text"])
+        self.assertNotIn("NOISETOKEN12", doc["search_text"])
+
+    def test_labels_dict_flattened_to_label_string(self) -> None:
+        # T003(P0·FR-002): labels 가 {label,score} dict 면 label 문자열만 추출(str(dict) 직렬화 금지).
+        # vlm_text_for_embedding 과 동형 — 'score'·숫자가 BM25 를 오염시키고 정확매칭을 무력화하던 버그.
+        row = self._row(
+            ext_meta={
+                "summary": "s",
+                "keywords": [],
+                "labels": [{"label": "텍스트", "score": 0.51}, {"label": "인물", "score": 0.3}],
+            }
+        )
+        doc = asset_to_doc(row, channel="st")
+        self.assertEqual(doc["labels"], ["텍스트", "인물"])
+        # 색인 문자열에 dict-repr('score'·중괄호)가 새지 않는다(SC-006).
+        self.assertNotIn("score", doc["search_text"])
+        self.assertNotIn("{", doc["search_text"])
+
+    def test_labels_mixed_dict_and_str(self) -> None:
+        # dict·str 혼합 labels 도 모두 문자열로 평탄화. 빈 label/공백은 제외.
+        row = self._row(
+            ext_meta={"summary": "s", "labels": [{"label": "가방"}, "신발", {"label": ""}, "  "]}
+        )
+        doc = asset_to_doc(row, channel="st")
+        self.assertEqual(doc["labels"], ["가방", "신발"])
 
     def test_missing_ext_meta_safe(self) -> None:
         # ext_meta 없음/None 도 빈 값으로 안전 처리.
@@ -106,6 +152,48 @@ class TestAssetToDoc(unittest.TestCase):
         self.assertEqual(doc["embedding"], [0.0, 0.1, 0.0])
 
 
+class TestCleanFileName(unittest.TestCase):
+    """T004(FR-003②): 파일명 정제 — ID스러움(유튜브 ID 등) 토큰만 보수적으로 제거.
+
+    토큰 단위(위치 무관). 판정: 순수 영숫자([A-Za-z0-9-])·길이≥8·(모음<25% 또는 (대소/숫자 2종 이상
+    혼합 and 사전식 단어 아님)). 한글 포함 토큰은 항상 보존. 일반 영단어('Maintenance')는 보존하되
+    무작위 ID('HAi1OZD1OMM')는 제거 — 정제는 순수·결정적(헌법 3조)."""
+
+    def test_removes_youtube_id_token(self) -> None:
+        # 'HAi1OZD1OMM': 길이 11·대소/숫자 3종 혼합·사전식 아님 → 제거. 한글 토큰만 남는다.
+        self.assertEqual(clean_file_name("무선_충전기_HAi1OZD1OMM.mp4"), "무선 충전기")
+
+    def test_preserves_common_english_word(self) -> None:
+        # 'Maintenance'(모음 5/11≥0.25·Capitalized 사전식) → 보존(오탐 방지).
+        self.assertEqual(clean_file_name("Server_Maintenance.txt"), "Server Maintenance")
+
+    def test_preserves_korean_tokens(self) -> None:
+        # 한글 포함 토큰은 ID스러움 판정 대상이 아니다(항상 보존).
+        self.assertEqual(clean_file_name("스마트폰_리뷰.mp4"), "스마트폰 리뷰")
+
+    def test_empty_and_no_extension_safe(self) -> None:
+        # 빈 문자열·확장자 없음·점만 있는 경우 안전.
+        self.assertEqual(clean_file_name(""), "")
+        self.assertEqual(clean_file_name("스마트폰"), "스마트폰")
+
+    def test_low_vowel_ratio_token_removed(self) -> None:
+        # 모음 희소(<25%) 영숫자 토큰(길이≥8)은 혼합 여부와 무관하게 제거.
+        self.assertEqual(clean_file_name("리뷰_QWXZBKLMN.mp4"), "리뷰")
+
+    def test_short_alnum_token_preserved(self) -> None:
+        # 길이<8 영숫자 토큰(예: 'Qi2'·'xyz')은 ID 판정에서 제외(보수적) — 보존.
+        self.assertEqual(clean_file_name("충전기_Qi2.mp4"), "충전기 Qi2")
+
+    def test_all_id_tokens_yields_empty(self) -> None:
+        # 모든 토큰이 ID스러우면 빈 문자열(파일명 신호 0) — 안전.
+        self.assertEqual(clean_file_name("HAi1OZD1OMM.mp4"), "")
+
+    def test_noise_pattern_token_removed(self) -> None:
+        # settings 잡음 패턴 목록(수집원 규약)도 토큰 제거 — 새 명명 규약을 코드 수정 없이 대응.
+        out = clean_file_name("리뷰_shorts.mp4", noise_patterns=[r"^shorts$"])
+        self.assertEqual(out, "리뷰")
+
+
 class TestIndexBody(unittest.TestCase):
     def test_knn_and_nori_mapping(self) -> None:
         body = build_index_body()
@@ -116,12 +204,33 @@ class TestIndexBody(unittest.TestCase):
         self.assertEqual(props["embedding"]["type"], "knn_vector")
         self.assertEqual(props["embedding"]["dimension"], FIX_EMBEDDING_DIMENSION)
         self.assertEqual(props["embedding"]["method"]["space_type"], "cosinesimil")
-        # 한국어 텍스트 필드는 nori 분석기.
-        self.assertEqual(props["summary"]["analyzer"], "nori")
-        self.assertEqual(props["search_text"]["analyzer"], "nori")
+        # T006(FR-004): 한국어 텍스트 필드는 user_dictionary 를 받는 **커스텀** nori analyzer('nori_user').
+        # 내장 'nori' 는 user_dictionary 를 못 받으므로 반드시 커스텀 정의를 쓴다.
+        for f in ("summary", "keywords", "search_text", "file_name"):
+            self.assertEqual(props[f]["analyzer"], "nori_user")
         # 메타 필터는 keyword.
         for k in ("asset_id", "modality", "domain_label", "status", "channel"):
             self.assertEqual(props[k]["type"], "keyword")
+
+    def test_custom_nori_analyzer_with_user_dictionary(self) -> None:
+        # T006(FR-004): settings.analysis 에 nori_tokenizer + user_dictionary_rules 기반 커스텀
+        # analyzer 'nori_user' 가 정의되고, 기본 외래어 고유명사 목록이 사전 규칙으로 들어간다
+        # (아이패드·아이폰 등이 분해되지 않게 — '아이패드' BM25 가짜매칭 0).
+        analysis = build_index_body()["settings"]["analysis"]
+        tok = analysis["tokenizer"]["nori_user_tokenizer"]
+        self.assertEqual(tok["type"], "nori_tokenizer")
+        self.assertEqual(
+            tok["user_dictionary_rules"],
+            ["아이패드", "아이폰", "스마트워치", "맥세이프", "에어팟", "갤럭시", "애플워치"],
+        )
+        analyzer = analysis["analyzer"]["nori_user"]
+        self.assertEqual(analyzer["tokenizer"], "nori_user_tokenizer")
+
+    def test_nori_user_words_override(self) -> None:
+        # 사전 목록은 인자로 주입 가능(settings 단일 출처가 IO 층에서 전달) — 결정적 반영.
+        body = build_index_body(nori_user_words=["갤럭시탭", "버즈"])
+        tok = body["settings"]["analysis"]["tokenizer"]["nori_user_tokenizer"]
+        self.assertEqual(tok["user_dictionary_rules"], ["갤럭시탭", "버즈"])
 
     def test_dim_override(self) -> None:
         # 차원은 인자로 덮어쓸 수 있다(테스트·향후 모델 교체 대비).

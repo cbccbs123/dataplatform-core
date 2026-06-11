@@ -25,6 +25,37 @@ class ImageSummaryResult(TypedDict):
     objects: list[str]
 
 
+# 요약 토픽화 지시(spec 026 FR-001). summary 가 **매체 자체**가 아니라 **담긴 내용·주제**를 쓰게 강제한다.
+# summary 는 임베딩 입력(vlm_text_for_embedding)·BM25(search_text)의 단일 원천이라, "~이미지입니다/
+# 썸네일" 같은 매체 문형이 들어가면 토픽이 아닌 '매체 포맷'으로 군집된다(F1 — '스마트폰' 질의에 수영·
+# 자전거 영상이 상위로 끼는 실증 원인). 산출 JSON 키·파싱은 불변이고, **이 지시 문구만** 추가한다.
+_SUMMARY_TOPIC_INSTRUCTION = (
+    "- summary 는 매체 자체를 언급하지 말 것 — '이미지입니다/사진입니다/영상입니다/썸네일' 같은 "
+    "매체 단어·문형 금지\n"
+    "- 담긴 내용·주제·개체를 명사구 중심으로 서술\n"
+)
+
+
+def _build_image_caption_prompt(*, summary_max_chars: int, top_k_keywords: int) -> str:
+    """이미지 캡션·키워드·객체 추출용 비전 프롬프트를 만든다(순수 — LLM·settings 미접촉).
+
+    함수 내 f-string 에 숨어 있던 프롬프트를 순수 빌더로 노출해 토픽화 지시(FR-001)를
+    단위로 가드할 수 있게 한다(동작 불변 — 이 빌더 출력이 그대로 비전 LLM 입력).
+    """
+    return (
+        "이 이미지를 분석해서 반드시 JSON만 출력해.\n"
+        "형식:\n"
+        '{ "summary": "한국어로 담긴 내용·주제를 서술한 문장", '
+        '"keywords": ["키워드1", "키워드2"], '
+        '"objects": ["객체1", "객체2"] }\n'
+        f"- summary은 {summary_max_chars}자 이내\n"
+        f"- keywords는 핵심 키워드 최대 {top_k_keywords}개 (한국어)\n"
+        "- objects는 이미지에 보이는 모든 주요 객체를 일반 명사 형태의 한국어로 나열 (중복 제거)\n"
+        + _SUMMARY_TOPIC_INSTRUCTION
+        + "개수/비율/합계 같은 통계 표현은 summary/keywords에는 쓰지 말 것."
+    )
+
+
 def _encode_image_as_jpeg_data_url(
     image_path: Path,
     *,
@@ -106,16 +137,8 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     """
     cfg = get_current_settings()
 
-    prompt = (
-        "이 이미지를 분석해서 반드시 JSON만 출력해.\n"
-        "형식:\n"
-        '{ "summary": "한국어로 이미지 전체를 설명하는 문장", '
-        '"keywords": ["키워드1", "키워드2"], '
-        '"objects": ["객체1", "객체2"] }\n'
-        f"- summary은 {cfg.summary_max_chars}자 이내\n"
-        f"- keywords는 핵심 키워드 최대 {cfg.top_k_keywords}개 (한국어)\n"
-        "- objects는 이미지에 보이는 모든 주요 객체를 일반 명사 형태의 한국어로 나열 (중복 제거)\n"
-        "개수/비율/합계 같은 통계 표현은 summary/keywords에는 쓰지 말 것."
+    prompt = _build_image_caption_prompt(
+        summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords
     )
 
     data = complete_vision_json(text=prompt, image_data_url=image_data_url)

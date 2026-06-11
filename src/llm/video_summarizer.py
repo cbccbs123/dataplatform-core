@@ -18,6 +18,38 @@ class VideoSummaryResult(TypedDict):
     objects: list[str]
 
 
+# 요약 토픽화 지시(spec 026 FR-001) — image_summarizer 와 동일 의도. video summary 도 임베딩·BM25
+# 의 단일 원천이라 '~영상입니다' 매체 문형이 들어가면 토픽이 아닌 포맷으로 군집된다(F1). 산출 JSON
+# 키·파싱은 불변, 이 지시 문구만 추가한다.
+_SUMMARY_TOPIC_INSTRUCTION = (
+    "- summary 는 매체 자체를 언급하지 말 것 — '이미지입니다/사진입니다/영상입니다/썸네일' 같은 "
+    "매체 단어·문형 금지\n"
+    "- 담긴 내용·주제·개체를 명사구 중심으로 서술\n"
+)
+
+
+def _build_video_summary_prompt(
+    timeline_lines: list[str], *, summary_max_chars: int, top_k_keywords: int
+) -> str:
+    """영상 장면 타임라인을 종합하는 reduce 프롬프트를 만든다(순수 — LLM·settings 미접촉).
+
+    함수 내 f-string 에 숨어 있던 프롬프트를 순수 빌더로 노출해 토픽화 지시(FR-001)를 단위로
+    가드한다(동작 불변 — 이 빌더 출력이 그대로 LLM 입력). timeline_lines 는 scene 순서를 보존한다.
+    """
+    return (
+        "아래는 영상의 장면별 대표프레임 분석 결과다. 전체를 종합해 반드시 JSON만 출력해.\n"
+        "형식:\n"
+        '{ "summary": "내용·주제 중심 요약", "keywords": ["키워드1"], "objects": ["객체1"] }\n'
+        f"- summary는 {summary_max_chars}자 이내\n"
+        f"- keywords는 핵심 키워드 최대 {top_k_keywords}개 (한국어)\n"
+        "- objects는 영상 전반의 주요 객체를 일반 명사 형태 한국어로 중복 없이 나열\n"
+        + _SUMMARY_TOPIC_INSTRUCTION
+        + "장면 순서를 반영해 흐름 중심으로 요약하고, 개수/비율/합계 같은 통계 표현은 금지.\n\n"
+        + "장면 결과:\n"
+        + "\n".join(timeline_lines)
+    )
+
+
 def summarize_video_from_scene_results(
     scene_results: list[dict],
 ) -> VideoSummaryResult:
@@ -58,15 +90,10 @@ def summarize_video_from_scene_results(
             f"summary={summary} | keywords={kw_text} | objects={obj_text}"
         )
 
-    prompt = (
-        "아래는 영상의 장면별 대표프레임 분석 결과다. 전체를 종합해 반드시 JSON만 출력해.\n"
-        "형식:\n"
-        '{ "summary": "영상 전체 요약", "keywords": ["키워드1"], "objects": ["객체1"] }\n'
-        f"- summary는 {cfg.summary_max_chars}자 이내\n"
-        f"- keywords는 핵심 키워드 최대 {cfg.top_k_keywords}개 (한국어)\n"
-        "- objects는 영상 전반의 주요 객체를 일반 명사 형태 한국어로 중복 없이 나열\n"
-        "장면 순서를 반영해 흐름 중심으로 요약하고, 개수/비율/합계 같은 통계 표현은 금지.\n\n"
-        f"장면 결과:\n" + "\n".join(timeline_lines)
+    prompt = _build_video_summary_prompt(
+        timeline_lines,
+        summary_max_chars=cfg.summary_max_chars,
+        top_k_keywords=cfg.top_k_keywords,
     )
 
     data = complete_json(prompt)

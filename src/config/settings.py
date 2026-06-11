@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -90,6 +91,11 @@ class PipelineSettings:
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
+    # 026: OS 색인 빌더 교정용 선택 설정(021/023 동형 — 미설정 시 기존 동작 불변). 모두 OS 색인 한정
+    # (pg FTS 무접촉). opensearch_nori_user_words = 커스텀 nori analyzer 의 user_dictionary 외래어 목록
+    # (build_index_body 기본과 동치). opensearch_filename_noise_patterns = 파일명 정제 추가 regex(기본 빈).
+    opensearch_nori_user_words: tuple[str, ...]
+    opensearch_filename_noise_patterns: tuple[str, ...]
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -301,6 +307,58 @@ def _resolve_os_bm25_operator() -> str:
     return value
 
 
+# 026 T006(FR-004): nori user_dictionary 외래어 고유명사 기본 목록. opensearch_sync.build_index_body
+# 의 기본과 **동치**(단일 출처 — test_settings 계약 테스트가 드리프트를 봉인). 외래어가 nori 로 분해되면
+# ('아이패드'→'아이'+'패드') 정확매칭 무력화·가짜매칭이 생기므로 한 토큰으로 보존한다.
+_DEFAULT_NORI_USER_WORDS: tuple[str, ...] = (
+    "아이패드",
+    "아이폰",
+    "스마트워치",
+    "맥세이프",
+    "에어팟",
+    "갤럭시",
+    "애플워치",
+)
+
+
+def resolve_opensearch_nori_user_words() -> tuple[str, ...]:
+    """nori user_dictionary 외래어 목록(026 FR-004). ``OPENSEARCH_NORI_USER_WORDS="아이패드,아이폰,..."``
+    CSV 로 오버라이드, 미설정 시 기본 7종. 공백 항목은 nori 사전 규칙으로 무의미·거부 대상이라 **즉시
+    ValueError**(fail-fast — 잘못된 사전으로 인덱스를 만들지 않게, ``_resolve_search_backend`` 동형)."""
+    raw = os.getenv("OPENSEARCH_NORI_USER_WORDS")
+    if raw is None or not raw.strip():
+        return _DEFAULT_NORI_USER_WORDS
+    words = [w.strip() for w in raw.split(",")]
+    if any(not w for w in words):
+        raise ValueError(
+            f"nori user_dictionary 빈 항목: OPENSEARCH_NORI_USER_WORDS={raw!r} (공백 항목 금지)"
+        )
+    return tuple(words)
+
+
+def resolve_opensearch_filename_noise_patterns() -> tuple[str, ...]:
+    """파일명 정제 추가 잡음 regex 목록(026 FR-003③). ``OPENSEARCH_FILENAME_NOISE_PATTERNS="re1,re2"``
+    CSV, 미설정 시 **빈 목록**(기본 정제는 clean_file_name 의 ID스러움 판정). 공백 항목·컴파일 불가
+    패턴은 **즉시 ValueError**(fail-fast — 잘못된 정제로 색인하지 않게). regex 안에 콤마가 필요한
+    드문 경우는 본 CSV 로 표현 불가하니 코드에서 직접 주입한다(기본 빈이라 통상 미사용)."""
+    raw = os.getenv("OPENSEARCH_FILENAME_NOISE_PATTERNS")
+    if raw is None or not raw.strip():
+        return ()
+    pats = [p.strip() for p in raw.split(",")]
+    if any(not p for p in pats):
+        raise ValueError(
+            f"파일명 잡음 패턴 빈 항목: OPENSEARCH_FILENAME_NOISE_PATTERNS={raw!r} (공백 항목 금지)"
+        )
+    for p in pats:
+        try:
+            re.compile(p)
+        except re.error as e:
+            raise ValueError(
+                f"파일명 잡음 패턴 컴파일 오류: OPENSEARCH_FILENAME_NOISE_PATTERNS={raw!r} ({p!r}: {e})"
+            ) from e
+    return tuple(pats)
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -359,6 +417,10 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_os_min_scores=resolve_os_search_min_scores(),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),
+        # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.
+        # 빈 항목·컴파일 불가 패턴은 resolver 가 _build_settings 시점에 즉시 ValueError(fail-fast).
+        opensearch_nori_user_words=resolve_opensearch_nori_user_words(),
+        opensearch_filename_noise_patterns=resolve_opensearch_filename_noise_patterns(),
     )
 
 

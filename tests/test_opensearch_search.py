@@ -34,7 +34,9 @@ from src.search.opensearch_search import (
 )
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
-_NORI_TEXT_FIELDS = {"summary", "keywords", "labels", "file_name", "search_text"}
+# 026 T008(FR-003①): boost 차등 표기 — summary^3·keywords^2·labels^1·file_name^0.5. search_text 는
+# boost 1(이제 file_name 비포함이라 안전). 파일명 노이즈가 토픽 신호를 압도하지 못하게 차등을 둔다.
+_NORI_TEXT_FIELDS = {"summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"}
 
 
 def _subqueries(body: dict) -> list:
@@ -76,12 +78,21 @@ class BuildSearchBodyTest(unittest.TestCase):
         self.assertEqual(len(subs), 2)
 
     def test_text_subquery_multi_match_nori_fields(self) -> None:
-        # (1-①) nori 텍스트 multi_match — query 를 020 nori 필드 5개 대상으로.
+        # (1-①) nori 텍스트 multi_match — query 를 020 nori 필드 5개 대상으로(boost 차등 표기).
         _, clause = _find_with_clause(_subqueries(self.body), "multi_match")
         self.assertIsNotNone(clause, "nori multi_match 서브쿼리가 있어야 한다")
         mm = clause["multi_match"]
         self.assertEqual(mm["query"], self.query)
         self.assertEqual(set(mm["fields"]), _NORI_TEXT_FIELDS)
+
+    def test_text_fields_boost_differentiation(self) -> None:
+        # 026 T008(FR-003①): boost 차등이 multi_match fields 에 그대로 실린다 — summary 가 가장 높고
+        # (^3), file_name 이 가장 낮다(^0.5). search_text 는 boost 1(표기 없음). 순서·표기 고정.
+        _, clause = _find_with_clause(_subqueries(self.body), "multi_match")
+        self.assertEqual(
+            clause["multi_match"]["fields"],
+            ["summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"],
+        )
 
     def test_knn_subquery_embedding_vector_k(self) -> None:
         # (1-②) knn 서브쿼리 — embedding 필드·query_vector·k.

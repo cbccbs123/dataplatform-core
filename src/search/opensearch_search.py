@@ -23,11 +23,15 @@ from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
 # 주의: labels 는 매핑상 keyword 지만 plan §1 이 multi_match 대상에 포함한다 — multi_match 는 keyword
 # 필드를 정확매칭 절로 안전 수용한다(텍스트 필드와 혼합 무해). text/audio 버킷 한국어 BM25 재현율용.
+# 026 T008(FR-003①): boost 차등 표기('field^N') — 토픽 신호(summary^3·keywords^2·labels^1)를
+# 파일명(file_name^0.5)보다 강하게 둬서 파일명 노이즈가 랭킹을 압도하지 못하게 한다(F8 구조 방어).
+# search_text 는 boost 1(표기 생략) — 이제 file_name 을 합본하지 않으므로(026 T005) 안전하다.
+# multi_match 는 'field^N' 부스트 문법을 그대로 해석한다.
 _TEXT_FIELDS: tuple[str, ...] = (
-    "summary",
-    "keywords",
-    "labels",
-    "file_name",
+    "summary^3",
+    "keywords^2",
+    "labels^1",
+    "file_name^0.5",
     "search_text",
 )
 
