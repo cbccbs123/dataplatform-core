@@ -60,7 +60,7 @@ def main() -> None:
     print(f"# calibration — EPS={eps} FLOOR={floor} probe_k={probe_k} index={index}\n")
 
     def probe_row(query: str) -> dict[str, tuple[float, float, bool]]:
-        vec = embed_query(query, channel="st")
+        vec = embed_query(query, channel=cfg.active_embed_channel)
         out: dict[str, tuple[float, float, bool]] = {}
         for label in MODALITIES:
             values = _MODALITY_VALUES.get(label, frozenset({label}))
@@ -89,11 +89,11 @@ def main() -> None:
     for tag, queries in (("HAS", HAS_MATCH), ("NO", NO_MATCH)):
         for q in queries:
             off = search_assets_os(
-                client, q, modalities=MODALITIES, k=20, channel="st", weights=weights,
+                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel, weights=weights,
                 index=index, pipeline_name=pipeline, cutoff_enabled=False,
             )
             on = search_assets_os(
-                client, q, modalities=MODALITIES, k=20, channel="st", weights=weights,
+                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel, weights=weights,
                 index=index, pipeline_name=pipeline, cutoff_enabled=True,
                 cutoff_eps=eps, cutoff_floor=floor, cutoff_probe_k=probe_k,
             )
@@ -106,7 +106,7 @@ def main() -> None:
     def timed(enabled: bool, q: str) -> float:
         t0 = time.perf_counter()
         search_assets_os(
-            client, q, modalities=MODALITIES, k=20, channel="st", weights=weights,
+            client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel, weights=weights,
             index=index, pipeline_name=pipeline, cutoff_enabled=enabled,
             cutoff_eps=eps, cutoff_floor=floor, cutoff_probe_k=probe_k,
         )
