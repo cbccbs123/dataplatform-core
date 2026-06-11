@@ -141,6 +141,27 @@ class BuildSearchBodyTest(unittest.TestCase):
         for sub in _subqueries(body):
             self.assertIn({"terms": {"modality": ["audio"]}}, _sub_bool(sub)["filter"])
 
+    def test_operator_and_requires_all_tokens(self) -> None:
+        # 025 FR-001: operator='and' 면 multi_match 가 모든 nori 토큰 매칭을 요구한다 —
+        # 복합어 질의('스마트폰 생산량')의 부분 토큰 가짜매칭(F2) 차단. knn 서브쿼리는 무영향.
+        body = build_search_body(
+            self.query, self.vector, modality_values=["txt"], operator="and"
+        )
+        _, clause = _find_with_clause(_subqueries(body), "multi_match")
+        self.assertEqual(clause["multi_match"]["operator"], "and")
+        _, knn = _find_with_clause(_subqueries(body), "knn")
+        self.assertIn("knn", knn)  # knn 서브쿼리 구조 불변
+
+    def test_operator_default_or_keeps_body_unchanged(self) -> None:
+        # 회귀 0(SC-001): 기본(or)·미지정은 현행 본문과 동일 — multi_match 에 operator 키 자체가 없다.
+        default_body = build_search_body(self.query, self.vector, modality_values=["txt"])
+        or_body = build_search_body(
+            self.query, self.vector, modality_values=["txt"], operator="or"
+        )
+        self.assertEqual(default_body, or_body)
+        _, clause = _find_with_clause(_subqueries(default_body), "multi_match")
+        self.assertNotIn("operator", clause["multi_match"])
+
     def test_text_modality_values_use_terms_set(self) -> None:
         # text 버킷은 다중 modality 값(txt·json·pdf·office)을 terms 집합으로 정렬해 거른다 —
         # 실데이터의 'txt' 가 'text' 라벨로 색인되지 않는 불일치를 흡수(실OS A/B 에서 발견·교정).

@@ -141,6 +141,8 @@ def _grouped_via_opensearch(
         cutoff_eps=getattr(cfg, "search_os_cutoff_eps", _DEFAULT_OS_CUTOFF_EPS),
         cutoff_floor=getattr(cfg, "search_os_cutoff_floor", _DEFAULT_OS_CUTOFF_FLOOR),
         cutoff_probe_k=getattr(cfg, "search_os_probe_k", _DEFAULT_OS_PROBE_K),
+        # 025: BM25 operator — 'and' 면 전 토큰 매칭(F2 복합어 가짜매칭 차단). 미초기화 폴백 'or'(현행).
+        bm25_operator=getattr(cfg, "search_os_bm25_operator", "or"),
     )  # client.search 미도달 예외도 전파(FR-007)
     # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
     for m in requested:

@@ -83,6 +83,9 @@ class PipelineSettings:
     search_os_cutoff_eps: float
     search_os_cutoff_floor: float
     search_os_probe_k: int
+    # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
+    # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
+    search_os_bm25_operator: str
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -258,6 +261,22 @@ def _resolve_os_probe_k() -> int:
     return value
 
 
+# 025: OS BM25 operator 화이트리스트. 'or'=현행(부분 토큰 매칭 허용·회귀 0), 'and'=전 토큰 매칭(F2).
+_OS_BM25_OPERATORS = ("or", "and")
+
+
+def _resolve_os_bm25_operator() -> str:
+    """OS BM25 multi_match operator(025, FR-001). ``SEARCH_OS_BM25_OPERATOR`` 미설정 시 ``'or'``(현행).
+
+    화이트리스트 {or, and} 밖 값은 **즉시 ValueError**(fail-fast — _resolve_search_backend 동형)."""
+    value = _env_str_default("SEARCH_OS_BM25_OPERATOR", "or").lower()
+    if value not in _OS_BM25_OPERATORS:
+        raise ValueError(
+            f"지원하지 않는 BM25 operator: SEARCH_OS_BM25_OPERATOR={value!r} (지원: {list(_OS_BM25_OPERATORS)})"
+        )
+    return value
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -312,6 +331,8 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_os_cutoff_eps=_resolve_os_cutoff_eps(),
         search_os_cutoff_floor=_resolve_os_cutoff_floor(),
         search_os_probe_k=_resolve_os_probe_k(),
+        # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
+        search_os_bm25_operator=_resolve_os_bm25_operator(),
     )
 
 

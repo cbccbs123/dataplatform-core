@@ -258,6 +258,23 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestSearchOsBm25Operator(unittest.TestCase):
+    """025 G1: BM25 operator 설정 — 기본 'or'(현행·회귀 0), 'and'=전토큰 매칭(F2). 화이트리스트 fail-fast."""
+
+    def test_default_or(self) -> None:
+        with _env():
+            self.assertEqual(_build_settings("dev").search_os_bm25_operator, "or")
+
+    def test_override_and(self) -> None:
+        with _env(SEARCH_OS_BM25_OPERATOR="and"):
+            self.assertEqual(_build_settings("dev").search_os_bm25_operator, "and")
+
+    def test_whitelist_fail_fast(self) -> None:
+        with _env(SEARCH_OS_BM25_OPERATOR="xor"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestG3FieldNameContract(unittest.TestCase):
     """G3(search_service.search_hybrid) getattr 계약 봉인 — 필드명·기본값 정확 일치.
 

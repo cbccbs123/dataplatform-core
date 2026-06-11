@@ -485,6 +485,30 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         self.assertEqual(out["results"]["text_documents"], [{"id": "t1"}])
 
 
+class TestBackendOsBm25OperatorWiring(unittest.TestCase):
+    """025 G1: backend='opensearch' 가 cfg 의 bm25 operator 를 os_search_fn 에 전달(023 cutoff 동형)."""
+
+    def test_operator_forwarded_from_cfg(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch", search_os_bm25_operator="and")
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+            )
+        self.assertEqual(os_cap["bm25_operator"], "and")
+
+    def test_operator_falls_back_to_or_when_cfg_missing(self) -> None:
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
+        search_hybrid(
+            "질의", modalities=["text"], backend="opensearch",
+            _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+        )
+        self.assertEqual(os_cap["bm25_operator"], "or")
+
+
 class TestBackendOpenSearchNoLLM(unittest.TestCase):
     """(c·FR-002·SC-004) backend='opensearch' 전 모달리티 경로는 structure_user_query(LLM) 미호출."""
 

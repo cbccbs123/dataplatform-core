@@ -77,6 +77,7 @@ def build_search_body(
     k: int = 100,
     weights: tuple[float, float] = (0.5, 0.5),
     exclude_medical: bool = True,
+    operator: str = "or",
 ) -> dict[str, Any]:
     """OpenSearch 하이브리드 검색 본문을 만든다(순수·결정적).
 
@@ -112,7 +113,13 @@ def build_search_body(
             clause["must_not"] = list(must_not)
         return {"bool": clause}
 
-    text_sub = _wrap({"multi_match": {"query": query, "fields": list(_TEXT_FIELDS)}})
+    # 025 FR-001: operator='and' 면 질의의 **모든 nori 토큰** 매칭을 요구해 복합어 질의(예: '스마트폰
+    # 생산량')의 부분 토큰 BM25 가짜매칭(F2)을 차단한다 — 의미 매칭은 knn 서브쿼리가 보완(하이브리드
+    # 불변). 기본 'or' 는 현행 본문과 바이트 동일(operator 키 생략 — 회귀 0).
+    mm: dict[str, Any] = {"query": query, "fields": list(_TEXT_FIELDS)}
+    if operator != "or":
+        mm["operator"] = operator
+    text_sub = _wrap({"multi_match": mm})
     # knn 은 modality·의료배제를 **knn native filter**(pre-filter)로 적용한다 — bool 사후필터로 감싸면
     # 전역 k 최근접을 먼저 뽑고 거르므로, 작은 k(=버킷 한도)에서 비우세 모달리티(image 등)가 0 건이
     # 된다(G3 실OS 발견: image k=3 → 0건). filter 안에서 modality 로 좁혀 그 모달리티의 k 최근접을 뽑는다.
@@ -317,6 +324,7 @@ def search_assets_os(
     cutoff_floor: float = _DEFAULT_CUTOFF_FLOOR,
     cutoff_probe_k: int = _DEFAULT_PROBE_K,
     probe_fn: Callable[..., tuple[float, float]] = probe_relevance,
+    bm25_operator: str = "or",
 ) -> dict[str, list[dict[str, Any]]]:
     """text·audio 버킷을 020 OS 인덱스에서 하이브리드 검색한다(FR-002 — OS 경로 모달리티).
 
@@ -342,6 +350,7 @@ def search_assets_os(
             k=k,
             weights=weights,
             exclude_medical=exclude_medical,
+            operator=bm25_operator,
         )
         resp = client.search(index=index, body=body, search_pipeline=pipeline_name)
         hits = ((resp or {}).get("hits") or {}).get("hits") or []
