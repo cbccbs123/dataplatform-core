@@ -180,6 +180,11 @@ class TestCleanFileName(unittest.TestCase):
         # 모음 희소(<25%) 영숫자 토큰(길이≥8)은 혼합 여부와 무관하게 제거.
         self.assertEqual(clean_file_name("리뷰_QWXZBKLMN.mp4"), "리뷰")
 
+    def test_consonant_heavy_real_word_kept(self) -> None:
+        # 모음 희소(<25%)지만 모음을 보유한 규칙 표기 영단어는 보존(리뷰 후속 — 모음 분기의
+        # 자연어 가드): 'strength'(e 1개·0.125). 모음·y 전무('QWXZBKLMN')만 ID 로 제거.
+        self.assertEqual(clean_file_name("강도_strength_가이드.pdf"), "강도 strength 가이드")
+
     def test_short_alnum_token_preserved(self) -> None:
         # 길이<8 영숫자 토큰(예: 'Qi2'·'xyz')은 ID 판정에서 제외(보수적) — 보존.
         self.assertEqual(clean_file_name("충전기_Qi2.mp4"), "충전기 Qi2")

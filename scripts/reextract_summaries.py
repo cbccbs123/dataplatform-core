@@ -47,11 +47,9 @@ _INS_EMB = (
     "VALUES (%s, %s, %s, %s::vector, %s, NULL)"
 )
 
-# image 재임베딩 대상 채널 → 모델(017/018 단일 출처와 동일 상수; KURE 는 026에서 삭제라 제외).
-_IMAGE_REEMBED_CHANNELS = (
-    ("st", "BM-K/KoSimCSE-roberta-multitask"),
-    ("st_bge", "BAAI/bge-m3"),
-)
+# image 재임베딩 대상 채널(KURE 는 026에서 삭제라 제외). 모델은 단일 출처 settings.model_for_channel
+# 로 실행 시점에 해소한다 — 하드코딩 중복이 env 오버라이드와 어긋나는 드리프트 방지(리뷰 후속).
+_IMAGE_REEMBED_CHANNELS = ("st", "st_bge")
 
 
 def _audio_text(ext_meta: dict[str, Any], fs_path: str) -> str:
@@ -104,6 +102,7 @@ def _reextract_one(modality: str, fs_path: str, ext_meta: dict[str, Any]) -> dic
 
 def _reembed_image(conn: Any, asset_id: str, ext_meta: dict[str, Any], *, normalize: bool) -> int:
     """image 자산의 st/st_bge 임베딩을 새 요약 기반으로 교체한다(DELETE+INSERT·1청크)."""
+    from src.config.settings import model_for_channel
     from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
@@ -111,7 +110,8 @@ def _reembed_image(conn: Any, asset_id: str, ext_meta: dict[str, Any], *, normal
     if not text.strip():
         return 0
     n = 0
-    for channel, model in _IMAGE_REEMBED_CHANNELS:
+    for channel in _IMAGE_REEMBED_CHANNELS:
+        model = model_for_channel(channel)  # 단일 출처(018) — env 오버라이드와 항상 일치
         raw = embed_texts([text], model_name=model, normalize_embeddings=normalize)[0]
         vec = pad_embedding_to_storage_dim(list(raw))
         literal = "[" + ",".join(repr(float(x)) for x in vec) + "]"
@@ -154,12 +154,12 @@ def main() -> int:
         ]
         if args.limit:
             targets = targets[: args.limit]
-        print(f"대상 자산: {len(targets)}건 (dry_run={args.dry_run})")
+        _LOG.info("대상 자산: %d건 (dry_run=%s)", len(targets), args.dry_run)
         if args.dry_run:
             by_mod: dict[str, int] = {}
             for _a, mod, _f, _e in targets:
                 by_mod[mod] = by_mod.get(mod, 0) + 1
-            print("모달리티 분포:", by_mod)
+            _LOG.info("모달리티 분포: %s", by_mod)
             return 0
 
         # ── 백업(복구 가능성, FR-006) — 실행 전 전체 ext_meta 스냅샷 ──
@@ -174,7 +174,7 @@ def main() -> int:
             ),
             encoding="utf-8",
         )
-        print(f"백업: {backup_path} ({len(targets)}건)")
+        _LOG.info("백업: %s (%d건)", backup_path, len(targets))
 
         for asset_id, modality, fs_path, ext_meta in targets:
             try:
@@ -192,13 +192,13 @@ def main() -> int:
                 conn.commit()
                 counts["processed"] += 1
                 if counts["processed"] % 20 == 0:
-                    print(f"진행: {counts}")
+                    _LOG.info("진행: %s", counts)
             except Exception as e:  # 자산별 격리(FR-006) — 배치 무중단
                 conn.rollback()
                 counts["failed"] += 1
                 _LOG.warning("재추출 실패 격리 asset=%s (%s: %s)", asset_id[:8], type(e).__name__, e)
 
-    print(f"완료: {counts}")
+    _LOG.info("완료: %s", counts)
     return 0
 
 

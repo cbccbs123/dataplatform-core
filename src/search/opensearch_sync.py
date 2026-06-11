@@ -98,7 +98,11 @@ def _is_id_like_token(token: str) -> bool:
         return False
     vowel_ratio = sum(1 for c in token if c in _VOWELS) / len(token)
     if vowel_ratio < _ID_VOWEL_RATIO:
-        return True
+        # 모음 희소여도 표기가 규칙적이고 **모음(또는 y)이 하나라도 있는** 자연어('strength'·
+        # 'blacksmith' 등 자음 과다 영단어)는 보존한다(리뷰 후속). 모음·y 가 전무한 토큰
+        # ('QWXZBKLMN')은 영단어일 수 없으므로 표기가 규칙적이어도 ID 로 본다.
+        has_vowelish = any(c in _VOWELS or c in "yY" for c in token)
+        return not (_looks_like_natural_word(token) and has_vowelish)
     kinds = sum(
         (
             any(c.isupper() for c in token),
