@@ -99,7 +99,10 @@ class TestRunResync(unittest.TestCase):
         )
 
         # (client, conn) 위치인자 + index·channel·recreate 키워드로 정확히 1회 호출(조립 정확성).
-        sync_fn.assert_called_once_with(client, conn, index="assets", channel="st", recreate=True)
+        sync_fn.assert_called_once_with(
+            client, conn, index="assets", channel="st", recreate=True,
+            nori_user_words=None, noise_patterns=(),  # 026: settings 주입 패스스루(미지정=기본)
+        )
         # 결과 보고: 상태·색인수(ok)·오류 + 색인 맥락(channel·index·recreate).
         self.assertEqual(report["status"], "created")
         self.assertEqual(report["ok"], 7)

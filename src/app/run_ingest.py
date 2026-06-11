@@ -97,6 +97,7 @@ def _make_opensearch_indexer(*, db: PostgresUtil, settings: Any) -> Callable[[An
                 cache["index_asset"](
                     cache["client"], conn, str(asset_id),
                     index=settings.opensearch_index, channel=cache["channel"],
+                    noise_patterns=getattr(settings, "opensearch_filename_noise_patterns", ()),
                 )
         except Exception as exc:  # noqa: BLE001 — OS 색인 실패가 적재를 막지 않는다(best-effort 격리)
             _LOG.warning("opensearch 증분 색인 실패(무시): asset_id=%s (%s)", asset_id, exc)

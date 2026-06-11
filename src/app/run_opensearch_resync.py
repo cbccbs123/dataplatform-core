@@ -73,6 +73,8 @@ def run_resync(
     channel: str,
     index: str,
     recreate: bool,
+    nori_user_words: Any = None,
+    noise_patterns: Any = (),
     sync_fn: Callable[..., tuple[str, int, list[Any]]] = sync_all,
 ) -> dict[str, Any]:
     """복구 러너의 **순수 조립부** — 전체 재동기화 코어(`sync_all`)를 호출하고 결과를 보고한다.
@@ -82,7 +84,11 @@ def run_resync(
     책임이고, 여기서는 (이미 해소된) channel·index·recreate 를 그대로 흘려보내고 코어가 돌려준
     ``(상태, 색인수, 오류목록)`` 을 보고용 dict 로 모은다(상태·색인 맥락을 함께 담아 출력·검수 용이).
     """
-    status, ok, errors = sync_fn(client, conn, index=index, channel=channel, recreate=recreate)
+    # 026: 인덱스 analyzer 사전·파일명 정제 패턴은 settings 단일 출처를 IO 층이 주입한다(미지정=기본).
+    status, ok, errors = sync_fn(
+        client, conn, index=index, channel=channel, recreate=recreate,
+        nori_user_words=nori_user_words, noise_patterns=noise_patterns,
+    )
     return {
         "status": status,
         "ok": ok,
@@ -171,7 +177,11 @@ def main() -> int:
         # 선검사: 동기화 SELECT 의 avg(embedding) 집계는 pgvector>=0.5 의존 → 미달이면 재색인 전에
         # 원인 분명한 오류로 중단(모호한 SQL 오류 회피). 그 뒤 읽기전용 전체 재동기화를 조립·실행.
         check_pgvector_version(conn)
-        return run_resync(client, conn, channel=channel, index=index, recreate=args.recreate)
+        return run_resync(
+            client, conn, channel=channel, index=index, recreate=args.recreate,
+            nori_user_words=getattr(cfg, "opensearch_nori_user_words", None),
+            noise_patterns=getattr(cfg, "opensearch_filename_noise_patterns", ()),
+        )
 
     with db:
         # 읽기 전용 조회 트랜잭션(원본 PG 무수정, FR-004). 멱등(_id=asset_id upsert)이라 재시도 안전.
