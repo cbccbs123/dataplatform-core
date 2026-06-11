@@ -83,6 +83,10 @@ class PipelineSettings:
     search_os_cutoff_eps: float
     search_os_cutoff_floor: float
     search_os_probe_k: int
+    # 024: OS 검색 per-result 적합도 컷오프(정규화 점수 스케일). PG 코사인 스케일 search_min_scores 와
+    # 분리 — OS 경로(backend=opensearch)만 적용해 023 버킷 게이트가 유지한 버킷의 노이즈 꼬리를 거른다.
+    # 범위 밖은 resolve_os_search_min_scores 가 _build_settings 시점에 즉시 ValueError(fail-fast).
+    search_os_min_scores: dict[str, float]
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -165,6 +169,26 @@ def resolve_search_min_scores() -> dict[str, float]:
         m: _env_float_default(f"SEARCH_MIN_SCORE_{m.upper()}", common)
         for m in _SEARCH_MIN_SCORE_MODALITIES
     }
+
+
+# 024: OS 검색 per-result 적합도 컷오프 기본값(정규화 융합 점수 스케일). 위 SEARCH_MIN_SCORE_*(PG 코사인
+# 스케일)와 **분리** — OS 정규화 점수는 결과셋 내 min-max(top≈1.0)라 스케일이 달라 PG값(image 0.25)이
+# 무력이다. G3 calibration 분포(관련 ≥~0.45 군집 ↔ 노이즈 꼬리 ≤~0.35)의 절벽 기준값.
+_OS_MIN_SCORE_DEFAULTS: dict[str, float] = {"text": 0.45, "image": 0.45, "video": 0.45, "audio": 0.40}
+
+
+def resolve_os_search_min_scores() -> dict[str, float]:
+    """모달리티 → OS 검색 per-result 적합도 하한(정규화 점수 스케일, 024). ``SEARCH_OS_MIN_SCORE_<M>``
+    가 있으면 덮고, 없으면 ``_OS_MIN_SCORE_DEFAULTS[m]``. 범위 ``[0,1]`` 밖이면 **즉시 ValueError**
+    (잘못된 임계로 검색하지 않게 — ``_resolve_search_backend`` fail-fast 동형). OS 경로 전용이라
+    PG ``SEARCH_MIN_SCORE_*`` 와 독립(스케일 분리·pg 무변경)."""
+    out: dict[str, float] = {}
+    for m in _SEARCH_MIN_SCORE_MODALITIES:
+        value = _env_float_default(f"SEARCH_OS_MIN_SCORE_{m.upper()}", _OS_MIN_SCORE_DEFAULTS[m])
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"OS min_score 범위 오류: SEARCH_OS_MIN_SCORE_{m.upper()}={value!r} (0<=v<=1)")
+        out[m] = value
+    return out
 
 
 # 021: 검색 read path 백엔드 화이트리스트. 'pg'=현 media_search 경로(기본·회귀 0), 'opensearch'=020 OS
@@ -312,6 +336,8 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_os_cutoff_eps=_resolve_os_cutoff_eps(),
         search_os_cutoff_floor=_resolve_os_cutoff_floor(),
         search_os_probe_k=_resolve_os_probe_k(),
+        # 024: OS per-result 적합도 컷오프(정규화 스케일). PG search_min_scores 와 분리(OS 경로 전용).
+        search_os_min_scores=resolve_os_search_min_scores(),
     )
 
 

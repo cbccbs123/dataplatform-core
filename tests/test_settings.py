@@ -258,6 +258,44 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestSearchOsMinScores(unittest.TestCase):
+    """024 G1: OS per-result 적합도 컷오프 — SEARCH_OS_MIN_SCORE_*(정규화 점수 스케일·fail-fast).
+
+    PG 코사인 스케일 SEARCH_MIN_SCORE_* 와 **분리**된 OS 전용 임계(켜진 버킷의 노이즈 꼬리 제거).
+    023 cutoff 설정 형식 미러. 범위 [0,1] 밖이면 _build_settings 시점에 즉시 ValueError.
+    """
+
+    def test_defaults_when_unset(self) -> None:
+        # G3 calibration 분포 절벽 기준 기본값(audio 만 0.40, 나머지 0.45).
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(
+            s.search_os_min_scores,
+            {"text": 0.45, "image": 0.45, "video": 0.45, "audio": 0.40},
+        )
+
+    def test_per_modality_override(self) -> None:
+        with _env(SEARCH_OS_MIN_SCORE_IMAGE="0.5"):
+            s = _build_settings("dev")
+        self.assertEqual(s.search_os_min_scores["image"], 0.5)
+        self.assertEqual(s.search_os_min_scores["text"], 0.45)  # 나머지 기본 유지
+
+    def test_boundary_inclusive(self) -> None:
+        for v in ("0", "1"):
+            with _env(SEARCH_OS_MIN_SCORE_AUDIO=v):
+                _build_settings("dev")  # [0,1] 경계 포함 — 예외 없음
+
+    def test_above_one_raises(self) -> None:
+        with _env(SEARCH_OS_MIN_SCORE_TEXT="1.5"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_negative_raises(self) -> None:
+        with _env(SEARCH_OS_MIN_SCORE_VIDEO="-0.1"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestG3FieldNameContract(unittest.TestCase):
     """G3(search_service.search_hybrid) getattr 계약 봉인 — 필드명·기본값 정확 일치.
 
@@ -300,7 +338,9 @@ class TestSearchBackendWiring(unittest.TestCase):
             os_cap["client"] = client
             os_cap["query"] = query
             os_cap.update(kw)
-            return {"text": [{"id": "os_t"}]}
+            # similarity 는 024 OS per-result 임계(기본 text 0.45) 위 값 — 본 테스트는 라우팅 검증이
+            # 목적이라 필터에 잘리지 않는 행을 쓴다(필터 동작 자체는 search_service 테스트가 검증).
+            return {"text": [{"id": "os_t", "similarity": 0.9}]}
 
         def fake_grouped(query: str, **kw: object) -> dict[str, object]:
             raise AssertionError("opensearch 백엔드 text 버킷에 pg grouped 가 쓰이면 안 됨")
@@ -314,7 +354,7 @@ class TestSearchBackendWiring(unittest.TestCase):
                 _os_client_fn=lambda: "FAKE",
                 _grouped_fn=fake_grouped,
             )
-        self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
+        self.assertEqual(out["results"]["text_documents"], [{"id": "os_t", "similarity": 0.9}])
         self.assertEqual(os_cap["client"], "FAKE")
 
     def test_default_pg_setting_routes_search_hybrid_to_pg(self) -> None:

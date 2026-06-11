@@ -485,6 +485,81 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         self.assertEqual(out["results"]["text_documents"], [{"id": "t1"}])
 
 
+class TestBackendOsPerResultMinScore(unittest.TestCase):
+    """024 G2 — backend='opensearch' 는 per-result 필터에 OS 정규화 스케일 임계
+    (``cfg.search_os_min_scores``)를 쓰고, pg 는 전달 ``min_scores``(PG 코사인 스케일) 그대로.
+
+    023 버킷 게이트는 버킷 통째 유지/비움만 하므로, 켜진 버킷 안의 노이즈 꼬리(F4)는 per-result
+    임계가 거른다 — 단 PG 스케일 값(image 0.25)은 OS 정규화 점수(top≈1.0)에 무력이라 분리한다.
+    """
+
+    @staticmethod
+    def _os_rows() -> dict[str, list[dict[str, object]]]:
+        # OS 버킷: 관련(0.6)·노이즈 꼬리(0.4) — OS 임계 0.5 면 꼬리만 잘려야 한다.
+        return {
+            "image": [
+                {"id": "hi", "similarity": 0.6},
+                {"id": "lo", "similarity": 0.4},
+            ]
+        }
+
+    def test_opensearch_uses_os_min_scores_not_passed(self) -> None:
+        # (a) OS 백엔드: cfg.search_os_min_scores 적용·전달 min_scores(PG 스케일) 무시.
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch",
+            search_os_min_scores={"text": 0.45, "image": 0.5, "video": 0.45, "audio": 0.4},
+        )
+        fake_os, _cap = _recording_os(self._os_rows())
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "질의",
+                modalities=["image"],
+                min_scores={"image": 0.25},  # PG 스케일 — OS 경로에선 무시돼야 함
+                _os_search_fn=fake_os,
+                _os_client_fn=lambda: "C",
+                _grouped_fn=_fake_grouped,
+            )
+        # OS 임계 0.5 적용: 0.6 유지·0.4 제거. (전달 0.25 가 적용됐다면 둘 다 남았을 것.)
+        self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi"])
+
+    def test_pg_uses_passed_min_scores_unchanged(self) -> None:
+        # (b) pg 백엔드: cfg 에 search_os_min_scores 가 있어도 전달 min_scores 그대로(회귀 0).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="pg",
+            search_os_min_scores={"text": 0.99},  # 적용되면 t1(기본 sim 없음=0.0)이 잘려버림
+        )
+
+        def grouped_with_sims(query: str, **_kw: object) -> dict[str, object]:
+            return {"text_documents": [{"id": "t1", "similarity": 0.3}], "meta": {}}
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "질의",
+                modalities=["text"],
+                min_scores={"text": 0.1},  # PG 스케일 그대로 적용 — 0.3 유지
+                _grouped_fn=grouped_with_sims,
+            )
+        self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["t1"])
+
+    def test_opensearch_falls_back_to_passed_when_cfg_missing(self) -> None:
+        # (c) settings 미초기화(cfg=None)·backend 명시 → 전달 min_scores 폴백(필터 동작 보존).
+        fake_os, _cap = _recording_os(self._os_rows())
+        out = search_hybrid(
+            "질의",
+            modalities=["image"],
+            backend="opensearch",
+            min_scores={"image": 0.5},  # 폴백으로 이 값이 적용 → 0.4 제거
+            _os_search_fn=fake_os,
+            _os_client_fn=lambda: "C",
+            _grouped_fn=_fake_grouped,
+        )
+        self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi"])
+
+
 class TestBackendOpenSearchNoLLM(unittest.TestCase):
     """(c·FR-002·SC-004) backend='opensearch' 전 모달리티 경로는 structure_user_query(LLM) 미호출."""
 
