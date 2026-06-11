@@ -498,11 +498,12 @@ class FuseHybridTest(unittest.TestCase):
         self.assertAlmostEqual(out["knn_only"]["_cos"], 0.4)
 
     def test_row_shape_homogeneous_with_media_search(self) -> None:
-        # SC-005: 행은 os_hit_to_row 동형 키 + 내부키(_cos·_bm25). similarity 는 융합값.
+        # SC-005: 행은 os_hit_to_row 동형 키 + 내부키(_cos·_bm25·_rrtext — 응답 전 전부 제거).
         out = fuse_hybrid([self._bm25_hit("a", 1.0)], [], weights=(0.5, 0.5))
         row = out[0]
         self.assertEqual(
-            set(row), {"id", "file_uri", "modality", "summary", "similarity", "_cos", "_bm25"}
+            set(row),
+            {"id", "file_uri", "modality", "summary", "similarity", "_cos", "_bm25", "_rrtext"},
         )
         self.assertEqual(row["modality"], "text")
 
@@ -738,6 +739,23 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertIn("seed", kept_ids)   # 양쪽
         self.assertNotIn("n1", kept_ids)  # cos<floor·BM25 미매칭 → 컷
         self.assertNotIn("low", kept_ids)
+
+    def test_rerank_scores_search_text_not_summary(self) -> None:
+        # 028 입력 검증(사용자 지적 후속): 채점 문서측은 summary 단독이 아니라 **구조화
+        # 텍스트("요약: …\n키워드: …")** — 입력 변형 4종 실측에서 최선(회식 0.003→0.071).
+        # nori 토큰 나열은 패러프레이즈 붕괴로 기각(자연어 문맥 파괴 — ADR 기록).
+        hit={"_id":"r1","_score":0.9,"_source":{"asset_id":"r1","modality":"txt",
+             "summary":"요약문","keywords":["키워드","라벨"]}}
+        client = _FakeMsearchClient(knn_by_label={"text":[hit]}, bm25_by_label={"text":[]})
+        seen=[]
+        def spy(query, texts, *, model_name):
+            seen.extend(texts); return [0.9]*len(texts)
+        buckets,_=search_assets_os(
+            client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            rerank_enabled=True, rerank_tau=0.0, rerank_fn=spy,
+        )
+        self.assertEqual(seen, ["요약: 요약문\n키워드: 키워드 라벨"])  # 구조화 입력(실측 최선)
+        self.assertNotIn("_rrtext", buckets["text"][0])  # 내부키 제거
 
     def test_rerank_replaces_gate_and_cut(self) -> None:
         # 028 평가 경로: rerank_enabled 면 게이트·컷 대신 — 융합 상위 R건을 쌍 채점해 τ 이상만

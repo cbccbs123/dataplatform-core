@@ -277,6 +277,16 @@ def fuse_hybrid(
 
     def _entry(hit: dict[str, Any]) -> dict[str, Any]:
         row = os_hit_to_row(hit)
+        # 028: rerank 문서측 입력은 **구조화 텍스트**("요약: …\n키워드: …") — 입력 변형 4종
+        # 실측에서 최선(회식 0.003→0.071·인접-없음 차단 유지). 요약문에 없는 토픽 앵커(예:
+        # 회식의 keywords '술자리')를 자연어 골격 안에 제공한다. nori 토큰 나열은 패러프레이즈
+        # 붕괴(별보기 0.005 — 문맥 파괴)로 기각. 내부키 — 응답 전 제거.
+        src_ = hit.get("_source") or {}
+        _kw = src_.get("keywords") if isinstance(src_.get("keywords"), list) else []
+        _summ = str(src_.get("summary") or row.get("summary") or "")
+        row["_rrtext"] = (
+            f"요약: {_summ}\n키워드: {' '.join(str(x) for x in _kw)}" if _kw else _summ
+        )
         aid = row["id"]
         e = merged.get(aid)
         if e is None:
@@ -473,7 +483,10 @@ def search_assets_os(
             if rerank_fn is None:
                 from src.search.reranker import score_pairs as rerank_fn  # noqa: PLW2901 — lazy 기본 seam
             cands = fused[: int(rerank_top_r)]
-            scores = rerank_fn(query, [str(r.get("summary") or "") for r in cands], model_name=rerank_model)
+            scores = rerank_fn(
+                query, [str(r.get("_rrtext") or r.get("summary") or "") for r in cands],
+                model_name=rerank_model,
+            )
             scored = [
                 {**r, "similarity": float(sc)} for r, sc in zip(cands, scores) if float(sc) >= rerank_tau
             ]
@@ -482,7 +495,7 @@ def search_assets_os(
             gate_passed = bool(kept)
             cut_count = len(fused) - len(kept)
             clean = [
-                {key: val for key, val in row.items() if key not in ("_cos", "_bm25")}
+                {key: val for key, val in row.items() if key not in ("_cos", "_bm25", "_rrtext")}
                 for row in kept[: int(k)]
             ]
             buckets[label] = clean
@@ -515,7 +528,7 @@ def search_assets_os(
         cut_count = len(fused) - len(kept)  # 게이트·컷으로 제거된 행 수(상한 절삭 제외 — 컷 효과만).
         # 내부키(_cos·_bm25) 제거 + 요청 k 상한(응답 동형·구 size=k 계약 보존).
         clean = [
-            {key: val for key, val in row.items() if key not in ("_cos", "_bm25")}
+            {key: val for key, val in row.items() if key not in ("_cos", "_bm25", "_rrtext")}
             for row in kept[: int(k)]
         ]
         buckets[label] = clean
