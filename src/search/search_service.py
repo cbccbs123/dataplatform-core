@@ -12,6 +12,7 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+from src.config import search_constants
 from src.config.settings import (
     ChunkAggConfig,
     active_embed_channel,
@@ -44,18 +45,10 @@ _MODALITY_BUCKETS: dict[str, str] = {
 # 회수된다(CLIP 아님 — 시각-내용 매칭은 후속 spec). 따라서 OS 경로는 요청 모달리티 전체를 한 번의
 # search_assets_os 호출로 처리하며, PG/모달리티 분기(021 의 _OS_MODALITIES·_PG_VISUAL_MODALITIES)는 제거됐다.
 
-# OS 정규화 융합 가중치 (BM25, kNN) 기본값. 설정 필드(opensearch_fusion_weights) 정식화·범위검증은
-# G4(T007) — 미설정이면 이 측정 근거 균형값으로 폴백(getattr). 동작 불변(SC-001): pg 경로 무관.
-_DEFAULT_OS_FUSION_WEIGHTS: tuple[float, float] = (0.5, 0.5)
-
-# 023: OS 검색 적합도 컷오프(probe 게이트) 기본값. _DEFAULT_OS_FUSION_WEIGHTS 동형 — settings 미초기화
-# (순수 단위 등)에서 getattr 폴백으로 쓴다(cross-module private import 안 함). enabled 기본 False 는
-# 미초기화 시 안전(무게이트) — 실 settings 기본은 True 이나 search_backend='pg'(기본)면 OS 경로 미실행
-# 이라 무관하다. eps/floor/probe_k 는 settings 기본과 같은 측정 근거값(opensearch_search 의 G1/G2 상수 동치).
-_DEFAULT_OS_CUTOFF_ENABLED: bool = False
-_DEFAULT_OS_CUTOFF_EPS: float = 0.15  # G4 calibration 확정(opensearch_search 상수 동치)
-_DEFAULT_OS_CUTOFF_FLOOR: float = 0.43
-_DEFAULT_OS_PROBE_K: int = 50
+# 027: OS 융합·게이트·컷 기본값은 모듈 중복 상수(_DEFAULT_OS_*)를 두지 않고 src.config.search_constants
+# 단일 출처(F1)를 직접 참조한다 — settings 미초기화(순수 단위 등) getattr 폴백도 같은 공개 상수를 쓴다
+# (cross-module private import 없음·하드코딩 0). 미초기화 시 게이트 기본은 운영 기본과 동일(enabled True)
+# 이며, search_backend='pg'(기본)면 OS 경로 자체가 미실행이라 회귀 0(SC-001).
 
 
 def _row_similarity(row: dict[str, Any]) -> float:
@@ -92,14 +85,15 @@ def _grouped_via_opensearch(
     limit_per_bucket: int,
     text_channel: str,
     cfg: Any,
-    os_search_fn: Callable[..., dict[str, list[dict[str, Any]]]],
+    disable_os_cutoff: bool,
+    os_search_fn: Callable[..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]],
     os_client_fn: Callable[..., Any],
 ) -> dict[str, Any]:
-    """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022, FR-002·FR-003·SC-005).
+    """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
 
     text·audio·**image·video 모든 버킷**을 020 OS 인덱스에서 동일 하이브리드(nori BM25 캡션·라벨 +
-    ``embedding`` kNN + 정규화 융합)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM 캡션·
-    KoSimCSE 캡션 임베딩으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속 spec).
+    ``embedding`` kNN + **클라이언트 융합**)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM
+    캡션·KoSimCSE 캡션 임베딩으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속).
     요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 현 pg 분기와 같은
     키(text_documents·audio·image·video·meta)로 담는다 — 반환 grouped 는 pg 분기와 동일 모양이라 호출부의
     ``_filter_by_min_score`` 공유 코드가 그대로 처리한다(응답 동형).
@@ -108,9 +102,16 @@ def _grouped_via_opensearch(
     - **PG·LLM 미접촉(FR-002·SC-004)**: PG grouped(시각 CLIP 2단계)·``structure_user_query``(LLM)를
       호출하지 않는다 — 원문 ``query`` 만 OS 에 넘긴다(멀티모달 LLM 0·ms). 따라서 PG 전용 파라미터
       (structured·alpha·fusion·query_model_name·chunk_agg·grouped_fn)는 이 경로에서 제거됐다.
+    - **(buckets, gate_meta) 튜플 수신(027)**: ``os_search_fn``(search_assets_os)은 클라이언트 융합
+      전환으로 버킷과 함께 게이트 메타(모달리티별 top·baseline·gate_passed·cut_count)를 돌려준다 →
+      ``meta["os_gate"]`` 로 합류시켜 빈 버킷이 no-match 판정인지 즉시 관측 가능하게 한다(F4 관측성).
     - **모달리티 키 매핑**: ``os_search_fn`` 버킷 키는 모달리티명('text'/'image')이고 응답 grouped 키는
       ('text_documents'/'image')이므로 ``_MODALITY_BUCKETS`` 로 변환해 담는다.
-    - **meta**: 항상 ``{"backend": "opensearch"}`` 단일(PG meta 통과 없음 — grouped 미호출).
+    - **컷오프 설정(027)**: 게이트·per-result 컷 임계(eps·floor·result_floor·operator)를 cfg 에서 읽어
+      OS seam 에 전달한다(getattr 폴백은 search_constants 단일 출처 — settings 미초기화 순수 단위 방어).
+      ``disable_os_cutoff=True`` 면 ``cutoff_enabled=False`` 로 강제해 게이트·per-result 컷을 모두 끈다
+      (no_cutoff 디버그 우회 — 약한 후보까지 노출). per-result 컷이 search_assets_os 내부 코사인 스케일
+      (cut_rows·result_floor)로 이동했으므로 호출부 ``_filter_by_min_score`` 는 OS 경로에 적용하지 않는다.
     - **OS 미도달(FR-007)**: ``os_client_fn``/``os_search_fn`` 예외를 try/except 로 감싸지 않아 그대로
       전파한다(silent pg 폴백 금지 — 결과가 백엔드 가용성에 따라 달라지지 않게).
 
@@ -119,31 +120,39 @@ def _grouped_via_opensearch(
     """
     requested = modalities if modalities is not None else list(_MODALITY_BUCKETS)
 
-    grouped: dict[str, Any] = {"meta": {"backend": "opensearch"}}
     if not requested:
-        return grouped  # 빈 요청: OS 미접촉(불필요 IO 회피)
+        # 빈 요청: OS 미접촉(불필요 IO 회피). os_gate 도 빈 dict(검색 안 함).
+        return {"meta": {"backend": "opensearch", "os_gate": {}}}
+
+    # disable_os_cutoff(디버그 우회)면 게이트·컷 모두 off. 아니면 cfg 의 enabled(미초기화 폴백=운영 기본).
+    cutoff_enabled = (
+        False
+        if disable_os_cutoff
+        else getattr(cfg, "search_os_cutoff_enabled", search_constants.OS_CUTOFF_ENABLED_DEFAULT)
+    )
 
     client = os_client_fn()  # OS 클라이언트 생성 실패 시 예외 전파(FR-007)
-    os_buckets = os_search_fn(
+    os_buckets, gate_meta = os_search_fn(
         client,
         query,
         modalities=requested,  # 요청 전 모달리티(image/video 포함)를 한 번에 OS 검색
         k=limit_per_bucket,
         channel=text_channel,
-        weights=getattr(cfg, "opensearch_fusion_weights", _DEFAULT_OS_FUSION_WEIGHTS),
+        weights=getattr(cfg, "opensearch_fusion_weights", search_constants.OS_FUSION_WEIGHTS_DEFAULT),
         index=getattr(cfg, "opensearch_index", "assets"),
-        pipeline_name=getattr(cfg, "opensearch_search_pipeline", "assets-hybrid"),
         exclude_medical=True,
-        # 023: 적합도 컷오프(probe 게이트) 설정을 cfg 에서 읽어 OS seam 에 전달한다(fusion_weights 동형
-        # getattr 폴백 — settings 미초기화 순수 단위 방어). cutoff_enabled=False(미초기화 기본)면
-        # search_assets_os 가 probe 미호출·버킷 그대로라 021/022 동작 동치다(회귀 0).
-        cutoff_enabled=getattr(cfg, "search_os_cutoff_enabled", _DEFAULT_OS_CUTOFF_ENABLED),
-        cutoff_eps=getattr(cfg, "search_os_cutoff_eps", _DEFAULT_OS_CUTOFF_EPS),
-        cutoff_floor=getattr(cfg, "search_os_cutoff_floor", _DEFAULT_OS_CUTOFF_FLOOR),
-        cutoff_probe_k=getattr(cfg, "search_os_probe_k", _DEFAULT_OS_PROBE_K),
+        # 027: 버킷 게이트 + per-result 컷 임계를 cfg 에서 읽어 OS seam 에 전달한다(getattr 폴백은
+        # search_constants 단일 출처 — settings 미초기화 순수 단위 방어). disable_os_cutoff 면 위에서
+        # cutoff_enabled=False 로 강제돼 search_assets_os 가 게이트·컷 모두 끄고 융합 전체를 노출한다.
+        cutoff_enabled=cutoff_enabled,
+        cutoff_eps=getattr(cfg, "search_os_cutoff_eps", search_constants.OS_CUTOFF_EPS_DEFAULT),
+        cutoff_floor=getattr(cfg, "search_os_cutoff_floor", search_constants.OS_CUTOFF_FLOOR_DEFAULT),
+        result_floor=getattr(cfg, "search_os_result_floor", search_constants.OS_RESULT_FLOOR_DEFAULT),
         # 025: BM25 operator — 'and' 면 전 토큰 매칭(F2 복합어 가짜매칭 차단). 미초기화 폴백 'or'(현행).
-        bm25_operator=getattr(cfg, "search_os_bm25_operator", "or"),
-    )  # client.search 미도달 예외도 전파(FR-007)
+        bm25_operator=getattr(cfg, "search_os_bm25_operator", search_constants.OS_BM25_OPERATOR_DEFAULT),
+    )  # client.msearch 미도달 예외도 전파(FR-007)
+    # meta 에 게이트 관측성(os_gate) 합류 — 빈 버킷이 no-match 판정인지 즉시 확인(F4).
+    grouped: dict[str, Any] = {"meta": {"backend": "opensearch", "os_gate": gate_meta}}
     # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
     for m in requested:
         grouped[_MODALITY_BUCKETS[m]] = os_buckets.get(m, [])
@@ -161,12 +170,15 @@ def search_hybrid(
     fusion: str = "alpha",
     structured: dict[str, Any] | None = None,
     min_scores: dict[str, float] | None = None,
+    disable_os_cutoff: bool = False,
     text_channel: str | None = None,
     text_query_model: str | None = None,
     chunk_agg: ChunkAggConfig | None = None,
     backend: str | None = None,
     _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
-    _os_search_fn: Callable[..., dict[str, list[dict[str, Any]]]] = os_search_assets,
+    _os_search_fn: Callable[
+        ..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]
+    ] = os_search_assets,
     _os_client_fn: Callable[..., Any] = os_get_client,
 ) -> dict[str, Any]:
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
@@ -178,7 +190,13 @@ def search_hybrid(
     ``structured`` 를 넘기면 그대로 grouped 검색에 전달돼 LLM 질의 구조화를 건너뛴다
     (이미 구조화됐거나 LLM 없이 테스트할 때). ``_grouped_fn`` 은 테스트 주입 seam.
     ``min_scores`` 는 모달리티 라벨→적합도 하한(0.0=비활성); 각 버킷에서 ``similarity`` 가
-    임계값 미만인 행을 응답에서 제외한다(미지정 모달리티는 필터하지 않음).
+    임계값 미만인 행을 응답에서 제외한다(미지정 모달리티는 필터하지 않음). ⚠️ **pg 경로 전용**이다 —
+    OS 경로(backend='opensearch')는 per-result 컷이 ``search_assets_os`` 내부 코사인 스케일
+    (``cut_rows``·``result_floor``)로 이동했으므로 전달 ``min_scores``(PG 코사인 스케일)를 적용하지
+    않는다(스케일 불일치 방지·F1). pg 경로는 종전대로 전달 ``min_scores`` 그대로(회귀 0).
+    ``disable_os_cutoff`` 는 OS 경로의 **게이트·per-result 컷을 모두 끄는 디버그 우회**다(기본 False).
+    True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(sample_search_api ``no_cutoff``
+    배선). pg 경로엔 무영향.
     ``fusion`` 은 ST 하이브리드 융합 방식(기본 ``alpha``=기존 동작; ``rrf``=순위 융합 프로토타입).
     ⚠️ 한계: ``rrf`` 는 현재 grouped 출력에 반영되지 않는다 — 버킷 cap 이 ``similarity`` 로
     재정렬하므로 RRF 순서는 ``_run_hybrid_search`` 레벨에서만 효과(KPI 측정용). 설계 §8 후속.
@@ -251,17 +269,12 @@ def search_hybrid(
         cfg = None
     backend_name = backend if backend is not None else getattr(cfg, "search_backend", "pg")
 
-    # 024: per-result 적합도 임계는 backend 별 스케일이 다르다 — OS 정규화 융합 점수(min-max·top≈1.0)
-    # 에 PG 코사인 스케일 min_scores(image 0.25 등)를 적용하면 사실상 무필터라 노이즈 꼬리가 남는다.
-    # OS 경로는 settings 의 OS 전용 임계(search_os_min_scores, SEARCH_OS_MIN_SCORE_*)가 전달
-    # min_scores 를 **대체**하고(명시 인자 우선 관례의 의도적 예외 — 운영 진입점이 PG 스케일 값을
-    # 그대로 넘기기 때문), pg 경로·settings 미초기화(폴백)는 전달 min_scores 그대로 둔다(회귀 0 —
-    # FR-002). 단 **명시 빈 dict({})는 "필터 비활성" 센티넬**로 존중한다 — no_cutoff 디버그 경로
-    # (sample_search_api)가 OS 백엔드에서도 약한 후보까지 노출할 수 있어야 하므로(리뷰 후속).
-    if backend_name == "opensearch" and min_scores != {}:
-        effective_min_scores = getattr(cfg, "search_os_min_scores", None) or min_scores
-    else:
-        effective_min_scores = min_scores
+    # 027: per-result 적합도 컷은 backend 별로 다른 곳에서 한다. OS 경로는 search_assets_os 내부 코사인
+    # 스케일(cut_rows·result_floor)이 노이즈 꼬리를 거르므로 호출부 _filter_by_min_score 를 적용하지
+    # 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에 무의미·스케일 불일치).
+    # pg 경로만 전달 min_scores 그대로 적용한다(회귀 0 — FR-002). 024 의 effective_min_scores 분기·
+    # 빈 dict 센티넬은 제거됐다(OS 컷이 seam 내부로 이동·디버그 우회는 disable_os_cutoff 가 담당).
+    filter_min_scores = {} if backend_name == "opensearch" else min_scores
 
     if backend_name == "opensearch":
         # 022: text·audio·image·video 전 모달리티를 OS(020 인덱스)로 검색(PG CLIP·LLM 미접촉).
@@ -273,6 +286,7 @@ def search_hybrid(
             limit_per_bucket=limit_per_bucket,
             text_channel=text_channel,
             cfg=cfg,
+            disable_os_cutoff=disable_os_cutoff,
             os_search_fn=_os_search_fn,
             os_client_fn=_os_client_fn,
         )
@@ -290,11 +304,11 @@ def search_hybrid(
             chunk_agg=chunk_agg,
             include_visual=include_visual,
         )
-    # per-result 적합도 필터: backend 별 스케일로 해소된 effective_min_scores 를 적용한다(024).
-    # OS=정규화 점수 스케일(search_os_min_scores)·pg=전달 min_scores(PG 코사인 스케일) — 위 backend
-    # 분기에서 결정. 0.0(미설정)이면 비활성(_filter_by_min_score 원본 반환).
+    # per-result 적합도 필터(027): pg 경로만 전달 min_scores 를 적용한다(PG 코사인 스케일). OS 경로는
+    # filter_min_scores={} 라 무필터(컷은 search_assets_os 내부에서 이미 수행). 0.0(미설정/빈)이면
+    # 비활성(_filter_by_min_score 원본 반환).
     results = {
-        key: _filter_by_min_score(grouped.get(key, []), (effective_min_scores or {}).get(label, 0.0))
+        key: _filter_by_min_score(grouped.get(key, []), (filter_min_scores or {}).get(label, 0.0))
         for label, key in label_keys
     }
     return {"query": query, "results": results, "meta": grouped.get("meta", {})}

@@ -22,7 +22,7 @@ OS_CUTOFF_EPS_DEFAULT: float = 0.17
 OS_CUTOFF_FLOOR_DEFAULT: float = 0.50
 
 # ── per-result 컷(단일 코사인 스케일) 기본값 ────────────────────────────────
-# 행 유지 = BM25 매칭(어휘 증거) OR 원시 코사인 ≥ RESULT_FLOOR. 정규화 스케일 임계(SEARCH_OS_MIN_SCORE_*)
+# 행 유지 = BM25 매칭(어휘 증거) OR 원시 코사인 ≥ RESULT_FLOOR. 024 의 모달리티별 정규화 스케일 임계
 # 4종을 대체하는 전역 1개(코사인 스케일). G4 재보정 확정.
 OS_RESULT_FLOOR_DEFAULT: float = 0.40
 

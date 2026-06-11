@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from src.config import search_constants
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -71,23 +73,22 @@ class PipelineSettings:
     # 동작 무영향(SC-001). search_backend 기본 'pg' 면 search_service.search_hybrid 가 현 media_search
     # 경로 그대로(회귀 0). 화이트리스트 밖 값은 _build_settings(=init_settings)에서 즉시 ValueError로
     # 차단한다(fail-fast — 런타임까지 오설정이 숨지 않게, 백로그 '설정 fail-late' 교정).
-    # opensearch_search_pipeline/opensearch_fusion_weights 는 OS 정규화 융합 검색 파이프라인 메타.
+    # opensearch_fusion_weights 는 클라이언트 융합(027)의 (BM25,kNN) 가중치다.
     search_backend: str
-    opensearch_search_pipeline: str
     opensearch_fusion_weights: tuple[float, float]
-    # 023: OS 검색 적합도 컷오프(probe 게이트) 설정. 모두 선택 필드(021 동형) — 미설정 시 측정 근거
-    # 기본값. 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로 enabled 기본 True 라도 search_backend='pg'
-    # (기본)면 OS 경로 자체가 실행되지 않아 동작 불변(SC-001). eps=상대신호(top-mean) 하한·floor=코사인
-    # 절대 backstop·probe_k=probe 표본 수. 범위 밖 값은 _resolve_* 헬퍼가 _build_settings 시점에 즉시
-    # ValueError 로 차단한다(잘못된 임계로 검색하지 않게 — _resolve_search_backend fail-fast 동형).
+    # 023/027: OS 검색 버킷 게이트(robust baseline) 설정. 모두 선택 필드(021 동형) — 미설정 시
+    # ``search_constants`` 단일 출처 기본값(F1). 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로 enabled
+    # 기본 True 라도 search_backend='pg'(기본)면 OS 경로 자체가 미실행이라 동작 불변(SC-001). eps=상대
+    # 신호(top-baseline) 하한·floor=코사인 절대 backstop. 범위 밖 값은 _resolve_* 헬퍼가 _build_settings
+    # 시점에 즉시 ValueError 로 차단한다(fail-fast). 027 클라이언트 융합 전환으로 게이트 표본 수 설정·
+    # 정규화 융합 검색 파이프라인 메타 필드는 제거됐다 — 게이트 신호는 같은 kNN 표본에서 직접 잰다(추가 검색 0).
     search_os_cutoff_enabled: bool
     search_os_cutoff_eps: float
     search_os_cutoff_floor: float
-    search_os_probe_k: int
-    # 024: OS 검색 per-result 적합도 컷오프(정규화 점수 스케일). PG 코사인 스케일 search_min_scores 와
-    # 분리 — OS 경로(backend=opensearch)만 적용해 023 버킷 게이트가 유지한 버킷의 노이즈 꼬리를 거른다.
-    # 범위 밖은 resolve_os_search_min_scores 가 _build_settings 시점에 즉시 ValueError(fail-fast).
-    search_os_min_scores: dict[str, float]
+    # 027: OS per-result 컷 코사인 하한(단일 코사인 스케일). 024 의 모달리티별 정규화 스케일 임계 4종을
+    # 대체하는 전역 1개 — 행 유지 = BM25 매칭 OR 원시 코사인 ≥ 이 값.
+    # 범위 [−1,1] 밖은 _resolve_os_result_floor 가 _build_settings 시점에 즉시 ValueError(fail-fast).
+    search_os_result_floor: float
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
@@ -180,26 +181,6 @@ def resolve_search_min_scores() -> dict[str, float]:
     }
 
 
-# 024: OS 검색 per-result 적합도 컷오프 기본값(정규화 융합 점수 스케일). 위 SEARCH_MIN_SCORE_*(PG 코사인
-# 스케일)와 **분리** — OS 정규화 점수는 결과셋 내 min-max(top≈1.0)라 스케일이 달라 PG값(image 0.25)이
-# 무력이다. G3 calibration 분포(관련 ≥~0.45 군집 ↔ 노이즈 꼬리 ≤~0.35)의 절벽 기준값.
-_OS_MIN_SCORE_DEFAULTS: dict[str, float] = {"text": 0.45, "image": 0.45, "video": 0.45, "audio": 0.40}
-
-
-def resolve_os_search_min_scores() -> dict[str, float]:
-    """모달리티 → OS 검색 per-result 적합도 하한(정규화 점수 스케일, 024). ``SEARCH_OS_MIN_SCORE_<M>``
-    가 있으면 덮고, 없으면 ``_OS_MIN_SCORE_DEFAULTS[m]``. 범위 ``[0,1]`` 밖이면 **즉시 ValueError**
-    (잘못된 임계로 검색하지 않게 — ``_resolve_search_backend`` fail-fast 동형). OS 경로 전용이라
-    PG ``SEARCH_MIN_SCORE_*`` 와 독립(스케일 분리·pg 무변경)."""
-    out: dict[str, float] = {}
-    for m in _SEARCH_MIN_SCORE_MODALITIES:
-        value = _env_float_default(f"SEARCH_OS_MIN_SCORE_{m.upper()}", _OS_MIN_SCORE_DEFAULTS[m])
-        if not (0.0 <= value <= 1.0):
-            raise ValueError(f"OS min_score 범위 오류: SEARCH_OS_MIN_SCORE_{m.upper()}={value!r} (0<=v<=1)")
-        out[m] = value
-    return out
-
-
 # 021: 검색 read path 백엔드 화이트리스트. 'pg'=현 media_search 경로(기본·회귀 0), 'opensearch'=020 OS
 # 인덱스 하이브리드. 그 외 값은 잘못된 백엔드로 검색하지 않도록 _resolve_search_backend 가 즉시 차단한다.
 _SEARCH_BACKENDS = ("pg", "opensearch")
@@ -220,15 +201,15 @@ def _resolve_search_backend() -> str:
 
 
 def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
-    """OS 정규화 융합 가중치 (BM25, kNN)(021, FR-005). ``OPENSEARCH_FUSION_WEIGHTS="0.5,0.5"`` → 튜플.
+    """OS 클라이언트 융합 가중치 (BM25, kNN)(021·027, FR-005). ``OPENSEARCH_FUSION_WEIGHTS="0.5,0.5"`` → 튜플.
 
-    미설정 시 기본 ``(0.5, 0.5)``(측정 근거 균형값). build_search_body 의 hybrid 서브쿼리 순서
-    ``[텍스트(BM25), knn]`` 와 동일 순서의 ``(w_bm25, w_knn)`` 이다. 정확히 2개(BM25·kNN)가 아니거나,
-    수치가 아니거나, 각 가중치가 ``0<=w<=1`` 범위를 벗어나면 **즉시 ValueError**(fail-fast — 잘못된
-    융합 가중치로 검색 품질이 조용히 붕괴하지 않게)."""
+    미설정 시 기본은 ``search_constants.OS_FUSION_WEIGHTS_DEFAULT`` 단일 출처(F1 — 하드코딩 제거).
+    fuse_hybrid 의 서브검색 순서 ``[BM25, kNN]`` 과 동일 순서의 ``(w_bm25, w_knn)`` 이다. 정확히
+    2개(BM25·kNN)가 아니거나, 수치가 아니거나, 각 가중치가 ``0<=w<=1`` 범위를 벗어나면 **즉시
+    ValueError**(fail-fast — 잘못된 융합 가중치로 검색 품질이 조용히 붕괴하지 않게)."""
     raw = os.getenv("OPENSEARCH_FUSION_WEIGHTS")
     if raw is None or not raw.strip():
-        return (0.5, 0.5)
+        return search_constants.OS_FUSION_WEIGHTS_DEFAULT
     parts = [p.strip() for p in raw.split(",")]
     if len(parts) != 2:
         raise ValueError(
@@ -246,48 +227,50 @@ def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
     return (w_bm25, w_knn)
 
 
-# 023: OS 검색 적합도 컷오프(probe 게이트) 4종 해소. 021 _resolve_opensearch_fusion_weights 와 동형으로
-# 환경 파싱·범위 검증·fail-fast 를 _build_settings 시점에 끌어와, 잘못된 임계로 검색하지 않도록 프로세스
-# 시작 시 즉시 실패시킨다. enabled 기본 True 라도 search_backend='pg'(기본)면 OS 경로 미실행 → 동작 불변.
+# 023/027: OS 검색 버킷 게이트 + per-result 컷 설정 해소. 021 _resolve_opensearch_fusion_weights 와
+# 동형으로 환경 파싱·범위 검증·fail-fast 를 _build_settings 시점에 끌어와, 잘못된 임계로 검색하지 않도록
+# 프로세스 시작 시 즉시 실패시킨다. 기본값은 모두 search_constants 단일 출처(F1 — 하드코딩 제거).
+# enabled 기본 True 라도 search_backend='pg'(기본)면 OS 경로 미실행 → 동작 불변.
 def _resolve_os_cutoff_enabled() -> bool:
-    """OS 검색 컷오프 활성 여부(023, FR-001). ``SEARCH_OS_CUTOFF_ENABLED`` 미설정 시 기본 ``True``.
+    """OS 검색 게이트 활성 여부(023·027, FR-001). 미설정 시 기본 ``OS_CUTOFF_ENABLED_DEFAULT``(True).
 
     bool 파싱은 020 ``_env_bool_default`` 재사용. 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로
     기본 True 라도 ``search_backend='pg'``(기본)면 OS 경로 자체가 실행되지 않아 동작 불변(SC-001)."""
-    return _env_bool_default("SEARCH_OS_CUTOFF_ENABLED", True)
+    return _env_bool_default("SEARCH_OS_CUTOFF_ENABLED", search_constants.OS_CUTOFF_ENABLED_DEFAULT)
 
 
 def _resolve_os_cutoff_eps() -> float:
-    """컷오프 상대신호 하한 eps(023, FR-001). 기본 ``0.15``(G4 calibration 확정). 범위 ``[0,1)`` 밖이면 **즉시 ValueError**.
+    """게이트 상대신호 하한 eps(023·027, FR-001). 기본 ``OS_CUTOFF_EPS_DEFAULT``. 범위 ``[0,1)`` 밖이면 **즉시 ValueError**.
 
-    eps 는 ``top − mean``(코사인 차) 의 하한이라 0 이상·1 미만이어야 의미가 있다(코사인 차의 유효 폭).
-    범위 밖은 잘못된 임계로 검색하지 않도록 fail-fast(``_resolve_search_backend`` 동형)."""
-    value = _env_float_default("SEARCH_OS_CUTOFF_EPS", 0.15)
+    eps 는 ``top − baseline``(코사인 차) 의 하한이라 0 이상·1 미만이어야 의미가 있다(코사인 차의 유효 폭).
+    범위 밖은 잘못된 임계로 검색하지 않도록 fail-fast(``_resolve_search_backend`` 동형). 027: baseline
+    정의가 '하위 절반 평균'(robust)으로 바뀌어 실측 확정치는 search_constants 1곳만 갱신한다."""
+    value = _env_float_default("SEARCH_OS_CUTOFF_EPS", search_constants.OS_CUTOFF_EPS_DEFAULT)
     if not (0.0 <= value < 1.0):
         raise ValueError(f"컷오프 eps 범위 오류: SEARCH_OS_CUTOFF_EPS={value!r} (0<=eps<1)")
     return value
 
 
 def _resolve_os_cutoff_floor() -> float:
-    """컷오프 절대 backstop floor(023, FR-004). 기본 ``0.43``(G4 calibration 확정). 범위 ``[-1,1]`` 밖이면 **즉시 ValueError**.
+    """게이트 절대 backstop floor(023·027, FR-004). 기본 ``OS_CUTOFF_FLOOR_DEFAULT``. 범위 ``[-1,1]`` 밖이면 **즉시 ValueError**.
 
     floor 는 top 코사인의 절대 하한이라 코사인 정의역 ``[-1,1]`` 안이어야 한다(경계 포함). 범위 밖은
-    잘못된 임계로 검색하지 않도록 fail-fast. 0.43 = 실OS 검증 라벨셋의 있음 top 최소(0.490)·없음 top
-    최대(0.365) 갭 중앙(주분리축)."""
-    value = _env_float_default("SEARCH_OS_CUTOFF_FLOOR", 0.43)
+    잘못된 임계로 검색하지 않도록 fail-fast. 실측 확정치는 search_constants 1곳만 갱신한다(F1)."""
+    value = _env_float_default("SEARCH_OS_CUTOFF_FLOOR", search_constants.OS_CUTOFF_FLOOR_DEFAULT)
     if not (-1.0 <= value <= 1.0):
         raise ValueError(f"컷오프 floor 범위 오류: SEARCH_OS_CUTOFF_FLOOR={value!r} (-1<=floor<=1)")
     return value
 
 
-def _resolve_os_probe_k() -> int:
-    """probe 표본 수 probe_k(023, FR-002). 기본 ``50``. ``1`` 미만이면 **즉시 ValueError**.
+def _resolve_os_result_floor() -> float:
+    """OS per-result 컷 코사인 하한(027, FR-004). 기본 ``OS_RESULT_FLOOR_DEFAULT``. 범위 ``[-1,1]`` 밖이면 **즉시 ValueError**.
 
-    probe_k 는 baseline(표본 평균) 추정의 표본 크기라 최소 1 이상이어야 한다(0·음수는 무의미). 정수
-    형식 오류는 ``_env_int_default`` 가, 범위(>=1)는 여기서 fail-fast 로 차단한다."""
-    value = _env_int_default("SEARCH_OS_PROBE_K", 50)
-    if value < 1:
-        raise ValueError(f"컷오프 probe_k 범위 오류: SEARCH_OS_PROBE_K={value!r} (probe_k>=1)")
+    행 유지 = BM25 매칭(어휘 증거) OR 원시 코사인 ≥ 이 값(의미 증거). 024 의 정규화 스케일 임계 4종을
+    대체하는 전역 1개(코사인 스케일). 코사인 정의역 안이어야 하므로 ``[-1,1]`` 밖은 잘못된 임계로 검색
+    하지 않도록 fail-fast(``_resolve_os_cutoff_floor`` 동형). 실측 확정치는 search_constants 1곳만 갱신."""
+    value = _env_float_default("SEARCH_OS_RESULT_FLOOR", search_constants.OS_RESULT_FLOOR_DEFAULT)
+    if not (-1.0 <= value <= 1.0):
+        raise ValueError(f"OS result_floor 범위 오류: SEARCH_OS_RESULT_FLOOR={value!r} (-1<=v<=1)")
     return value
 
 
@@ -296,10 +279,10 @@ _OS_BM25_OPERATORS = ("or", "and")
 
 
 def _resolve_os_bm25_operator() -> str:
-    """OS BM25 multi_match operator(025, FR-001). ``SEARCH_OS_BM25_OPERATOR`` 미설정 시 ``'or'``(현행).
+    """OS BM25 multi_match operator(025, FR-001). 미설정 시 ``OS_BM25_OPERATOR_DEFAULT``('or', 현행·F1).
 
     화이트리스트 {or, and} 밖 값은 **즉시 ValueError**(fail-fast — _resolve_search_backend 동형)."""
-    value = _env_str_default("SEARCH_OS_BM25_OPERATOR", "or").lower()
+    value = _env_str_default("SEARCH_OS_BM25_OPERATOR", search_constants.OS_BM25_OPERATOR_DEFAULT).lower()
     if value not in _OS_BM25_OPERATORS:
         raise ValueError(
             f"지원하지 않는 BM25 operator: SEARCH_OS_BM25_OPERATOR={value!r} (지원: {list(_OS_BM25_OPERATORS)})"
@@ -405,16 +388,15 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 021: 검색 백엔드 선택. 미설정 시 기본 pg(현 경로·회귀 0). search_backend 화이트리스트 검증·
         # 융합 가중치 범위검증은 _resolve_* 헬퍼가 _build_settings 시점에 수행한다(fail-fast).
         search_backend=_resolve_search_backend(),
-        opensearch_search_pipeline=_env_str_default("OPENSEARCH_SEARCH_PIPELINE", "assets-hybrid"),
         opensearch_fusion_weights=_resolve_opensearch_fusion_weights(),
-        # 023: OS 검색 컷오프 4종. 범위 검증·fail-fast 는 _resolve_* 헬퍼가 _build_settings 시점에 수행
-        # (021 fusion_weights 동형). 기본 enabled=True 라도 pg 백엔드(기본)면 OS 경로 미실행 → 회귀 0.
+        # 023/027: OS 검색 버킷 게이트 + per-result 컷. 범위 검증·fail-fast 는 _resolve_* 헬퍼가
+        # _build_settings 시점에 수행(021 fusion_weights 동형). 기본값은 search_constants 단일 출처(F1).
+        # 기본 enabled=True 라도 pg 백엔드(기본)면 OS 경로 미실행 → 회귀 0.
         search_os_cutoff_enabled=_resolve_os_cutoff_enabled(),
         search_os_cutoff_eps=_resolve_os_cutoff_eps(),
         search_os_cutoff_floor=_resolve_os_cutoff_floor(),
-        search_os_probe_k=_resolve_os_probe_k(),
-        # 024: OS per-result 적합도 컷오프(정규화 스케일). PG search_min_scores 와 분리(OS 경로 전용).
-        search_os_min_scores=resolve_os_search_min_scores(),
+        # 027: OS per-result 컷 코사인 하한(024 정규화 스케일 4종을 단일 코사인 임계로 대체).
+        search_os_result_floor=_resolve_os_result_floor(),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),
         # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.

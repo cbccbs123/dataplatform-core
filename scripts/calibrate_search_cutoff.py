@@ -1,10 +1,14 @@
-"""023 G4 — OS 검색 적합도 컷오프 calibration 하니스(실OS·읽기 전용).
+"""027 G4 — OS 검색 버킷 게이트 calibration 하니스(실OS·읽기 전용).
 
-있음/없음 질의 라벨셋으로 modality 별 **실 plain-knn probe** 원시 코사인 top·baseline(표본 평균)을
-재서, 기본 게이트(EPS·FLOOR)가 has-match 를 통과(과필터 0)·no-match 를 차단하는지 측정한다.
-또 cutoff on/off 로 search_assets_os 버킷 크기를 비교해 "없는 데이터 → 빈 버킷"을 확인한다.
+027 클라이언트 융합 전환에 맞춰 재작성했다. 종전(023)은 모달리티당 plain-knn **probe**(추가 검색)로
+원시 코사인을 재서 게이트를 측정했으나, 027 은 융합이 클라이언트로 오면서 같은 kNN 표본에 원시 코사인이
+보존된다 — 따라서 별도 probe 없이 ``build_knn_body`` + ``client.search`` 로 모달리티별 kNN 코사인 리스트를
+모아 ``gate_signal``(top·**robust baseline**=하위 절반 평균)로 신호를 잰다.
 
-부트스트랩은 앱 진입점과 동일(load_dotenv(.env.dev) → init_settings). 읽기 전용(헌법 6조).
+있음/없음 질의 라벨셋으로 운영 임계(EPS·FLOOR — cfg 에서 읽음)가 has-match 를 통과(과필터 0)·no-match 를
+차단하는지 측정하고, ``search_assets_os`` 를 게이트 on/off 로 비교해 "없는 데이터 → 빈 버킷"과 per-result
+컷(RESULT_FLOOR)의 효과를 확인한다. 부트스트랩은 앱 진입점과 동일(load_dotenv(.env.dev) → init_settings).
+읽기 전용(헌법 6조).
 
 실행: conda run -n AuroraFS python scripts/calibrate_search_cutoff.py
 """
@@ -25,6 +29,9 @@ HAS_MATCH = ["아이폰", "무선충전기", "주식", "자전거 정비"]
 NO_MATCH = ["아이패드", "양자컴퓨터", "에펠탑 야경"]
 MODALITIES = ["text", "audio", "image", "video"]
 
+# 게이트 신호용 kNN 표본 하한(robust baseline 안정). search_constants 단일 출처 동치.
+_SIGNAL_K = 50
+
 
 def _bootstrap() -> None:
     from dotenv import load_dotenv
@@ -39,80 +46,91 @@ def main() -> None:
     _bootstrap()
     from src.config.settings import get_current_settings
     from src.search.opensearch_search import (
-        _DEFAULT_CUTOFF_EPS,
-        _DEFAULT_CUTOFF_FLOOR,
-        _DEFAULT_PROBE_K,
         _MODALITY_VALUES,
+        build_knn_body,
         embed_query,
+        gate_signal,
         get_client,
+        knn_score_to_cosine,
         passes_cutoff,
-        probe_relevance,
         search_assets_os,
     )
 
     cfg = get_current_settings()
     client = get_client()
-    eps, floor, probe_k = _DEFAULT_CUTOFF_EPS, _DEFAULT_CUTOFF_FLOOR, _DEFAULT_PROBE_K
-    pipeline = getattr(cfg, "opensearch_search_pipeline", "assets-hybrid")
+    # 운영 임계(cfg)를 기준으로 측정한다 — search_constants 단일 출처가 settings resolver 로 들어온 값.
+    eps = cfg.search_os_cutoff_eps
+    floor = cfg.search_os_cutoff_floor
+    result_floor = cfg.search_os_result_floor
     index = getattr(cfg, "opensearch_index", "assets")
     weights = getattr(cfg, "opensearch_fusion_weights", (0.5, 0.5))
 
-    print(f"# calibration — EPS={eps} FLOOR={floor} probe_k={probe_k} index={index}\n")
+    print(
+        f"# calibration(027) — EPS={eps} FLOOR={floor} RESULT_FLOOR={result_floor} "
+        f"signal_k={_SIGNAL_K} index={index}\n"
+    )
 
-    def probe_row(query: str) -> dict[str, tuple[float, float, bool]]:
+    def knn_cosines(vec: list[float], label: str) -> list[float]:
+        """그 modality 의 kNN 코사인 리스트(robust baseline 표본). 별도 검색 1회(probe 아님 — 같은 본문)."""
+        values = _MODALITY_VALUES.get(label, frozenset({label}))
+        body = build_knn_body(vec, modality_values=values, k=_SIGNAL_K)
+        resp = client.search(index=index, body=body)
+        hits = ((resp or {}).get("hits") or {}).get("hits") or []
+        return [knn_score_to_cosine(h.get("_score")) for h in hits]
+
+    def signal_row(query: str) -> dict[str, tuple[float, float, bool]]:
         vec = embed_query(query, channel=cfg.active_embed_channel)
         out: dict[str, tuple[float, float, bool]] = {}
         for label in MODALITIES:
-            values = _MODALITY_VALUES.get(label, frozenset({label}))
-            top, mean = probe_relevance(
-                client, vec, modality_values=values, k=probe_k, index=index
-            )
-            keep = passes_cutoff(top, mean, eps=eps, floor=floor)
-            out[label] = (top, mean, keep)
+            top, baseline = gate_signal(knn_cosines(vec, label))
+            keep = passes_cutoff(top, baseline, eps=eps, floor=floor)
+            out[label] = (top, baseline, keep)
         return out
 
-    # ── 1) probe 신호 분포(원시 코사인 top·mean·게이트) ──────────────────────
+    # ── 1) 게이트 신호 분포(원시 코사인 top·robust baseline·게이트) ──────────────
     for tag, queries in (("HAS-MATCH(있음)", HAS_MATCH), ("NO-MATCH(없음)", NO_MATCH)):
         print(f"## {tag}")
         for q in queries:
-            row = probe_row(q)
+            row = signal_row(q)
             parts = []
             for label in MODALITIES:
-                top, mean, keep = row[label]
+                top, baseline, keep = row[label]
                 mark = "KEEP" if keep else "cut "
-                parts.append(f"{label}: top={top:.3f} mean={mean:.3f} Δ={top-mean:.3f} [{mark}]")
+                parts.append(
+                    f"{label}: top={top:.3f} base={baseline:.3f} Δ={top-baseline:.3f} [{mark}]"
+                )
             print(f"  · {q!r:14} " + " | ".join(parts))
         print()
 
-    # ── 2) cutoff on/off 버킷 크기(없는 데이터 → 빈 버킷) ──────────────────────
+    # ── 2) cutoff on/off 버킷 크기(없는 데이터 → 빈 버킷·per-result 컷 효과) ──────
     print("## search_assets_os 버킷 크기 (cutoff OFF → ON)")
     for tag, queries in (("HAS", HAS_MATCH), ("NO", NO_MATCH)):
         for q in queries:
-            off = search_assets_os(
-                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel, weights=weights,
-                index=index, pipeline_name=pipeline, cutoff_enabled=False,
+            off, _ = search_assets_os(
+                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
+                weights=weights, index=index, cutoff_enabled=False,
             )
-            on = search_assets_os(
-                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel, weights=weights,
-                index=index, pipeline_name=pipeline, cutoff_enabled=True,
-                cutoff_eps=eps, cutoff_floor=floor, cutoff_probe_k=probe_k,
+            on, _ = search_assets_os(
+                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
+                weights=weights, index=index, cutoff_enabled=True,
+                cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor,
             )
             off_n = {m: len(off.get(m, [])) for m in MODALITIES}
             on_n = {m: len(on.get(m, [])) for m in MODALITIES}
             print(f"  [{tag}] {q!r:14} OFF={off_n}  →  ON={on_n}")
     print()
 
-    # ── 3) probe 비용(멀티모달 게이트 p95 Δ) ──────────────────────────────────
+    # ── 3) 비용(멀티모달 게이트 p50/max Δ, ms) ────────────────────────────────────
     def timed(enabled: bool, q: str) -> float:
         t0 = time.perf_counter()
         search_assets_os(
-            client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel, weights=weights,
-            index=index, pipeline_name=pipeline, cutoff_enabled=enabled,
-            cutoff_eps=eps, cutoff_floor=floor, cutoff_probe_k=probe_k,
+            client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
+            weights=weights, index=index, cutoff_enabled=enabled,
+            cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor,
         )
         return (time.perf_counter() - t0) * 1000.0
 
-    print("## probe 비용 (멀티모달 1회, ms)")
+    print("## 비용 (멀티모달 1회, ms)")
     for q in ["아이폰", "아이패드"]:
         # 워밍업 1회 후 5회 측정(p95 근사 = 최대).
         timed(True, q)

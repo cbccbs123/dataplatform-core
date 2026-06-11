@@ -342,8 +342,8 @@ class CutRowsTest(unittest.TestCase):
 
 # ──────────────────────────────────────────────────────────────────────────
 # 027 G1/T003 — 모달리티당 [BM25 + plain kNN] 서브검색 본문(순수). msearch 의 두 서브검색 body.
-# build_search_body(hybrid) 를 대체한다: 서버 융합(파이프라인)을 쓰지 않고 두 본문을 따로 만들어
-# msearch 로 받은 뒤 클라이언트(fuse_hybrid)가 융합한다. build_knn_body 는 구 build_probe_body 계승.
+# 종전 서버 hybrid 융합 쿼리를 대체한다: 서버 융합(파이프라인)을 쓰지 않고 두 본문을 따로 만들어
+# msearch 로 받은 뒤 클라이언트(fuse_hybrid)가 융합한다. build_knn_body 는 게이트 신호용 kNN 본문이다.
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -403,7 +403,7 @@ class BuildBm25BodyTest(unittest.TestCase):
 
 
 class BuildKnnBodyTest(unittest.TestCase):
-    """T003/FR-001: plain kNN 서브검색 본문(구 build_probe_body 계승) — native pre-filter·의료 must_not."""
+    """T003/FR-001: plain kNN 서브검색 본문(게이트 신호용) — native pre-filter·의료 must_not."""
 
     def setUp(self) -> None:
         self.vector = [0.1, 0.2, 0.3]

@@ -57,9 +57,9 @@ _TEXT_FIELDS: tuple[str, ...] = (
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
 _MEDICAL_LABEL = "medical"
 
-# 027 T006: 게이트·probe 기본 상수(_DEFAULT_CUTOFF_EPS·_DEFAULT_CUTOFF_FLOOR·_DEFAULT_PROBE_K)는
-# 모듈 중복 출처라 제거했다 — 임계 기본값의 단일 출처는 src.config.search_constants(F1). 값은 코사인
-# 스케일로 통일됐다(클라이언트 융합 전환으로 probe 출력 스케일 보정이 불필요해짐, 027).
+# 027 T006: 게이트 기본 상수(중복 cutoff eps·floor·표본 수)는 모듈 중복 출처라 제거했다 — 임계
+# 기본값의 단일 출처는 src.config.search_constants(F1). 값은 코사인 스케일로 통일됐다(클라이언트
+# 융합 전환으로 서버 출력 스케일 보정이 불필요해짐, 027).
 
 # OS 검색 버킷 라벨 → 저장된 modality 값 집합(PG media_search 와 동일 분류). 요청 라벨('text')과
 # 저장 modality 값('txt')의 불일치를 흡수한다 — text 버킷은 ALLOWED_TEXT_META_FILE_KINDS(txt·json·
@@ -95,7 +95,7 @@ def build_bm25_body(
 ) -> dict[str, Any]:
     """BM25 multi_match 단독 서브검색 본문(순수·결정적, 027 FR-001).
 
-    027 클라이언트 융합 전환: 서버 hybrid 쿼리(구 build_search_body)의 텍스트 서브쿼리를 **독립
+    027 클라이언트 융합 전환: 종전 서버 hybrid 쿼리의 텍스트 서브쿼리를 **독립
     검색 본문**으로 떼어낸다 — msearch 의 한 서브검색으로 보내 BM25 원시 ``_score`` 를 그대로 받아
     클라이언트(fuse_hybrid)가 min-max 정규화·가중평균한다(파이프라인 소거). 구성은 026 계승:
     boost 차등 ``_TEXT_FIELDS``(summary^3…file_name^0.5), modality terms 필터, 의료 ``must_not``.
@@ -120,11 +120,11 @@ def build_knn_body(
     k: int,
     exclude_medical: bool = True,
 ) -> dict[str, Any]:
-    """plain kNN 단독 서브검색 본문(순수·결정적, 027 FR-001 — 구 build_probe_body 계승·개명 통합).
+    """plain kNN 단독 서브검색 본문(순수·결정적, 027 FR-001 — 게이트 신호용 kNN 표본 통합).
 
     정규화 파이프라인을 적용하지 않는 단일 knn 이다 — knn ``_score``(lucene cosinesimil=(1+cos)/2)에
     원시 코사인이 보존돼, 클라이언트가 ① 융합 기여(min-max)와 ② 게이트 신호(gate_signal)·per-result
-    컷(_cos)을 **같은 표본 1회**로 얻는다(probe 추가 호출 소멸 — SC-002). 023 probe 와 동일하게
+    컷(_cos)을 **같은 표본 1회**로 얻는다(추가 게이트 검색 소멸 — SC-002). 023 게이트와 동일하게
     modality terms·의료배제를 **knn native filter(pre-filter)**로 적용한다 — bool 사후필터로 감싸면
     전역 k 최근접을 먼저 뽑고 걸러 작은 k 에서 비우세 모달리티(image 등)가 0 건이 되는 회귀(022 G3
     실OS 발견)를 막고, 그 모달리티 안에서 k 최근접을 뽑는다. ``size`` 는 ``k``(게이트 표본 하한 적용은 호출부).
@@ -222,7 +222,7 @@ def gate_signal(cosines: Iterable[float]) -> tuple[float, float]:
 def cut_rows(rows: Iterable[dict[str, Any]], *, result_floor: float) -> list[dict[str, Any]]:
     """per-result 컷(순수·결정적, FR-004): 행 유지 = ``_bm25`` 매칭 **OR** ``_cos ≥ result_floor``.
 
-    024 의 정규화 스케일 임계 4종(SEARCH_OS_MIN_SCORE_*)을 **코사인 스케일 단일 임계**로 통일한다.
+    024 의 정규화 스케일 모달리티별 임계 4종을 **코사인 스케일 단일 임계**로 통일한다.
     - ``_bm25 is True`` (전 토큰 어휘 증거)면 유지 — 코사인이 없어도(``_cos None``, BM25-only 행) 안전.
     - 아니면 원시 코사인 ``_cos`` 가 ``result_floor`` 이상일 때만 유지(의미 증거). ``_cos None`` 은
       비교 불가이므로 ``_bm25`` 가 유일 근거다(없으면 컷).
@@ -330,8 +330,8 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
 # 플래그 off(pg 백엔드) 환경의 모듈 순수성(상단 import 없음)을 보존하기 위함이다 — 위 순수 함수만
 # 쓰는 단위 게이트는 opensearch-py·임베더 미설치여도 import 가능해야 한다(020 동형).
 # 실제 OS 동작 검증은 G4(실OS e2e). 여기 IO 는 가짜 msearch 클라이언트로 액션 조립을 단위 검증한다.
-# 027 T006: 서버 융합 파이프라인 등록(search_pipeline_body·ensure_search_pipeline)과 probe(probe_relevance)
-# 경로는 제거됐다 — 융합이 클라이언트로 이동해 서버 상태(파이프라인) 0·중복 kNN 0(SC-002).
+# 027 T006: 서버 융합 파이프라인 등록 코어와 별도 게이트 검색(추가 kNN) 경로는 제거됐다 — 융합이
+# 클라이언트로 이동해 서버 상태(파이프라인) 0·중복 kNN 0(SC-002).
 # ──────────────────────────────────────────────────────────────────────────
 
 

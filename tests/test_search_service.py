@@ -10,6 +10,7 @@ import types
 import unittest
 from unittest import mock
 
+from src.config import search_constants
 from src.search.search_service import search_hybrid
 
 
@@ -205,20 +206,26 @@ class TestIncludeVisualWiring(unittest.TestCase):
 # 검색 서비스 백엔드 분기(search_hybrid 의 SEARCH_BACKEND). pg(기본)=현 경로 동치(회귀 0·SC-001).
 # 022: opensearch=text·audio·**image·video 모두 OS**(현 PG CLIP 대신, 021 대비 변경) — 요청 모달리티
 # 전체를 한 번의 OS 호출로 검색해 4 버킷을 만든다(FR-003). PG grouped(시각 CLIP)·structure_user_query
-# (LLM) 미접촉 → 멀티모달 LLM 0(FR-002·SC-004). meta={"backend":"opensearch"}. OS 미도달 명확 실패
-# (FR-007·SC-006). 실제 OS 검색은 가짜 seam(_os_search_fn·_os_client_fn) 주입으로 네트워크 없이 검증한다.
+# (LLM) 미접촉 → 멀티모달 LLM 0(FR-002·SC-004). meta={"backend":"opensearch","os_gate":…}. OS 미도달
+# 명확 실패(FR-007·SC-006). 실제 OS 검색은 가짜 seam(_os_search_fn·_os_client_fn) 주입으로 검증한다.
+# 027: search_assets_os 가 (buckets, gate_meta) 튜플을 돌려주므로 가짜 seam 도 튜플을 반환한다.
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _recording_os(buckets: dict[str, list[dict[str, object]]]) -> tuple[object, dict[str, object]]:
-    """주입용 가짜 OS 검색 seam. 호출 인자를 캡처하고 주어진 버킷을 그대로 돌려준다."""
+def _recording_os(
+    buckets: dict[str, list[dict[str, object]]],
+    gate_meta: dict[str, dict[str, object]] | None = None,
+) -> tuple[object, dict[str, object]]:
+    """주입용 가짜 OS 검색 seam(027 (buckets, gate_meta) 튜플 계약). 호출 인자를 캡처하고 반환한다."""
     captured: dict[str, object] = {}
 
-    def _os(client: object, query: str, **kw: object) -> dict[str, list[dict[str, object]]]:
+    def _os(
+        client: object, query: str, **kw: object
+    ) -> tuple[dict[str, list[dict[str, object]]], dict[str, dict[str, object]]]:
         captured["client"] = client
         captured["query"] = query
         captured.update(kw)
-        return buckets
+        return buckets, (gate_meta or {})
 
     return _os, captured
 
@@ -323,9 +330,9 @@ class TestBackendOpenSearchMerge(unittest.TestCase):
         # 022: image 단독 요청도 OS 에서 검색(021 의 'image→PG' 가정을 OS 동작으로 갱신).
         os_calls: list[object] = []
 
-        def fake_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+        def fake_os(*a: object, **k: object) -> tuple[dict[str, list[dict[str, object]]], dict]:
             os_calls.append((a, k))
-            return {"image": [{"id": "os_i"}]}
+            return {"image": [{"id": "os_i"}]}, {}
 
         grouped_calls: list[object] = []
 
@@ -391,8 +398,8 @@ class TestBackendOpenSearchMerge(unittest.TestCase):
         self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
 
     def test_meta_is_backend_opensearch_with_visual(self) -> None:
-        # 022: 시각(image/video) 동반 요청에도 meta 는 {"backend":"opensearch"} 단일 — PG grouped 가
-        # 호출되지 않으므로 PG meta(structured 등) 통과 키는 없다(021 대비 변경).
+        # 022·027: 시각(image/video) 동반 요청에도 meta 는 backend=opensearch + os_gate 관측키만 —
+        # PG grouped 가 호출되지 않으므로 PG meta(structured 등) 통과 키는 없다(021 대비 변경).
         fake_os, _ = _recording_os(
             {"text": [{"id": "os_t"}], "audio": [], "image": [{"id": "os_i"}], "video": []}
         )
@@ -407,29 +414,32 @@ class TestBackendOpenSearchMerge(unittest.TestCase):
             _os_search_fn=fake_os,
             _os_client_fn=lambda: "C",
         )
-        self.assertEqual(out["meta"], {"backend": "opensearch"})
+        self.assertEqual(out["meta"].get("backend"), "opensearch")
+        self.assertIn("os_gate", out["meta"])  # 027 게이트 관측성 합류(F4)
         self.assertNotIn("structured", out["meta"])  # PG meta 통과 없음(grouped 미호출)
 
 
 class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
-    """T008(023 G3) — backend='opensearch' 경로가 cfg 의 컷오프 4종을 ``os_search_fn`` 에 전달한다.
+    """027 — backend='opensearch' 경로가 cfg 의 게이트·컷 임계를 ``os_search_fn`` 에 전달한다.
 
-    021 fusion_weights·index·pipeline 배선(``getattr(cfg, ...)``)과 동형으로, search_service 상단
-    fallback 상수 + ``getattr`` 폴백으로 ``cutoff_enabled``/``cutoff_eps``/``cutoff_floor``/
-    ``cutoff_probe_k`` 를 G1/G2 ``search_assets_os`` seam 에 넘긴다(cross-module private import 안 함).
+    021 fusion_weights·index 배선(``getattr(cfg, ...)``)과 동형으로, search_constants 단일 출처를
+    ``getattr`` 폴백으로 써 ``cutoff_enabled``/``cutoff_eps``/``cutoff_floor``/``result_floor``/
+    ``bm25_operator`` 를 G1/G2 ``search_assets_os`` seam 에 넘긴다(cross-module private import 안 함).
+    027: 게이트 표본 수(probe_k)·정규화 스케일 임계 4종(min_scores)은 제거되고, per-result 컷이
+    코사인 스케일 단일 임계(``result_floor``)로 통합됐다. 서버 파이프라인(pipeline_name) 인자도 소멸.
     """
 
     def test_cutoff_settings_forwarded_from_cfg(self) -> None:
         import src.search.search_service as svc
 
-        # 컷오프 값을 모듈 fallback 기본 상수와 다르게 둔 가짜 cfg — 전달이 폴백이 아니라 cfg 에서
+        # 컷오프 값을 search_constants 기본값과 다르게 둔 가짜 cfg — 전달이 폴백이 아니라 cfg 에서
         # 옴을 증명한다. search_backend='opensearch' 가 경로를 결정(진입점은 backend 인자 미전달).
         cfg = types.SimpleNamespace(
             search_backend="opensearch",
             search_os_cutoff_enabled=True,
             search_os_cutoff_eps=0.22,
             search_os_cutoff_floor=0.55,
-            search_os_probe_k=33,
+            search_os_result_floor=0.33,
         )
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
 
@@ -444,14 +454,18 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
                 _os_client_fn=lambda: "C",
                 _grouped_fn=fake_grouped,
             )
-        # os_search_fn 가 cfg 값 그대로 받음(기본 상수 폴백 아님)
+        # os_search_fn 가 cfg 값 그대로 받음(search_constants 폴백 아님)
         self.assertIs(os_cap["cutoff_enabled"], True)
         self.assertEqual(os_cap["cutoff_eps"], 0.22)
         self.assertEqual(os_cap["cutoff_floor"], 0.55)
-        self.assertEqual(os_cap["cutoff_probe_k"], 33)
+        self.assertEqual(os_cap["result_floor"], 0.33)
+        # 027: 제거된 인자는 전달되지 않는다(probe_k·정규화 min_scores·pipeline_name 소멸).
+        self.assertNotIn("cutoff_probe_k", os_cap)
+        self.assertNotIn("pipeline_name", os_cap)
 
-    def test_cutoff_falls_back_to_module_defaults_when_cfg_missing(self) -> None:
-        # settings 미초기화(순수 단위) → cfg=None → 모듈 fallback 상수(무게이트·기본값)로 전달.
+    def test_cutoff_falls_back_to_search_constants_when_cfg_missing(self) -> None:
+        # settings 미초기화(순수 단위) → cfg=None → search_constants 단일 출처 폴백으로 전달.
+        # 027: 미초기화 폴백 enabled 는 운영 기본과 동일(True) — 디버그 우회는 disable_os_cutoff 가 담당.
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
         out = search_hybrid(
             "질의",
@@ -461,11 +475,50 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
             _os_client_fn=lambda: "C",
             _grouped_fn=_fake_grouped,
         )
-        self.assertIs(os_cap["cutoff_enabled"], False)  # 미초기화 안전(무게이트)
-        self.assertEqual(os_cap["cutoff_eps"], 0.15)  # G4 calibration 확정(모듈 fallback)
-        self.assertEqual(os_cap["cutoff_floor"], 0.43)
-        self.assertEqual(os_cap["cutoff_probe_k"], 50)
+        self.assertIs(os_cap["cutoff_enabled"], search_constants.OS_CUTOFF_ENABLED_DEFAULT)
+        self.assertEqual(os_cap["cutoff_eps"], search_constants.OS_CUTOFF_EPS_DEFAULT)
+        self.assertEqual(os_cap["cutoff_floor"], search_constants.OS_CUTOFF_FLOOR_DEFAULT)
+        self.assertEqual(os_cap["result_floor"], search_constants.OS_RESULT_FLOOR_DEFAULT)
         self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
+
+    def test_disable_os_cutoff_forces_cutoff_disabled(self) -> None:
+        # disable_os_cutoff=True(no_cutoff 디버그 우회) → cfg 가 enabled=True 라도 cutoff_enabled=False
+        # 로 강제 전달(게이트·per-result 컷 모두 off → 약한 후보까지 노출).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch",
+            search_os_cutoff_enabled=True,
+            search_os_cutoff_eps=0.22,
+            search_os_cutoff_floor=0.55,
+            search_os_result_floor=0.33,
+        )
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의",
+                modalities=["text"],
+                disable_os_cutoff=True,
+                _os_search_fn=fake_os,
+                _os_client_fn=lambda: "C",
+                _grouped_fn=_fake_grouped,
+            )
+        self.assertIs(os_cap["cutoff_enabled"], False)  # cfg True 를 우회가 덮음
+
+    def test_default_disable_os_cutoff_false_keeps_cfg_enabled(self) -> None:
+        # disable_os_cutoff 기본 False → cfg 의 enabled 가 그대로 전달(우회 미적용·회귀 0).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch", search_os_cutoff_enabled=True,
+        )
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+            )
+        self.assertIs(os_cap["cutoff_enabled"], True)
 
     def test_pg_default_never_touches_os_cutoff(self) -> None:
         # (SC-001) backend=pg(기본) → OS seam(컷오프 포함) 미접촉·동작 동치(회귀 0).
@@ -485,17 +538,18 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         self.assertEqual(out["results"]["text_documents"], [{"id": "t1"}])
 
 
-class TestBackendOsPerResultMinScore(unittest.TestCase):
-    """024 G2 — backend='opensearch' 는 per-result 필터에 OS 정규화 스케일 임계
-    (``cfg.search_os_min_scores``)를 쓰고, pg 는 전달 ``min_scores``(PG 코사인 스케일) 그대로.
+class TestBackendOsPerResultCutDelegation(unittest.TestCase):
+    """027 — backend='opensearch' 는 per-result 컷을 ``search_assets_os`` 내부(코사인 스케일
+    cut_rows·result_floor)에 위임하므로, search_hybrid 호출부는 전달 ``min_scores``(PG 코사인 스케일)를
+    OS 경로에 **적용하지 않는다**(스케일 불일치 방지·F1). pg 는 전달 ``min_scores`` 그대로(회귀 0).
 
-    023 버킷 게이트는 버킷 통째 유지/비움만 하므로, 켜진 버킷 안의 노이즈 꼬리(F4)는 per-result
-    임계가 거른다 — 단 PG 스케일 값(image 0.25)은 OS 정규화 점수(top≈1.0)에 무력이라 분리한다.
+    024 의 정규화 스케일 min_scores 분기·빈 dict 센티넬은 제거됐다 — OS 컷은 seam 내부에서 끝나고
+    호출부 _filter_by_min_score 는 pg 전용이다. 디버그 우회는 disable_os_cutoff(별 클래스)가 담당.
     """
 
     @staticmethod
     def _os_rows() -> dict[str, list[dict[str, object]]]:
-        # OS 버킷: 관련(0.6)·노이즈 꼬리(0.4) — OS 임계 0.5 면 꼬리만 잘려야 한다.
+        # OS 버킷: 이미 search_assets_os 내부 컷을 통과한 행들(여기선 가짜 seam 이 그대로 돌려줌).
         return {
             "image": [
                 {"id": "hi", "similarity": 0.6},
@@ -503,84 +557,67 @@ class TestBackendOsPerResultMinScore(unittest.TestCase):
             ]
         }
 
-    def test_opensearch_uses_os_min_scores_not_passed(self) -> None:
-        # (a) OS 백엔드: cfg.search_os_min_scores 적용·전달 min_scores(PG 스케일) 무시.
+    def test_opensearch_ignores_passed_min_scores(self) -> None:
+        # (a) OS 백엔드: 전달 min_scores(PG 스케일)가 매우 높아도 OS 버킷 행이 잘리지 않는다 —
+        # 호출부가 OS 경로에 _filter_by_min_score 를 적용하지 않음(컷은 seam 내부에서 이미 끝남).
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
-            search_backend="opensearch",
-            search_os_min_scores={"text": 0.45, "image": 0.5, "video": 0.45, "audio": 0.4},
-        )
+        cfg = types.SimpleNamespace(search_backend="opensearch")
         fake_os, _cap = _recording_os(self._os_rows())
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             out = svc.search_hybrid(
                 "질의",
                 modalities=["image"],
-                min_scores={"image": 0.25},  # PG 스케일 — OS 경로에선 무시돼야 함
-                _os_search_fn=fake_os,
-                _os_client_fn=lambda: "C",
-                _grouped_fn=_fake_grouped,
-            )
-        # OS 임계 0.5 적용: 0.6 유지·0.4 제거. (전달 0.25 가 적용됐다면 둘 다 남았을 것.)
-        self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi"])
-
-    def test_pg_uses_passed_min_scores_unchanged(self) -> None:
-        # (b) pg 백엔드: cfg 에 search_os_min_scores 가 있어도 전달 min_scores 그대로(회귀 0).
-        import src.search.search_service as svc
-
-        cfg = types.SimpleNamespace(
-            search_backend="pg",
-            search_os_min_scores={"text": 0.99},  # 적용되면 t1(기본 sim 없음=0.0)이 잘려버림
-        )
-
-        def grouped_with_sims(query: str, **_kw: object) -> dict[str, object]:
-            return {"text_documents": [{"id": "t1", "similarity": 0.3}], "meta": {}}
-
-        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
-            out = svc.search_hybrid(
-                "질의",
-                modalities=["text"],
-                min_scores={"text": 0.1},  # PG 스케일 그대로 적용 — 0.3 유지
-                _grouped_fn=grouped_with_sims,
-            )
-        self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["t1"])
-
-    def test_opensearch_falls_back_to_passed_when_cfg_missing(self) -> None:
-        # (c) settings 미초기화(cfg=None)·backend 명시 → 전달 min_scores 폴백(필터 동작 보존).
-        # 폴백 값 0.7 은 OS 기본 임계(image 0.45)와 결과가 갈리는 값 — 실 cfg 가 새어들면 ['hi'],
-        # 진짜 폴백이면 [](둘 다 제거)로 구분돼 폴백을 강하게 격리한다(리뷰 후속).
-        fake_os, _cap = _recording_os(self._os_rows())
-        out = search_hybrid(
-            "질의",
-            modalities=["image"],
-            backend="opensearch",
-            min_scores={"image": 0.7},  # 폴백으로 이 값이 적용 → 0.6·0.4 둘 다 제거
-            _os_search_fn=fake_os,
-            _os_client_fn=lambda: "C",
-            _grouped_fn=_fake_grouped,
-        )
-        self.assertEqual(out["results"]["image"], [])
-
-    def test_opensearch_empty_dict_sentinel_disables_filter(self) -> None:
-        # (d) 명시 빈 dict({}) = "필터 비활성" 센티넬(no_cutoff 디버그 경로) — OS 임계로 대체하지
-        # 않고 무필터로 약한 후보까지 노출한다(리뷰 후속: or 가 {} 를 삼키던 회귀 교정).
-        import src.search.search_service as svc
-
-        cfg = types.SimpleNamespace(
-            search_backend="opensearch",
-            search_os_min_scores={"text": 0.45, "image": 0.5, "video": 0.45, "audio": 0.4},
-        )
-        fake_os, _cap = _recording_os(self._os_rows())
-        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
-            out = svc.search_hybrid(
-                "질의",
-                modalities=["image"],
-                min_scores={},  # 명시 비활성 — OS 임계(0.5)가 적용되면 'lo' 가 잘려버림
+                min_scores={"image": 0.99},  # 적용됐다면 둘 다 잘렸을 값 — OS 경로는 무시
                 _os_search_fn=fake_os,
                 _os_client_fn=lambda: "C",
                 _grouped_fn=_fake_grouped,
             )
         self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi", "lo"])
+
+    def test_pg_uses_passed_min_scores_unchanged(self) -> None:
+        # (b) pg 백엔드: 전달 min_scores 그대로 적용(회귀 0 — OS 위임은 pg 에 무영향).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="pg")
+
+        def grouped_with_sims(query: str, **_kw: object) -> dict[str, object]:
+            return {
+                "text_documents": [
+                    {"id": "t_hi", "similarity": 0.3},
+                    {"id": "t_lo", "similarity": 0.05},
+                ],
+                "meta": {},
+            }
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "질의",
+                modalities=["text"],
+                min_scores={"text": 0.1},  # PG 스케일 그대로 적용 — 0.3 유지·0.05 제거
+                _grouped_fn=grouped_with_sims,
+            )
+        self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["t_hi"])
+
+    def test_os_gate_meta_merged_into_response_meta(self) -> None:
+        # (c·F4 관측성) search_assets_os 가 돌려준 gate_meta 가 응답 meta["os_gate"] 로 합류한다.
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch")
+        gate = {"text": {"top": 0.7, "baseline": 0.2, "gate_passed": True, "cut_count": 1}}
+        fake_os, _cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]}, gate)
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "질의",
+                modalities=["text"],
+                _os_search_fn=fake_os,
+                _os_client_fn=lambda: "C",
+                _grouped_fn=_fake_grouped,
+            )
+        self.assertEqual(out["meta"]["backend"], "opensearch")
+        self.assertEqual(out["meta"]["os_gate"], gate)
+
+
 class TestBackendOsBm25OperatorWiring(unittest.TestCase):
     """025 G1: backend='opensearch' 가 cfg 의 bm25 operator 를 os_search_fn 에 전달(023 cutoff 동형)."""
 

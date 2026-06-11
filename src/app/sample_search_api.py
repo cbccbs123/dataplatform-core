@@ -251,7 +251,8 @@ def search(
     """`search_service.search_hybrid` 를 그대로 호출해 모달리티 버킷 결과를 JSON 으로 반환한다.
 
     - ``fusion``: alpha(기본)/rrf 선택 — 단, grouped 출력은 cap 재정렬로 rrf 가 보이지 않을 수 있다(설계 §8 한계).
-    - ``no_cutoff``: 디버깅용 — 컷오프(min_scores)를 빈 dict 로 줘 약한 후보까지 노출.
+    - ``no_cutoff``: 디버깅용 — OS 경로는 ``disable_os_cutoff=True`` 로 게이트·per-result 컷을 모두 끄고
+      (027), pg 경로는 min_scores 를 빈 dict 로 줘 약한 후보까지 노출한다.
     - ``compact``: 전 모달리티를 합쳐 합산 점수(similarity) 내림차순 top-K(=limit)로, 순위·모달리티·
       점수·파일명·요약만 남긴 단일 리스트를 반환한다(브라우저·터미널에서 한눈에 보기용).
     - ``group_by_relation``: 같은 영상의 모달리티들을 graph_edge(active duplicate_near/derived_from)로
@@ -268,7 +269,9 @@ def search(
         if unknown:
             return {"error": f"알 수 없는 modality: {unknown} (허용: {list(_VALID_MODALITIES)})"}
 
-    # 기본은 설정의 모달리티별 컷오프, no_cutoff 면 빈 dict(=전부 0.0=비활성).
+    # pg 경로 per-result 컷(코사인 스케일). no_cutoff 면 빈 dict(=전부 0.0=비활성)로 pg 필터를 끈다.
+    # 027: OS 경로는 min_scores 를 쓰지 않고 컷이 search_assets_os 내부로 이동했으므로, OS 디버그 우회는
+    # 아래 search_hybrid(disable_os_cutoff=no_cutoff)로 전달한다(게이트·per-result 컷 모두 off).
     min_scores: dict[str, float] = {} if no_cutoff else get_current_settings().search_min_scores
 
     # skip_llm: structured 를 직접 주입하면 search_hybrid 가 structure_user_query(LLM) 를 건너뛴다.
@@ -292,6 +295,7 @@ def search(
         fusion=fusion,
         structured=structured,
         min_scores=min_scores,
+        disable_os_cutoff=no_cutoff,  # 027: OS 경로 게이트·per-result 컷 우회(디버그)
     )
     if group_by_relation:
         return _group_by_relation_view(result, summary_chars)

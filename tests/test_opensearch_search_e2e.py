@@ -1,19 +1,18 @@
-"""021 G5 — OpenSearch 검색 read path 실OS e2e (게이트 ``RUN_OS_E2E=1``).
+"""021 G5 / 027 — OpenSearch 검색 read path 실OS e2e (게이트 ``RUN_OS_E2E=1``).
 
-G1·G2 가 순수/가짜클라이언트로 검증한 쿼리 빌더·파이프라인·검색 seam 이 **실제 OpenSearch
-하이브리드(nori 한국어 BM25 + ``knn_vector`` kNN + normalization-processor 검색 파이프라인)**에서
-의도대로 동작하는지 확정 검증한다. 특히 ``opensearch_search`` docstring 이 "best-effort·G5 에서
-확정"으로 남긴 **실 OS API 가정**의 최종 검증 지점이다:
-    - ``client.search_pipeline.get/put``(검색 파이프라인 멱등 등록) 시맨틱(``ensure_search_pipeline``),
-    - ``client.search(..., search_pipeline=name)`` 인자로 normalization-processor 가 실제 적용되는지,
-    - ``hybrid`` 쿼리 DSL + ``sort:[{_score desc},{asset_id asc}]`` 결정적 tiebreaker(FR-009)가
-      파이프라인 정규화 점수 위에서 동작하는지.
+G1·G2 가 순수/가짜클라이언트로 검증한 쿼리 빌더·**클라이언트 융합**·검색 seam 이 **실제 OpenSearch
+하이브리드(nori 한국어 BM25 + ``knn_vector`` kNN)**에서 의도대로 동작하는지 확정 검증한다. 027 전환:
+서버 normalization-processor 검색 파이프라인이 **클라이언트 융합**(``fuse_hybrid``: min-max+가중평균,
+모달리티당 [kNN + BM25] _msearch 1회)으로 대체돼, 등록할 서버 파이프라인이 없다. 검증 지점:
+    - ``client.msearch`` 로 모달리티당 [kNN, BM25] 서브검색을 1회에 받아 클라이언트가 융합하는지,
+    - 융합 점수 + ``(-similarity, id)`` 결정적 tiebreaker(FR-009)가 동작하는지,
+    - 버킷 게이트(``gate_signal`` robust baseline → ``passes_cutoff``)·per-result 컷(``cut_rows``)이
+      실 OS 의 원시 코사인 위에서 무관 질의를 빈 버킷으로 만드는지.
 
 **자기완결 e2e — 실 PG 불요.** 테스트가 직접 작은 알려진 한국어 코퍼스(text/audio + 의료 1건 +
 동점쌍 2건)를 임시 인덱스(``assets_021e2e``)에 ``asset_to_doc``(020 순수 문서 빌더)로 만들어
-색인하고, 임시 검색 파이프라인(``assets-hybrid-021e2e``)을 등록한다. 질의·문서 임베딩은 **실제
-모델**(활성 채널 KoSimCSE, 게이트 안이라 무방)로 같은 벡터 공간에서 계산해 kNN 이 비교 가능하게
-구성한다. 임시 인덱스·파이프라인은 ``tearDownClass`` 에서 삭제하고 변경한 env 도 복원한다.
+색인한다. 질의·문서 임베딩은 **실제 모델**(활성 채널, 게이트 안이라 무방)로 같은 벡터 공간에서
+계산해 kNN 이 비교 가능하게 구성한다. 임시 인덱스는 ``tearDownClass`` 에서 삭제하고 변경한 env 도 복원한다.
 
 기본(``RUN_OS_E2E`` 미설정) 회귀에서는 클래스 전체가 **auto-skip** 되어 모델 로드·OS 접속·env
 변경이 일어나지 않는다(헌법 8조 회귀 0). 실 측정은 사람이 OpenSearch 기동 후 ``RUN_OS_E2E=1`` 로.
@@ -31,7 +30,7 @@ G1·G2 가 순수/가짜클라이언트로 검증한 쿼리 빌더·파이프라
     #   docker exec os021 bin/opensearch-plugin install analysis-nori && docker restart os021
 
    ``.env.dev`` 의 ``OPENSEARCH_URL``(미설정 시 기본 http://localhost:9200)이 이 인스턴스를 가리키게 한다.
-   (DEV 무인증 http 기준 — 보안 비활성. 보안 활성 환경은 024 범위.)
+   (DEV 무인증 http 기준 — 보안 비활성.)
 
 2) 본 e2e 실행 — 자기색인 코퍼스라 실 PG 불요, OpenSearch 만 있으면 된다:
 
@@ -41,25 +40,20 @@ G1·G2 가 순수/가짜클라이언트로 검증한 쿼리 빌더·파이프라
    본 테스트 대신 ``SEARCH_BACKEND=opensearch`` 진입점(run_search 등)으로 육안 확인:
 
     OPENSEARCH_SYNC_ENABLED=true python -m src.app.run_ingest --env dev <FILE>...   # 증분 색인
-    python -m src.app.run_opensearch_resync --env dev --recreate --ensure-pipeline  # 전체 재색인 + 파이프라인 등록
+    python -m src.app.run_opensearch_resync --env dev --recreate                    # 전체 재색인(서버 파이프라인 0)
     SEARCH_BACKEND=opensearch python -m src.app.run_search --env dev "재무 보고서" --modalities text,audio
 
 ────────────────────────────────────────────────────────────────────────────
-T010 — KPI A/B (사람 측정, 본 파일 밖·하드 정지점)
+G4/G5 — KPI·골든·사용자 평가 (사람 측정, 본 파일 밖·하드 정지점)
 ────────────────────────────────────────────────────────────────────────────
-006 하니스(``scripts/measure_chunk_agg_kpi.py``)는 ``search_hybrid`` 를 통해 골든셋 recall@20 을
-산출한다. ``search_hybrid`` 가 백엔드를 ``settings.search_backend``(=``SEARCH_BACKEND`` env)로
-해소하므로, 같은 골든셋을 백엔드만 바꿔 A/B 한다(실 PG + 실 OS + 020 동기화 필요):
+골든 58질의 하니스(``scripts/measure_search_golden.py``)가 gate-off recall@20·**gate-on recall(027
+신규·오컷 가시화)**·no-match 차단율을 산출한다. 실 OS·실데이터 인덱스가 필요하다:
 
-    RUN_DB_E2E=1 SEARCH_BACKEND=pg         conda run -n AuroraFS python scripts/measure_chunk_agg_kpi.py --env dev
-    RUN_DB_E2E=1 SEARCH_BACKEND=opensearch conda run -n AuroraFS python scripts/measure_chunk_agg_kpi.py --env dev
+    RUN_OS_E2E=1 SEARCH_BACKEND=opensearch conda run -n AuroraFS python scripts/measure_search_golden.py
 
-   - **SC-002(품질)**: opensearch 의 text/audio recall@20 ≥ pg 인지 비교표로 확인.
-   - **SC-003(성능)**: text/audio 검색 p95 ≤ 1000ms. 위 하니스는 recall 위주라 p95 는 측정 항목이
-     아니므로, ``tests/test_search_kpi_e2e.py``(p95 측정 패턴) 또는 search_hybrid 호출을
-     ``time.perf_counter`` 로 감싼 30회 측정으로 백엔드별 p95 를 별도 측정한다.
-   - 결과(recall·p95 비교)는 ADR ``docs/decisions/2026-06-10-opensearch-search-cutover.md`` 측정
-     기록에 남긴다.
+   - **SC-001(품질)**: gate-off recall@20 ≥ 0.985 유지·gate-on recall 하락폭(오컷)이 작은지 확인.
+   - 분포 실측·EPS/FLOOR/RESULT_FLOOR 재보정은 ``scripts/calibrate_search_cutoff.py``(robust baseline).
+   - 결과는 ADR ``docs/decisions/2026-06-11-search-fusion-simplify.md`` 측정 기록에 남긴다.
 """
 
 from __future__ import annotations
@@ -71,7 +65,6 @@ from unittest import mock
 
 _RUN = os.getenv("RUN_OS_E2E") == "1"
 _INDEX = "assets_021e2e"
-_PIPELINE = "assets-hybrid-021e2e"
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # 코퍼스 자산 id(결정적·테스트 스코프). 동점쌍은 asset_id 사전순(a<b)으로 tiebreaker(FR-009) 검증.
@@ -154,15 +147,11 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # 임시 인덱스·파이프라인을 settings 에 주입해 search_hybrid(backend=opensearch) 도 같은 코퍼스를
-        # 보게 한다(LLM 0 테스트가 진입점 경로를 그대로 탄다). .env.dev 엔 이 두 키가 없으므로 override=False
-        # 로드와 무관하게 우리 값이 유지된다. 변경 전 값은 복원용으로 보관.
-        cls._saved_env = {
-            k: os.environ.get(k)
-            for k in ("OPENSEARCH_INDEX", "OPENSEARCH_SEARCH_PIPELINE")
-        }
+        # 임시 인덱스를 settings 에 주입해 search_hybrid(backend=opensearch) 도 같은 코퍼스를 보게 한다
+        # (LLM 0 테스트가 진입점 경로를 그대로 탄다). .env.dev 엔 이 키가 없으므로 override=False 로드와
+        # 무관하게 우리 값이 유지된다. 변경 전 값은 복원용으로 보관. 027: 서버 파이프라인 env 는 소멸.
+        cls._saved_env = {k: os.environ.get(k) for k in ("OPENSEARCH_INDEX",)}
         os.environ["OPENSEARCH_INDEX"] = _INDEX
-        os.environ["OPENSEARCH_SEARCH_PIPELINE"] = _PIPELINE
 
         from dotenv import load_dotenv
 
@@ -170,15 +159,15 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         from src.config.settings import active_embed_channel, init_settings
 
         init_settings("dev")
-        from src.search.opensearch_search import embed_query, ensure_search_pipeline
+        from src.search.opensearch_search import embed_query
         from src.search.opensearch_sync import asset_to_doc, ensure_index, get_client
 
         cls.client = get_client()
         cls.channel = active_embed_channel()
 
-        # 임시 인덱스(020 매핑·nori·knn_vector) + 정규화 검색 파이프라인 멱등 등록.
+        # 임시 인덱스(020 매핑·nori·knn_vector)만 만든다 — 027 클라이언트 융합이라 서버 검색 파이프라인
+        # 등록은 없다(융합 수학이 클라이언트 fuse_hybrid 로 이동).
         ensure_index(cls.client, _INDEX, recreate=True)
-        ensure_search_pipeline(cls.client, _PIPELINE, weights=(0.5, 0.5))
 
         # 코퍼스를 실제 모델로 임베딩 → asset_to_doc(순수) → 색인. 문서·질의가 같은 임베더(채널 모델)를
         # 써 같은 벡터 공간에서 kNN 비교된다(FR-004 질의-문서 일치).
@@ -200,15 +189,11 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        # 임시 인덱스·파이프라인 삭제(best-effort) + env 복원.
+        # 임시 인덱스 삭제(best-effort) + env 복원. 027: 삭제할 서버 파이프라인 없음.
         try:
             if cls.client.indices.exists(index=_INDEX):
                 cls.client.indices.delete(index=_INDEX)
         finally:
-            try:
-                cls.client.search_pipeline.delete(id=_PIPELINE)
-            except Exception:
-                pass  # 파이프라인 삭제 API 부재/오류는 정리 실패로 보지 않음
             for k, v in cls._saved_env.items():
                 if v is None:
                     os.environ.pop(k, None)
@@ -218,19 +203,25 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
     def _search(
         self, query: str, modalities: list[str], *, k: int = 10
     ) -> dict[str, list[dict]]:
-        """임시 인덱스·파이프라인으로 하이브리드 검색(seam 그대로). 버킷 {modality: [rows]} 반환."""
+        """임시 인덱스로 클라이언트 융합 검색(seam 그대로). 버킷 {modality: [rows]} 반환.
+
+        027: search_assets_os 는 (buckets, gate_meta) 튜플을 돌려준다 — 본 헬퍼는 버킷만 쓴다(게이트
+        메커니즘 검증은 아래 023 섹션이 직접 gate_signal·search_assets_os 로 다룬다). 컷오프 기본 off
+        (게이트·per-result 컷 미적용)로 회수 자체를 본다 — 게이트 분기 검증은 별도 테스트에서 켠다.
+        """
         from src.search.opensearch_search import search_assets_os
 
-        return search_assets_os(
+        buckets, _meta = search_assets_os(
             self.client,
             query,
             modalities=modalities,
             k=k,
             channel=self.channel,
             index=_INDEX,
-            pipeline_name=_PIPELINE,
             exclude_medical=True,
+            cutoff_enabled=False,
         )
+        return buckets
 
     # ── 1) recall sanity (SC-002 방향) ──────────────────────────────────────
     def test_recall_sanity_top1(self) -> None:
@@ -292,21 +283,20 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         self.assertIn("audio", result["results"])
         self.assertEqual(result["meta"].get("backend"), "opensearch")
 
-    # ── 5) 정규화 융합 동작 (FR-005 — 파이프라인 실적용 최종 검증) ───────────
-    def test_normalization_pipeline_applied(self) -> None:
-        """normalization-processor(min-max + 가중평균)가 실제 적용된다 — 결합 점수 ≤ 1.0 상한이 증거.
+    # ── 5) 클라이언트 융합 동작 (FR-002 — fuse_hybrid 실적용 최종 검증) ───────────
+    def test_client_fusion_score_bounded(self) -> None:
+        """클라이언트 융합(fuse_hybrid: min-max + 가중평균)이 실제 적용된다 — 결합 점수 ≤ 1.0 상한이 증거.
 
-        min-max 정규화는 서브쿼리별 최고점을 1.0 으로 스케일하고, arithmetic_mean(가중치 합 1.0)으로
-        결합하므로 결합 점수의 이론 상한은 1.0(양 서브쿼리 동시 1등). 정규화 미적용(원시 BM25)이면
-        보통 1.0 을 초과한다 — 이 상한이 ``client.search(search_pipeline=)`` 로 파이프라인이 실제
-        적용됐다는 신호다(G1·G2 가 best-effort 로 가정한 실 OS API 의 최종 검증 지점).
+        min-max 정규화는 서브검색별 최고점을 1.0 으로 스케일하고, 가중평균(가중치 합 1.0)으로 결합하므로
+        결합 similarity 의 이론 상한은 1.0(양 서브검색 동시 1등). 원시 BM25 라면 보통 1.0 을 초과한다 —
+        이 상한이 ``fuse_hybrid`` 가 실제 적용됐다는 신호다(027: 서버 파이프라인이 아니라 클라이언트 융합).
         """
         rows = self._search("재무 매출 보고서", ["text"])["text"]
         self.assertTrue(rows, "결과가 있어야 융합 점수를 검증할 수 있다")
         top = rows[0]["similarity"]
-        self.assertGreater(top, 0.0, "정규화 융합 점수는 양수여야 한다")
-        self.assertLessEqual(top, 1.0 + 1e-6, "min-max 정규화 + 가중평균 결합 점수 상한 1.0(파이프라인 실적용)")
-        # 점수 단조 비증가(정렬 일관성 — _score desc).
+        self.assertGreater(top, 0.0, "융합 점수는 양수여야 한다")
+        self.assertLessEqual(top, 1.0 + 1e-6, "min-max + 가중평균 결합 점수 상한 1.0(fuse_hybrid 실적용)")
+        # 점수 단조 비증가(정렬 일관성 — similarity desc).
         sims = [r["similarity"] for r in rows]
         self.assertEqual(sims, sorted(sims, reverse=True), "결과는 점수 내림차순이어야 한다")
 
@@ -406,29 +396,42 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         self.assertIn("video", result["results"])
         self.assertEqual(result["meta"].get("backend"), "opensearch")
 
-    # ── 023) 적합도 컷오프 게이트 — 실 probe·empty/keep·결정성·의료배제 ──────────────
-    # 주의: production 기본 임계(FLOOR=0.43·EPS=0.15)는 실 318자산 코퍼스로 보정된 값이라, 이 작은
-    # 자체색인 코퍼스에는 그대로 전이하지 않는다(절대 코사인 스케일·baseline 이 다름). 따라서 e2e 는
-    # **production 임계를 재검증하지 않고**(그건 scripts/calibrate_search_cutoff.py 가 실코퍼스로 수행)
-    # 실 OS 경로의 게이트 *메커니즘*(실 probe_relevance → passes_cutoff → 빈/유지)을 코퍼스에서 측정한
-    # 신호로 결정적으로 검증한다. 즉 매칭>무관 불변식과, 두 top 사이 floor 로 empty/keep 분기를 단언한다.
+    # ── 023/027) 버킷 게이트 — 실 kNN 신호·empty/keep·결정성·의료배제 ──────────────
+    # 주의: production 기본 임계(FLOOR·EPS)는 실 318자산 코퍼스로 보정된 값이라, 이 작은 자체색인
+    # 코퍼스에는 그대로 전이하지 않는다(절대 코사인 스케일·baseline 이 다름). 따라서 e2e 는 **production
+    # 임계를 재검증하지 않고**(그건 scripts/calibrate_search_cutoff.py 가 실코퍼스로 수행) 실 OS 경로의
+    # 게이트 *메커니즘*(build_knn_body+client.search 의 실 kNN 코사인 → gate_signal → passes_cutoff →
+    # 빈/유지)을 코퍼스에서 측정한 신호로 결정적으로 검증한다. 027: 별도 추가 검색(probe) 없이 같은 kNN
+    # 본문으로 코사인을 모은다. 즉 매칭>무관 불변식과, 두 top 사이 floor 로 empty/keep 분기를 단언한다.
 
-    def _probe_top(self, query: str, label: str) -> tuple[float, float]:
-        """실 probe_relevance 로 그 modality 의 (top, mean) 원시 코사인을 잰다(임시 인덱스)."""
+    def _knn_signal(
+        self, query: str, label: str, *, exclude_medical: bool = True, k: int = 10
+    ) -> tuple[float, float]:
+        """실 kNN(build_knn_body+client.search)의 코사인에서 (top, robust baseline)을 잰다(임시 인덱스).
+
+        023 probe 를 대체한다 — 융합이 클라이언트로 오면서 kNN 응답에 원시 코사인이 보존되므로 추가
+        검색 없이 같은 본문에서 신호를 잰다. knn_score_to_cosine 으로 환산 후 gate_signal 로 신호화한다.
+        """
         from src.search.opensearch_search import (
             _MODALITY_VALUES,
+            build_knn_body,
             embed_query,
-            probe_relevance,
+            gate_signal,
+            knn_score_to_cosine,
         )
 
         vec = embed_query(query, channel=self.channel)
         values = _MODALITY_VALUES.get(label, frozenset({label}))
-        return probe_relevance(self.client, vec, modality_values=values, k=10, index=_INDEX)
+        body = build_knn_body(vec, modality_values=values, k=k, exclude_medical=exclude_medical)
+        resp = self.client.search(index=_INDEX, body=body)
+        hits = ((resp or {}).get("hits") or {}).get("hits") or []
+        cosines = [knn_score_to_cosine(h.get("_score")) for h in hits]
+        return gate_signal(cosines)
 
-    def test_cutoff_probe_matching_above_foreign(self) -> None:
-        """실 probe: 코퍼스에 있는 토픽(강아지) top > 무관 토픽(양자역학) top — 매칭>무관 불변식(FR-002)."""
-        present_top, _ = self._probe_top("강아지 키우기 사료", "text")
-        foreign_top, _ = self._probe_top("양자역학 입자 가속기 실험", "text")
+    def test_cutoff_signal_matching_above_foreign(self) -> None:
+        """실 kNN: 코퍼스에 있는 토픽(강아지) top > 무관 토픽(양자역학) top — 매칭>무관 불변식(FR-003)."""
+        present_top, _ = self._knn_signal("강아지 키우기 사료", "text")
+        foreign_top, _ = self._knn_signal("양자역학 입자 가속기 실험", "text")
         self.assertGreater(
             present_top, foreign_top,
             f"매칭 질의 top({present_top:.3f})이 무관 질의 top({foreign_top:.3f})보다 커야 한다",
@@ -437,23 +440,25 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
     def test_cutoff_empties_foreign_keeps_present(self) -> None:
         """게이트 메커니즘(FR-001·003): 두 top 사이 floor 로 무관 질의는 빈 버킷·매칭 질의는 유지.
 
-        eps=0.0 으로 상대신호를 끄고 floor 만으로 분기 — 실 probe 가 잰 두 top 의 중앙을 floor 로 써
-        production 기본값 의존 없이 메커니즘만 본다. cutoff off 면 둘 다 비지 않음(게이트가 원인임을 격리).
+        eps=0.0 으로 상대신호를 끄고 floor 만으로 분기 — 실 kNN 이 잰 두 top 의 중앙을 floor 로 써
+        production 기본값 의존 없이 메커니즘만 본다. result_floor=-1.0 으로 per-result 컷은 끄고(게이트
+        분기만 격리). cutoff off 면 둘 다 비지 않음(게이트가 원인임을 격리).
         """
         from src.search.opensearch_search import search_assets_os
 
-        present_top, _ = self._probe_top("강아지 키우기 사료", "text")
-        foreign_top, _ = self._probe_top("양자역학 입자 가속기 실험", "text")
+        present_top, _ = self._knn_signal("강아지 키우기 사료", "text")
+        foreign_top, _ = self._knn_signal("양자역학 입자 가속기 실험", "text")
         floor = (present_top + foreign_top) / 2.0  # 두 top 사이 → 매칭 유지·무관 차단
 
         def buckets(query: str, enabled: bool) -> dict:
-            return search_assets_os(
+            out, _meta = search_assets_os(
                 self.client, query, modalities=["text"], k=10, channel=self.channel,
-                index=_INDEX, pipeline_name=_PIPELINE, cutoff_enabled=enabled,
-                cutoff_eps=0.0, cutoff_floor=floor, cutoff_probe_k=10,
+                index=_INDEX, cutoff_enabled=enabled,
+                cutoff_eps=0.0, cutoff_floor=floor, result_floor=-1.0,
             )
+            return out
 
-        # cutoff OFF: 무관 질의도 정규화 랭킹으로 결과가 나온다(게이트 없음 → no-match 노이즈).
+        # cutoff OFF: 무관 질의도 융합 랭킹으로 결과가 나온다(게이트 없음 → no-match 노이즈).
         self.assertTrue(buckets("양자역학 입자 가속기 실험", False)["text"], "게이트 off 면 무관 질의도 결과")
         # cutoff ON: 무관 질의 → 빈 버킷, 매칭 질의 → 유지.
         self.assertEqual(buckets("양자역학 입자 가속기 실험", True)["text"], [], "무관 질의는 빈 버킷")
@@ -463,40 +468,28 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         """결정성(헌법 3조·SC-004): 같은 질의·게이트 2회 → 동일 버킷(빈/유지)."""
         from src.search.opensearch_search import search_assets_os
 
-        foreign_top, _ = self._probe_top("양자역학 입자 가속기 실험", "text")
-        present_top, _ = self._probe_top("강아지 키우기 사료", "text")
+        foreign_top, _ = self._knn_signal("양자역학 입자 가속기 실험", "text")
+        present_top, _ = self._knn_signal("강아지 키우기 사료", "text")
         floor = (present_top + foreign_top) / 2.0
 
         def run(query: str) -> list:
-            out = search_assets_os(
+            out, _meta = search_assets_os(
                 self.client, query, modalities=["text"], k=10, channel=self.channel,
-                index=_INDEX, pipeline_name=_PIPELINE, cutoff_enabled=True,
-                cutoff_eps=0.0, cutoff_floor=floor, cutoff_probe_k=10,
+                index=_INDEX, cutoff_enabled=True,
+                cutoff_eps=0.0, cutoff_floor=floor, result_floor=-1.0,
             )
             return [r["id"] for r in out["text"]]
 
         self.assertEqual(run("양자역학 입자 가속기 실험"), run("양자역학 입자 가속기 실험"))
         self.assertEqual(run("강아지 키우기 사료"), run("강아지 키우기 사료"))
 
-    def test_cutoff_probe_excludes_medical(self) -> None:
-        """probe 의료배제(FR-008·헌법 10조): 의료 토픽만 매칭하는 질의는 probe 후보에서 의료가 빠져 top↓.
+    def test_cutoff_signal_excludes_medical(self) -> None:
+        """게이트 신호 의료배제(FR-008·헌법 10조): 의료 토픽만 매칭하는 질의는 kNN 후보에서 의료가 빠져 top↓.
 
-        '환자 진료 처방' 은 코퍼스에서 의료 문서(_ID_MED)에만 매칭한다 — exclude_medical=True(probe 기본)면
+        '환자 진료 처방' 은 코퍼스에서 의료 문서(_ID_MED)에만 매칭한다 — exclude_medical=True(기본)면
         그 후보가 빠져, 포함했을 때보다 top 코사인이 낮아야 한다(같은 후보 집단에서 의료 격리)."""
-        from src.search.opensearch_search import (
-            _MODALITY_VALUES,
-            embed_query,
-            probe_relevance,
-        )
-
-        vec = embed_query("환자 진료 처방 병원 검사", channel=self.channel)
-        values = _MODALITY_VALUES.get("text", frozenset({"text"}))
-        top_excl, _ = probe_relevance(
-            self.client, vec, modality_values=values, k=10, index=_INDEX, exclude_medical=True
-        )
-        top_incl, _ = probe_relevance(
-            self.client, vec, modality_values=values, k=10, index=_INDEX, exclude_medical=False
-        )
+        top_excl, _ = self._knn_signal("환자 진료 처방 병원 검사", "text", exclude_medical=True)
+        top_incl, _ = self._knn_signal("환자 진료 처방 병원 검사", "text", exclude_medical=False)
         self.assertLess(
             top_excl, top_incl,
             f"의료배제 top({top_excl:.3f})은 의료포함 top({top_incl:.3f})보다 낮아야 한다(의료 격리)",

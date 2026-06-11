@@ -7,13 +7,14 @@
   - ``search_backend``           : 기본 ``"pg"``, 화이트리스트 ``{"pg","opensearch"}`` — 그 외 값이면
                                    ``_build_settings``(=init_settings 검증 지점)에서 **즉시 ValueError**
                                    (런타임까지 숨지 않게 — 백로그 '설정 fail-late' 교정).
-  - ``opensearch_search_pipeline``: 기본 ``"assets-hybrid"`` (문자열, normalization-processor 이름).
-  - ``opensearch_fusion_weights`` : 기본 ``(0.5, 0.5)`` (BM25, kNN). 각 가중치 **0<=w<=1**(벗어나면 ValueError).
-                                    ``OPENSEARCH_FUSION_WEIGHTS="0.5,0.5"`` → 튜플로 파싱.
+  - ``opensearch_fusion_weights`` : 기본 ``search_constants.OS_FUSION_WEIGHTS_DEFAULT``(=(0.5,0.5)).
+                                    각 가중치 **0<=w<=1**(벗어나면 ValueError). ``"0.5,0.5"`` → 튜플로 파싱.
 
-⚠️ G3(``search_service.search_hybrid``)가 이 3필드를 ``getattr(cfg, "search_backend", "pg")`` /
-``getattr(cfg, "opensearch_search_pipeline", "assets-hybrid")`` / ``getattr(cfg,
-"opensearch_fusion_weights", (0.5,0.5))`` 로 읽으므로 **필드명·기본값이 정확히 일치**해야 한다 —
+027 갱신: 서버 정규화 융합 파이프라인이 클라이언트 융합으로 대체되며 파이프라인 메타 필드·env 키가
+제거됐다. 임계 기본값은 ``search_constants`` 단일 출처(F1)를 참조한다.
+
+⚠️ G3(``search_service.search_hybrid``)가 이 필드들을 ``getattr(cfg, "search_backend", "pg")`` /
+``getattr(cfg, "opensearch_fusion_weights", …)`` 로 읽으므로 **필드명·기본값이 정확히 일치**해야 한다 —
 ``TestG3FieldNameContract`` 가 그 계약을 봉인한다.
 
 ``_build_settings`` 는 11개 필수 env 를 요구하므로(test_settings_relation_retry 동형), 그 최소 env 를
@@ -27,6 +28,7 @@ import os
 import unittest
 from unittest import mock
 
+from src.config import search_constants
 from src.config.settings import _build_settings
 
 # _build_settings 가 _require_env* 로 읽는 필수 env 최소 집합(값은 형식만 맞으면 됨).
@@ -49,12 +51,12 @@ _REQUIRED_ENV = {
 # 기본값 단언을 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
 _BACKEND_KEYS = (
     "SEARCH_BACKEND",
-    "OPENSEARCH_SEARCH_PIPELINE",
     "OPENSEARCH_FUSION_WEIGHTS",
     "SEARCH_OS_CUTOFF_ENABLED",
     "SEARCH_OS_CUTOFF_EPS",
     "SEARCH_OS_CUTOFF_FLOOR",
-    "SEARCH_OS_PROBE_K",
+    # 027: per-result 컷 코사인 하한(probe_k·정규화 스케일 4종을 대체). 잔존값 오염 방지로 비운다.
+    "SEARCH_OS_RESULT_FLOOR",
     # 026 T006/T004 가 추가하는 색인 빌더 선택 env 키도 함께 비워, 실행 환경 잔존값이 기본값 단언을
     # 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
     "OPENSEARCH_NORI_USER_WORDS",
@@ -107,20 +109,6 @@ class TestSearchBackend(unittest.TestCase):
         self.assertEqual(settings.search_backend, "pg")
 
 
-class TestOpenSearchSearchPipeline(unittest.TestCase):
-    """``opensearch_search_pipeline``: 기본 'assets-hybrid'(문자열) — _env_str_default 패턴."""
-
-    def test_default_is_assets_hybrid(self) -> None:
-        with _env():
-            settings = _build_settings("dev")
-        self.assertEqual(settings.opensearch_search_pipeline, "assets-hybrid")
-
-    def test_env_override(self) -> None:
-        with _env(OPENSEARCH_SEARCH_PIPELINE="custom-pipe"):
-            settings = _build_settings("dev")
-        self.assertEqual(settings.opensearch_search_pipeline, "custom-pipe")
-
-
 class TestOpenSearchFusionWeights(unittest.TestCase):
     """``opensearch_fusion_weights``: 기본 (0.5,0.5) · 'w1,w2' 파싱 · 0<=w<=1 범위검증(FR-005)."""
 
@@ -171,26 +159,27 @@ class TestOpenSearchFusionWeights(unittest.TestCase):
 
 
 class TestSearchOsCutoffSettings(unittest.TestCase):
-    """023 G3 — OS 검색 적합도 컷오프(probe 게이트) 4종 정식화 + fail-fast 검증.
+    """023/027 — OS 검색 버킷 게이트(robust baseline) 3종 정식화 + fail-fast + search_constants 단일 출처.
 
     021 ``_resolve_opensearch_fusion_weights`` 패턴 미러: dataclass 필드 + ``_resolve_*`` 환경 파싱·
     범위 검증 + ``_build_settings`` 배선. 범위 밖 값은 init_settings(=_build_settings) 에서 **즉시
     ValueError** — 잘못된 임계로 검색하지 않게(fail-fast, _resolve_search_backend 동형).
 
-      - ``search_os_cutoff_enabled`` : 기본 True (bool). pg 백엔드(기본)엔 무영향, OS 백엔드에만 적용.
-      - ``search_os_cutoff_eps``     : 기본 0.15(G4 calibration), 범위 ``[0,1)`` (상대신호 하한).
-      - ``search_os_cutoff_floor``   : 기본 0.43(G4 calibration), 범위 ``[-1,1]`` (코사인 절대 backstop·주분리축).
-      - ``search_os_probe_k``        : 기본 50, ``>=1`` 정수 (probe 표본 수).
+      - ``search_os_cutoff_enabled`` : 기본 OS_CUTOFF_ENABLED_DEFAULT(True). pg 백엔드(기본)엔 무영향.
+      - ``search_os_cutoff_eps``     : 기본 OS_CUTOFF_EPS_DEFAULT, 범위 ``[0,1)`` (상대신호 하한).
+      - ``search_os_cutoff_floor``   : 기본 OS_CUTOFF_FLOOR_DEFAULT, 범위 ``[-1,1]`` (코사인 절대 backstop).
+
+    027: 게이트 표본 수(search_os_probe_k)는 클라이언트 융합 전환으로 제거됐다(같은 kNN 표본에서 직접
+    신호를 잰다 — 추가 검색 0). 기본값은 하드코딩 대신 search_constants 단일 출처를 참조한다(F1).
     """
 
-    # (a) 기본값 — env 미설정 시(G4 실OS calibration 으로 확정한 값).
+    # (a) 기본값 — env 미설정 시 search_constants 단일 출처(F1) 값.
     def test_defaults_when_unset(self) -> None:
         with _env():
             settings = _build_settings("dev")
-        self.assertIs(settings.search_os_cutoff_enabled, True)
-        self.assertEqual(settings.search_os_cutoff_eps, 0.15)
-        self.assertEqual(settings.search_os_cutoff_floor, 0.43)
-        self.assertEqual(settings.search_os_probe_k, 50)
+        self.assertIs(settings.search_os_cutoff_enabled, search_constants.OS_CUTOFF_ENABLED_DEFAULT)
+        self.assertEqual(settings.search_os_cutoff_eps, search_constants.OS_CUTOFF_EPS_DEFAULT)
+        self.assertEqual(settings.search_os_cutoff_floor, search_constants.OS_CUTOFF_FLOOR_DEFAULT)
 
     # (b) 환경 오버라이드.
     def test_enabled_env_override_false(self) -> None:
@@ -208,12 +197,7 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
             settings = _build_settings("dev")
         self.assertEqual(settings.search_os_cutoff_floor, 0.7)
 
-    def test_probe_k_env_override(self) -> None:
-        with _env(SEARCH_OS_PROBE_K="80"):
-            settings = _build_settings("dev")
-        self.assertEqual(settings.search_os_probe_k, 80)
-
-    # 경계 포함/제외 — eps∈[0,1)·floor∈[-1,1]·probe_k>=1.
+    # 경계 포함/제외 — eps∈[0,1)·floor∈[-1,1].
     def test_eps_boundary_zero_ok_one_excluded(self) -> None:
         with _env(SEARCH_OS_CUTOFF_EPS="0"):
             self.assertEqual(_build_settings("dev").search_os_cutoff_eps, 0.0)
@@ -226,18 +210,9 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
             with _env(SEARCH_OS_CUTOFF_FLOOR=v):
                 _build_settings("dev")  # [-1,1] 경계 포함 — 예외 없음
 
-    def test_probe_k_boundary_one_ok(self) -> None:
-        with _env(SEARCH_OS_PROBE_K="1"):
-            self.assertEqual(_build_settings("dev").search_os_probe_k, 1)
-
     # (c) fail-fast — 범위 밖은 즉시 ValueError.
     def test_eps_negative_raises(self) -> None:
         with _env(SEARCH_OS_CUTOFF_EPS="-0.1"):
-            with self.assertRaises(ValueError):
-                _build_settings("dev")
-
-    def test_probe_k_zero_raises(self) -> None:
-        with _env(SEARCH_OS_PROBE_K="0"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
@@ -256,46 +231,42 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
-    def test_probe_k_non_integer_raises(self) -> None:
-        with _env(SEARCH_OS_PROBE_K="3.5"):
-            with self.assertRaises(ValueError):
-                _build_settings("dev")
 
+class TestSearchOsResultFloor(unittest.TestCase):
+    """027: OS per-result 컷 코사인 하한 ``search_os_result_floor`` — 024 정규화 스케일 4종을 대체.
 
-class TestSearchOsMinScores(unittest.TestCase):
-    """024 G1: OS per-result 적합도 컷오프 — SEARCH_OS_MIN_SCORE_*(정규화 점수 스케일·fail-fast).
-
-    PG 코사인 스케일 SEARCH_MIN_SCORE_* 와 **분리**된 OS 전용 임계(켜진 버킷의 노이즈 꼬리 제거).
-    023 cutoff 설정 형식 미러. 범위 [0,1] 밖이면 _build_settings 시점에 즉시 ValueError.
+    행 유지 = BM25 매칭(어휘 증거) OR 원시 코사인 ≥ 이 값(의미 증거). 단일 코사인 스케일이라 모달리티별
+    분리가 불필요한 전역 1개. 기본값은 search_constants.OS_RESULT_FLOOR_DEFAULT 단일 출처(F1). 코사인
+    정의역이라 범위 ``[-1,1]``, 밖이면 _build_settings 시점에 즉시 ValueError(fail-fast).
     """
 
-    def test_defaults_when_unset(self) -> None:
-        # G3 calibration 분포 절벽 기준 기본값(audio 만 0.40, 나머지 0.45).
+    def test_default_when_unset(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(
-            s.search_os_min_scores,
-            {"text": 0.45, "image": 0.45, "video": 0.45, "audio": 0.40},
-        )
+        self.assertEqual(s.search_os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
 
-    def test_per_modality_override(self) -> None:
-        with _env(SEARCH_OS_MIN_SCORE_IMAGE="0.5"):
+    def test_env_override(self) -> None:
+        with _env(SEARCH_OS_RESULT_FLOOR="0.55"):
             s = _build_settings("dev")
-        self.assertEqual(s.search_os_min_scores["image"], 0.5)
-        self.assertEqual(s.search_os_min_scores["text"], 0.45)  # 나머지 기본 유지
+        self.assertEqual(s.search_os_result_floor, 0.55)
 
     def test_boundary_inclusive(self) -> None:
-        for v in ("0", "1"):
-            with _env(SEARCH_OS_MIN_SCORE_AUDIO=v):
-                _build_settings("dev")  # [0,1] 경계 포함 — 예외 없음
+        for v in ("-1", "1"):
+            with _env(SEARCH_OS_RESULT_FLOOR=v):
+                _build_settings("dev")  # [-1,1] 경계 포함 — 예외 없음
 
     def test_above_one_raises(self) -> None:
-        with _env(SEARCH_OS_MIN_SCORE_TEXT="1.5"):
+        with _env(SEARCH_OS_RESULT_FLOOR="1.5"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
-    def test_negative_raises(self) -> None:
-        with _env(SEARCH_OS_MIN_SCORE_VIDEO="-0.1"):
+    def test_below_minus_one_raises(self) -> None:
+        with _env(SEARCH_OS_RESULT_FLOOR="-2"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_non_numeric_raises(self) -> None:
+        with _env(SEARCH_OS_RESULT_FLOOR="abc"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
@@ -379,22 +350,30 @@ class TestOpenSearchFilenameNoisePatterns(unittest.TestCase):
 class TestG3FieldNameContract(unittest.TestCase):
     """G3(search_service.search_hybrid) getattr 계약 봉인 — 필드명·기본값 정확 일치.
 
-    G3 가 ``getattr(cfg, "search_backend", "pg")`` / ``getattr(cfg, "opensearch_search_pipeline",
-    "assets-hybrid")`` / ``getattr(cfg, "opensearch_fusion_weights", (0.5,0.5))`` 로 읽으므로,
-    정식화된 필드명·기본값이 그 폴백값과 어긋나면 동작이 갈라진다(회귀). 이 계약을 직접 봉인한다.
+    G3 가 ``getattr(cfg, "search_backend", "pg")`` / ``getattr(cfg, "opensearch_fusion_weights",
+    search_constants.OS_FUSION_WEIGHTS_DEFAULT)`` / ``getattr(cfg, "search_os_result_floor",
+    search_constants.OS_RESULT_FLOOR_DEFAULT)`` 로 읽으므로, 정식화된 필드명·기본값이 그 폴백값과
+    어긋나면 동작이 갈라진다(회귀). 이 계약을 직접 봉인한다. 027: 서버 파이프라인 메타 필드는
+    클라이언트 융합 전환으로 제거됐다 — 제거 봉인은 아래 '제거된 필드 부재' 단언이 담당한다.
     """
+
+    # 027: 제거된 파이프라인 메타 필드명(부재를 봉인). 리터럴을 한 곳에만 두어 잔존 참조와 구분한다.
+    _REMOVED_FIELDS = ("opensearch_" + "search_pipeline", "search_os_" + "probe_k", "search_os_" + "min_scores")
 
     def test_field_names_and_defaults_match_g3_getattr(self) -> None:
         with _env():
             settings = _build_settings("dev")
         # 필드명(getattr 키) 일치
         self.assertTrue(hasattr(settings, "search_backend"))
-        self.assertTrue(hasattr(settings, "opensearch_search_pipeline"))
         self.assertTrue(hasattr(settings, "opensearch_fusion_weights"))
-        # 기본값이 G3 getattr 폴백과 동일(미설정 시 동작 불변)
+        self.assertTrue(hasattr(settings, "search_os_result_floor"))
+        # 027: 제거된 필드들은 더 이상 존재하지 않는다(서버 융합 파이프라인·정규화 스케일 임계 0)
+        for removed in self._REMOVED_FIELDS:
+            self.assertFalse(hasattr(settings, removed), f"제거된 필드가 잔존: {removed}")
+        # 기본값이 G3 getattr 폴백(search_constants 단일 출처)과 동일(미설정 시 동작 불변)
         self.assertEqual(settings.search_backend, "pg")
-        self.assertEqual(settings.opensearch_search_pipeline, "assets-hybrid")
-        self.assertEqual(settings.opensearch_fusion_weights, (0.5, 0.5))
+        self.assertEqual(settings.opensearch_fusion_weights, search_constants.OS_FUSION_WEIGHTS_DEFAULT)
+        self.assertEqual(settings.search_os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
 
 
 class TestSearchBackendWiring(unittest.TestCase):
@@ -414,13 +393,15 @@ class TestSearchBackendWiring(unittest.TestCase):
 
         os_cap: dict[str, object] = {}
 
-        def fake_os(client: object, query: str, **kw: object) -> dict[str, list[dict[str, object]]]:
+        def fake_os(
+            client: object, query: str, **kw: object
+        ) -> tuple[dict[str, list[dict[str, object]]], dict]:
             os_cap["client"] = client
             os_cap["query"] = query
             os_cap.update(kw)
-            # similarity 는 024 OS per-result 임계(기본 text 0.45) 위 값 — 본 테스트는 라우팅 검증이
-            # 목적이라 필터에 잘리지 않는 행을 쓴다(필터 동작 자체는 search_service 테스트가 검증).
-            return {"text": [{"id": "os_t", "similarity": 0.9}]}
+            # 027: search_assets_os 는 (buckets, gate_meta) 튜플을 돌려준다. 본 테스트는 라우팅 검증이
+            # 목적이라 OS 경로가 호출부 필터를 적용하지 않으므로 행은 그대로 보존된다.
+            return {"text": [{"id": "os_t", "similarity": 0.9}]}, {}
 
         def fake_grouped(query: str, **kw: object) -> dict[str, object]:
             raise AssertionError("opensearch 백엔드 text 버킷에 pg grouped 가 쓰이면 안 됨")
@@ -445,9 +426,9 @@ class TestSearchBackendWiring(unittest.TestCase):
 
         os_calls: list[object] = []
 
-        def fake_os(*a: object, **k: object) -> dict[str, list[dict[str, object]]]:
+        def fake_os(*a: object, **k: object) -> tuple[dict[str, list[dict[str, object]]], dict]:
             os_calls.append(1)
-            return {}
+            return {}, {}
 
         def fake_grouped(query: str, **kw: object) -> dict[str, object]:
             return {"text_documents": [{"id": "pg_t"}], "meta": {}}
