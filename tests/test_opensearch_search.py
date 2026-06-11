@@ -1,19 +1,20 @@
-"""021 G1·G2 — OpenSearch 검색 쿼리 빌더·결과 매핑·검색 seam 단위 테스트.
+"""021·027 — OpenSearch 검색 서브검색 빌더·클라이언트 융합·게이트·컷·검색 seam 단위 테스트.
 
-G1(순수): OS·DB·opensearch-py 불필요. ``build_search_body``(하이브리드 쿼리 본문)와
-``os_hit_to_row``(결과 행 매핑)가 020 인덱스 매핑(opensearch_sync.build_index_body)과
-일치하고 media_search 버킷 행과 동형(SC-005)인지 충실히 검증한다.
+순수(OS·DB·opensearch-py 불필요): 두 서브검색 본문(``build_bm25_body``·``build_knn_body``)·결과 행
+매핑(``os_hit_to_row``)이 020 인덱스 매핑(opensearch_sync.build_index_body)과 일치하고 media_search
+버킷 행과 동형(SC-005)인지 검증한다. 027 클라이언트 융합 순수 함수(``minmax_normalize``·``fuse_hybrid``·
+``gate_signal``·``cut_rows``·``passes_cutoff``)의 융합 수학·robust 게이트·per-result 컷을 결정적으로
+고정한다(헌법 3조·FR-002·003·004).
 
-G2(IO seam): ``ensure_search_pipeline``(정규화 검색 파이프라인 멱등 등록)·``search_assets_os``
-(질의 1회 임베딩 → modality 별 하이브리드 검색 → 버킷)을 **가짜 OS 클라이언트 주입**으로 OS 없이
-액션 조립을 검증한다(docs/테스트_가이드.md §2 seam 주입). OS 미도달은 예외 전파로 검증(FR-008).
+IO seam: ``search_assets_os``(질의 1회 임베딩 → 전 모달리티 [knn+bm25] **_msearch 1회** → 클라이언트
+융합 → 게이트 → 컷 → (buckets, gate_meta))을 **가짜 msearch 클라이언트 주입**으로 OS 없이 액션 조립을
+검증한다(docs/테스트_가이드.md §2 seam 주입). OS 미도달은 예외 전파로 검증(FR-007).
 
-022 G1(image/video): image·video 도 020 assets 인덱스에 한국어 VLM 캡션(nori) + KoSimCSE 캡션
-임베딩(``embedding``)으로 색인돼 있어 text/audio 와 **동일 OS 하이브리드**로 검색한다(CLIP 아님).
-``_MODALITY_VALUES`` 의 image·video 명시 등재(저장값=라벨)와 그 하이브리드 본문·의료배제·결정 정렬을
-고정한다(spec 022 FR-001·004).
+022(image/video): image·video 도 020 assets 인덱스에 한국어 VLM 캡션(nori) + KoSimCSE 캡션 임베딩
+(``embedding``)으로 색인돼 text/audio 와 **동일 OS 서브검색**으로 검색한다(CLIP 아님). 라벨 명시 등재와
+그 서브검색 본문·의료배제를 고정한다.
 
-테스트 위조·약화 금지(docs/테스트_가이드.md). 실제 OS 검색 실효·결정성·의료배제는 G5(실OS e2e).
+테스트 위조·약화 금지(docs/테스트_가이드.md). 실제 OS 검색 실효·결정성·의료배제·재보정은 G4(실OS e2e).
 """
 
 from __future__ import annotations
@@ -23,13 +24,15 @@ import unittest
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.opensearch_search import (
     _MODALITY_VALUES,
-    build_probe_body,
-    build_search_body,
-    ensure_search_pipeline,
+    build_bm25_body,
+    build_knn_body,
+    cut_rows,
+    fuse_hybrid,
+    gate_signal,
     knn_score_to_cosine,
+    minmax_normalize,
     os_hit_to_row,
     passes_cutoff,
-    probe_relevance,
     search_assets_os,
 )
 
@@ -39,151 +42,9 @@ from src.search.opensearch_search import (
 _NORI_TEXT_FIELDS = {"summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"}
 
 
-def _subqueries(body: dict) -> list:
-    """hybrid 쿼리의 서브쿼리 목록을 꺼낸다."""
-    return body["query"]["hybrid"]["queries"]
-
-
-def _find_with_clause(subqueries: list, clause_key: str):
-    """주어진 절(clause_key)을 가진 서브쿼리·절을 찾는다(없으면 (None, None)).
-
-    텍스트 서브쿼리는 ``bool.must`` 안에 절이 있고(multi_match), knn 서브쿼리는 native filter 구조라
-    **top-level**(``{"knn": ...}``)이다 — 둘 다 찾는다.
-    """
-    for sub in subqueries:
-        if clause_key in sub:  # top-level 서브쿼리(예: knn native filter)
-            return sub, sub
-        for clause in sub.get("bool", {}).get("must", []):
-            if clause_key in clause:
-                return sub, clause
-    return None, None
-
-
-def _sub_bool(sub: dict) -> dict:
-    """서브쿼리의 modality/의료배제 bool 절 — text 는 ``bool``, knn 은 native ``filter.bool``."""
-    if "knn" in sub:
-        return sub["knn"]["embedding"]["filter"]["bool"]
-    return sub["bool"]
-
-
-class BuildSearchBodyTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.query = "한국어 검색 질의"
-        self.vector = [0.1, 0.2, 0.3, 0.4]
-        self.body = build_search_body(self.query, self.vector, modality_values=["txt"], k=50)
-
-    def test_hybrid_with_two_subqueries(self) -> None:
-        # (1) OpenSearch hybrid 쿼리 + 서브쿼리 2개(텍스트·knn).
-        subs = _subqueries(self.body)
-        self.assertEqual(len(subs), 2)
-
-    def test_text_subquery_multi_match_nori_fields(self) -> None:
-        # (1-①) nori 텍스트 multi_match — query 를 020 nori 필드 5개 대상으로(boost 차등 표기).
-        _, clause = _find_with_clause(_subqueries(self.body), "multi_match")
-        self.assertIsNotNone(clause, "nori multi_match 서브쿼리가 있어야 한다")
-        mm = clause["multi_match"]
-        self.assertEqual(mm["query"], self.query)
-        self.assertEqual(set(mm["fields"]), _NORI_TEXT_FIELDS)
-
-    def test_text_fields_boost_differentiation(self) -> None:
-        # 026 T008(FR-003①): boost 차등이 multi_match fields 에 그대로 실린다 — summary 가 가장 높고
-        # (^3), file_name 이 가장 낮다(^0.5). search_text 는 boost 1(표기 없음). 순서·표기 고정.
-        _, clause = _find_with_clause(_subqueries(self.body), "multi_match")
-        self.assertEqual(
-            clause["multi_match"]["fields"],
-            ["summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"],
-        )
-
-    def test_knn_subquery_embedding_vector_k(self) -> None:
-        # (1-②) knn 서브쿼리 — embedding 필드·query_vector·k.
-        _, clause = _find_with_clause(_subqueries(self.body), "knn")
-        self.assertIsNotNone(clause, "knn 서브쿼리가 있어야 한다")
-        knn = clause["knn"]["embedding"]
-        self.assertEqual(knn["vector"], self.vector)
-        self.assertEqual(knn["k"], 50)
-
-    def test_modality_filter_in_each_subquery(self) -> None:
-        # (2) modality terms 필터(집합)가 각 서브쿼리에 포함 — text 는 bool.filter, knn 은 native filter.
-        for sub in _subqueries(self.body):
-            self.assertIn({"terms": {"modality": ["txt"]}}, _sub_bool(sub)["filter"])
-
-    def test_knn_uses_native_prefilter(self) -> None:
-        # (2') G3 교정: knn 은 modality 를 **native filter(pre-filter)**로 좁힌다(bool 사후필터 아님) —
-        # 작은 k(=버킷 한도)에서 비우세 모달리티(image 등)가 0 건이 되는 것을 막는다(실OS 발견).
-        _, knn_sub = _find_with_clause(_subqueries(self.body), "knn")
-        self.assertIn("filter", knn_sub["knn"]["embedding"], "knn 에 native filter 가 있어야 한다")
-        self.assertIn(
-            {"terms": {"modality": ["txt"]}},
-            knn_sub["knn"]["embedding"]["filter"]["bool"]["filter"],
-        )
-
-    def test_exclude_medical_must_not_default(self) -> None:
-        # (3) exclude_medical=True(기본): domain_label='medical' must_not(FR-011). text=bool, knn=native filter.
-        for sub in _subqueries(self.body):
-            self.assertIn(
-                {"term": {"domain_label": "medical"}}, _sub_bool(sub)["must_not"]
-            )
-
-    def test_include_medical_when_disabled(self) -> None:
-        # (3) exclude_medical=False: 의료 배제 미포함.
-        body = build_search_body(
-            self.query, self.vector, modality_values=["txt"], exclude_medical=False
-        )
-        for sub in _subqueries(body):
-            self.assertNotIn(
-                {"term": {"domain_label": "medical"}},
-                _sub_bool(sub).get("must_not", []),
-            )
-
-    def test_no_score_field_combined_sort(self) -> None:
-        # (4) FR-009 결정적 tiebreaker 는 OS sort 가 아니라 클라이언트(search_assets_os)에서 적용한다.
-        # OpenSearch hybrid 쿼리는 _score 와 필드 정렬 조합을 금지(실OS 400: "_score sort criteria
-        # cannot be applied with any other criteria")하므로, build_search_body 본문에는 sort 를 두지
-        # 않고 정규화 융합 점수(_score)로만 정렬한다(G5 실OS 검증으로 교정).
-        self.assertNotIn("sort", self.body)
-
-    def test_size_equals_k(self) -> None:
-        # (5) size=k.
-        self.assertEqual(self.body["size"], 50)
-
-    def test_audio_modality_filter(self) -> None:
-        # 모달리티 분담(text·audio→OS): audio 도 terms 필터(['audio'])로 들어간다.
-        body = build_search_body(self.query, self.vector, modality_values=["audio"])
-        for sub in _subqueries(body):
-            self.assertIn({"terms": {"modality": ["audio"]}}, _sub_bool(sub)["filter"])
-
-    def test_operator_and_requires_all_tokens(self) -> None:
-        # 025 FR-001: operator='and' 면 multi_match 가 모든 nori 토큰 매칭을 요구한다 —
-        # 복합어 질의('스마트폰 생산량')의 부분 토큰 가짜매칭(F2) 차단. knn 서브쿼리는 무영향.
-        body = build_search_body(
-            self.query, self.vector, modality_values=["txt"], operator="and"
-        )
-        _, clause = _find_with_clause(_subqueries(body), "multi_match")
-        self.assertEqual(clause["multi_match"]["operator"], "and")
-        _, knn = _find_with_clause(_subqueries(body), "knn")
-        self.assertIn("knn", knn)  # knn 서브쿼리 구조 불변
-
-    def test_operator_default_or_keeps_body_unchanged(self) -> None:
-        # 회귀 0(SC-001): 기본(or)·미지정은 현행 본문과 동일 — multi_match 에 operator 키 자체가 없다.
-        default_body = build_search_body(self.query, self.vector, modality_values=["txt"])
-        or_body = build_search_body(
-            self.query, self.vector, modality_values=["txt"], operator="or"
-        )
-        self.assertEqual(default_body, or_body)
-        _, clause = _find_with_clause(_subqueries(default_body), "multi_match")
-        self.assertNotIn("operator", clause["multi_match"])
-
-    def test_text_modality_values_use_terms_set(self) -> None:
-        # text 버킷은 다중 modality 값(txt·json·pdf·office)을 terms 집합으로 정렬해 거른다 —
-        # 실데이터의 'txt' 가 'text' 라벨로 색인되지 않는 불일치를 흡수(실OS A/B 에서 발견·교정).
-        from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS
-
-        body = build_search_body(
-            self.query, self.vector, modality_values=ALLOWED_TEXT_META_FILE_KINDS
-        )
-        expected = {"terms": {"modality": sorted(ALLOWED_TEXT_META_FILE_KINDS)}}
-        for sub in _subqueries(body):
-            self.assertIn(expected, _sub_bool(sub)["filter"])
+# 027 T006: hybrid 서브쿼리 헬퍼(_subqueries·_find_with_clause·_sub_bool)와 BuildSearchBodyTest 는
+# 제거됐다 — 서버 hybrid 쿼리가 두 독립 서브검색(build_bm25_body·build_knn_body)으로 분리되면서
+# 그 본문 검증 의도는 BuildBm25BodyTest·BuildKnnBodyTest·ImageVideoSubqueryBodyTest 로 이전됐다.
 
 
 class OsHitToRowTest(unittest.TestCase):
@@ -259,232 +120,15 @@ class OsHitToRowTest(unittest.TestCase):
         self.assertEqual(row["id"], "fallback-id")
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# G2 — IO seam(검색 파이프라인·질의 임베딩·search_assets_os). 가짜 OS 클라이언트 주입.
-# 실제 opensearch-py 검색 파이프라인 API(client.search_pipeline.get/put·client.search(search_pipeline=))
-# 시그니처는 G5 실OS 에서 확정 검증한다 — 여기선 가짜 클라이언트가 그 인터페이스를 흉내내 액션 조립만 본다.
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class _FakeSearchPipelineNS:
-    """opensearch-py ``client.search_pipeline`` 네임스페이스 대역(get/put).
-
-    ``get()``(id 미지정)은 전체 검색 파이프라인 dict 를 돌려준다(실 OS: 없으면 ``{}``) — 020
-    ``indices.exists`` 의 boolean-멱등 패턴과 동형으로, 멤버십 검사만으로 존재 여부를 판단한다.
-    ``put`` 호출은 (id, body) 로 기록해 멱등(존재 시 PUT 0회)을 단언한다.
-    """
-
-    def __init__(self, existing: dict | None = None) -> None:
-        self._existing: dict = dict(existing or {})
-        self.put_calls: list[tuple[str, dict]] = []
-
-    def get(self, *, id=None, **_kw):  # noqa: A002 (opensearch-py 시그니처 미러)
-        if id is None:
-            return dict(self._existing)
-        return {id: self._existing[id]}  # 미러용(미사용 경로) — 부재 시 KeyError
-
-    def put(self, *, id, body, **_kw):  # noqa: A002
-        self.put_calls.append((id, body))
-        self._existing[id] = body
-        return {"acknowledged": True}
-
-
-class _FakeSearchClient:
-    """opensearch-py OpenSearch 클라이언트 대역 — search_pipeline NS + search() 기록.
-
-    ``search`` 호출 인자를 기록하고 modality 별 canned hits 를 돌려준다. ``raise_on_search`` 가
-    주어지면 그 예외를 던져 OS 미도달(FR-008)을 흉내낸다.
-    """
-
-    def __init__(
-        self,
-        *,
-        existing_pipelines: dict | None = None,
-        hits_by_modality: dict | None = None,
-        raise_on_search: Exception | None = None,
-    ) -> None:
-        self.search_pipeline = _FakeSearchPipelineNS(existing_pipelines)
-        self._hits_by_modality = hits_by_modality or {}
-        self._raise_on_search = raise_on_search
-        self.search_calls: list[dict] = []
-
-    def search(self, *, index=None, body=None, search_pipeline=None, **_kw):
-        self.search_calls.append(
-            {"index": index, "body": body, "search_pipeline": search_pipeline}
-        )
-        if self._raise_on_search is not None:
-            raise self._raise_on_search
-        terms = body["query"]["hybrid"]["queries"][0]["bool"]["filter"][0]["terms"][
-            "modality"
-        ]
-        # 저장값 집합(terms) → canned hits 버킷 라벨. audio/video/image 는 단일값, 그 외(txt·json…)는 text.
-        if "audio" in terms:
-            label = "audio"
-        elif "video" in terms:
-            label = "video"
-        elif "image" in terms:
-            label = "image"
-        else:
-            label = "text"
-        hits = self._hits_by_modality.get(label, [])
-        return {"hits": {"hits": hits}}
-
-
-def _os_hit(asset_id: str, score: float, modality: str) -> dict:
-    return {
-        "_id": asset_id,
-        "_score": score,
-        "_source": {"asset_id": asset_id, "modality": modality, "summary": f"요약 {asset_id}"},
-    }
-
-
-class EnsureSearchPipelineTest(unittest.TestCase):
-    """T003/FR-006: normalization-processor 검색 파이프라인을 멱등 등록(020 ensure_index 동형)."""
-
-    def test_puts_when_absent(self) -> None:
-        # 부재 → PUT 1회, 'created'. 본문에 normalization-processor + 가중치.
-        client = _FakeSearchClient(existing_pipelines={})
-        result = ensure_search_pipeline(client, "assets-hybrid", weights=(0.3, 0.7))
-        self.assertEqual(result, "created")
-        self.assertEqual(len(client.search_pipeline.put_calls), 1)
-        put_id, body = client.search_pipeline.put_calls[0]
-        self.assertEqual(put_id, "assets-hybrid")
-        procs = body["phase_results_processors"]
-        norm = procs[0]["normalization-processor"]
-        self.assertEqual(norm["normalization"]["technique"], "min_max")
-        self.assertEqual(
-            norm["combination"]["parameters"]["weights"], [0.3, 0.7]
-        )
-
-    def test_noop_when_exists(self) -> None:
-        # 존재 → PUT 0회(멱등), 'exists'.
-        client = _FakeSearchClient(existing_pipelines={"assets-hybrid": {"x": 1}})
-        result = ensure_search_pipeline(client, "assets-hybrid", weights=(0.5, 0.5))
-        self.assertEqual(result, "exists")
-        self.assertEqual(client.search_pipeline.put_calls, [])
-
-
-class SearchAssetsOsTest(unittest.TestCase):
-    """T003/FR-002: 질의 1회 임베딩 → modality 별 build_search_body → client.search → 버킷."""
-
-    def setUp(self) -> None:
-        self.query = "한국어 검색 질의"
-        self.vector = [0.11, 0.22, 0.33]
-        self.embed_calls: list[tuple[str, str]] = []
-
-        def fake_embed(q: str, *, channel: str) -> list[float]:
-            self.embed_calls.append((q, channel))
-            return list(self.vector)
-
-        self.fake_embed = fake_embed
-        self.client = _FakeSearchClient(
-            hits_by_modality={
-                "text": [_os_hit("t1", 0.9, "text"), _os_hit("t2", 0.7, "text")],
-                "audio": [_os_hit("a1", 0.8, "audio")],
-            }
-        )
-
-    def _run(self, **overrides):
-        kwargs = {
-            "modalities": ("text", "audio"),
-            "k": 20,
-            "channel": "st",
-            "weights": (0.4, 0.6),
-            "index": "assets",
-            "pipeline_name": "assets-hybrid",
-            "embed_fn": self.fake_embed,
-        }
-        kwargs.update(overrides)
-        return search_assets_os(self.client, self.query, **kwargs)
-
-    def test_embeds_query_once_and_reuses_vector(self) -> None:
-        # (a) embed_fn 으로 질의 1회만 임베딩(modality 마다 재임베딩 금지) — 활성 채널 전달.
-        self._run()
-        self.assertEqual(len(self.embed_calls), 1)
-        self.assertEqual(self.embed_calls[0], (self.query, "st"))
-
-    def test_searches_each_modality_with_pipeline(self) -> None:
-        # (b) modality 마다 client.search(index=, body=, search_pipeline=) 1회.
-        self._run()
-        self.assertEqual(len(self.client.search_calls), 2)
-        for call in self.client.search_calls:
-            self.assertEqual(call["index"], "assets")
-            self.assertEqual(call["search_pipeline"], "assets-hybrid")
-
-    def test_search_body_uses_builder_with_vector_and_modality(self) -> None:
-        # build_search_body 의 산출(하이브리드·knn 벡터·modality 필터·size=k)을 그대로 search body 로.
-        self._run()
-        modalities_searched = []
-        for call in self.client.search_calls:
-            body = call["body"]
-            self.assertEqual(body["size"], 20)
-            subs = body["query"]["hybrid"]["queries"]
-            _, knn = _find_with_clause(subs, "knn")
-            self.assertEqual(knn["knn"]["embedding"]["vector"], self.vector)
-            terms = subs[0]["bool"]["filter"][0]["terms"]["modality"]
-            modalities_searched.append("audio" if "audio" in terms else "text")
-        self.assertEqual(set(modalities_searched), {"text", "audio"})
-
-    def test_results_deterministic_tiebreaker(self) -> None:
-        # FR-009(헌법 3조): OS sort 불가(hybrid 제약) → 클라이언트에서 (-similarity, id) 결정적 정렬.
-        # OS 가 동점·뒤섞인 순서로 hit 을 줘도 출력은 점수 desc·동점 id asc 로 고정된다.
-        client = _FakeSearchClient(
-            hits_by_modality={
-                "text": [
-                    _os_hit("b", 0.5, "text"),
-                    _os_hit("c", 0.9, "text"),
-                    _os_hit("a", 0.5, "text"),
-                ]
-            }
-        )
-        out = search_assets_os(
-            client,
-            self.query,
-            modalities=("text",),
-            index="assets",
-            pipeline_name="assets-hybrid",
-            embed_fn=self.fake_embed,
-        )
-        self.assertEqual([r["id"] for r in out["text"]], ["c", "a", "b"])
-
-    def test_returns_bucket_per_modality_mapped_rows(self) -> None:
-        # (c) {modality: [os_hit_to_row 행]} 버킷 — text 2건·audio 1건.
-        buckets = self._run()
-        self.assertEqual(set(buckets), {"text", "audio"})
-        self.assertEqual(len(buckets["text"]), 2)
-        self.assertEqual(len(buckets["audio"]), 1)
-        # os_hit_to_row 와 동형(id·similarity·modality·summary·file_uri).
-        row = buckets["text"][0]
-        self.assertEqual(set(row), {"id", "file_uri", "modality", "summary", "similarity"})
-        self.assertEqual(row["id"], "t1")
-        self.assertEqual(row["similarity"], 0.9)
-        self.assertEqual(row["modality"], "text")
-
-    def test_empty_bucket_when_no_hits(self) -> None:
-        # hits 없는 modality 는 빈 버킷(키는 존재).
-        buckets = self._run(modalities=("text", "video"))
-        self.assertEqual(buckets["video"], [])
-
-    def test_propagates_os_unreachable_error(self) -> None:
-        # FR-008: client.search 예외 → search_assets_os 가 전파(silent 폴백 없음).
-        client = _FakeSearchClient(raise_on_search=ConnectionError("OS 미도달"))
-        with self.assertRaises(ConnectionError):
-            search_assets_os(
-                client,
-                self.query,
-                modalities=("text",),
-                k=10,
-                channel="st",
-                weights=(0.5, 0.5),
-                index="assets",
-                pipeline_name="assets-hybrid",
-                embed_fn=self.fake_embed,
-            )
+# 027 T006: 서버 파이프라인 등록(EnsureSearchPipelineTest)·구 hybrid search_assets_os(SearchAssetsOsTest)
+# 와 그 가짜(_FakeSearchPipelineNS·_FakeSearchClient·_os_hit)는 제거됐다 — 파이프라인 경로(FR-005)와
+# 구 client.search 융합 경로가 msearch 클라이언트 융합으로 대체됐기 때문. 그 검증 의도(질의 1회 임베딩·
+# modality 별 본문·결정 정렬·버킷·OS 미도달 전파)는 SearchAssetsOsMsearchTest 로 이전됐다.
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # 022 G1 — image/video 모달리티 값 매핑(순수·seam). image/video 는 020 assets 인덱스에 캡션 nori +
-# KoSimCSE 캡션 임베딩으로 이미 색인돼 있어 text/audio 와 동일 OS 하이브리드로 검색한다(CLIP 아님).
+# KoSimCSE 캡션 임베딩으로 이미 색인돼 있어 text/audio 와 동일 OS 서브검색으로 검색한다(CLIP 아님).
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -506,11 +150,12 @@ class ModalityValuesMappingTest(unittest.TestCase):
         self.assertEqual(_MODALITY_VALUES[MediaKind.AUDIO.value], frozenset({"audio"}))
 
 
-class ImageVideoHybridBodyTest(unittest.TestCase):
-    """T001/FR-001·004: image·video 도 text/audio 와 동일 OS 하이브리드(캡션 nori + 캡션 임베딩 knn).
+class ImageVideoSubqueryBodyTest(unittest.TestCase):
+    """T006(022 의도 이전): image·video 도 text/audio 와 동일 두 서브검색(BM25 + 캡션 임베딩 kNN).
 
     image/video 자산의 ``embedding`` 은 KoSimCSE 캡션 임베딩(텍스트 의미)이고 질의도 같은 채널로
-    임베딩하므로 같은 벡터 공간(plan §R3). CLIP·새 필드 없이 build_search_body 로 동형 본문을 만든다.
+    임베딩하므로 같은 벡터 공간(plan §R3). CLIP·새 필드 없이 build_bm25_body·build_knn_body 로 동형
+    서브검색 본문을 만든다 — 구 ImageVideoHybridBodyTest(하이브리드 단일 본문)의 검증 의도 이전.
     """
 
     def setUp(self) -> None:
@@ -518,137 +163,29 @@ class ImageVideoHybridBodyTest(unittest.TestCase):
         self.vector = [0.5, 0.6, 0.7]
 
     def _check_modality(self, modality_value: str) -> None:
-        body = build_search_body(
-            self.query, self.vector, modality_values=[modality_value], k=30
+        bm25 = build_bm25_body(self.query, modality_values=[modality_value], k=30)
+        knn = build_knn_body(self.vector, modality_values=[modality_value], k=30)
+        # (1) BM25 서브검색: nori multi_match(boost 차등) + terms 필터 + 의료 must_not + size.
+        mm = bm25["query"]["bool"]["must"][0]["multi_match"]
+        self.assertEqual(mm["query"], self.query)
+        self.assertEqual(set(mm["fields"]), _NORI_TEXT_FIELDS)
+        self.assertIn({"terms": {"modality": [modality_value]}}, bm25["query"]["bool"]["filter"])
+        self.assertIn(
+            {"term": {"domain_label": "medical"}}, bm25["query"]["bool"]["must_not"]
         )
-        subs = _subqueries(body)
-        # (1) 하이브리드 서브쿼리 2개(nori multi_match + embedding knn) — text/audio 와 동일.
-        self.assertEqual(len(subs), 2)
-        _, mm = _find_with_clause(subs, "multi_match")
-        self.assertIsNotNone(mm, "nori multi_match 서브쿼리가 있어야 한다")
-        self.assertEqual(mm["multi_match"]["query"], self.query)
-        self.assertEqual(set(mm["multi_match"]["fields"]), _NORI_TEXT_FIELDS)
-        _, knn = _find_with_clause(subs, "knn")
-        self.assertIsNotNone(knn, "knn 서브쿼리가 있어야 한다")
-        self.assertEqual(knn["knn"]["embedding"]["vector"], self.vector)
-        # (2) terms 필터(라벨→값 집합) + (3) 의료배제 must_not(FR-004)이 각 서브쿼리에 적용 —
-        # text 는 bool, knn 은 native filter(pre-filter, G3 교정). _sub_bool 로 양쪽 다 꺼낸다.
-        for sub in subs:
-            self.assertIn(
-                {"terms": {"modality": [modality_value]}}, _sub_bool(sub)["filter"]
-            )
-            self.assertIn(
-                {"term": {"domain_label": "medical"}}, _sub_bool(sub)["must_not"]
-            )
-        self.assertEqual(body["size"], 30)
+        self.assertEqual(bm25["size"], 30)
+        # (2) kNN 서브검색: 캡션 임베딩 벡터 + native pre-filter terms + 의료 must_not + size.
+        self.assertEqual(knn["query"]["knn"]["embedding"]["vector"], self.vector)
+        knn_bool = knn["query"]["knn"]["embedding"]["filter"]["bool"]
+        self.assertIn({"terms": {"modality": [modality_value]}}, knn_bool["filter"])
+        self.assertIn({"term": {"domain_label": "medical"}}, knn_bool["must_not"])
+        self.assertEqual(knn["size"], 30)
 
-    def test_image_hybrid_body(self) -> None:
+    def test_image_subquery_bodies(self) -> None:
         self._check_modality("image")
 
-    def test_video_hybrid_body(self) -> None:
+    def test_video_subquery_bodies(self) -> None:
         self._check_modality("video")
-
-
-class SearchAssetsOsImageVideoTest(unittest.TestCase):
-    """T001/FR-001·006: search_assets_os 가 image·video 라벨을 terms 필터로 해소·하이브리드 검색·결정 정렬."""
-
-    def setUp(self) -> None:
-        self.query = "강아지 영상"
-        self.vector = [0.1, 0.9]
-
-        def fake_embed(q: str, *, channel: str) -> list[float]:
-            return list(self.vector)
-
-        self.fake_embed = fake_embed
-
-    def test_image_video_resolve_to_terms_filter(self) -> None:
-        # 라벨('image'/'video') → 저장값 집합 terms 필터로 해소돼 그 버킷에서 회수된다(FR-001).
-        client = _FakeSearchClient(
-            hits_by_modality={
-                "image": [_os_hit("i1", 0.9, "image")],
-                "video": [_os_hit("v1", 0.8, "video"), _os_hit("v2", 0.6, "video")],
-            }
-        )
-        buckets = search_assets_os(
-            client,
-            self.query,
-            modalities=("image", "video"),
-            index="assets",
-            pipeline_name="assets-hybrid",
-            embed_fn=self.fake_embed,
-        )
-        self.assertEqual(set(buckets), {"image", "video"})
-        self.assertEqual([r["id"] for r in buckets["image"]], ["i1"])
-        self.assertEqual([r["id"] for r in buckets["video"]], ["v1", "v2"])
-        # 각 search 본문의 terms 필터가 라벨→값 집합으로 해소됐는지(image→['image'], video→['video']).
-        searched = []
-        for call in client.search_calls:
-            terms = call["body"]["query"]["hybrid"]["queries"][0]["bool"]["filter"][0][
-                "terms"
-            ]["modality"]
-            searched.append(tuple(terms))
-        self.assertIn(("image",), searched)
-        self.assertIn(("video",), searched)
-
-    def test_image_deterministic_tiebreaker(self) -> None:
-        # FR-006(021 동형): 동점에서 (-similarity, id) 결정 정렬이 image 버킷에도 그대로 적용.
-        client = _FakeSearchClient(
-            hits_by_modality={
-                "image": [
-                    _os_hit("b", 0.5, "image"),
-                    _os_hit("c", 0.9, "image"),
-                    _os_hit("a", 0.5, "image"),
-                ]
-            }
-        )
-        out = search_assets_os(
-            client,
-            self.query,
-            modalities=("image",),
-            index="assets",
-            pipeline_name="assets-hybrid",
-            embed_fn=self.fake_embed,
-        )
-        self.assertEqual([r["id"] for r in out["image"]], ["c", "a", "b"])
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# 023 G1 — 적합도 게이트 순수 함수(probe 본문·코사인 환산·게이트). OS·DB·opensearch-py 불필요.
-# 정규화 파이프라인 없는 plain kNN probe 로 원시 코사인을 얻어 buckets 유지/비움을 결정한다.
-# 실 OS 의 정확한 스케일·calibration 은 G4(실OS e2e)에서 확정한다 — 여기선 결정적 로직만 고정.
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class BuildProbeBodyTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.vector = [0.1, 0.2, 0.3]
-
-    def test_plain_knn_no_pipeline_fields(self) -> None:
-        # probe 는 정규화 파이프라인 없는 plain knn 1개(하이브리드 아님) — size=k, embedding 벡터·k.
-        body = build_probe_body(self.vector, modality_values=["image"], k=50)
-        self.assertNotIn("hybrid", body["query"])
-        knn = body["query"]["knn"]["embedding"]
-        self.assertEqual(knn["vector"], self.vector)
-        self.assertEqual(knn["k"], 50)
-        self.assertEqual(body["size"], 50)
-
-    def test_modality_terms_prefilter(self) -> None:
-        # modality terms 필터(정렬·집합)가 knn native filter(pre-filter)에 들어간다 — 같은 후보 집단.
-        body = build_probe_body(self.vector, modality_values=["video", "image"], k=10)
-        flt = body["query"]["knn"]["embedding"]["filter"]["bool"]["filter"]
-        self.assertIn({"terms": {"modality": ["image", "video"]}}, flt)
-
-    def test_exclude_medical_must_not_default(self) -> None:
-        # FR-008: 의료배제 기본 — domain_label='medical' must_not(정규화 경로와 동일 후보).
-        body = build_probe_body(self.vector, modality_values=["text"], k=10)
-        self.assertIn(
-            {"term": {"domain_label": "medical"}},
-            body["query"]["knn"]["embedding"]["filter"]["bool"]["must_not"],
-        )
-
-    def test_include_medical_when_disabled(self) -> None:
-        body = build_probe_body(self.vector, modality_values=["text"], k=10, exclude_medical=False)
-        self.assertNotIn("must_not", body["query"]["knn"]["embedding"]["filter"]["bool"])
 
 
 class KnnScoreToCosineTest(unittest.TestCase):
@@ -666,125 +203,588 @@ class KnnScoreToCosineTest(unittest.TestCase):
 
 
 class PassesCutoffTest(unittest.TestCase):
-    # 진단: no-match max-mean ≤0.088·top ≤0.707 / match max-mean ≥0.116·top ≥0.745.
+    # 진단: no-match top−baseline ≤0.088·top ≤0.707 / match top−baseline ≥0.116·top ≥0.745.
+    # 027: 두 번째 인자는 robust baseline(하위 절반 평균)이다 — 판정식·경계는 023 동일(의미만 이전).
     def test_keep_strong_relative_signal(self) -> None:  # match
-        self.assertTrue(passes_cutoff(0.78, 0.66, eps=0.10, floor=0.65))   # top-mean=0.12, top≥floor
+        self.assertTrue(passes_cutoff(0.78, 0.66, eps=0.10, floor=0.65))   # top-baseline=0.12, top≥floor
 
     def test_cut_flat_no_match(self) -> None:  # no-match: 상대신호 부족
-        self.assertFalse(passes_cutoff(0.70, 0.65, eps=0.10, floor=0.65))  # top-mean=0.05 < 0.10
+        self.assertFalse(passes_cutoff(0.70, 0.65, eps=0.10, floor=0.65))  # top-baseline=0.05 < 0.10
 
     def test_cut_below_floor_backstop(self) -> None:  # 전체 평평·낮음 → floor 가 차단
-        self.assertFalse(passes_cutoff(0.60, 0.30, eps=0.10, floor=0.65))  # top-mean ok, top<floor
+        self.assertFalse(passes_cutoff(0.60, 0.30, eps=0.10, floor=0.65))  # top-baseline ok, top<floor
 
     def test_boundary_inclusive(self) -> None:  # 경계 포함(>=)
         self.assertTrue(passes_cutoff(0.75, 0.65, eps=0.10, floor=0.65))   # =0.10, =0.65
 
-    def test_empty_probe_zero_cut(self) -> None:  # probe 빈(top=mean=0) → cut
+    def test_empty_probe_zero_cut(self) -> None:  # 표본 빈(top=baseline=0) → cut
         self.assertFalse(passes_cutoff(0.0, 0.0, eps=0.10, floor=0.65))
 
 
+# 027 T006: probe IO seam(_ProbeFakeClient·ProbeRelevanceTest)·probe_fn 주입 게이트 통합 테스트
+# (SearchAssetsOsCutoffTest)는 제거됐다 — probe 경로가 소멸(융합이 클라이언트로 와 kNN 응답에 원시
+# 코사인 보존)했기 때문. 그 의도(원시 코사인 top·baseline 산출 → 게이트 keep/empty → modality 별 독립)는
+# GateSignalTest(top·robust baseline)와 SearchAssetsOsMsearchTest(게이트 keep/cut·meta·결정성)로 이전됐다.
+
+
 # ──────────────────────────────────────────────────────────────────────────
-# 023 G2 — probe IO seam(probe_relevance) + search_assets_os 게이트 통합. 가짜 클라이언트·주입 probe_fn.
-# probe 는 정규화 검색과 분리된 plain kNN 1회다 — search_pipeline 인자 없이 호출됨을 단언한다.
-# 실 opensearch-py knn 응답·스케일은 G4(실OS) 확정(021 ensure_search_pipeline 동형).
+# 027 G1 — 클라이언트 융합 순수 함수(min-max 정규화·robust 게이트 신호·per-result 컷).
+# OS·DB·opensearch-py 불필요. 결정적 단위로 융합 수학을 검증한다(헌법 3조·FR-002·003·004).
 # ──────────────────────────────────────────────────────────────────────────
 
 
-class _ProbeFakeClient:
-    """plain knn probe 용 가짜 — search(search_pipeline 미지정) 호출을 기록하고 canned hits 반환."""
-    def __init__(self, hits):
-        self._hits = hits
-        self.calls = []
-    def search(self, *, index=None, body=None, search_pipeline=None, **_kw):
-        self.calls.append({"index": index, "body": body, "search_pipeline": search_pipeline})
-        return {"hits": {"hits": self._hits}}
+class MinmaxNormalizeTest(unittest.TestCase):
+    """027 T002/FR-002: min-max 정규화(순수·결정적). 빈→[], max==min→전원 1.0."""
+
+    def test_empty_returns_empty(self) -> None:
+        # 빈 입력 → 빈 출력(결정적 단락 — 0 나눗셈 없음).
+        self.assertEqual(minmax_normalize([]), [])
+
+    def test_single_element_is_one(self) -> None:
+        # 단일 원소: max==min 퇴화 → 1.0(전원 동일 취급). 0 나눗셈 회피.
+        self.assertEqual(minmax_normalize([0.42]), [1.0])
+
+    def test_all_equal_all_ones(self) -> None:
+        # 동점(max==min): 전원 1.0 — min-max 의 결정적 퇴화 정의(랭킹 보존·결정성, FR-002).
+        self.assertEqual(minmax_normalize([0.3, 0.3, 0.3]), [1.0, 1.0, 1.0])
+
+    def test_scales_to_unit_interval(self) -> None:
+        # 일반: (x−min)/(max−min) — min→0.0, max→1.0, 중간은 비례.
+        self.assertEqual(minmax_normalize([0.0, 5.0, 10.0]), [0.0, 0.5, 1.0])
+
+    def test_preserves_order_and_length(self) -> None:
+        # 정규화는 입력 순서·길이를 보존한다(자리표시 정합 — fuse 가 hit 과 zip).
+        out = minmax_normalize([2.0, 8.0, 4.0, 8.0])
+        self.assertEqual(len(out), 4)
+        self.assertEqual(out[0], 0.0)   # 2 = min
+        self.assertEqual(out[1], 1.0)   # 8 = max
+        self.assertEqual(out[3], 1.0)   # 8 = max(동점도 1.0)
+        self.assertAlmostEqual(out[2], (4.0 - 2.0) / (8.0 - 2.0))
 
 
-class ProbeRelevanceTest(unittest.TestCase):
-    def test_returns_top_and_mean_cosine(self) -> None:
-        # _score (1+cos)/2: 0.9→cos0.8, 0.8→0.6, 0.75→0.5 ⇒ top=0.8, mean=(0.8+0.6+0.5)/3≈0.6333.
-        client = _ProbeFakeClient([{"_score": 0.9}, {"_score": 0.8}, {"_score": 0.75}])
-        top, mean = probe_relevance(client, [0.1, 0.2], modality_values=["image"], k=50, index="assets")
-        self.assertAlmostEqual(top, 0.8, places=4)
-        self.assertAlmostEqual(mean, (0.8 + 0.6 + 0.5) / 3, places=4)
+class GateSignalTest(unittest.TestCase):
+    """027 T002/FR-003: kNN 코사인 리스트 → (top, robust baseline=하위 절반 평균). <2개면 baseline 0."""
 
-    def test_no_pipeline_and_probe_body(self) -> None:
-        # 정규화 파이프라인 미적용(search_pipeline=None) + build_probe_body 본문(plain knn).
-        client = _ProbeFakeClient([{"_score": 0.9}])
-        probe_relevance(client, [0.1], modality_values=["text"], k=5, index="assets")
-        call = client.calls[0]
-        self.assertIsNone(call["search_pipeline"])
-        self.assertIn("knn", call["body"]["query"])
+    def test_empty_zero(self) -> None:
+        # 빈 표본 → (0.0, 0.0): 게이트가 cut(no-match) 하도록 중립 신호.
+        self.assertEqual(gate_signal([]), (0.0, 0.0))
 
-    def test_empty_hits_zero(self) -> None:
-        top, mean = probe_relevance(_ProbeFakeClient([]), [0.1], modality_values=["video"], k=5, index="assets")
-        self.assertEqual((top, mean), (0.0, 0.0))
+    def test_single_element_baseline_zero(self) -> None:
+        # 원소 1개: top 은 그 값, baseline=0.0(하위 절반을 평균낼 표본 부족 — 정의상 0).
+        top, baseline = gate_signal([0.8])
+        self.assertEqual(top, 0.8)
+        self.assertEqual(baseline, 0.0)
+
+    def test_top_is_max(self) -> None:
+        # top 은 표본 최댓값(순서 무관).
+        top, _ = gate_signal([0.2, 0.9, 0.5, 0.7])
+        self.assertEqual(top, 0.9)
+
+    def test_baseline_is_lower_half_mean(self) -> None:
+        # robust baseline = 코사인 하위 절반 평균(밀집 토픽에서도 background 해석 유지 — '충전' 해결).
+        # 정렬 [0.1,0.2,0.8,0.9] 하위 절반(2개)=[0.1,0.2] → 평균 0.15. 전체 평균(0.5)보다 낮다.
+        top, baseline = gate_signal([0.9, 0.1, 0.8, 0.2])
+        self.assertEqual(top, 0.9)
+        self.assertAlmostEqual(baseline, (0.1 + 0.2) / 2)
+
+    def test_baseline_uses_floor_half_for_odd(self) -> None:
+        # 홀수 표본: 하위 절반은 floor(n/2) 개(정렬 하위). [0.1,0.3,0.5,0.7,0.9] → 하위 2개=[0.1,0.3] 평균 0.2.
+        _, baseline = gate_signal([0.5, 0.9, 0.1, 0.7, 0.3])
+        self.assertAlmostEqual(baseline, (0.1 + 0.3) / 2)
+
+    def test_dense_topic_baseline_below_full_mean(self) -> None:
+        # '충전' 시나리오(밀집 토픽): 다수 고코사인 + 소수 저코사인. 하위 절반 baseline 이 전체 평균보다
+        # 낮아 top−baseline 이 충분히 벌어진다 → 게이트 통과(전체 평균이면 baseline 이 높아 오컷됐다).
+        cosines = [0.85, 0.84, 0.83, 0.82, 0.30, 0.28]
+        top, baseline = gate_signal(cosines)
+        full_mean = sum(cosines) / len(cosines)
+        self.assertEqual(top, 0.85)
+        self.assertLess(baseline, full_mean)  # robust baseline < 전체 평균(밀집 편향 흡수)
 
 
-class SearchAssetsOsCutoffTest(unittest.TestCase):
+class CutRowsTest(unittest.TestCase):
+    """027 T002/FR-004: per-result 컷 — 행 유지 = _bm25 매칭 OR _cos≥result_floor. _cos None 은 _bm25 필수."""
+
+    def test_keep_bm25_matched_even_without_cos(self) -> None:
+        # BM25 매칭(어휘 증거)이면 코사인 없어도(_cos None) 유지 — BM25-only 행 안전(plan R2).
+        rows = [{"id": "a", "_bm25": True, "_cos": None}]
+        self.assertEqual([r["id"] for r in cut_rows(rows, result_floor=0.4)], ["a"])
+
+    def test_keep_when_cos_at_or_above_floor(self) -> None:
+        # BM25 미매칭이어도 원시 코사인 ≥ floor 면 유지(의미 증거).
+        rows = [{"id": "a", "_bm25": False, "_cos": 0.5}]
+        self.assertEqual([r["id"] for r in cut_rows(rows, result_floor=0.4)], ["a"])
+
+    def test_drop_when_cos_below_floor_and_no_bm25(self) -> None:
+        # BM25 미매칭 + 코사인 < floor → 컷(노이즈 꼬리 제거).
+        rows = [{"id": "a", "_bm25": False, "_cos": 0.3}]
+        self.assertEqual(cut_rows(rows, result_floor=0.4), [])
+
+    def test_drop_cos_none_without_bm25(self) -> None:
+        # _cos None + BM25 미매칭 → 코사인 비교 불가이므로 컷(_cos None 은 _bm25 가 유일 근거).
+        rows = [{"id": "a", "_bm25": False, "_cos": None}]
+        self.assertEqual(cut_rows(rows, result_floor=0.4), [])
+
+    def test_boundary_inclusive(self) -> None:
+        # 경계 포용(≥): _cos == floor 면 유지(부동소수 표현오차 허용).
+        rows = [{"id": "a", "_bm25": False, "_cos": 0.4}]
+        self.assertEqual([r["id"] for r in cut_rows(rows, result_floor=0.4)], ["a"])
+
+    def test_mixed_rows_preserve_input_order(self) -> None:
+        # 혼합: 유지 행만 남기되 입력(이미 정렬된) 순서를 보존한다(랭킹 불변).
+        rows = [
+            {"id": "keep_bm25", "_bm25": True, "_cos": None},
+            {"id": "drop", "_bm25": False, "_cos": 0.1},
+            {"id": "keep_cos", "_bm25": False, "_cos": 0.9},
+        ]
+        self.assertEqual([r["id"] for r in cut_rows(rows, result_floor=0.4)], ["keep_bm25", "keep_cos"])
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 027 G1/T003 — 모달리티당 [BM25 + plain kNN] 서브검색 본문(순수). msearch 의 두 서브검색 body.
+# build_search_body(hybrid) 를 대체한다: 서버 융합(파이프라인)을 쓰지 않고 두 본문을 따로 만들어
+# msearch 로 받은 뒤 클라이언트(fuse_hybrid)가 융합한다. build_knn_body 는 구 build_probe_body 계승.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class BuildBm25BodyTest(unittest.TestCase):
+    """T003/FR-001: BM25 multi_match 서브검색 본문 — boost 필드·operator·modality terms·의료 must_not."""
+
     def setUp(self) -> None:
-        self.vector = [0.1, 0.2]
-        def fake_embed(q, *, channel): return list(self.vector)
-        self.fake_embed = fake_embed
-        self.client = _FakeSearchClient(hits_by_modality={
-            "text": [_os_hit("t1", 0.9, "text"), _os_hit("t2", 0.7, "text")],
-            "image": [_os_hit("i1", 0.8, "image")],
-        })
+        self.query = "한국어 검색 질의"
+        self.body = build_bm25_body(self.query, modality_values=["txt"], k=20)
 
-    def _run(self, probe_fn, **ov):
+    def test_multi_match_nori_boost_fields(self) -> None:
+        # nori 텍스트 multi_match — query 를 020 nori 필드 5개 대상으로(boost 차등 표기 그대로 계승).
+        mm = self.body["query"]["bool"]["must"][0]["multi_match"]
+        self.assertEqual(mm["query"], self.query)
+        self.assertEqual(
+            mm["fields"],
+            ["summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"],
+        )
+
+    def test_size_equals_k(self) -> None:
+        self.assertEqual(self.body["size"], 20)
+
+    def test_modality_terms_filter(self) -> None:
+        # modality terms(집합·정렬) 필터 — 라벨↔저장값 불일치 흡수.
+        self.assertIn({"terms": {"modality": ["txt"]}}, self.body["query"]["bool"]["filter"])
+
+    def test_text_terms_set_sorted(self) -> None:
+        body = build_bm25_body(self.query, modality_values=ALLOWED_TEXT_META_FILE_KINDS, k=10)
+        expected = {"terms": {"modality": sorted(ALLOWED_TEXT_META_FILE_KINDS)}}
+        self.assertIn(expected, body["query"]["bool"]["filter"])
+
+    def test_exclude_medical_must_not_default(self) -> None:
+        # FR-011(헌법 10조): 의료 자산 배제 must_not(bool 래핑).
+        self.assertIn(
+            {"term": {"domain_label": "medical"}}, self.body["query"]["bool"]["must_not"]
+        )
+
+    def test_include_medical_when_disabled(self) -> None:
+        body = build_bm25_body(self.query, modality_values=["txt"], k=10, exclude_medical=False)
+        self.assertNotIn("must_not", body["query"]["bool"])
+
+    def test_operator_and_requires_all_tokens(self) -> None:
+        # 025 FR-001 계승: operator='and' 면 전 nori 토큰 매칭 강제(F2 복합어 가짜매칭 차단).
+        body = build_bm25_body(self.query, modality_values=["txt"], k=10, operator="and")
+        self.assertEqual(body["query"]["bool"]["must"][0]["multi_match"]["operator"], "and")
+
+    def test_operator_default_or_omits_key(self) -> None:
+        # 회귀 0: 기본 'or' 는 operator 키 자체를 생략(현행 본문 바이트 보존).
+        default_body = build_bm25_body(self.query, modality_values=["txt"], k=10)
+        or_body = build_bm25_body(self.query, modality_values=["txt"], k=10, operator="or")
+        self.assertEqual(default_body, or_body)
+        self.assertNotIn("operator", default_body["query"]["bool"]["must"][0]["multi_match"])
+
+    def test_audio_modality_filter(self) -> None:
+        body = build_bm25_body(self.query, modality_values=["audio"], k=10)
+        self.assertIn({"terms": {"modality": ["audio"]}}, body["query"]["bool"]["filter"])
+
+
+class BuildKnnBodyTest(unittest.TestCase):
+    """T003/FR-001: plain kNN 서브검색 본문(구 build_probe_body 계승) — native pre-filter·의료 must_not."""
+
+    def setUp(self) -> None:
+        self.vector = [0.1, 0.2, 0.3]
+
+    def test_plain_knn_no_hybrid(self) -> None:
+        # plain knn 1개(하이브리드 아님) — embedding 벡터·k·size=k.
+        body = build_knn_body(self.vector, modality_values=["image"], k=50)
+        self.assertNotIn("hybrid", body["query"])
+        knn = body["query"]["knn"]["embedding"]
+        self.assertEqual(knn["vector"], self.vector)
+        self.assertEqual(knn["k"], 50)
+        self.assertEqual(body["size"], 50)
+
+    def test_modality_native_prefilter(self) -> None:
+        # G3 교훈 계승: modality 를 **native filter(pre-filter)**로 좁힌다(작은 k 비우세 모달리티 0건 방지).
+        body = build_knn_body(self.vector, modality_values=["video", "image"], k=10)
+        flt = body["query"]["knn"]["embedding"]["filter"]["bool"]["filter"]
+        self.assertIn({"terms": {"modality": ["image", "video"]}}, flt)
+
+    def test_exclude_medical_must_not_default(self) -> None:
+        body = build_knn_body(self.vector, modality_values=["text"], k=10)
+        self.assertIn(
+            {"term": {"domain_label": "medical"}},
+            body["query"]["knn"]["embedding"]["filter"]["bool"]["must_not"],
+        )
+
+    def test_include_medical_when_disabled(self) -> None:
+        body = build_knn_body(self.vector, modality_values=["text"], k=10, exclude_medical=False)
+        self.assertNotIn("must_not", body["query"]["knn"]["embedding"]["filter"]["bool"])
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 027 G1/T004 — fuse_hybrid: 두 서브검색(BM25·kNN) hit 을 클라이언트에서 융합(합집합·min-max·가중평균).
+# 서버 normalization-processor 가 하던 융합을 순수 함수로 이관(헌법 3조). 누락측 정규화 기여 0.
+# 행에 _cos(원시 코사인|None)·_bm25(매칭 여부) 동반 → 게이트·per-result 컷의 단일 코사인 스케일 신호.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class FuseHybridTest(unittest.TestCase):
+    """T004/FR-002: 합집합·min-max+가중평균·(-sim,id) 정렬·_cos/_bm25 동반·같은 자산 한 행."""
+
+    def _bm25_hit(self, asset_id: str, score: float) -> dict:
+        # BM25 서브검색 hit — _score 는 BM25 원시 점수(스케일 임의).
+        return {"_id": asset_id, "_score": score,
+                "_source": {"asset_id": asset_id, "modality": "text", "summary": f"요약 {asset_id}"}}
+
+    def _knn_hit(self, asset_id: str, cos: float) -> dict:
+        # kNN 서브검색 hit — _score 는 lucene cosinesimil=(1+cos)/2 라 원시 코사인 cos 로 역산된다.
+        return {"_id": asset_id, "_score": (1.0 + cos) / 2.0,
+                "_source": {"asset_id": asset_id, "modality": "text", "summary": f"요약 {asset_id}"}}
+
+    def test_union_of_both_sides(self) -> None:
+        # 합집합: BM25-only·kNN-only·양쪽 자산이 모두 한 번씩 등장(양쪽=한 행).
+        bm25 = [self._bm25_hit("both", 10.0), self._bm25_hit("bm_only", 5.0)]
+        knn = [self._knn_hit("both", 0.8), self._knn_hit("knn_only", 0.4)]
+        out = fuse_hybrid(bm25, knn, weights=(0.5, 0.5))
+        self.assertEqual({r["id"] for r in out}, {"both", "bm_only", "knn_only"})
+        # 같은 자산('both')은 한 행으로 결합(중복 0).
+        self.assertEqual(sum(1 for r in out if r["id"] == "both"), 1)
+
+    def test_weighted_average_with_missing_side_zero(self) -> None:
+        # similarity = w_b*norm_bm25 + w_k*norm_knn. 누락측 정규화 기여 0(서버 hybrid 와 동일 시맨틱).
+        # bm25 norm: both=1.0(max), bm_only=0.0(min). knn norm: both=1.0(max), knn_only=0.0(min).
+        bm25 = [self._bm25_hit("both", 10.0), self._bm25_hit("bm_only", 5.0)]
+        knn = [self._knn_hit("both", 0.8), self._knn_hit("knn_only", 0.4)]
+        out = {r["id"]: r for r in fuse_hybrid(bm25, knn, weights=(0.5, 0.5))}
+        self.assertAlmostEqual(out["both"]["similarity"], 0.5 * 1.0 + 0.5 * 1.0)
+        self.assertAlmostEqual(out["bm_only"]["similarity"], 0.5 * 0.0 + 0.5 * 0.0)   # knn 누락측 0
+        self.assertAlmostEqual(out["knn_only"]["similarity"], 0.5 * 0.0 + 0.5 * 0.0)  # bm25 누락측 0
+
+    def test_weights_applied_asymmetrically(self) -> None:
+        # 가중치 (w_bm25, w_knn) 비대칭 적용 확인 — knn 쪽 가중을 키우면 knn-only 가 bm25-only 보다 높다.
+        bm25 = [self._bm25_hit("bm_top", 10.0), self._bm25_hit("bm_only", 0.0)]
+        knn = [self._knn_hit("knn_top", 0.9), self._knn_hit("knn_only2", -1.0)]
+        out = {r["id"]: r for r in fuse_hybrid(bm25, knn, weights=(0.2, 0.8))}
+        self.assertAlmostEqual(out["bm_top"]["similarity"], 0.2 * 1.0)   # bm25 max·knn 누락
+        self.assertAlmostEqual(out["knn_top"]["similarity"], 0.8 * 1.0)  # knn max·bm25 누락
+
+    def test_cos_and_bm25_flags_on_rows(self) -> None:
+        # 각 행에 _cos(원시 코사인|None)·_bm25(매칭 여부) 동반 — 게이트·per-result 컷 신호.
+        bm25 = [self._bm25_hit("both", 10.0), self._bm25_hit("bm_only", 5.0)]
+        knn = [self._knn_hit("both", 0.8), self._knn_hit("knn_only", 0.4)]
+        out = {r["id"]: r for r in fuse_hybrid(bm25, knn, weights=(0.5, 0.5))}
+        # 양쪽 행: _bm25 True + _cos = 원시 코사인.
+        self.assertTrue(out["both"]["_bm25"])
+        self.assertAlmostEqual(out["both"]["_cos"], 0.8)
+        # BM25-only 행: _bm25 True, _cos None(kNN 부재 → 코사인 없음, plan R2).
+        self.assertTrue(out["bm_only"]["_bm25"])
+        self.assertIsNone(out["bm_only"]["_cos"])
+        # kNN-only 행: _bm25 False, _cos = 원시 코사인.
+        self.assertFalse(out["knn_only"]["_bm25"])
+        self.assertAlmostEqual(out["knn_only"]["_cos"], 0.4)
+
+    def test_row_shape_homogeneous_with_media_search(self) -> None:
+        # SC-005: 행은 os_hit_to_row 동형 키 + 내부키(_cos·_bm25). similarity 는 융합값.
+        out = fuse_hybrid([self._bm25_hit("a", 1.0)], [], weights=(0.5, 0.5))
+        row = out[0]
+        self.assertEqual(
+            set(row), {"id", "file_uri", "modality", "summary", "similarity", "_cos", "_bm25"}
+        )
+        self.assertEqual(row["modality"], "text")
+
+    def test_sorted_by_similarity_desc_then_id_asc(self) -> None:
+        # (-similarity, id) 결정 정렬: 점수 desc, 동점은 id asc(FR-002 tiebreaker).
+        bm25 = [self._bm25_hit("high", 10.0), self._bm25_hit("b", 5.0), self._bm25_hit("a", 5.0)]
+        out = fuse_hybrid(bm25, [], weights=(1.0, 0.0))
+        # bm25 norm: high=1.0, b=0.0, a=0.0 → high 먼저, 동점(b,a)은 id asc → a, b.
+        self.assertEqual([r["id"] for r in out], ["high", "a", "b"])
+
+    def test_all_tie_deterministic_id_order(self) -> None:
+        # 전부 동점(전 점수 동일 → min-max 전원 1.0): similarity 동일 → id asc 결정.
+        bm25 = [self._bm25_hit("c", 7.0), self._bm25_hit("a", 7.0), self._bm25_hit("b", 7.0)]
+        knn = [self._knn_hit("c", 0.5), self._knn_hit("a", 0.5), self._knn_hit("b", 0.5)]
+        out = fuse_hybrid(bm25, knn, weights=(0.5, 0.5))
+        self.assertEqual([r["id"] for r in out], ["a", "b", "c"])
+        for r in out:
+            self.assertAlmostEqual(r["similarity"], 1.0)  # 0.5*1.0 + 0.5*1.0
+
+    def test_empty_inputs_empty_output(self) -> None:
+        self.assertEqual(fuse_hybrid([], [], weights=(0.5, 0.5)), [])
+
+    def test_knn_only_side(self) -> None:
+        # BM25 측이 비어도 kNN-only 융합이 동작(누락 bm25 기여 0, _bm25 False).
+        knn = [self._knn_hit("k1", 0.9), self._knn_hit("k2", 0.1)]
+        out = fuse_hybrid([], knn, weights=(0.5, 0.5))
+        ids = [r["id"] for r in out]
+        self.assertEqual(set(ids), {"k1", "k2"})
+        top = next(r for r in out if r["id"] == "k1")
+        self.assertFalse(top["_bm25"])
+        self.assertAlmostEqual(top["similarity"], 0.5 * 1.0)  # knn norm max=1.0, bm25 누락 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 027 G2/T005 — search_assets_os msearch 재구성. 가짜 msearch 클라이언트 주입(OS 불필요).
+# 모달리티당 [knn, bm25] 서브검색을 전 모달리티 _msearch 1회로 → 클라이언트 융합 → 게이트 → per-result
+# 컷 → (buckets, gate_meta) 튜플. 실 OS 의 msearch 응답·스케일은 G4(실OS e2e)에서 확정.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _knn_hit_os(asset_id: str, cos: float, modality: str = "text") -> dict:
+    # kNN 서브검색 hit — _score = lucene cosinesimil = (1+cos)/2 (원시 코사인 cos 로 역산됨).
+    return {"_id": asset_id, "_score": (1.0 + cos) / 2.0,
+            "_source": {"asset_id": asset_id, "modality": modality, "summary": f"요약 {asset_id}"}}
+
+
+def _bm25_hit_os(asset_id: str, score: float, modality: str = "text") -> dict:
+    return {"_id": asset_id, "_score": score,
+            "_source": {"asset_id": asset_id, "modality": modality, "summary": f"요약 {asset_id}"}}
+
+
+def _sub_terms_label(sub: dict) -> tuple[str, str]:
+    """서브검색 본문에서 (kind, modality 라벨)을 뽑는다 — knn=native filter, bm25=bool.filter."""
+    q = sub["query"]
+    if "knn" in q:
+        terms = q["knn"]["embedding"]["filter"]["bool"]["filter"][0]["terms"]["modality"]
+        kind = "knn"
+    else:
+        terms = q["bool"]["filter"][0]["terms"]["modality"]
+        kind = "bm25"
+    if "audio" in terms:
+        label = "audio"
+    elif "video" in terms:
+        label = "video"
+    elif "image" in terms:
+        label = "image"
+    else:
+        label = "text"
+    return kind, label
+
+
+class _FakeMsearchClient:
+    """opensearch-py ``client.msearch(body=[header, sub, ...])`` 대역.
+
+    body 는 [헤더, 서브검색본문, 헤더, 서브검색본문, …] 교대 리스트다(서브검색은 홀수 인덱스).
+    각 서브검색을 (kind=knn|bm25, modality) 로 분류해 canned hits 를 ``{"responses": [...]}`` 로
+    돌려준다. ``raise_on_msearch`` 면 그 예외를 던져 OS 미도달(FR-007)을 흉내낸다.
+    """
+
+    def __init__(self, *, knn_by_label=None, bm25_by_label=None, raise_on_msearch=None) -> None:
+        self.knn_by_label = knn_by_label or {}
+        self.bm25_by_label = bm25_by_label or {}
+        self._raise = raise_on_msearch
+        self.msearch_calls: list[list] = []
+
+    def msearch(self, *, body=None, **_kw):
+        self.msearch_calls.append(body)
+        if self._raise is not None:
+            raise self._raise
+        responses = []
+        for sub in body[1::2]:  # 서브검색 본문(헤더 다음 홀수 인덱스)
+            kind, label = _sub_terms_label(sub)
+            src = self.knn_by_label if kind == "knn" else self.bm25_by_label
+            responses.append({"hits": {"hits": list(src.get(label, []))}})
+        return {"responses": responses}
+
+
+class SearchAssetsOsMsearchTest(unittest.TestCase):
+    """T005/FR-001·002·003·004·007: msearch 1회 → 융합 → 게이트 → 컷 → (buckets, gate_meta)."""
+
+    def setUp(self) -> None:
+        self.query = "한국어 검색 질의"
+        self.vector = [0.11, 0.22, 0.33]
+        self.embed_calls: list[tuple[str, str]] = []
+
+        def fake_embed(q: str, *, channel: str) -> list[float]:
+            self.embed_calls.append((q, channel))
+            return list(self.vector)
+
+        self.fake_embed = fake_embed
+        # text: 강한 신호(top 0.85·하위 절반 낮음 → 게이트 통과). audio: 단일 강신호.
+        self.client = _FakeMsearchClient(
+            knn_by_label={
+                "text": [_knn_hit_os("t1", 0.85), _knn_hit_os("t2", 0.80),
+                         _knn_hit_os("t3", 0.30), _knn_hit_os("t4", 0.28)],
+                "audio": [_knn_hit_os("a1", 0.82, "audio"), _knn_hit_os("a2", 0.25, "audio")],
+            },
+            bm25_by_label={
+                "text": [_bm25_hit_os("t1", 12.0), _bm25_hit_os("t2", 6.0)],
+                "audio": [_bm25_hit_os("a1", 9.0, "audio")],
+            },
+        )
+
+    def _run(self, **ov):
         kw = {
-            "modalities": ("text", "image"), "index": "assets", "pipeline_name": "assets-hybrid",
-            "embed_fn": self.fake_embed, "cutoff_enabled": True, "cutoff_eps": 0.10,
-            "cutoff_floor": 0.65, "probe_fn": probe_fn,
+            "modalities": ("text", "audio"), "k": 20, "channel": "st",
+            "weights": (0.5, 0.5), "index": "assets", "embed_fn": self.fake_embed,
+            "cutoff_enabled": True, "cutoff_eps": 0.17, "cutoff_floor": 0.50,
+            "result_floor": 0.40, "bm25_operator": "or",
         }
         kw.update(ov)
-        return search_assets_os(self.client, "질의", **kw)
+        return search_assets_os(self.client, self.query, **kw)
 
-    def test_disabled_no_probe_unchanged(self) -> None:
-        # 회귀 0: cutoff_enabled=False(기본) → probe 미호출·버킷 그대로(021/022 동작).
-        calls = []
-        def probe_fn(*a, **k):
-            calls.append(1)
-            return (0.0, 0.0)
-        out = search_assets_os(self.client, "질의", modalities=("text",), index="assets",
-                               pipeline_name="assets-hybrid", embed_fn=self.fake_embed, probe_fn=probe_fn)
-        self.assertEqual(calls, [])
-        self.assertEqual(len(out["text"]), 2)
+    def test_embeds_query_once(self) -> None:
+        # (a) 질의 1회만 임베딩해 전 모달리티 재사용(중복 임베딩 0) — 활성 채널 전달.
+        self._run()
+        self.assertEqual(self.embed_calls, [(self.query, "st")])
 
-    def test_keep_bucket_when_signal_passes(self) -> None:
-        # 강한 신호(top-mean=0.12·top≥floor) → 버킷 유지(정규화 랭킹 그대로, FR-003).
-        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
-            return (0.78, 0.66)
-        out = self._run(probe_fn)
-        self.assertEqual([r["id"] for r in out["text"]], ["t1", "t2"])
-        self.assertEqual(len(out["image"]), 1)
+    def test_single_msearch_call(self) -> None:
+        # FR-001: 전 모달리티 서브검색을 _msearch **1회**로(HTTP 1회). client.search 미사용.
+        self._run()
+        self.assertEqual(len(self.client.msearch_calls), 1)
+        self.assertFalse(hasattr(self.client, "search_calls"))
 
-    def test_empty_bucket_when_signal_fails(self) -> None:
-        # 약한 신호(top-mean=0.05<eps) → 빈 버킷(no-match 차단, SC-003·SC-006 동형).
-        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
-            return (0.70, 0.65)
-        out = self._run(probe_fn)
-        self.assertEqual(out["text"], [])
-        self.assertEqual(out["image"], [])
+    def test_msearch_body_order_knn_then_bm25_per_modality(self) -> None:
+        # 본문 순서 = [m1-헤더, m1-knn, m1-헤더, m1-bm25, m2-헤더, m2-knn, …] 결정적.
+        self._run(modalities=("text", "audio"))
+        body = self.client.msearch_calls[0]
+        # 헤더는 짝수 인덱스(index 지정), 서브검색은 홀수 인덱스.
+        self.assertEqual(len(body), 8)  # 2 모달리티 × (헤더+knn+헤더+bm25)
+        for header in body[0::2]:
+            self.assertEqual(header, {"index": "assets"})
+        kinds = [_sub_terms_label(sub) for sub in body[1::2]]
+        self.assertEqual(kinds, [("knn", "text"), ("bm25", "text"), ("knn", "audio"), ("bm25", "audio")])
 
-    def test_per_modality_gate_independent(self) -> None:
-        # modality 별 독립 판정 — text 통과·image 차단.
-        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
-            return (0.80, 0.66) if "image" not in set(modality_values) else (0.66, 0.64)
-        out = self._run(probe_fn)
-        self.assertEqual(len(out["text"]), 2)
-        self.assertEqual(out["image"], [])
+    def test_knn_k_is_max_request_and_sample(self) -> None:
+        # kNN k = max(요청 k, OS_KNN_SAMPLE_K) — robust baseline 표본 하한. bm25 k = 요청 k.
+        from src.config.search_constants import OS_KNN_SAMPLE_K
+        self._run(k=5)  # 요청 5 < 표본하한
+        body = self.client.msearch_calls[0]
+        knn_sub, bm25_sub = body[1], body[3]
+        self.assertEqual(knn_sub["query"]["knn"]["embedding"]["k"], OS_KNN_SAMPLE_K)
+        self.assertEqual(knn_sub["size"], OS_KNN_SAMPLE_K)
+        self.assertEqual(bm25_sub["size"], 5)  # bm25 는 요청 k
 
-    def test_probe_receives_same_vector_and_modality(self) -> None:
-        # probe 는 질의 벡터 재사용(중복 임베딩 0)·같은 modality 값 집합을 받는다(FR-002).
-        seen = []
-        def probe_fn(client, vec, *, modality_values, k, index, exclude_medical=True):
-            seen.append((tuple(vec), tuple(sorted(modality_values)), exclude_medical))
-            return (0.9, 0.6)
-        self._run(probe_fn, modalities=("image",))
-        self.assertEqual(seen[0][0], tuple(self.vector))
-        self.assertEqual(seen[0][1], ("image",))
-        self.assertTrue(seen[0][2])  # 의료배제 전달
+    def test_knn_k_uses_request_when_larger(self) -> None:
+        from src.config.search_constants import OS_KNN_SAMPLE_K
+        self._run(k=OS_KNN_SAMPLE_K + 30)
+        knn_sub = self.client.msearch_calls[0][1]
+        self.assertEqual(knn_sub["query"]["knn"]["embedding"]["k"], OS_KNN_SAMPLE_K + 30)
+
+    def test_returns_buckets_and_gate_meta_tuple(self) -> None:
+        # 반환은 (buckets, gate_meta) 튜플. buckets[modality]=행 리스트, gate_meta[modality]=신호 dict.
+        result = self._run()
+        self.assertIsInstance(result, tuple)
+        buckets, gate_meta = result
+        self.assertEqual(set(buckets), {"text", "audio"})
+        self.assertEqual(set(gate_meta), {"text", "audio"})
+
+    def test_buckets_fused_and_stripped_internal_keys(self) -> None:
+        # 융합 결과가 버킷에 담기되 내부키(_cos·_bm25)는 제거된다(응답 동형 SC-005).
+        buckets, _ = self._run()
+        text = buckets["text"]
+        self.assertEqual([r["id"] for r in text][:2], ["t1", "t2"])  # 융합 점수 desc
+        for r in text:
+            self.assertNotIn("_cos", r)
+            self.assertNotIn("_bm25", r)
+            self.assertEqual(set(r), {"id", "file_uri", "modality", "summary", "similarity"})
+
+    def test_gate_pass_keeps_bucket(self) -> None:
+        # 강한 신호(top 0.85·robust baseline 낮음) → 게이트 통과·버킷 유지, gate_passed True.
+        buckets, gate_meta = self._run()
+        self.assertTrue(gate_meta["text"]["gate_passed"])
+        self.assertGreater(len(buckets["text"]), 0)
+        self.assertAlmostEqual(gate_meta["text"]["top"], 0.85)
+        # robust baseline = 하위 절반 평균([0.28,0.30]) = 0.29.
+        self.assertAlmostEqual(gate_meta["text"]["baseline"], (0.28 + 0.30) / 2)
+
+    def test_gate_fail_empties_bucket_but_records_meta(self) -> None:
+        # 약한 신호(평탄·낮음) → 빈 버킷 + meta 기록(F4 관측성: no-match 사유 보존).
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("x1", 0.40), _knn_hit_os("x2", 0.39),
+                                   _knn_hit_os("x3", 0.38), _knn_hit_os("x4", 0.37)]},
+            bm25_by_label={"text": [_bm25_hit_os("x1", 3.0)]},
+        )
+        buckets, gate_meta = search_assets_os(
+            client, self.query, modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40,
+        )
+        self.assertEqual(buckets["text"], [])
+        self.assertFalse(gate_meta["text"]["gate_passed"])
+        self.assertIn("top", gate_meta["text"])
+        self.assertIn("baseline", gate_meta["text"])
+        self.assertGreater(gate_meta["text"]["cut_count"], 0)  # 컷된 행 수 관측
+
+    def test_per_result_cut_keeps_bm25_or_high_cos(self) -> None:
+        # per-result 컷: 게이트 통과 버킷 안에서도 행 유지 = BM25 매칭 OR cos≥result_floor.
+        # n1: knn-only cos 0.30(<floor 0.40)·BM25 미매칭 → 컷. n2: knn-only cos 0.80 → 유지.
+        # n3: BM25 매칭(코사인 무관) → 유지.
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("n2", 0.80), _knn_hit_os("n1", 0.30),
+                                   _knn_hit_os("seed", 0.85), _knn_hit_os("low", 0.20)]},
+            bm25_by_label={"text": [_bm25_hit_os("n3", 8.0), _bm25_hit_os("seed", 4.0)]},
+        )
+        buckets, gate_meta = search_assets_os(
+            client, self.query, modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40,
+        )
+        kept_ids = {r["id"] for r in buckets["text"]}
+        self.assertIn("n2", kept_ids)     # cos 0.80 ≥ floor
+        self.assertIn("n3", kept_ids)     # BM25 매칭
+        self.assertIn("seed", kept_ids)   # 양쪽
+        self.assertNotIn("n1", kept_ids)  # cos<floor·BM25 미매칭 → 컷
+        self.assertNotIn("low", kept_ids)
+
+    def test_cutoff_disabled_no_gate_no_cut(self) -> None:
+        # 디버그 우회(cutoff_enabled=False): 게이트·per-result 컷 모두 off → 융합 전체 노출, gate_passed True.
+        buckets, gate_meta = self._run(cutoff_enabled=False)
+        # text 융합 합집합: t1·t2(양쪽) + t3·t4(knn-only, 저코사인)도 컷 없이 유지.
+        ids = {r["id"] for r in buckets["text"]}
+        self.assertEqual(ids, {"t1", "t2", "t3", "t4"})
+        self.assertEqual(gate_meta["text"]["cut_count"], 0)
+        self.assertTrue(gate_meta["text"]["gate_passed"])
+
+    def test_bucket_capped_to_k(self) -> None:
+        # 버킷은 요청 k 로 상한(knn 표본 50 으로 더 받아도 응답은 ≤k — 구 size=k 계약 보존).
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os(f"a{i}", 0.85 - i * 0.001) for i in range(40)]},
+            bm25_by_label={"text": [_bm25_hit_os("a0", 9.0)]},
+        )
+        buckets, _ = search_assets_os(
+            client, self.query, modalities=("text",), k=3, index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40,
+        )
+        self.assertLessEqual(len(buckets["text"]), 3)
+
+    def test_deterministic_two_runs_identical(self) -> None:
+        # SC-003: 같은 입력 → 같은 출력(2회 동일) — 융합·게이트·컷·정렬이 순수 결정적.
+        out1 = self._run()
+        out2 = self._run()
+        self.assertEqual(out1, out2)
+
+    def test_propagates_os_unreachable(self) -> None:
+        # FR-007: client.msearch 예외 → 그대로 전파(silent pg 폴백 금지).
+        client = _FakeMsearchClient(raise_on_msearch=ConnectionError("OS 미도달"))
+        with self.assertRaises(ConnectionError):
+            search_assets_os(client, self.query, modalities=("text",), index="assets",
+                             embed_fn=self.fake_embed)
+
+    def test_image_video_label_resolution_and_tiebreaker(self) -> None:
+        # 022 계승: image·video 라벨이 terms 로 해소되고, 동점은 (-sim,id) 결정 정렬. cutoff off 로 컷 무관.
+        client = _FakeMsearchClient(
+            knn_by_label={"image": [_knn_hit_os("b", 0.5, "image"), _knn_hit_os("c", 0.5, "image"),
+                                    _knn_hit_os("a", 0.5, "image")]},
+            bm25_by_label={},
+        )
+        buckets, _ = search_assets_os(
+            client, self.query, modalities=("image",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=False,
+        )
+        # 전 동점(코사인 동일 → min-max 전원 1.0) → similarity 동일 → id asc.
+        self.assertEqual([r["id"] for r in buckets["image"]], ["a", "b", "c"])
 
 
 if __name__ == "__main__":

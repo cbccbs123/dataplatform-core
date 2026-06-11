@@ -1,10 +1,20 @@
-"""OpenSearch 검색 쿼리 빌더·결과 매핑 (검색 read path → OpenSearch, spec 021 G1).
+"""OpenSearch 검색 쿼리 빌더·클라이언트 융합·결과 매핑 (검색 read path → OpenSearch, spec 021·027).
 
 020 이 깐 단일 인덱스(nori 한국어 BM25 + ``knn_vector``)를 **읽기만** 한다(쓰기 0, 헌법 6조).
-본 모듈의 **순수 함수**(`build_search_body`·`os_hit_to_row`)는 OS·DB·opensearch-py 없이
-결정적으로 동작하며 단위 게이트에서 항상 검증된다. 실제 검색 실행(IO: 검색 파이프라인 등록·
-질의 임베딩·search_assets_os)은 후속 그룹(G2)에서 추가하며, opensearch-py 의존은 모듈 상단이
-아니라 해당 함수 내부에서 지연 import 한다(플래그 off 환경의 순수성 보존 — 020 동형).
+본 모듈의 **순수 함수**(서브검색 본문·융합·게이트·컷·결과 매핑)는 OS·DB·opensearch-py 없이
+결정적으로 동작하며 단위 게이트에서 항상 검증된다(헌법 3조). 실제 검색 실행(IO: 질의 임베딩·
+``search_assets_os`` msearch)의 opensearch-py 의존은 모듈 상단이 아니라 함수 내부에서 지연 import
+한다(플래그 off 환경의 순수성 보존 — 020 동형).
+
+**027 클라이언트 융합 재구성** — 왜 서버 파이프라인이 아니라 클라이언트인가:
+종전(021~024)은 OS 서버 normalization-processor 로 BM25·kNN 을 융합해 응답에서 **원시 코사인이
+소거**됐고, 그 보상으로 023 probe(같은 kNN 을 모달리티당 한 번 더 실행해 코사인 재구매)·024 정규화
+스케일 임계 4종·빈 dict 센티넬이 쌓였다. 027 은 융합을 **클라이언트 순수 함수**로 옮긴다 — 모달리티당
+[plain kNN + BM25] 서브검색을 전 모달리티 **_msearch 1회**로 받아 ``fuse_hybrid`` 가 min-max+가중평균
+(서버와 동일 수식)으로 융합한다. kNN 응답에 원시 코사인이 자연히 보존돼 ① probe 가 개념째 소멸(중복
+kNN 0), ② 게이트(``gate_signal``)·per-result 컷(``cut_rows``)이 **코사인 단일 스케일의 두 규칙**으로
+통합, ③ 융합 수학이 서버 상태가 아닌 단위 검증 가능한 순수 함수로 이동(결정성). 임계 기본값은
+``src.config.search_constants`` 단일 출처(F1).
 
 필드명 정본 = 020 인덱스 매핑(`opensearch_sync.build_index_body`):
     - nori 텍스트: ``summary``·``keywords``·``labels``·``file_name``·``search_text``
@@ -18,6 +28,15 @@ import math
 from collections.abc import Callable, Collection, Iterable
 from typing import Any
 
+from src.config.search_constants import (
+    OS_BM25_OPERATOR_DEFAULT,
+    OS_CUTOFF_ENABLED_DEFAULT,
+    OS_CUTOFF_EPS_DEFAULT,
+    OS_CUTOFF_FLOOR_DEFAULT,
+    OS_FUSION_WEIGHTS_DEFAULT,
+    OS_KNN_SAMPLE_K,
+    OS_RESULT_FLOOR_DEFAULT,
+)
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
@@ -38,16 +57,9 @@ _TEXT_FIELDS: tuple[str, ...] = (
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
 _MEDICAL_LABEL = "medical"
 
-# 게이트 기본값 — G4 실OS calibration 으로 확정(2026-06-10, dev 318자산·lucene cosinesimil probe).
-# 검증 라벨셋(있음 9·없음 6)에서 probe 원시 코사인 top: 있음 최소 0.490 vs 없음 최대 0.365 → 갭 0.125,
-# Δ(top-mean): 있음 최소 0.273 vs 없음 최대 0.179 → 갭 0.094 로 깨끗이 분리. FLOOR=0.43(top 갭 중앙·
-# 양쪽 마진 ~0.06), EPS=0.15(없음 Δ는 차단하되 있음 약모달리티는 과필터 안 하도록 보수적·갭 하단).
-# 절대 FLOOR 가 주분리축이고 상대 EPS 는 코퍼스 평탄 시 보강(AND). 임계는 probe 출력 스케일에 보정됨.
-# ⚠️ 토픽 인접 없음(예: '양자컴퓨터'→과학 콘텐츠)은 코사인이 있음과 동률이라 게이트로 못 막는다 —
-# nori 외래어 분해·임베딩 교정(Non-Goal·후속) 영역. 어휘적으로 무관한 없음(아이패드 등)은 확실히 차단.
-_DEFAULT_CUTOFF_EPS = 0.15
-_DEFAULT_CUTOFF_FLOOR = 0.43
-_DEFAULT_PROBE_K = 50
+# 027 T006: 게이트·probe 기본 상수(_DEFAULT_CUTOFF_EPS·_DEFAULT_CUTOFF_FLOOR·_DEFAULT_PROBE_K)는
+# 모듈 중복 출처라 제거했다 — 임계 기본값의 단일 출처는 src.config.search_constants(F1). 값은 코사인
+# 스케일로 통일됐다(클라이언트 융합 전환으로 probe 출력 스케일 보정이 불필요해짐, 027).
 
 # OS 검색 버킷 라벨 → 저장된 modality 값 집합(PG media_search 와 동일 분류). 요청 라벨('text')과
 # 저장 modality 값('txt')의 불일치를 흡수한다 — text 버킷은 ALLOWED_TEXT_META_FILE_KINDS(txt·json·
@@ -73,90 +85,49 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return x if math.isfinite(x) else default
 
 
-def build_search_body(
+def build_bm25_body(
     query: str,
-    query_vector: list[float],
     *,
     modality_values: Collection[str],
-    k: int = 100,
-    weights: tuple[float, float] = (0.5, 0.5),
-    exclude_medical: bool = True,
+    k: int,
     operator: str = "or",
+    exclude_medical: bool = True,
 ) -> dict[str, Any]:
-    """OpenSearch 하이브리드 검색 본문을 만든다(순수·결정적).
+    """BM25 multi_match 단독 서브검색 본문(순수·결정적, 027 FR-001).
 
-    nori 텍스트 ``multi_match``(BM25) ⊕ ``knn``(embedding, 질의 벡터)의 **hybrid 쿼리**다. 두
-    두 서브쿼리 모두 ① ``modality`` keyword **terms** 필터(``modality_values`` 집합 — text 버킷은 txt·
-    json·pdf·office 등 다중값이라 terms 로 거른다)와 ② ``exclude_medical`` 이면 ``domain_label='medical'``
-    ``must_not``(FR-011)을 적용하되, **적용 방식이 다르다**: 텍스트(BM25)는 ``bool`` 로 감싼 사후 필터로
-    충분하나(BM25 는 k 제한이 없다), **knn 은 native ``filter``(pre-filter)**로 그 모달리티 안에서 k 최근접을
-    뽑는다 — bool 사후필터는 전역 k 를 먼저 뽑고 걸러 작은 k 에서 비우세 모달리티가 비기 때문(G3 실OS 교정).
+    027 클라이언트 융합 전환: 서버 hybrid 쿼리(구 build_search_body)의 텍스트 서브쿼리를 **독립
+    검색 본문**으로 떼어낸다 — msearch 의 한 서브검색으로 보내 BM25 원시 ``_score`` 를 그대로 받아
+    클라이언트(fuse_hybrid)가 min-max 정규화·가중평균한다(파이프라인 소거). 구성은 026 계승:
+    boost 차등 ``_TEXT_FIELDS``(summary^3…file_name^0.5), modality terms 필터, 의료 ``must_not``.
 
-    점수 융합(BM25·kNN 의 min-max 정규화 + 가중평균)은 OpenSearch **검색 파이프라인**
-    (normalization-processor, G2 ``ensure_search_pipeline``)이 담당하므로 본문은 hybrid 서브쿼리
-    구성까지만 책임진다 — ``weights`` 는 그 파이프라인 등록용 융합 가중치 메타로, 쿼리 본문에는
-    반영하지 않는다(호출부 search_assets_os 가 파이프라인에 전달, G2).
-
-    ``size`` 는 ``k``. 필드명·차원은 020 인덱스 매핑(`opensearch_sync.build_index_body`)과 일치.
-
-    **정렬**: OpenSearch hybrid 쿼리는 ``_score`` 와 필드 정렬 조합을 금지(실OS 400: "_score sort
-    criteria cannot be applied with any other criteria")하므로 본문에 ``sort`` 를 두지 않는다 —
-    정규화 융합 점수로 정렬되고, FR-009 결정적 tiebreaker(점수 desc·동점 ``id`` asc)는
-    ``search_assets_os`` 가 클라이언트에서 적용한다(헌법 3조). (G5 실OS 검증으로 교정.)
+    operator='and' 면 전 nori 토큰 매칭 강제(025 FR-001 — 복합어 가짜매칭 차단). 기본 'or' 는
+    operator 키를 생략해 현행 본문과 바이트 동일(회귀 0). ``size`` 는 ``k``(요청 버킷 한도).
     """
-    # terms(집합) 필터 — 라벨↔저장값 불일치(text→txt·json…) 흡수. sorted 로 결정적 본문(헌법 3조).
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
-    must_not: list[dict[str, Any]] = []
-    if exclude_medical:
-        must_not.append({"term": {"domain_label": _MEDICAL_LABEL}})
-
-    def _wrap(inner: dict[str, Any]) -> dict[str, Any]:
-        # 각 서브쿼리를 bool 로 감싸 같은 modality 필터·의료배제를 균일 적용한다.
-        clause: dict[str, Any] = {"must": [inner], "filter": list(filters)}
-        if must_not:
-            clause["must_not"] = list(must_not)
-        return {"bool": clause}
-
-    # 025 FR-001: operator='and' 면 질의의 **모든 nori 토큰** 매칭을 요구해 복합어 질의(예: '스마트폰
-    # 생산량')의 부분 토큰 BM25 가짜매칭(F2)을 차단한다 — 의미 매칭은 knn 서브쿼리가 보완(하이브리드
-    # 불변). 기본 'or' 는 현행 본문과 바이트 동일(operator 키 생략 — 회귀 0).
     mm: dict[str, Any] = {"query": query, "fields": list(_TEXT_FIELDS)}
     if operator != "or":
         mm["operator"] = operator
-    text_sub = _wrap({"multi_match": mm})
-    # knn 은 modality·의료배제를 **knn native filter**(pre-filter)로 적용한다 — bool 사후필터로 감싸면
-    # 전역 k 최근접을 먼저 뽑고 거르므로, 작은 k(=버킷 한도)에서 비우세 모달리티(image 등)가 0 건이
-    # 된다(G3 실OS 발견: image k=3 → 0건). filter 안에서 modality 로 좁혀 그 모달리티의 k 최근접을 뽑는다.
-    knn_prefilter: dict[str, Any] = {"bool": {"filter": list(filters)}}
-    if must_not:
-        knn_prefilter["bool"]["must_not"] = list(must_not)
-    knn_sub = {
-        "knn": {
-            "embedding": {"vector": list(query_vector), "k": int(k), "filter": knn_prefilter}
-        }
-    }
-
-    return {
-        "size": int(k),
-        "query": {"hybrid": {"queries": [text_sub, knn_sub]}},
-        # 정렬 없음: hybrid 쿼리는 _score+필드 sort 조합을 금지(실OS 400)하므로 정규화 융합 점수로만
-        # 정렬한다. FR-009 결정적 tiebreaker(점수 desc·동점 id asc)는 search_assets_os 가 클라이언트에서.
-    }
+    clause: dict[str, Any] = {"must": [{"multi_match": mm}], "filter": filters}
+    if exclude_medical:
+        clause["must_not"] = [{"term": {"domain_label": _MEDICAL_LABEL}}]
+    return {"size": int(k), "query": {"bool": clause}}
 
 
-def build_probe_body(
+def build_knn_body(
     query_vector: list[float],
     *,
     modality_values: Collection[str],
     k: int,
     exclude_medical: bool = True,
 ) -> dict[str, Any]:
-    """적합도 게이트용 plain kNN probe 본문(순수·결정적, 023 FR-002).
+    """plain kNN 단독 서브검색 본문(순수·결정적, 027 FR-001 — 구 build_probe_body 계승·개명 통합).
 
-    정규화 검색 파이프라인을 **적용하지 않는** 단일 knn 이다 — 그 modality 의 원시 코사인(lucene
-    cosinesimil _score)을 직접 얻어 게이트(passes_cutoff)에 쓴다. 하이브리드(BM25 융합)가 아니라
-    knn 단독이라 _score 가 코사인 단조다. modality terms·의료배제(FR-008)를 knn native filter(pre-
-    filter)로 적용해 **정규화 경로(build_search_body)와 같은 후보 집단**에서 신호를 잰다.
+    정규화 파이프라인을 적용하지 않는 단일 knn 이다 — knn ``_score``(lucene cosinesimil=(1+cos)/2)에
+    원시 코사인이 보존돼, 클라이언트가 ① 융합 기여(min-max)와 ② 게이트 신호(gate_signal)·per-result
+    컷(_cos)을 **같은 표본 1회**로 얻는다(probe 추가 호출 소멸 — SC-002). 023 probe 와 동일하게
+    modality terms·의료배제를 **knn native filter(pre-filter)**로 적용한다 — bool 사후필터로 감싸면
+    전역 k 최근접을 먼저 뽑고 걸러 작은 k 에서 비우세 모달리티(image 등)가 0 건이 되는 회귀(022 G3
+    실OS 발견)를 막고, 그 모달리티 안에서 k 최근접을 뽑는다. ``size`` 는 ``k``(게이트 표본 하한 적용은 호출부).
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
     knn_filter: dict[str, Any] = {"bool": {"filter": filters}}
@@ -187,24 +158,158 @@ def knn_score_to_cosine(score: Any) -> float:
 _CUTOFF_TOL = 1e-9
 
 
-def passes_cutoff(top: float, mean: float, *, eps: float, floor: float) -> bool:
-    """적합도 게이트(순수·결정적, 023 FR-001·004): 그 modality 버킷을 유지할지 판정한다.
+def passes_cutoff(top: float, baseline: float, *, eps: float, floor: float) -> bool:
+    """적합도 게이트(순수·결정적, 023 FR-001·004 계승): 그 modality 버킷을 유지할지 판정한다.
 
-    ``keep = (top − mean) ≥ eps AND top ≥ floor``. 상대 신호 ``top − mean``(이방성 baseline 흡수)이
+    ``keep = (top − baseline) ≥ eps AND top ≥ floor``. 상대 신호 ``top − baseline``(background 흡수)이
     주판정, 절대 ``floor`` 는 코퍼스 전체가 평평할 때의 느슨한 backstop. 둘 다 만족해야 유지(AND);
     실패면 빈 버킷(no-match → 무관 결과 표출 차단). 비교는 ``_CUTOFF_TOL`` 로 경계를 포용한다.
+
+    027: ``baseline`` 은 ``gate_signal`` 이 주는 **하위 절반 평균**(robust)이다 — 023 의 전체 평균을
+    대체해 밀집 토픽('충전')에서 baseline 이 끌려 올라가는 오컷을 구조 해결한다. 입력 의미만 바뀌고
+    판정식·경계 처리는 동일(시그니처 (top, baseline, *, eps, floor) — 인자 위치·의미 보존).
     """
     t = _safe_float(top)
-    return (t - _safe_float(mean)) >= eps - _CUTOFF_TOL and t >= floor - _CUTOFF_TOL
+    return (t - _safe_float(baseline)) >= eps - _CUTOFF_TOL and t >= floor - _CUTOFF_TOL
+
+
+def minmax_normalize(scores: Iterable[float]) -> list[float]:
+    """점수 리스트를 [0,1] 로 min-max 정규화한다(순수·결정적, 027 FR-002).
+
+    클라이언트 융합의 1단계다 — OS 서버 normalization-processor 가 하던 min-max 를 **순수 함수로
+    이관**(헌법 3조: 융합 수학을 서버 상태가 아닌 단위 검증 가능한 코드로). 빈 입력은 ``[]``,
+    퇴화(``max==min``, 단일 원소·전 동점)는 **전원 1.0** 으로 결정적 정의한다(0 나눗셈 회피·랭킹
+    보존). 입력 순서·길이를 보존해 호출부(fuse_hybrid)가 hit 리스트와 자리표시로 zip 할 수 있다.
+    """
+    vals = [_safe_float(s) for s in scores]
+    if not vals:
+        return []
+    lo, hi = min(vals), max(vals)
+    span = hi - lo
+    if span <= 0.0:
+        # max==min(단일·전 동점): 정규화 불가 → 전원 1.0(서버 min_max 의 퇴화 처리와 동형·결정적).
+        return [1.0 for _ in vals]
+    return [(v - lo) / span for v in vals]
+
+
+def gate_signal(cosines: Iterable[float]) -> tuple[float, float]:
+    """kNN 원시 코사인 리스트에서 게이트 신호 ``(top, robust baseline)`` 을 뽑는다(순수·결정적, FR-003).
+
+    023 probe(추가 kNN 호출)를 대체한다 — 융합이 클라이언트로 오면서 kNN 응답에 원시 코사인이
+    자연히 보존되므로, **추가 검색 없이** 같은 kNN 표본에서 신호를 잰다(SC-002: probe 소멸).
+
+    - ``top`` = 표본 최댓값(그 modality 의 최적합 신호).
+    - ``baseline`` = **코사인 하위 절반 평균**(robust). 023 의 '전체 평균' 은 밀집 토픽(예: '충전'
+      → 다수 영상이 고코사인)에서 baseline 이 끌어올려져 ``top−baseline`` 이 좁아지는 오컷을 낳았다.
+      하위 절반(정렬 후 floor(n/2)개)만 평균내면 background(무관 꼬리) 해석이 유지돼 밀집 토픽에서도
+      신호가 분리된다 — 신규 분기·상수 0 의 **구조 해결**(027 핵심).
+
+    표본이 2개 미만이면 하위 절반을 평균낼 수 없어 ``baseline=0.0``(빈 표본은 ``top`` 도 0.0).
+    """
+    vals = [_safe_float(c) for c in cosines]
+    if not vals:
+        return (0.0, 0.0)
+    top = max(vals)
+    if len(vals) < 2:
+        return (top, 0.0)
+    ordered = sorted(vals)
+    half = len(ordered) // 2  # 하위 절반 개수(floor) — 정렬 하위 구간만 background 로.
+    lower = ordered[:half]
+    baseline = sum(lower) / len(lower)
+    return (top, baseline)
+
+
+def cut_rows(rows: Iterable[dict[str, Any]], *, result_floor: float) -> list[dict[str, Any]]:
+    """per-result 컷(순수·결정적, FR-004): 행 유지 = ``_bm25`` 매칭 **OR** ``_cos ≥ result_floor``.
+
+    024 의 정규화 스케일 임계 4종(SEARCH_OS_MIN_SCORE_*)을 **코사인 스케일 단일 임계**로 통일한다.
+    - ``_bm25 is True`` (전 토큰 어휘 증거)면 유지 — 코사인이 없어도(``_cos None``, BM25-only 행) 안전.
+    - 아니면 원시 코사인 ``_cos`` 가 ``result_floor`` 이상일 때만 유지(의미 증거). ``_cos None`` 은
+      비교 불가이므로 ``_bm25`` 가 유일 근거다(없으면 컷).
+    입력(이미 융합 정렬된) 순서를 보존한다 — 랭킹 불변, 노이즈 꼬리만 제거. 경계는 ``_CUTOFF_TOL`` 포용.
+    """
+    kept: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("_bm25"):
+            kept.append(r)
+            continue
+        cos = r.get("_cos")
+        if cos is not None and _safe_float(cos) >= result_floor - _CUTOFF_TOL:
+            kept.append(r)
+    return kept
+
+
+def fuse_hybrid(
+    bm25_hits: Iterable[dict[str, Any]],
+    knn_hits: Iterable[dict[str, Any]],
+    *,
+    weights: tuple[float, float],
+) -> list[dict[str, Any]]:
+    """BM25·kNN 두 서브검색 hit 을 클라이언트에서 융합한다(순수·결정적, 027 FR-002).
+
+    서버 normalization-processor(min-max + arithmetic_mean)를 **순수 함수로 이관**한다(헌법 3조 —
+    융합 수학이 서버 상태가 아니라 단위 검증 가능한 코드로). 수식·가중치는 동일:
+
+      similarity = w_bm25 · norm(BM25 _score) + w_knn · norm(kNN 코사인)
+
+    - 두 측을 각각 ``minmax_normalize`` 한다(BM25 는 원시 _score, kNN 은 ``knn_score_to_cosine`` 환산
+      코사인). 한쪽에만 있는 자산은 **누락측 정규화 기여 0**(서버 hybrid 와 동일 시맨틱 — plan R2).
+    - 자산 id 로 **합집합**한다. 같은 자산이 양쪽에 있으면 **한 행**으로 결합(점수만 합산). 행의 메타
+      (file_uri·modality·summary)는 먼저 본 측(BM25 우선) hit 으로 채운다 — 같은 asset_id 라 내용 동일.
+    - 행은 ``os_hit_to_row`` 동형 + 내부키 ``_cos``(kNN 원시 코사인|없으면 None)·``_bm25``(BM25 매칭 여부).
+      이 두 키가 게이트(gate_signal)·per-result 컷(cut_rows)의 **단일 코사인 스케일 신호**다(024 통일).
+    - 정렬은 ``(-similarity, id)`` — 점수 desc·동점 id asc 결정적(FR-002, 헌법 3조).
+    """
+    w_bm25, w_knn = weights
+    bm25_list = list(bm25_hits)
+    knn_list = list(knn_hits)
+    bm25_norm = minmax_normalize([_safe_float(h.get("_score")) for h in bm25_list])
+    knn_cos = [knn_score_to_cosine(h.get("_score")) for h in knn_list]
+    knn_norm = minmax_normalize(knn_cos)
+
+    # id → {row, norm_bm25, norm_knn, cos, bm25}. 누락측은 0(기여 0)·_cos None·_bm25 False 가 기본.
+    merged: dict[str, dict[str, Any]] = {}
+
+    def _entry(hit: dict[str, Any]) -> dict[str, Any]:
+        row = os_hit_to_row(hit)
+        aid = row["id"]
+        e = merged.get(aid)
+        if e is None:
+            # 먼저 본 측의 메타로 행을 채운다(BM25 루프가 먼저라 양쪽 자산은 BM25 hit 메타 — 내용 동일).
+            e = merged.setdefault(
+                aid, {"row": row, "norm_bm25": 0.0, "norm_knn": 0.0, "cos": None, "bm25": False}
+            )
+        return e
+
+    # minmax_normalize 가 입력 길이를 보존하므로 zip 양변 길이가 같다(strict=True 로 불변 보장).
+    for hit, norm in zip(bm25_list, bm25_norm, strict=True):
+        e = _entry(hit)
+        e["norm_bm25"] = norm
+        e["bm25"] = True
+    for hit, norm, cos in zip(knn_list, knn_norm, knn_cos, strict=True):
+        e = _entry(hit)
+        e["norm_knn"] = norm
+        e["cos"] = cos
+
+    out: list[dict[str, Any]] = []
+    for e in merged.values():
+        row = dict(e["row"])
+        row["similarity"] = w_bm25 * e["norm_bm25"] + w_knn * e["norm_knn"]
+        row["_cos"] = e["cos"]
+        row["_bm25"] = e["bm25"]
+        out.append(row)
+    out.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
+    return out
 
 
 def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
     """OpenSearch hit 을 media_search 버킷 행과 동형(SC-005)인 dict 로 매핑한다(순수·결정적).
 
     media_search 버킷 행의 핵심 키(``id``·``file_uri``·``modality``·``summary``·``similarity``)에
-    맞춘다 — 검색 서비스(G3)가 OS 버킷(text·audio)과 PG 버킷(image·video)을 같은 모양으로
-    병합할 수 있게 한다(응답 동형). ``similarity`` 는 hit 의 ``_score``(검색 파이프라인이 BM25·
-    kNN 을 min-max 정규화·가중평균한 융합 점수)다. ``_source`` 누락·메타 None 도 안전 처리한다.
+    맞춘다 — 검색 서비스가 OS 버킷과 PG 버킷을 같은 모양으로 병합할 수 있게 한다(응답 동형).
+    ``similarity`` 는 hit 의 원시 ``_score`` 다(서브검색 단독 점수) — 027 클라이언트 융합에서는
+    ``fuse_hybrid`` 가 이 값을 **융합 점수로 덮어쓴다**(min-max+가중평균). ``_source`` 누락·메타
+    None 도 안전 처리한다.
 
     ⚠️ media_search 버킷 행의 자산 식별 키는 ``asset_id`` 가 아니라 ``id`` 다(검색 SQL alias
     ``asset_id AS id``). 따라서 020 인덱스 ``_source.asset_id``(== ``_id``)를 이 ``id`` 로 옮긴다.
@@ -221,55 +326,13 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# IO 함수 (G2) — opensearch-py·임베더는 모듈 상단이 아니라 **함수 내부에서 지연 import**.
+# IO 함수 (027) — opensearch-py·임베더는 모듈 상단이 아니라 **함수 내부에서 지연 import**.
 # 플래그 off(pg 백엔드) 환경의 모듈 순수성(상단 import 없음)을 보존하기 위함이다 — 위 순수 함수만
 # 쓰는 단위 게이트는 opensearch-py·임베더 미설치여도 import 가능해야 한다(020 동형).
-# 실제 OS 동작 검증은 G5(실OS e2e). 여기 IO 는 가짜 OS 클라이언트로 액션 조립을 단위 검증한다.
+# 실제 OS 동작 검증은 G4(실OS e2e). 여기 IO 는 가짜 msearch 클라이언트로 액션 조립을 단위 검증한다.
+# 027 T006: 서버 융합 파이프라인 등록(search_pipeline_body·ensure_search_pipeline)과 probe(probe_relevance)
+# 경로는 제거됐다 — 융합이 클라이언트로 이동해 서버 상태(파이프라인) 0·중복 kNN 0(SC-002).
 # ──────────────────────────────────────────────────────────────────────────
-
-
-def search_pipeline_body(weights: tuple[float, float]) -> dict[str, Any]:
-    """normalization-processor 검색 파이프라인 본문을 만든다(순수·결정적, FR-005).
-
-    BM25(텍스트 서브쿼리)·kNN 점수를 **min-max 정규화 후 가중평균**(arithmetic_mean)으로 융합한다.
-    ``weights`` 는 ``build_search_body`` 의 hybrid 서브쿼리 순서 ``[텍스트(BM25), knn]`` 와 **동일
-    순서**의 가중치 ``(w_bm25, w_knn)`` 다 — 측정 프로토타입·OS 네이티브 방식과 일치(plan §R2).
-    """
-    w_bm25, w_knn = weights
-    return {
-        "description": "021 하이브리드 검색 정규화 융합(min-max + 가중평균) — BM25 ⊕ kNN",
-        "phase_results_processors": [
-            {
-                "normalization-processor": {
-                    "normalization": {"technique": "min_max"},
-                    "combination": {
-                        "technique": "arithmetic_mean",
-                        "parameters": {"weights": [float(w_bm25), float(w_knn)]},
-                    },
-                }
-            }
-        ],
-    }
-
-
-def ensure_search_pipeline(
-    client: Any, name: str, *, weights: tuple[float, float] = (0.5, 0.5)
-) -> str:
-    """정규화 검색 파이프라인이 없으면 등록한다(멱등 — 020 ``ensure_index`` 동형, FR-006).
-
-    존재 여부는 ``client.search_pipeline.get()``(id 미지정 → 전체 파이프라인 dict, 없으면 ``{}``)
-    의 멤버십으로 판단한다(020 ``indices.exists`` boolean-멱등과 동형). 부재면 ``put`` 으로 1회
-    등록하고, 존재하면 no-op 이다(재실행 안전). 반환: ``'created'`` | ``'exists'``.
-
-    ⚠️ 실 opensearch-py 검색 파이프라인 API(``client.search_pipeline.get/put``)는 best-effort 로
-    맞췄다(opensearch-py 3.x ``SearchPipelineClient.get(id=...)``·``put(id=, body=)``). 실 OS 응답
-    형태·존재 시맨틱은 G5 실OS e2e 에서 확정 검증한다.
-    """
-    existing = client.search_pipeline.get() or {}
-    if name in existing:
-        return "exists"
-    client.search_pipeline.put(id=name, body=search_pipeline_body(weights))
-    return "created"
 
 
 def embed_query(query: str, *, channel: str) -> list[float]:
@@ -286,29 +349,9 @@ def embed_query(query: str, *, channel: str) -> list[float]:
     return embed_query_for_media_search(query, model_name=model_for_channel(channel))
 
 
-def probe_relevance(
-    client: Any,
-    query_vector: list[float],
-    *,
-    modality_values: Collection[str],
-    k: int,
-    index: str,
-    exclude_medical: bool = True,
-) -> tuple[float, float]:
-    """그 modality 의 원시 코사인 top·baseline(표본 평균)을 plain kNN probe 로 얻는다(023 FR-002).
-
-    정규화 검색 파이프라인을 **적용하지 않고**(``search_pipeline`` 미지정) ``build_probe_body`` 로 knn
-    단독 검색을 1회 한다 — knn ``_score`` 를 ``knn_score_to_cosine`` 로 원시 코사인 환산한 뒤 top(최대)·
-    mean(표본 평균)을 돌려준다. hits 가 없으면 (0.0, 0.0)(게이트가 cut). OS 미도달은 그대로 전파(FR-007
-    동형). 실 opensearch-py knn 응답·스케일은 G4 실OS 확정.
-    """
-    body = build_probe_body(query_vector, modality_values=modality_values, k=k, exclude_medical=exclude_medical)
-    resp = client.search(index=index, body=body)
-    hits = ((resp or {}).get("hits") or {}).get("hits") or []
-    if not hits:
-        return (0.0, 0.0)
-    cosines = [knn_score_to_cosine(h.get("_score")) for h in hits]
-    return (max(cosines), sum(cosines) / len(cosines))
+def _resp_hits(resp: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """msearch 한 서브검색 응답에서 hits 리스트를 안전 추출한다(None·누락 방어)."""
+    return ((resp or {}).get("hits") or {}).get("hits") or []
 
 
 def search_assets_os(
@@ -316,64 +359,101 @@ def search_assets_os(
     query: str,
     *,
     modalities: Iterable[str],
-    k: int = 100,
+    k: int = 20,
     channel: str = "st",
-    weights: tuple[float, float] = (0.5, 0.5),
+    weights: tuple[float, float] = OS_FUSION_WEIGHTS_DEFAULT,
     index: str,
-    pipeline_name: str,
     exclude_medical: bool = True,
     embed_fn: Callable[..., list[float]] = embed_query,
-    cutoff_enabled: bool = False,
-    cutoff_eps: float = _DEFAULT_CUTOFF_EPS,
-    cutoff_floor: float = _DEFAULT_CUTOFF_FLOOR,
-    cutoff_probe_k: int = _DEFAULT_PROBE_K,
-    probe_fn: Callable[..., tuple[float, float]] = probe_relevance,
-    bm25_operator: str = "or",
-) -> dict[str, list[dict[str, Any]]]:
-    """text·audio 버킷을 020 OS 인덱스에서 하이브리드 검색한다(FR-002 — OS 경로 모달리티).
+    cutoff_enabled: bool = OS_CUTOFF_ENABLED_DEFAULT,
+    cutoff_eps: float = OS_CUTOFF_EPS_DEFAULT,
+    cutoff_floor: float = OS_CUTOFF_FLOOR_DEFAULT,
+    result_floor: float = OS_RESULT_FLOOR_DEFAULT,
+    bm25_operator: str = OS_BM25_OPERATOR_DEFAULT,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
 
-    흐름: (a) ``embed_fn`` 으로 질의를 **1회만** 임베딩해 벡터를 modality 간 재사용한다(질의-문서
-    일치·중복 임베딩 방지), (b) modality 마다 ``build_search_body`` 로 하이브리드 본문을 만들어
-    ``client.search(index=, body=, search_pipeline=pipeline_name)`` 으로 정규화 융합 검색하고,
-    (c) hit 들을 ``os_hit_to_row`` 로 매핑해 ``{modality: [rows]}`` 버킷으로 돌려준다(SC-005 동형).
+    흐름(검색 1회당 OS HTTP **1회**):
+    (a) ``embed_fn`` 으로 질의를 **1회만** 임베딩해 벡터를 전 modality 재사용한다(중복 임베딩 0).
+    (b) modality 마다 [plain kNN(k=max(요청k, ``OS_KNN_SAMPLE_K``)) + BM25(k=요청k)] 두 서브검색
+        본문을 만들어 **_msearch 1회**로 보낸다. msearch 본문 순서는 ``[m1-knn, m1-bm25, m2-knn,
+        m2-bm25, …]`` 로 결정적(헌법 3조) — 응답을 같은 순서로 분해한다. kNN 을 표본 하한까지 키우는
+        이유는 robust baseline(하위 절반 평균)이 흔들리지 않을 표본을 그 modality 안에서 확보하기 위함.
+    (c) ``fuse_hybrid`` 가 두 서브검색을 합집합·min-max+가중평균 융합한다(서버 파이프라인과 동일 수식,
+        순수 함수). 행에 원시 코사인(_cos)·BM25 매칭(_bm25)이 동반된다.
+    (d) **버킷 게이트**: kNN 코사인 표본에서 ``gate_signal`` → (top, robust baseline) → ``passes_cutoff``.
+        실패면 그 버킷을 비운다(no-match → 무관 결과 표출 차단, FR-003).
+    (e) **per-result 컷**: 게이트 통과 버킷에 ``cut_rows``(BM25 매칭 OR cos≥``result_floor``)로 노이즈
+        꼬리를 제거한다(FR-004, 단일 코사인 스케일).
+    (f) 내부키(_cos·_bm25)를 제거하고 요청 k 로 상한해 버킷에 담는다(SC-005 응답 동형·구 size=k 계약 보존).
 
-    OS 미도달(``client.search`` 예외)이면 **그대로 전파**한다(FR-008 — silent pg 폴백 금지: 결과가
-    백엔드 가용성에 따라 달라지면 결정성·관측성 훼손). 검색은 PG·OS 를 **읽기 전용**으로만 만진다
-    (헌법 6조). 검색용 LLM 질의 구조화는 호출하지 않는다(FR-004 — 원문 질의를 nori·임베딩에 직접).
+    반환 ``(buckets, gate_meta)`` — ``gate_meta[modality] = {top, baseline, gate_passed, cut_count}``
+    (F4 관측성: 빈 버킷이 no-match 판정인지 즉시 확인). ``cut_count`` 는 융합 행 중 게이트·컷으로
+    제거된 수(상한 절삭은 포함 안 함 — 컷 효과만).
+
+    **디버그 우회**(``cutoff_enabled=False``): 게이트·per-result 컷을 **모두 끈다** — 융합 전체를 그대로
+    노출한다(약한 후보까지 관측). 호출부(search_service)의 ``disable_os_cutoff`` 가 이 스위치로 배선된다.
+
+    OS 미도달(``client.msearch`` 예외)이면 **그대로 전파**한다(FR-007 — silent pg 폴백 금지: 결과가
+    백엔드 가용성에 따라 달라지면 결정성·관측성 훼손). 검색은 OS 를 **읽기 전용**으로만 만진다(헌법 6조).
+    검색용 LLM 질의 구조화는 호출하지 않는다(원문 질의를 nori·임베딩에 직접).
     """
+    labels = list(modalities)
     query_vector = embed_fn(query, channel=channel)
-    buckets: dict[str, list[dict[str, Any]]] = {}
-    for label in modalities:
+    sample_k = max(int(k), OS_KNN_SAMPLE_K)  # 게이트 표본 하한(robust baseline 안정용).
+
+    # msearch 본문: 모달리티당 [헤더, knn, 헤더, bm25] 를 결정적 순서로 쌓는다(opensearch-py 규약 —
+    # 각 서브검색 앞에 인덱스 헤더 1줄). 본문 순서가 결정적이라야 응답 분해도 결정적이다(헌법 3조).
+    msearch_body: list[dict[str, Any]] = []
+    label_values: list[frozenset[str]] = []
+    for label in labels:
         # 요청 라벨('text'/'audio') → 저장된 modality 값 집합으로 해소(text=txt·json·pdf·office).
-        # 매핑에 없는 라벨은 라벨 자체를 값으로 본다(미래 모달리티 안전 폴백).
+        # 매핑에 없는 라벨은 라벨 자체를 값으로 본다(미래 모달리티 안전 폴백 — 022 image/video 동형).
         values = _MODALITY_VALUES.get(label, frozenset({label}))
-        body = build_search_body(
-            query,
-            query_vector,
-            modality_values=values,
-            k=k,
-            weights=weights,
-            exclude_medical=exclude_medical,
-            operator=bm25_operator,
+        label_values.append(values)
+        knn_body = build_knn_body(
+            query_vector, modality_values=values, k=sample_k, exclude_medical=exclude_medical
         )
-        resp = client.search(index=index, body=body, search_pipeline=pipeline_name)
-        hits = ((resp or {}).get("hits") or {}).get("hits") or []
-        rows = [os_hit_to_row(h) for h in hits]
-        # FR-009 결정적 tiebreaker(헌법 3조): hybrid 쿼리는 OS sort(_score+필드)를 금지하므로 정렬을
-        # 클라이언트에서 한다 — 정규화 융합 점수(similarity) desc, 동점은 id asc 로 결정적.
-        rows.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
-        if cutoff_enabled and rows:
-            # 적합도 게이트(023): 정규화 랭킹은 불변, probe 신호로 버킷 유지/비움만 결정(FR-001·003).
-            # 게이트 off(기본)면 probe 미호출·버킷 그대로 — 021/022 동작 보존(회귀 0). 이미 빈 버킷
-            # (rows==[])은 probe 해도 결과가 빈 채이므로 단락해 불필요한 모달리티당 +1 kNN IO 를 아낀다.
-            top, mean = probe_fn(
-                client, query_vector, modality_values=values, k=cutoff_probe_k,
-                index=index, exclude_medical=exclude_medical,
-            )
-            if not passes_cutoff(top, mean, eps=cutoff_eps, floor=cutoff_floor):
-                rows = []  # no-match: 무관 결과 표출 대신 빈 버킷
-        buckets[label] = rows
-    return buckets
+        bm25_body = build_bm25_body(
+            query, modality_values=values, k=int(k),
+            operator=bm25_operator, exclude_medical=exclude_medical,
+        )
+        msearch_body.extend(({"index": index}, knn_body, {"index": index}, bm25_body))
+
+    resp = client.msearch(body=msearch_body)  # OS 미도달 예외 그대로 전파(FR-007)
+    responses = (resp or {}).get("responses") or []
+
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    gate_meta: dict[str, dict[str, Any]] = {}
+    for i, label in enumerate(labels):
+        knn_hits = _resp_hits(responses[2 * i]) if 2 * i < len(responses) else []
+        bm25_hits = _resp_hits(responses[2 * i + 1]) if 2 * i + 1 < len(responses) else []
+
+        fused = fuse_hybrid(bm25_hits, knn_hits, weights=weights)
+        # 게이트 신호는 kNN 원시 코사인 표본에서 직접(probe 추가 호출 0 — 같은 표본 재사용).
+        knn_cosines = [knn_score_to_cosine(h.get("_score")) for h in knn_hits]
+        top, baseline = gate_signal(knn_cosines)
+
+        if not cutoff_enabled:
+            # 디버그 우회: 게이트·per-result 컷 모두 off → 융합 전체 노출.
+            kept = fused
+            gate_passed = True
+        else:
+            gate_passed = passes_cutoff(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
+            # 게이트 통과면 per-result 컷, 실패면 빈 버킷(no-match).
+            kept = cut_rows(fused, result_floor=result_floor) if gate_passed else []
+
+        cut_count = len(fused) - len(kept)  # 게이트·컷으로 제거된 행 수(상한 절삭 제외 — 컷 효과만).
+        # 내부키(_cos·_bm25) 제거 + 요청 k 상한(응답 동형·구 size=k 계약 보존).
+        clean = [
+            {key: val for key, val in row.items() if key not in ("_cos", "_bm25")}
+            for row in kept[: int(k)]
+        ]
+        buckets[label] = clean
+        gate_meta[label] = {
+            "top": top, "baseline": baseline, "gate_passed": gate_passed, "cut_count": cut_count,
+        }
+    return buckets, gate_meta
 
 
 def get_client(url: str | None = None) -> Any:
