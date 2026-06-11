@@ -5,6 +5,10 @@
 복원하고, 'valid' 판정 자산의 합집합을 그 질의의 정답(IR 풀링 관례)으로 둔다. partial 은 별도 보존.
 absent 질의는 `expect_empty: true`. 토픽 태그(coverage guard 용)는 코퍼스 파일명 슬러그 1토큰 기준.
 
+⚠️ 운영 규칙: fixture 의 ``topics`` 는 손수정 금지 — 본 빌더의 ``_QUERY_TOPICS`` 가 정본이며 재생성으로만
+갱신한다(이중 보유 divergence 방지). coverage guard(RUN_OS_E2E) 실패 시 고칠 곳도 여기다: 신규 토픽
+질의를 judgments 에 추가·판정 후 ``_QUERY_TOPICS`` 에 토픽을 등재하고 재생성한다.
+
 읽기 전용(헌법 6조)·temperature 무관(임베딩 결정적) — 같은 코퍼스에서 2회 실행 동일 출력.
 
 실행: conda run -n AuroraFS python scripts/build_golden_os.py
