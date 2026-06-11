@@ -251,6 +251,18 @@ def search_hybrid(
         cfg = None
     backend_name = backend if backend is not None else getattr(cfg, "search_backend", "pg")
 
+    # 024: per-result 적합도 임계는 backend 별 스케일이 다르다 — OS 정규화 융합 점수(min-max·top≈1.0)
+    # 에 PG 코사인 스케일 min_scores(image 0.25 등)를 적용하면 사실상 무필터라 노이즈 꼬리가 남는다.
+    # OS 경로는 settings 의 OS 전용 임계(search_os_min_scores, SEARCH_OS_MIN_SCORE_*)가 전달
+    # min_scores 를 **대체**하고(명시 인자 우선 관례의 의도적 예외 — 운영 진입점이 PG 스케일 값을
+    # 그대로 넘기기 때문), pg 경로·settings 미초기화(폴백)는 전달 min_scores 그대로 둔다(회귀 0 —
+    # FR-002). 단 **명시 빈 dict({})는 "필터 비활성" 센티넬**로 존중한다 — no_cutoff 디버그 경로
+    # (sample_search_api)가 OS 백엔드에서도 약한 후보까지 노출할 수 있어야 하므로(리뷰 후속).
+    if backend_name == "opensearch" and min_scores != {}:
+        effective_min_scores = getattr(cfg, "search_os_min_scores", None) or min_scores
+    else:
+        effective_min_scores = min_scores
+
     if backend_name == "opensearch":
         # 022: text·audio·image·video 전 모달리티를 OS(020 인덱스)로 검색(PG CLIP·LLM 미접촉).
         # OS 미도달 예외는 전파(FR-007). PG 전용 인자(structured·alpha·fusion·query_model_name·
@@ -278,11 +290,11 @@ def search_hybrid(
             chunk_agg=chunk_agg,
             include_visual=include_visual,
         )
-    # ⚠️ min_scores 는 PG 코사인/alpha 스케일로 보정된 값이다. backend='opensearch' 의 OS 버킷
-    # similarity 는 정규화 융합 점수(결과셋 내 min-max·top≈1.0)라 스케일이 달라 같은 임계가 과/소
-    # 필터를 유발할 수 있다 — 기본(None)·KPI 경로는 무영향, OS 전용 컷오프 보정은 후속(spec Non-Goals).
+    # per-result 적합도 필터: backend 별 스케일로 해소된 effective_min_scores 를 적용한다(024).
+    # OS=정규화 점수 스케일(search_os_min_scores)·pg=전달 min_scores(PG 코사인 스케일) — 위 backend
+    # 분기에서 결정. 0.0(미설정)이면 비활성(_filter_by_min_score 원본 반환).
     results = {
-        key: _filter_by_min_score(grouped.get(key, []), (min_scores or {}).get(label, 0.0))
+        key: _filter_by_min_score(grouped.get(key, []), (effective_min_scores or {}).get(label, 0.0))
         for label, key in label_keys
     }
     return {"query": query, "results": results, "meta": grouped.get("meta", {})}
