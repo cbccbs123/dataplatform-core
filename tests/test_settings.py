@@ -274,9 +274,10 @@ class TestSearchOsResultFloor(unittest.TestCase):
 class TestSearchOsBm25Operator(unittest.TestCase):
     """025 G1: BM25 operator 설정 — 기본 'or'(현행·회귀 0), 'and'=전토큰 매칭(F2). 화이트리스트 fail-fast."""
 
-    def test_default_or(self) -> None:
+    def test_default_and(self) -> None:
+        # 027 리뷰 후속: 기본값 = 운영 검증값 'and'(F1 — 코드 기본=운영 보정값·어휘 구제 전제).
         with _env():
-            self.assertEqual(_build_settings("dev").search_os_bm25_operator, "or")
+            self.assertEqual(_build_settings("dev").search_os_bm25_operator, "and")
 
     def test_override_and(self) -> None:
         with _env(SEARCH_OS_BM25_OPERATOR="and"):

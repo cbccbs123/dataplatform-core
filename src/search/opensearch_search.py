@@ -24,6 +24,7 @@ kNN 0), ② 게이트(``gate_signal``)·per-result 컷(``cut_rows``)이 **코사
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable, Collection, Iterable
 from typing import Any
@@ -349,9 +350,21 @@ def embed_query(query: str, *, channel: str) -> list[float]:
     return embed_query_for_media_search(query, model_name=model_for_channel(channel))
 
 
-def _resp_hits(resp: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """msearch 한 서브검색 응답에서 hits 리스트를 안전 추출한다(None·누락 방어)."""
-    return ((resp or {}).get("hits") or {}).get("hits") or []
+_LOG = logging.getLogger(__name__)
+
+
+def _resp_hits(resp: dict[str, Any] | None) -> tuple[list[dict[str, Any]], bool]:
+    """msearch 한 서브검색 응답에서 (hits, 오류여부)를 안전 추출한다(None·누락 방어).
+
+    msearch 는 HTTP 200 이어도 서브검색별로 ``{"error": …}`` 를 돌려줄 수 있다 — 이를 조용히
+    빈 결과로 격하하면 **부분 실패가 no-match 와 구분 불가**해진다(FR-007 관측성·silent 폴백
+    금지 취지). 오류 여부를 함께 돌려 호출부가 gate_meta 에 표식·로그를 남긴다(리뷰 후속).
+    """
+    if not resp:
+        return [], True  # 응답 누락(배열 짧음 등)도 오류로 본다
+    if resp.get("error"):
+        return [], True
+    return (((resp.get("hits") or {}).get("hits")) or []), False
 
 
 def search_assets_os(
@@ -426,8 +439,14 @@ def search_assets_os(
     buckets: dict[str, list[dict[str, Any]]] = {}
     gate_meta: dict[str, dict[str, Any]] = {}
     for i, label in enumerate(labels):
-        knn_hits = _resp_hits(responses[2 * i]) if 2 * i < len(responses) else []
-        bm25_hits = _resp_hits(responses[2 * i + 1]) if 2 * i + 1 < len(responses) else []
+        knn_hits, knn_err = _resp_hits(responses[2 * i] if 2 * i < len(responses) else None)
+        bm25_hits, bm25_err = _resp_hits(
+            responses[2 * i + 1] if 2 * i + 1 < len(responses) else None
+        )
+        sub_error = knn_err or bm25_err
+        if sub_error:
+            # 부분 실패는 빈 버킷(no-match)과 구분돼야 한다 — meta 표식 + 경고 로그(FR-007).
+            _LOG.warning("msearch 서브검색 부분 실패 modality=%s knn_err=%s bm25_err=%s", label, knn_err, bm25_err)
 
         # 융합 입력은 kNN **상위 k행만** — 게이트 표본(OS_KNN_SAMPLE_K)을 그대로 정규화에 쓰면
         # 분모가 넓어져 상위 경계(top-k) 순위가 흔들린다(서버 융합 시절의 결과셋 범위와 동치 유지).
@@ -445,11 +464,13 @@ def search_assets_os(
             gate_passed = passes_cutoff(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
             if gate_passed:
                 kept = cut_rows(fused, result_floor=result_floor)
-            elif has_lexical:
-                # 어휘 구제(027 정밀화): 코사인 게이트가 실패해도 BM25(전 토큰 어휘) 증거 행은
-                # 살린다 — 약한-있음 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음
-                # 보다 버킷 통계상 약해지는 역전을 행 단위 증거로 해소. 단 의미-노이즈 유입을 막기
-                # 위해 구제 시엔 **어휘 증거 행만** 남긴다(cos-only 행 배제).
+            elif has_lexical and bm25_operator == "and":
+                # 어휘 구제(027 정밀화): 코사인 게이트가 실패해도 BM25 증거 행은 살린다 — 약한-있음
+                # 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음보다 버킷 통계상
+                # 약해지는 역전을 행 단위 증거로 해소. 단 ① 의미-노이즈 유입을 막기 위해 구제 시엔
+                # **어휘 증거 행만** 남기고(cos-only 배제), ② **operator='and'(전 토큰 매칭)일 때만**
+                # 적용한다 — 'or' 매칭은 단일 토큰 우연 일치도 _bm25=True 라 증거 강도가 없어
+                # 무관 결과가 구제를 타고 누수된다(리뷰 후속 — 전제의 코드 강제).
                 kept = [r for r in fused if r.get("_bm25")]
             else:
                 kept = []  # 어휘 증거도 없음 → 빈 버킷(no-match)
@@ -463,7 +484,7 @@ def search_assets_os(
         buckets[label] = clean
         gate_meta[label] = {
             "top": top, "baseline": baseline, "gate_passed": gate_passed,
-            "lexical_evidence": has_lexical, "cut_count": cut_count,
+            "lexical_evidence": has_lexical, "cut_count": cut_count, "error": sub_error,
         }
     return buckets, gate_meta
 

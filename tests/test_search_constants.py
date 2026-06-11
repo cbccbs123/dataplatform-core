@@ -45,7 +45,7 @@ class SearchConstantsTest(unittest.TestCase):
 
     def test_bm25_operator_default_is_or(self) -> None:
         # 회귀 0(현행): 기본 multi_match operator 는 'or'(전 토큰 강제는 'and' 옵트인).
-        self.assertEqual(sc.OS_BM25_OPERATOR_DEFAULT, "or")
+        self.assertEqual(sc.OS_BM25_OPERATOR_DEFAULT, "and")
 
     def test_knn_sample_k_is_positive_int(self) -> None:
         # 게이트 표본 하한 — robust baseline(하위 절반 평균)이 의미 있으려면 충분한 표본이 필요하다.

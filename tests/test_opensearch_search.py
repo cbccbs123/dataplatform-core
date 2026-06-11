@@ -759,6 +759,37 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["similarity"], 0.5)
         self.assertAlmostEqual(rows[1]["similarity"], 0.0)
 
+    def test_lexical_rescue_requires_and_operator(self) -> None:
+        # 구제 전제의 코드 강제(리뷰 후속): operator='or' 매칭은 단일 토큰 우연 일치도 _bm25=True 라
+        # 증거 강도가 없다 — 'and' 가 아니면 게이트 실패 버킷은 구제 없이 빈 버킷이어야 한다.
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("n1", 0.70)]},
+            bm25_by_label={"text": [_bm25_hit_os("b1", 3.2)]},
+        )
+        buckets, meta = search_assets_os(
+            client, "질의", modalities=("text",), index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=True,
+            cutoff_eps=0.9, cutoff_floor=0.9, result_floor=0.99,
+            bm25_operator="or",  # 전제 불충족 → 구제 미적용
+        )
+        self.assertEqual(buckets["text"], [])
+        self.assertTrue(meta["text"]["lexical_evidence"])  # 증거는 있었으나 전제 미충족
+
+    def test_partial_failure_marked_in_meta(self) -> None:
+        # msearch 부분 실패(서브검색 error 객체)는 빈 버킷(no-match)과 구분돼야 한다(FR-007) —
+        # gate_meta["error"]=True 로 표식(운영자가 '오류로 빈 것'을 식별).
+        class _PartialFailClient:
+            def msearch(self, *, body=None, **_kw):
+                # [knn 응답=error, bm25 응답=정상 빈] 1개 모달리티 분량
+                return {"responses": [{"error": {"type": "search_phase_execution_exception"}},
+                                      {"hits": {"hits": []}}]}
+        buckets, meta = search_assets_os(
+            _PartialFailClient(), "질의", modalities=("text",), index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=True,
+        )
+        self.assertEqual(buckets["text"], [])
+        self.assertTrue(meta["text"]["error"])
+
     def test_lexical_rescue_keeps_only_bm25_rows_when_gate_fails(self) -> None:
         # 어휘 구제(027 정밀화): 코사인 게이트가 실패해도 BM25(전 토큰 어휘) 증거 행이 있으면
         # 버킷을 통째로 죽이지 않는다 — 단 구제 시엔 **어휘 증거 행만** 남긴다(의미-노이즈 배제).

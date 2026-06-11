@@ -633,13 +633,14 @@ class TestBackendOsBm25OperatorWiring(unittest.TestCase):
             )
         self.assertEqual(os_cap["bm25_operator"], "and")
 
-    def test_operator_falls_back_to_or_when_cfg_missing(self) -> None:
+    def test_operator_falls_back_to_constants_when_cfg_missing(self) -> None:
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
         search_hybrid(
             "질의", modalities=["text"], backend="opensearch",
             _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
         )
-        self.assertEqual(os_cap["bm25_operator"], "or")
+        # 폴백 = search_constants 단일 출처(027 리뷰 후속: 기본 'and' — 운영 검증값).
+        self.assertEqual(os_cap["bm25_operator"], "and")
 
 
 class TestBackendOpenSearchNoLLM(unittest.TestCase):
