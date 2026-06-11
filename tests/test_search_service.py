@@ -547,17 +547,40 @@ class TestBackendOsPerResultMinScore(unittest.TestCase):
 
     def test_opensearch_falls_back_to_passed_when_cfg_missing(self) -> None:
         # (c) settings 미초기화(cfg=None)·backend 명시 → 전달 min_scores 폴백(필터 동작 보존).
+        # 폴백 값 0.7 은 OS 기본 임계(image 0.45)와 결과가 갈리는 값 — 실 cfg 가 새어들면 ['hi'],
+        # 진짜 폴백이면 [](둘 다 제거)로 구분돼 폴백을 강하게 격리한다(리뷰 후속).
         fake_os, _cap = _recording_os(self._os_rows())
         out = search_hybrid(
             "질의",
             modalities=["image"],
             backend="opensearch",
-            min_scores={"image": 0.5},  # 폴백으로 이 값이 적용 → 0.4 제거
+            min_scores={"image": 0.7},  # 폴백으로 이 값이 적용 → 0.6·0.4 둘 다 제거
             _os_search_fn=fake_os,
             _os_client_fn=lambda: "C",
             _grouped_fn=_fake_grouped,
         )
-        self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi"])
+        self.assertEqual(out["results"]["image"], [])
+
+    def test_opensearch_empty_dict_sentinel_disables_filter(self) -> None:
+        # (d) 명시 빈 dict({}) = "필터 비활성" 센티넬(no_cutoff 디버그 경로) — OS 임계로 대체하지
+        # 않고 무필터로 약한 후보까지 노출한다(리뷰 후속: or 가 {} 를 삼키던 회귀 교정).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch",
+            search_os_min_scores={"text": 0.45, "image": 0.5, "video": 0.45, "audio": 0.4},
+        )
+        fake_os, _cap = _recording_os(self._os_rows())
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "질의",
+                modalities=["image"],
+                min_scores={},  # 명시 비활성 — OS 임계(0.5)가 적용되면 'lo' 가 잘려버림
+                _os_search_fn=fake_os,
+                _os_client_fn=lambda: "C",
+                _grouped_fn=_fake_grouped,
+            )
+        self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi", "lo"])
 
 
 class TestBackendOpenSearchNoLLM(unittest.TestCase):

@@ -251,9 +251,12 @@ def search_hybrid(
 
     # 024: per-result 적합도 임계는 backend 별 스케일이 다르다 — OS 정규화 융합 점수(min-max·top≈1.0)
     # 에 PG 코사인 스케일 min_scores(image 0.25 등)를 적용하면 사실상 무필터라 노이즈 꼬리가 남는다.
-    # OS 경로는 settings 의 OS 전용 임계(search_os_min_scores, SEARCH_OS_MIN_SCORE_*)로 대체하고,
-    # pg 경로·settings 미초기화(폴백)는 전달 min_scores 그대로 둔다(회귀 0 — FR-002).
-    if backend_name == "opensearch":
+    # OS 경로는 settings 의 OS 전용 임계(search_os_min_scores, SEARCH_OS_MIN_SCORE_*)가 전달
+    # min_scores 를 **대체**하고(명시 인자 우선 관례의 의도적 예외 — 운영 진입점이 PG 스케일 값을
+    # 그대로 넘기기 때문), pg 경로·settings 미초기화(폴백)는 전달 min_scores 그대로 둔다(회귀 0 —
+    # FR-002). 단 **명시 빈 dict({})는 "필터 비활성" 센티넬**로 존중한다 — no_cutoff 디버그 경로
+    # (sample_search_api)가 OS 백엔드에서도 약한 후보까지 노출할 수 있어야 하므로(리뷰 후속).
+    if backend_name == "opensearch" and min_scores != {}:
         effective_min_scores = getattr(cfg, "search_os_min_scores", None) or min_scores
     else:
         effective_min_scores = min_scores
