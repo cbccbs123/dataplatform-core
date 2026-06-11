@@ -232,6 +232,29 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestSearchOsRerank(unittest.TestCase):
+    """028: rerank 설정 4종 — 기본 off·fail-fast(τ∈[0,1]·R≥1)."""
+
+    def test_defaults(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.search_os_rerank_enabled, False)
+        self.assertEqual(s.search_os_rerank_model, "BAAI/bge-reranker-v2-m3")
+        self.assertEqual(s.search_os_rerank_top_r, 10)
+
+    def test_override_and_fail_fast(self) -> None:
+        with _env(SEARCH_OS_RERANK_ENABLED="true", SEARCH_OS_RERANK_TAU="0.1"):
+            s = _build_settings("dev")
+        self.assertIs(s.search_os_rerank_enabled, True)
+        self.assertEqual(s.search_os_rerank_tau, 0.1)
+        with _env(SEARCH_OS_RERANK_TAU="1.5"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+        with _env(SEARCH_OS_RERANK_TOP_R="0"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestSearchOsResultFloor(unittest.TestCase):
     """027: OS per-result 컷 코사인 하한 ``search_os_result_floor`` — 024 정규화 스케일 4종을 대체.
 

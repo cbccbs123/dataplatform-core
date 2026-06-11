@@ -150,6 +150,11 @@ def _grouped_via_opensearch(
         result_floor=getattr(cfg, "search_os_result_floor", search_constants.OS_RESULT_FLOOR_DEFAULT),
         # 025: BM25 operator — 'and' 면 전 토큰 매칭(F2 복합어 가짜매칭 차단). 미초기화 폴백 'or'(현행).
         bm25_operator=getattr(cfg, "search_os_bm25_operator", search_constants.OS_BM25_OPERATOR_DEFAULT),
+        # 028: rerank 평가 설정(기본 off — 회귀 0). on 이면 게이트·컷을 대체하는 평가 경로.
+        rerank_enabled=getattr(cfg, "search_os_rerank_enabled", search_constants.OS_RERANK_ENABLED_DEFAULT),
+        rerank_top_r=getattr(cfg, "search_os_rerank_top_r", search_constants.OS_RERANK_TOP_R_DEFAULT),
+        rerank_tau=getattr(cfg, "search_os_rerank_tau", search_constants.OS_RERANK_TAU_DEFAULT),
+        rerank_model=getattr(cfg, "search_os_rerank_model", search_constants.OS_RERANK_MODEL_DEFAULT),
     )  # client.msearch 미도달 예외도 전파(FR-007)
     # meta 에 게이트 관측성(os_gate) 합류 — 빈 버킷이 no-match 판정인지 즉시 확인(F4).
     grouped: dict[str, Any] = {"meta": {"backend": "opensearch", "os_gate": gate_meta}}

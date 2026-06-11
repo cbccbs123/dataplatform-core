@@ -739,6 +739,47 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertNotIn("n1", kept_ids)  # cos<floor·BM25 미매칭 → 컷
         self.assertNotIn("low", kept_ids)
 
+    def test_rerank_replaces_gate_and_cut(self) -> None:
+        # 028 평가 경로: rerank_enabled 면 게이트·컷 대신 — 융합 상위 R건을 쌍 채점해 τ 이상만
+        # 유지·점수로 재정렬(similarity=rerank 점수·절대 0~1). 순수 A/B 를 위해 게이트 신호와 무관.
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("a", 0.40), _knn_hit_os("b", 0.39),
+                                   _knn_hit_os("c", 0.38)]},  # 게이트라면 컷됐을 약신호
+            bm25_by_label={"text": []},
+        )
+        def fake_rerank(query, texts, *, model_name):
+            # 요약 문구로 점수 차등: a=0.9, b=0.01(τ 미달), c=0.6
+            table={"요약 a":0.9, "요약 b":0.01, "요약 c":0.6}
+            return [table[t] for t in texts]
+        buckets, meta = search_assets_os(
+            client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,  # 게이트는 무시돼야 함
+            rerank_enabled=True, rerank_top_r=10, rerank_tau=0.05,
+            rerank_model="가짜", rerank_fn=fake_rerank,
+        )
+        rows=buckets["text"]
+        self.assertEqual([r["id"] for r in rows], ["a", "c"])  # τ=0.05: b 제외, 점수 내림차순
+        self.assertAlmostEqual(rows[0]["similarity"], 0.9)
+        self.assertTrue(meta["text"]["rerank"]["enabled"])
+        self.assertEqual(meta["text"]["rerank"]["scored"], 3)
+        self.assertEqual(meta["text"]["rerank"]["kept"], 2)
+
+    def test_rerank_disabled_is_027_identical(self) -> None:
+        # 회귀 0: rerank 기본 off 면 027 경로(게이트·컷) 그대로 — rerank_fn 미호출.
+        calls=[]
+        def boom(query, texts, *, model_name):
+            calls.append(1); return [1.0]*len(texts)
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("t1", 0.85)]},
+            bm25_by_label={"text": [_bm25_hit_os("t1", 9.0)]},
+        )
+        buckets, meta = search_assets_os(
+            client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            rerank_fn=boom,
+        )
+        self.assertEqual(calls, [])
+        self.assertNotIn("rerank", meta["text"])
+
     def test_fusion_uses_topk_knn_rows_not_gate_sample(self) -> None:
         # 융합 입력은 kNN **상위 k행만**(서버 융합 시절의 결과셋 범위와 동치) — 게이트 표본(50)을
         # 그대로 정규화에 쓰면 분모가 넓어져 상위 경계 순위가 흔들린다(골든 실측 -0.008 회귀 교정).

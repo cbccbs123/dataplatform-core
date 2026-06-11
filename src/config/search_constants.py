@@ -37,6 +37,14 @@ OS_BM25_OPERATOR_DEFAULT: str = "and"
 # 충분한 표본에서 안정되게 한다(요청 k 가 작아도 background 추정이 흔들리지 않게).
 OS_KNN_SAMPLE_K: int = 50
 
+# ── reranker 평가(028) 기본값 — cross-encoder 쌍별 절대 판정(추론만·헌법 1조 inference-only) ──
+# 기본 off(회귀 0 — 평가 opt-in). 모델은 다국어 cross-encoder(한국어 포함), τ 는 쌍별 절대 점수
+# (sigmoid 0~1) 하한 — **모델 기준 1회 보정**(쌍 점수는 코퍼스 불변이라 코퍼스 추적 재보정 불필요).
+OS_RERANK_ENABLED_DEFAULT: bool = False
+OS_RERANK_MODEL_DEFAULT: str = "BAAI/bge-reranker-v2-m3"
+OS_RERANK_TOP_R_DEFAULT: int = 10   # 모달리티당 채점 후보 상한(지연 통제)
+OS_RERANK_TAU_DEFAULT: float = 0.05  # G4 로짓 스윕으로 확정 예정(잠정 — 파일럿 분포 기준)
+
 __all__ = [
     "OS_BM25_OPERATOR_DEFAULT",
     "OS_CUTOFF_ENABLED_DEFAULT",
@@ -45,4 +53,8 @@ __all__ = [
     "OS_FUSION_WEIGHTS_DEFAULT",
     "OS_KNN_SAMPLE_K",
     "OS_RESULT_FLOOR_DEFAULT",
+    "OS_RERANK_ENABLED_DEFAULT",
+    "OS_RERANK_MODEL_DEFAULT",
+    "OS_RERANK_TOP_R_DEFAULT",
+    "OS_RERANK_TAU_DEFAULT",
 ]

@@ -31,6 +31,10 @@ from typing import Any
 
 from src.config.search_constants import (
     OS_BM25_OPERATOR_DEFAULT,
+    OS_RERANK_ENABLED_DEFAULT,
+    OS_RERANK_MODEL_DEFAULT,
+    OS_RERANK_TAU_DEFAULT,
+    OS_RERANK_TOP_R_DEFAULT,
     OS_CUTOFF_ENABLED_DEFAULT,
     OS_CUTOFF_EPS_DEFAULT,
     OS_CUTOFF_FLOOR_DEFAULT,
@@ -383,6 +387,11 @@ def search_assets_os(
     cutoff_floor: float = OS_CUTOFF_FLOOR_DEFAULT,
     result_floor: float = OS_RESULT_FLOOR_DEFAULT,
     bm25_operator: str = OS_BM25_OPERATOR_DEFAULT,
+    rerank_enabled: bool = OS_RERANK_ENABLED_DEFAULT,
+    rerank_top_r: int = OS_RERANK_TOP_R_DEFAULT,
+    rerank_tau: float = OS_RERANK_TAU_DEFAULT,
+    rerank_model: str = OS_RERANK_MODEL_DEFAULT,
+    rerank_fn: Callable[..., list[float]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
 
@@ -456,6 +465,34 @@ def search_assets_os(
         top, baseline = gate_signal(knn_cosines)
 
         has_lexical = any(r.get("_bm25") for r in fused)
+        if rerank_enabled:
+            # 028 평가 경로: cross-encoder 쌍별 절대 판정이 게이트·컷을 **대체**한다(순수 A/B —
+            # 효과 귀속이 명확하도록 코사인 통계 판정과 섞지 않는다). 융합 상위 R건을 (질의,
+            # summary) 쌍으로 채점 → τ 이상만 유지·점수 내림차순(동점 id) 재정렬. similarity 는
+            # rerank 점수(0~1 절대 — 쌍 단독·코퍼스 불변)로 교체된다(응답 동형 유지).
+            if rerank_fn is None:
+                from src.search.reranker import score_pairs as rerank_fn  # noqa: PLW2901 — lazy 기본 seam
+            cands = fused[: int(rerank_top_r)]
+            scores = rerank_fn(query, [str(r.get("summary") or "") for r in cands], model_name=rerank_model)
+            scored = [
+                {**r, "similarity": float(sc)} for r, sc in zip(cands, scores) if float(sc) >= rerank_tau
+            ]
+            scored.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
+            kept = scored
+            gate_passed = bool(kept)
+            cut_count = len(fused) - len(kept)
+            clean = [
+                {key: val for key, val in row.items() if key not in ("_cos", "_bm25")}
+                for row in kept[: int(k)]
+            ]
+            buckets[label] = clean
+            gate_meta[label] = {
+                "top": top, "baseline": baseline, "gate_passed": gate_passed,
+                "lexical_evidence": has_lexical, "cut_count": cut_count, "error": sub_error,
+                "rerank": {"enabled": True, "scored": len(cands), "kept": len(kept),
+                           "top": (max(scores) if scores else 0.0)},
+            }
+            continue
         if not cutoff_enabled:
             # 디버그 우회: 게이트·per-result 컷 모두 off → 융합 전체 노출.
             kept = fused

@@ -55,3 +55,13 @@ class SearchConstantsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RerankConstantsTest(unittest.TestCase):
+    """028: rerank 평가 기본값 — 기본 off(회귀 0)·모델·R·τ 단일 출처."""
+
+    def test_rerank_defaults(self) -> None:
+        self.assertIs(sc.OS_RERANK_ENABLED_DEFAULT, False)
+        self.assertEqual(sc.OS_RERANK_MODEL_DEFAULT, "BAAI/bge-reranker-v2-m3")
+        self.assertEqual(sc.OS_RERANK_TOP_R_DEFAULT, 10)
+        self.assertIsInstance(sc.OS_RERANK_TAU_DEFAULT, float)

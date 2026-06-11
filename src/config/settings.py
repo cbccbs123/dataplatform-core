@@ -89,6 +89,11 @@ class PipelineSettings:
     # 대체하는 전역 1개 — 행 유지 = BM25 매칭 OR 원시 코사인 ≥ 이 값.
     # 범위 [−1,1] 밖은 _resolve_os_result_floor 가 _build_settings 시점에 즉시 ValueError(fail-fast).
     search_os_result_floor: float
+    # 028: reranker 평가(쌍별 절대 판정·추론만). 기본 off — 평가 opt-in(회귀 0). τ∈[0,1]·R≥1 fail-fast.
+    search_os_rerank_enabled: bool
+    search_os_rerank_model: str
+    search_os_rerank_top_r: int
+    search_os_rerank_tau: float
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
@@ -342,6 +347,22 @@ def resolve_opensearch_filename_noise_patterns() -> tuple[str, ...]:
     return tuple(pats)
 
 
+def _resolve_os_rerank_top_r() -> int:
+    """rerank 후보 상한(028). 기본 search_constants 단일 출처. 1 미만은 즉시 ValueError(fail-fast)."""
+    value = _env_int_default("SEARCH_OS_RERANK_TOP_R", search_constants.OS_RERANK_TOP_R_DEFAULT)
+    if value < 1:
+        raise ValueError(f"rerank top_r 범위 오류: SEARCH_OS_RERANK_TOP_R={value!r} (>=1)")
+    return value
+
+
+def _resolve_os_rerank_tau() -> float:
+    """rerank 쌍별 점수 하한 τ(028). 범위 [0,1] 밖은 즉시 ValueError(fail-fast)."""
+    value = _env_float_default("SEARCH_OS_RERANK_TAU", search_constants.OS_RERANK_TAU_DEFAULT)
+    if not (0.0 <= value <= 1.0):
+        raise ValueError(f"rerank tau 범위 오류: SEARCH_OS_RERANK_TAU={value!r} (0<=tau<=1)")
+    return value
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return PipelineSettings(
         profile=profile,
@@ -397,6 +418,15 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_os_cutoff_floor=_resolve_os_cutoff_floor(),
         # 027: OS per-result 컷 코사인 하한(024 정규화 스케일 4종을 단일 코사인 임계로 대체).
         search_os_result_floor=_resolve_os_result_floor(),
+        # 028: rerank 평가 설정(기본 off — 평가 opt-in).
+        search_os_rerank_enabled=_env_bool_default(
+            "SEARCH_OS_RERANK_ENABLED", search_constants.OS_RERANK_ENABLED_DEFAULT
+        ),
+        search_os_rerank_model=_env_str_default(
+            "SEARCH_OS_RERANK_MODEL", search_constants.OS_RERANK_MODEL_DEFAULT
+        ),
+        search_os_rerank_top_r=_resolve_os_rerank_top_r(),
+        search_os_rerank_tau=_resolve_os_rerank_tau(),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),
         # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.
