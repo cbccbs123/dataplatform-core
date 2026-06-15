@@ -1,3 +1,19 @@
+"""CLIP 시각/언어 임베딩 seam — CLIP 추론(학습 배제·inference only).
+
+두 역할을 한 모델로 묶는다(같은 임베딩 공간이라 가능):
+  - 인덱싱 측: 이미지/키프레임을 CLIP 이미지 인코더로 벡터화(``src/skills/image_skill.py``·
+    ``video_embedder``). 동시에 VLM 이 준 한글 후보 라벨로 제로샷 점수도 매긴다(이미지 인코딩 1회 재사용).
+  - 검색 측: 텍스트 질의를 CLIP **텍스트** 인코더로 벡터화(``embed_clip_text_query_for_image_search``),
+    DB의 CLIP 이미지 벡터와 같은 공간에서 비교(``src/search/media_search.py``).
+
+따라서 적재·검색이 동일 ``model_name``(기본 ``DEFAULT_CLIP_MODEL_NAME``)을 써야 한다.
+모든 출력 벡터는 ``clip_image_row_to_embedding_1536`` 으로 DB ``vector(1536)`` 에 맞춘다
+(CLIP 기본 차원은 512라 뒤를 0 패딩 — 헌법 1536D 통일).
+
+``coerce_clip_*_feature_tensor`` 군은 transformers 버전마다 ``get_*_features`` 반환형이
+텐서/``BaseModelOutput``(pooler·last_hidden_state)로 갈리는 것을 흡수하는 호환 셈이다.
+"""
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -95,6 +111,9 @@ def coerce_clip_text_feature_tensor(
         return apply_clip_projection_or_pass(proj, pooler)
     last = getattr(feat, "last_hidden_state", None)
     if last is not None:
+        # CLIP 텍스트 풀링은 마지막 실제 토큰(EOT) 위치의 hidden state를 쓴다.
+        # 패딩이 섞이므로 attention_mask 로 시퀀스 실길이를 구해 그 위치를 골라야 한다
+        # (mask 없으면 [-1] 가정). pooler_output 이 없는 transformers 버전용 폴백 경로.
         if attention_mask is not None:
             seq_lens = (attention_mask.long().sum(dim=1) - 1).clamp(min=0)
             b = torch.arange(last.size(0), device=last.device, dtype=torch.long)

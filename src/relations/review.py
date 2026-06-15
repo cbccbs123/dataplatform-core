@@ -64,10 +64,20 @@ def _decide_edge(conn: Connection[Any], *, edge_id: str, reviewer: str, status: 
 
 
 def approve_edge(conn: Connection[Any], *, edge_id: str, reviewer: str) -> bool:
+    """proposed 엣지를 active 로 승인 — 이후 graph_query 의 status='active' 필터에 잡혀 그래프에 노출된다.
+
+    1행 갱신 시 True(계약·멱등·proposed 가드는 ``_decide_edge`` 참조).
+    """
     return _decide_edge(conn, edge_id=edge_id, reviewer=reviewer, status="active")
 
 
 def reject_edge(conn: Connection[Any], *, edge_id: str, reviewer: str) -> bool:
+    """proposed 엣지를 rejected 로 반려 — **소프트**(삭제 아님, status 전이만)라 status 필터에서 빠질 뿐 행은 남는다.
+
+    이 rejected 결정은 사람의 판단이므로, 이후 LLM 이 같은 쌍을 재제안해도
+    ``sync_graph_edges`` 의 ON CONFLICT 가 status 를 덮지 않아 rejected 가 보존된다(부활 방지).
+    1행 갱신 시 True(계약은 ``_decide_edge`` 참조).
+    """
     return _decide_edge(conn, edge_id=edge_id, reviewer=reviewer, status="rejected")
 
 

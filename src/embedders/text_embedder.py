@@ -1,3 +1,15 @@
+"""텍스트 임베딩 seam — SentenceTransformer 추론(학습 배제·inference only).
+
+per-asset 파이프라인의 ST 채널 벡터를 여기서 만든다: 텍스트/오디오(STT) 본문 청크와
+이미지/영상의 VLM 텍스트(캡션·키워드·라벨)가 모두 이 모듈을 거친다(``src/skills/*_skill.py``).
+검색 쿼리 측(``src/search/media_search.py``)도 동일 함수(``embed_texts``·
+``pad_embedding_to_storage_dim``)를 공유한다 — 인덱싱과 질의가 같은 벡터 공간이어야
+코사인 유사도가 성립하기 때문이다. 따라서 모델 체크포인트는 적재·검색이 동일해야 한다.
+
+모든 출력 벡터는 ``pad_embedding_to_storage_dim`` 으로 DB ``vector(1536)`` 차원에 맞춘다
+(헌법: 1536D 통일·PG17+pgvector). 본문 텍스트 자체는 DB에 저장하지 않고 벡터만 적재한다.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
@@ -58,6 +70,11 @@ def embed_texts(
     model_name: str,
     normalize_embeddings: bool = True,
 ) -> list[list[float]]:
+    """문자열 배치를 그대로 ST 인코딩하는 저수준 seam(패딩 전·청크 분할 없음).
+
+    인덱싱(skills)과 검색 쿼리(media_search)가 함께 호출하는 지점 — 양측이 같은
+    ``model_name``·``normalize_embeddings`` 를 줘야 벡터 공간이 일치한다.
+    """
     if not texts:
         return []
     model = get_embedding_model(model_name)
@@ -75,6 +92,8 @@ def _iter_nonempty_chunks(
     encoding: str,
     chunk_size: int,
 ) -> Iterator[tuple[int, str]]:
+    # idx 는 빈 청크를 건너뛴 뒤의 연속 번호(0,1,2,…) — 원본 문서상의 청크 위치가 아니다.
+    # DB persist 가 chunk_index 로 청크를 식별하므로 빈틈 없는 0-based 순번을 보장한다.
     kind = normalize_file_kind(file_kind)
     if kind is None:
         raise ValueError("file_kind는 필수입니다.")

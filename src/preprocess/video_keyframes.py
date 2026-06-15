@@ -1,3 +1,11 @@
+"""영상 → 장면 단위 대표 키프레임(메모리 JPEG) 추출.
+
+PySceneDetect 의 ``ContentDetector`` 로 컷(장면 전환)을 찾아 각 장면의 중앙 시점 프레임을
+OpenCV 로 읽어 JPEG bytes 로 인코딩한다. 파일로 저장하지 않고 메모리에서 바로 image_skill
+(CLIP 라벨·VLM 요약)으로 넘겨 영상의 키프레임 임베딩·검색에 쓰기 위한 전처리다.
+``extract_video_basic_meta`` 는 별도로 duration/fps/해상도만 뽑는다.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -87,6 +95,10 @@ def extract_video_representative_frame_bytes(
     영상에서 장면(Scene) 단위 대표 프레임(중앙 시점) JPEG bytes를 반환한다.
 
     파일로 저장하지 않고 메모리에서 바로 후속 요약 파이프라인에 연결할 때 사용한다.
+
+    장면이 하나도 안 잡히면(단일 컷·아주 짧은 영상 등) 영상 중앙 1프레임만 ``scene_index=1`` 로
+    돌려준다. ``max_frames`` 는 장면 수 상한(앞에서부터 자름). 프레임을 못 읽거나 JPEG 인코딩에
+    실패한 장면은 건너뛴다(예외로 중단하지 않음).
     """
     src = Path(video_path)
     if not src.is_file():

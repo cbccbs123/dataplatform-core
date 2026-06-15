@@ -418,12 +418,20 @@ def _finite_float(value: object, default: float = 0.0) -> float:
 
 
 def _saturating_bm25(raw_bm25: object, *, k: float = BM25_SATURATION_K) -> float:
+    """원시 BM25(``ts_rank_cd``)를 ``x/(x+k)`` 로 포화 정규화한다(0~1 단조·결정적).
+
+    수식·상수 의미는 ``BM25_SATURATION_K`` 주석 참조(bm25==k 일 때 0.5). 방어적으로 음수 입력은
+    0 으로, ``k`` 는 1e-9 로 바닥 클램프해 0 나눗셈을 막는다(ts_rank_cd 는 비음수이나 견고성용)."""
     x = max(_finite_float(raw_bm25, 0.0), 0.0)
     kk = max(_finite_float(k, BM25_SATURATION_K), 1e-9)
     return x / (x + kk)
 
 
 def _sanitize_hybrid_search_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """드라이버가 돌려준 행을 결과 계약(시각 2단계 경로와 동형)으로 제자리 정규화한다.
+
+    자산 id 는 ``str(UUID)`` 로, 수치 필드(similarity·emb_score·bm25_*)는 NaN/inf/None 을
+    ``_finite_float`` 로 유한 실수화, candidate_count 는 int 로 통일한다(JSON 직렬화·키 비교 일관)."""
     for r in rows:
         # psycopg 가 asset_id 를 uuid.UUID 로 반환하므로 결과 계약(시각 2단계 경로와 동일)상
         # 자산 id 를 항상 str(UUID) 로 통일한다(JSON 직렬화·키 비교 일관).
@@ -692,6 +700,10 @@ def _two_stage_load_bm25_for_ids(
     query_ko: str,
     ids: list[str],
 ) -> dict[str, float]:
+    """후보 id 들의 ``search_vector`` FTS 점수(``ts_rank_cd``)를 ``query_ko`` 기준으로 일괄 조회한다.
+
+    시각 2단계의 병합 후보(ST + CLIP-단독)에 한국어 질의 BM25 를 다시 붙이는 단계다 — id→bm25
+    매핑을 돌려주고, 없는 id 는 호출부가 0 으로 채운다. 빈 ids 면 쿼리를 생략하고 빈 dict."""
     if not ids:
         return {}
     bm25_by_id: dict[str, float] = {}
@@ -712,6 +724,9 @@ def _two_stage_load_bm25_for_ids(
 
 
 def _summaries_for_media_item_ids(ids: list[str]) -> dict[str, str]:
+    """자산 id 목록의 요약(``asset_metadata.ext_meta->>'summary'``)을 한 쿼리로 조회한다(id→summary).
+
+    최종 상위 행에 ``summary`` 를 채우는 용도(없는 id 는 호출부가 빈 문자열). 빈 ids 면 빈 dict."""
     if not ids:
         return {}
     db = PostgresUtil()

@@ -1,20 +1,12 @@
 """
-음성 파일 → 텍스트(STT).
+음성 파일 → 텍스트(STT). 온프레미스 로컬 추론만 사용한다(외부 API 미호출).
 
-OpenAI 호환 ``/v1/audio/transcriptions`` 엔드포인트를 사용한다.
-(``get_current_settings()``의 ``openai_base_url`` / ``openai_api_key``)
+``faster-whisper``(CTranslate2 백엔드)로 Whisper 모델을 로컬에서 돌린다. 기본은 한국어(``ko``),
+``small`` 모델, CPU + ``int8`` 양자화이며, 인자로 GPU(``cuda``/``float16``)·모델 크기를 바꿀 수 있다.
+``vad_filter=True`` 로 무음 구간을 걸러 환각을 줄이고, 모델이 낸 세그먼트 텍스트를 공백으로 이어
+'전체 텍스트'만 돌려준다(타임스탬프·세그먼트 경계는 보존하지 않음).
 
-대표 구간(“어디가 핵심 발화인가?”)은 보통 아래처럼 나눈다.
-
-1. **Whisper 세그먼트(이 모듈)** — ``verbose_json`` + ``timestamp_granularities`` 로
-   구간별 텍스트·시간이 오면, 가장 긴 구간·텍스트가 많은 구간 등으로 고른다.
-2. **VAD** — WebRTC VAD, silero-vad, pyannote 등으로 음성 구간만 잘라낸 뒤
-   그 구간만 STT하거나, 가장 긴 음성 구간을 “대표”로 쓴다.
-3. **에너지/RMS** — 짧은 윈도우 RMS가 높은 구간을 후보로 쓰는 휴리스틱(가벼움, 부정확할 수 있음).
-4. **ffmpeg silencedetect** — 무음 구간 경계로 쪼갠 뒤 가장 긴 덩어리 선택.
-
-게이트웨이가 세그먼트 타임스탬프를 지원하지 않으면 ``segments`` 는 빈 리스트이고
-``text`` 만 채워진다.
+audio_skill 이 이 전체 텍스트를 받아 요약·임베딩(media_chunks 의 STT 텍스트 청크)으로 잇는다.
 """
 
 from __future__ import annotations
@@ -26,7 +18,7 @@ from faster_whisper import WhisperModel
 
 
 class TranscriptionResult(TypedDict):
-    """전체 텍스트와 구간 목록(가능할 때만 채움)."""
+    """전사 결과 — 세그먼트를 이어 붙인 전체 텍스트만 담는다."""
 
     text: str
 
@@ -39,6 +31,7 @@ def transcribe_audio_local(
     device: str = "cpu",         # GPU면 "cuda"
     compute_type: str = "int8",  # GPU면 "float16" 권장
 ) -> TranscriptionResult:
+    """로컬 Whisper 로 ``file_path`` 를 전사해 전체 텍스트(``{"text": ...}``)를 반환한다."""
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))

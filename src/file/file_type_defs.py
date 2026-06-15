@@ -1,3 +1,10 @@
+"""파일 모달리티·오피스 종류 enum 과 검색 능력별 media_type 집합의 중앙 정의.
+
+``detect_file_kind`` 의 판정값(``MediaKind``/``OfficeKind``)과 ``data_loader`` 가 받는
+``file_kind`` 허용 집합이 모두 여기 한곳에서 나온다(단일 출처). 검색측은 어떤 media_type 이
+어떤 종류의 임베딩 청크를 갖는지를 아래 ``MEDIA_TYPES_*_CHUNK_SEARCH`` 로 참조한다.
+"""
+
 from __future__ import annotations
 
 from enum import Enum

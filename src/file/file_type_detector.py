@@ -1,5 +1,10 @@
 """
 파일이 이미지 / 텍스트 / 영상 / 음성 / PDF / JSON 인지, 오피스면 Word·Excel·PPT 인지 판별한다.
+
+확장자가 아니라 ``libmagic`` 의 내용 기반 MIME 판정을 쓴다(확장자는 위조·누락될 수 있음).
+오피스(OOXML)는 신/구·매크로 변형까지 명시 MIME 집합으로 매핑하고, 나머지는 ``_kind_from_mime``
+의 접두(``image/`` 등)·정확매칭으로 ``MediaKind`` 에 매핑한다. 판정 불가는 ``unknown`` 으로 반환하며,
+라우터(``src/ingest/router.py``)가 이를 routable=False 로 격리한다.
 """
 
 from __future__ import annotations
@@ -79,6 +84,10 @@ def _kind_from_mime(mime: str) -> MediaKind | None:
 
 
 def detect_file_kind(file_path: str | Path) -> str:
+    """파일의 ``file_kind`` 문자열(MediaKind/OfficeKind 값, 미상은 'unknown')을 반환한다.
+
+    오피스 MIME 을 먼저 정확매칭한 뒤, 일반 미디어는 ``_kind_from_mime`` 로 넘긴다.
+    """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))

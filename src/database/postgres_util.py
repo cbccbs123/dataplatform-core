@@ -107,7 +107,12 @@ def _resolve_min_server_version(explicit: int | None) -> int:
 
 
 class PostgresUtil:
-    """Small utility wrapper for psycopg3 with pooling."""
+    """psycopg3 풀·트랜잭션·재시도를 감싼 단일 DB 접근 seam.
+
+    persist/search/relations 등 모든 DB 접근이 이 래퍼를 공유한다(CLAUDE.md: PG17+ 풀·트랜잭션).
+    ``connection()``/``transaction()`` 으로 풀에서 커넥션을 빌리고, ``run_with_retry`` 로 일시 오류를
+    흡수하며, 첫 커넥션 사용 시 server_version 가드로 PG17 미만 서버를 거부한다(헌법: PG17 고정).
+    """
 
     def __init__(
         self,
@@ -223,9 +228,20 @@ class PostgresUtil:
         operation_name: str = "db-operation",
         idempotent: bool = True,
     ) -> Any:
+        """일시적(transient) DB 오류에 대해 ``operation`` 을 지수 백오프+지터로 재시도한다.
+
+        ``execute``/``execute_in_transaction`` 등 모든 DB 호출이 경유하는 재시도 chokepoint다.
+        재시도 대상은 ``_is_retryable_error`` 가 True 인 일시 오류(직렬화 실패·교착·커넥션 단절 등
+        SQLSTATE 화이트리스트)뿐이며, 그 외 오류나 마지막 시도 실패는 즉시 raise 한다.
+
+        **불변식(중요)**: ``idempotent=False`` 면 단 1회만 시도한다(재시도 안 함). 부분 적용된 비멱등
+        쓰기를 재시도하면 중복 적용될 수 있어서다 — 안전한 재시도는 호출자의 멱등성 보장이 전제다.
+
+        ``on_retry``/``on_success``/``on_failure`` 는 메트릭·로깅용 관측 훅(주입 콜백)이다.
+        """
         attempts, base_delay_ms, max_delay_ms, jitter_ms = self._retry_config()
         if not idempotent:
-            attempts = 1
+            attempts = 1  # 비멱등 연산은 재시도 금지(부분 적용 시 중복 위험) → 단일 시도로 강제.
         last_error: BaseException | None = None
 
         for attempt in range(1, attempts + 1):
@@ -291,6 +307,7 @@ class PostgresUtil:
         raise RuntimeError("run_with_retry reached unexpected state.")
 
     def open_pool(self) -> Any:
+        """커넥션 풀을 지연 생성한다(최초 호출 때만; 이후 같은 풀 재사용). psycopg_pool 은 지연 import."""
         if self._pool is None:
             from psycopg_pool import ConnectionPool  # pyright: ignore[reportMissingImports]
 
@@ -361,6 +378,7 @@ class PostgresUtil:
         self._version_checked = True
 
     def _ensure_version_checked(self, conn: Connection[Any]) -> None:
+        # PG 버전 가드는 풀 수명 동안 1회만(첫 커넥션 사용 시점)에 수행한다 — 매 borrow 마다 재검증 회피.
         if not self._version_checked:
             self._validate_server_version(conn)
 
@@ -371,6 +389,11 @@ class PostgresUtil:
         *,
         idempotent: bool = False,
     ) -> int:
+        """단일 쿼리를 실행하고 영향 행 수(rowcount)를 반환한다(자체 connection→commit).
+
+        ``idempotent`` 기본 False(재시도 안 함) — 임의 쿼리는 멱등 보장이 없어서다. 안전히 재시도하려면
+        멱등 쿼리에 한해 ``idempotent=True`` 로 호출한다(``run_with_retry`` 불변식 참고).
+        """
         def _op() -> int:
             self.logger.debug("Execute query: %s", query)
             with self.connection() as conn:

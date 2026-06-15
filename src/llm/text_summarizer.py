@@ -1,3 +1,13 @@
+"""텍스트 문서·STT 전사 → LLM 요약·키워드(map→reduce).
+
+per-asset 파이프라인 extract 단계에서 ``text_skill``(문서)·``audio_skill``(Whisper STT 전사)이 호출한다.
+LLM 호출은 전부 단일 seam ``src.llm.client.complete_json`` 경유(temperature=0·온프레미스).
+
+문서 경로는 청크별 요약(map) 후 합쳐 최종 요약·키워드를 뽑는(reduce) 2단계이고, STT 경로는 전사 전문을
+한 번에 요약한다. 산출 ``summary`` 는 임베딩·BM25 의 단일 원천이라 image/video summarizer 와 동일하게
+매체 문형을 금지하고 내용·주제 중심으로 강제한다(spec 026 FR-001 토픽화).
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,6 +23,12 @@ from src.llm.client import complete_json
 
 
 class SummaryKeywords(TypedDict):
+    """문서·STT 요약 결과의 공유 형태.
+
+    ``stt`` 는 오디오 경로에서만 전사 원문을 담는다. 문서 경로 반환값은 ``stt`` 키를 아예 넣지 않으므로
+    (TypedDict 선언과 달리 부분 dict), 소비자는 ``stt`` 를 ``.get()`` 으로 선택 조회해야 한다.
+    """
+
     summary: str
     keywords: list[str]
     stt: str  # 오디오 전용 필드. 텍스트/이미지/영상 경로에서는 채우지 않는다.

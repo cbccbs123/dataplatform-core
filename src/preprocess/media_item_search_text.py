@@ -16,6 +16,7 @@ _MAX_PLAIN_CHARS = 32_000
 _ZERO_WIDTH = re.compile(r"[\u200B-\u200D\uFEFF]")
 _CTRL = re.compile(r"[\x00-\x1F\x7F]")
 _WS = re.compile(r"\s+")
+# 너무 일반적이라 FTS 변별력이 없는 CLIP 라벨 — search_vector 만 부풀려 정밀도를 떨어뜨리므로 제외.
 _NOISE_LABELS = {
     "사람",
     "인물",

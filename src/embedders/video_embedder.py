@@ -1,3 +1,11 @@
+"""영상 키프레임 CLIP 임베딩 seam — ``image_embedder`` 의 단일 이미지 경로를 프레임 배치로 확장.
+
+``src/skills/video_skill.py`` 가 호출한다: scenedetect 로 뽑은 대표 키프레임 JPEG 마다
+CLIP 이미지 벡터(1536)와, VLM objects 를 후보로 한 제로샷 라벨 점수를 붙인다.
+프레임당 이미지 인코딩 1회 — 같은 임베딩으로 벡터화와 라벨링을 함께 처리한다.
+새 CLIP 추론 로직은 두지 않고 ``image_embedder`` 의 primitive 만 재사용한다(공간 일치 보장).
+"""
+
 from __future__ import annotations
 
 from io import BytesIO

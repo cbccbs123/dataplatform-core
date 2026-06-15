@@ -1,3 +1,13 @@
+"""영상 장면별 요약 결과 → 영상 전체 요약(reduce).
+
+per-asset 파이프라인에서 ``video_skill`` 이 호출한다. 영상 extract 단계가 장면별 대표프레임을
+``image_summarizer`` 로 요약해 둔 ``scene_results`` 를 받아, 시간 흐름(장면 순서)을 보존한 타임라인으로
+직렬화한 뒤 단일 LLM 호출(``src.llm.client.complete_json`` seam·temperature=0·온프레미스)로 종합한다.
+
+산출 ``summary`` 는 임베딩·BM25 의 단일 원천이라 image/text summarizer 와 동일하게 매체 문형을 금지하고
+내용·주제 중심으로 강제한다(spec 026 FR-001 토픽화).
+"""
+
 from __future__ import annotations
 
 from typing import TypedDict

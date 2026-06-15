@@ -1,8 +1,12 @@
-'''
-이 이미지에 있는 모든 객체를 빠짐없이 나열해줘.
-일반 명사 형태로 리스트만 반환해.
-중복 제거해서 출력해.
-'''
+"""이미지 1장 → LLM 비전 요약(summary·keywords·objects).
+
+per-asset 파이프라인의 extract 단계에서 ``image_skill`` 이, 영상 키프레임 처리에서 ``video_skill`` 이
+호출한다. LLM 호출은 전부 단일 seam ``src.llm.client.complete_vision_json`` 경유(temperature=0·온프레미스).
+
+산출 ``summary`` 는 임베딩 입력(vlm_text_for_embedding)·BM25(search_text)의 **단일 원천**이라,
+프롬프트에서 매체 문형('~이미지입니다')을 금지하고 내용·주제 중심으로 강제한다(spec 026 FR-001 토픽화).
+``objects`` 는 CLIP 제로샷 라벨 후보로만 쓰이고 최종 메타에서는 제거된다(→ ``image_skill`` 참고).
+"""
 
 from __future__ import annotations
 

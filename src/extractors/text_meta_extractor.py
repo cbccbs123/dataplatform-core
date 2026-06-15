@@ -1,3 +1,10 @@
+"""텍스트/문서 본문 통계 메타(언어·인코딩·문장수·토큰수·길이) 추출 — text_skill 이 호출.
+
+본문을 청크로 순회하며 집계만 한다. 임베딩 벡터는 ``src/embedders/text_embedder.py`` 가
+별도로 만든다(추출/임베딩 분리 설계). 여기서 모델을 로드하는 이유는 임베딩이 아니라
+임베딩 모델의 **토크나이저**로 토큰 수를 세기 위해서다(``count_tokens`` 참조).
+"""
+
 from __future__ import annotations
 
 import re
@@ -37,6 +44,9 @@ def count_tokens(text: str, *, model_name: str) -> int:
 
 
 def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:
+    # 글자 종류 비율 기반 휴리스틱(사전·LLM 없이 결정적). 한글은 라틴보다 낮은 임계(0.3)를
+    # 쓴다 — 한글 문서도 영문 용어가 흔히 섞여 한글 비중이 낮게 나오기 때문.
+    # 라틴 0.5 미만이고 한글도 0.3 미만이면 판별 불가로 unknown.
     total_letters = hangul_count + latin_count
     if total_letters == 0:
         return "unknown"
