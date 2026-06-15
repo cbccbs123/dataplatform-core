@@ -31,8 +31,10 @@ from src.search.opensearch_search import (
     gate_signal,
     knn_score_to_cosine,
     minmax_normalize,
+    normalize_query,
     os_hit_to_row,
     passes_cutoff,
+    rerank_select,
     search_assets_os,
 )
 
@@ -537,6 +539,94 @@ class FuseHybridTest(unittest.TestCase):
         self.assertAlmostEqual(top["similarity"], 0.5 * 1.0)  # knn norm max=1.0, bm25 누락 0
 
 
+class RerankSelectTest(unittest.TestCase):
+    """T001/FR-002: 게이트 통과 버킷의 행 선별·재정렬 순수 함수(주입 seam·결정적·OS/DB 무관)."""
+
+    @staticmethod
+    def _row(asset_id: str, sim: float, *, rrtext: str | None = None) -> dict:
+        # 융합 행 동형(id·similarity·_rrtext). _rrtext 없으면 summary 폴백 경로 확인용.
+        r = {"id": asset_id, "similarity": sim, "summary": f"요약 {asset_id}", "_cos": 0.5, "_bm25": False}
+        if rrtext is not None:
+            r["_rrtext"] = rrtext
+        return r
+
+    def test_scores_only_top_r_candidates(self) -> None:
+        # cands=rows[:top_r] 만 채점한다 — R 밖 행은 rerank_fn 에 전달되지 않는다(R 상한 절삭).
+        rows = [self._row(c, s) for c, s in (("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6))]
+        seen = []
+        def fake(query, texts, *, model_name):
+            seen.extend(texts); return [0.5] * len(texts)
+        kept, scores = rerank_select(rows, "질의", fake, top_r=2, tau=0.0, model_name="가짜")
+        self.assertEqual(seen, ["요약 a", "요약 b"])      # 상위 2건만 채점
+        self.assertEqual(len(scores), 2)
+        self.assertEqual({r["id"] for r in kept}, {"a", "b"})
+
+    def test_tau_filters_and_reorders_by_rerank_score(self) -> None:
+        # sc≥tau 만 유지하고 (-similarity, id) 로 재정렬 — similarity 를 rerank 점수로 덮어쓴다.
+        rows = [self._row(c, 0.5) for c in ("a", "b", "c")]  # 융합 similarity 동일(재정렬 가시화)
+        def fake(query, texts, *, model_name):
+            table = {"요약 a": 0.9, "요약 b": 0.01, "요약 c": 0.6}  # b 는 τ 미달
+            return [table[t] for t in texts]
+        kept, scores = rerank_select(rows, "질의", fake, top_r=10, tau=0.05, model_name="가짜")
+        self.assertEqual([r["id"] for r in kept], ["a", "c"])     # b 제외·점수 내림차순
+        self.assertAlmostEqual(kept[0]["similarity"], 0.9)        # similarity = rerank 점수
+        self.assertAlmostEqual(kept[1]["similarity"], 0.6)
+        self.assertEqual(scores, [0.9, 0.01, 0.6])               # cands 전체 점수(meta top 용)
+
+    def test_prefers_rrtext_over_summary(self) -> None:
+        # 채점 문서측은 _rrtext("요약:…\n키워드:…") 우선, 없으면 summary 폴백(028 구조화 입력 계승).
+        rows = [self._row("a", 0.5, rrtext="요약: A\n키워드: 키1"), self._row("b", 0.5)]
+        seen = []
+        def fake(query, texts, *, model_name):
+            seen.extend(texts); return [0.9] * len(texts)
+        rerank_select(rows, "질의", fake, top_r=10, tau=0.0, model_name="가짜")
+        self.assertEqual(seen, ["요약: A\n키워드: 키1", "요약 b"])
+
+    def test_empty_input_returns_empty(self) -> None:
+        # 빈 입력 → ([], []) (rerank_fn 미호출 안전).
+        def boom(query, texts, *, model_name):
+            raise AssertionError("빈 입력엔 채점하지 않아야 한다")
+        self.assertEqual(rerank_select([], "질의", boom, top_r=10, tau=0.05, model_name="가짜"), ([], []))
+
+    def test_tie_break_by_id_ascending(self) -> None:
+        # 동점 rerank 점수는 id asc 로 결정적 정렬(헌법 3조).
+        rows = [self._row(c, 0.5) for c in ("c", "a", "b")]
+        def fake(query, texts, *, model_name):
+            return [0.7] * len(texts)  # 전 동점
+        kept, _ = rerank_select(rows, "질의", fake, top_r=10, tau=0.0, model_name="가짜")
+        self.assertEqual([r["id"] for r in kept], ["a", "b", "c"])
+
+
+class NormalizeQueryTest(unittest.TestCase):
+    """T003/FR-004: LLM 질의 명사구 정규화 순수 토글 함수(off=바이트 동일 passthrough·llm_fn 주입 seam)."""
+
+    def test_disabled_is_byte_identical_passthrough(self) -> None:
+        # off(기본): 원문 그대로 — llm_fn 미호출(바이트 동일·027 회귀 0).
+        def boom(q):
+            raise AssertionError("off 면 llm_fn 을 호출하지 않아야 한다")
+        self.assertEqual(normalize_query("별 보는 방법", enabled=False, llm_fn=boom), "별 보는 방법")
+
+    def test_enabled_calls_llm_fn_for_noun_phrase(self) -> None:
+        # on: 검색 직전 질의를 llm_fn 으로 명사구 정규화(가짜 주입 — 네트워크 0).
+        def fake(q):
+            return {"별 보는 방법": "천체 관측"}[q]
+        self.assertEqual(normalize_query("별 보는 방법", enabled=True, llm_fn=fake), "천체 관측")
+
+    def test_deterministic_same_query_same_phrase(self) -> None:
+        # SC-003 결정성: 같은 질의 → 같은 명사구(순수 — llm_fn 이 결정적이면 함수도 결정적).
+        def fake(q):
+            return "천체 관측"
+        out = [normalize_query("별 보는 방법", enabled=True, llm_fn=fake) for _ in range(3)]
+        self.assertEqual(out, ["천체 관측"] * 3)
+
+    def test_empty_and_none_safe(self) -> None:
+        # 빈/None 질의 안전: 정규화할 내용 없음 → 원문 그대로(llm_fn 미호출).
+        def boom(q):
+            raise AssertionError("빈/None 질의엔 llm_fn 을 호출하지 않아야 한다")
+        self.assertEqual(normalize_query("", enabled=True, llm_fn=boom), "")
+        self.assertIsNone(normalize_query(None, enabled=True, llm_fn=boom))
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 027 G2/T005 — search_assets_os msearch 재구성. 가짜 msearch 클라이언트 주입(OS 불필요).
 # 모달리티당 [knn, bm25] 서브검색을 전 모달리티 _msearch 1회로 → 클라이언트 융합 → 게이트 → per-result
@@ -757,29 +847,53 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertEqual(seen, ["요약: 요약문\n키워드: 키워드 라벨"])  # 구조화 입력(실측 최선)
         self.assertNotIn("_rrtext", buckets["text"][0])  # 내부키 제거
 
-    def test_rerank_replaces_gate_and_cut(self) -> None:
-        # 028 평가 경로: rerank_enabled 면 게이트·컷 대신 — 융합 상위 R건을 쌍 채점해 τ 이상만
-        # 유지·점수로 재정렬(similarity=rerank 점수·절대 0~1). 순수 A/B 를 위해 게이트 신호와 무관.
-        client = _FakeMsearchClient(
+    def test_rerank_augments_gate(self) -> None:
+        # 029 행동 변경의 핵심 증인(replace→augment): rerank 는 게이트를 **대체하지 않는다**.
+        # (a) 게이트 실패면 rerank_enabled=True 여도 빈 버킷이고 rerank_fn 미호출(게이트가 '없음'
+        #     버킷을 먼저 비운다 — 차단 23/24 보존), (b) 게이트 통과면 **통과 버킷 안에서만** rerank 가
+        #     융합 상위 R건을 τ 선별·점수 재정렬한다.
+        calls: list[list[str]] = []
+        def fake_rerank(query, texts, *, model_name):
+            calls.append(list(texts))
+            table = {"요약 a": 0.9, "요약 b": 0.01, "요약 c": 0.6, "요약 d": 0.02}
+            return [table[t] for t in texts]
+
+        # (a) 약신호 + 게이트 확실 실패(eps=0.9/floor=0.9)·어휘 증거 없음 → rerank 미실행·빈 버킷.
+        weak = _FakeMsearchClient(
             knn_by_label={"text": [_knn_hit_os("a", 0.40), _knn_hit_os("b", 0.39),
-                                   _knn_hit_os("c", 0.38)]},  # 게이트라면 컷됐을 약신호
+                                   _knn_hit_os("c", 0.38)]},
             bm25_by_label={"text": []},
         )
-        def fake_rerank(query, texts, *, model_name):
-            # 요약 문구로 점수 차등: a=0.9, b=0.01(τ 미달), c=0.6
-            table={"요약 a":0.9, "요약 b":0.01, "요약 c":0.6}
-            return [table[t] for t in texts]
         buckets, meta = search_assets_os(
-            client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,  # 게이트는 무시돼야 함
+            weak, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
             rerank_enabled=True, rerank_top_r=10, rerank_tau=0.05,
             rerank_model="가짜", rerank_fn=fake_rerank,
         )
-        rows=buckets["text"]
-        self.assertEqual([r["id"] for r in rows], ["a", "c"])  # τ=0.05: b 제외, 점수 내림차순
+        self.assertEqual(buckets["text"], [])             # 게이트가 먼저 비움(rerank 무관)
+        self.assertEqual(calls, [])                        # rerank_fn 미호출(augment — 대체 아님)
+        self.assertFalse(meta["text"]["gate_passed"])
+        self.assertNotIn("rerank", meta["text"])           # rerank 잎 미부착(게이트 실패)
+
+        # (b) 강신호(top 0.85·하위 절반 낮음) → 게이트 통과 → 통과 버킷 안에서만 rerank τ 선별·재정렬.
+        strong = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("a", 0.85), _knn_hit_os("b", 0.30),
+                                   _knn_hit_os("c", 0.28), _knn_hit_os("d", 0.25)]},
+            bm25_by_label={"text": []},
+        )
+        buckets, meta = search_assets_os(
+            strong, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50,
+            rerank_enabled=True, rerank_top_r=10, rerank_tau=0.05,
+            rerank_model="가짜", rerank_fn=fake_rerank,
+        )
+        rows = buckets["text"]
+        self.assertEqual([r["id"] for r in rows], ["a", "c"])  # τ=0.05: b·d 제외, 점수 내림차순
         self.assertAlmostEqual(rows[0]["similarity"], 0.9)
+        self.assertEqual(len(calls), 1)                        # 통과 버킷에서만 rerank 1회 실행
+        self.assertTrue(meta["text"]["gate_passed"])
         self.assertTrue(meta["text"]["rerank"]["enabled"])
-        self.assertEqual(meta["text"]["rerank"]["scored"], 3)
+        self.assertEqual(meta["text"]["rerank"]["scored"], 4)  # 통과 버킷 융합 4행 채점
         self.assertEqual(meta["text"]["rerank"]["kept"], 2)
 
     def test_rerank_disabled_is_027_identical(self) -> None:
@@ -889,6 +1003,45 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertEqual(ids, {"t1", "t2", "t3", "t4"})
         self.assertEqual(gate_meta["text"]["cut_count"], 0)
         self.assertTrue(gate_meta["text"]["gate_passed"])
+
+    def test_cutoff_disabled_bypasses_rerank(self) -> None:
+        # T004 디버그 우회 × rerank: cutoff_enabled=False 면 rerank_enabled=True 여도 게이트·컷·
+        # rerank 를 **모두 off** — 융합 전체 노출·rerank_fn 미호출. 우회를 rerank 보다 우선 두는
+        # 우선순위를 코드로 강제한다(현 replace 경로가 rerank 를 cutoff 검사보다 먼저 둬서 숨겼던 모호성 해소).
+        calls: list[int] = []
+        def boom(query, texts, *, model_name):
+            calls.append(1); return [1.0] * len(texts)
+        buckets, gate_meta = self._run(cutoff_enabled=False, rerank_enabled=True, rerank_fn=boom)
+        ids = {r["id"] for r in buckets["text"]}
+        self.assertEqual(ids, {"t1", "t2", "t3", "t4"})    # 융합 전체(약 후보 포함)
+        self.assertEqual(calls, [])                          # rerank 미실행(우회가 먼저)
+        self.assertEqual(gate_meta["text"]["cut_count"], 0)
+        self.assertTrue(gate_meta["text"]["gate_passed"])
+        self.assertNotIn("rerank", gate_meta["text"])        # rerank 잎 미부착
+
+    def test_rerank_meta_cut_count_excludes_r_cap(self) -> None:
+        # T005 관측성: augment meta 의 rerank{enabled,scored,kept,top} 는 gate_passed ∧ rerank 잎에서만
+        # 부착하고, cut_count 는 **τ 선별로만** 센다 — R 상한 절삭(fused 중 top_r 밖 행)은 컷으로 세지
+        # 않는다(028 'len(fused)-len(kept)' 과대보고 교정). 강신호 5행·top_r=2 → cands 2행 채점·τ 1행 컷.
+        def fake_rerank(query, texts, *, model_name):
+            return [{"요약 a": 0.9, "요약 b": 0.01}[t] for t in texts]  # cands(a,b)만 채점
+        client = _FakeMsearchClient(
+            knn_by_label={"text": [_knn_hit_os("a", 0.85), _knn_hit_os("b", 0.84),
+                                   _knn_hit_os("c", 0.30), _knn_hit_os("d", 0.28),
+                                   _knn_hit_os("e", 0.25)]},
+            bm25_by_label={"text": []},
+        )
+        buckets, meta = search_assets_os(
+            client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50,
+            rerank_enabled=True, rerank_top_r=2, rerank_tau=0.05,
+            rerank_model="가짜", rerank_fn=fake_rerank,
+        )
+        self.assertTrue(meta["text"]["gate_passed"])
+        self.assertEqual(meta["text"]["rerank"], {"enabled": True, "scored": 2, "kept": 1, "top": 0.9})
+        # cut_count 은 τ 선별(채점 2→유지 1)만 — R 상한 절삭(융합 5→채점 2)은 제외.
+        self.assertEqual(meta["text"]["cut_count"], 1)
+        self.assertEqual([r["id"] for r in buckets["text"]], ["a"])
 
     def test_bucket_capped_to_k(self) -> None:
         # 버킷은 요청 k 로 상한(knn 표본 50 으로 더 받아도 응답은 ≤k — 구 size=k 계약 보존).

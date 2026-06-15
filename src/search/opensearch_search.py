@@ -244,6 +244,79 @@ def cut_rows(rows: Iterable[dict[str, Any]], *, result_floor: float) -> list[dic
     return kept
 
 
+def rerank_select(
+    rows: Iterable[dict[str, Any]],
+    query: str,
+    rerank_fn: Callable[..., list[float]] | None = None,
+    *,
+    top_r: int,
+    tau: float,
+    model_name: str,
+) -> tuple[list[dict[str, Any]], list[float]]:
+    """게이트 통과 버킷에서 cross-encoder 가 행을 선별·재정렬한다(순수·결정적, 029 FR-002).
+
+    029 augment 의 잎 함수다 — 게이트(``passes_cutoff``)가 '없음' 버킷을 먼저 비운 뒤, **통과
+    버킷 안에서만** ``cut_rows`` 를 대체해 호출된다(replace 아님). 028 평가가 1순위로 못박은
+    하이브리드 구성: 융합 상위 R건만 (질의, 구조화 텍스트) 쌍으로 채점 → τ 행 선별 + rerank
+    점수 재정렬. 종전 인라인(opensearch_search 의 replace 분기)을 **순수 함수로 추출**해 ``rerank_fn``
+    주입 seam·결정적·OS/DB 없이 단위 검증 가능하게 한다(헌법 3조).
+
+    - ``cands = rows[:top_r]`` 만 채점한다 — R 밖 행은 rerank_fn 에 전달조차 않는다(지연 통제·
+      R 상한 절삭). 문서측 입력은 ``_rrtext``("요약: …\n키워드: …") 우선·없으면 ``summary`` 폴백
+      (028 구조화 입력 실측 최선 — 회식 0.003→0.071).
+    - ``rerank_fn`` 가 채점한 점수 중 ``sc ≥ tau`` 행만 유지하고, ``similarity`` 를 rerank 점수
+      (0~1 절대 — 쌍 단독·코퍼스 불변)로 **덮어쓴다**(응답 동형 유지).
+    - 정렬은 ``(-similarity, id)`` — 점수 desc·동점 id asc 결정적(헌법 3조).
+    - 빈 입력은 ``([], [])``(rerank_fn 미호출). ``rerank_fn is None`` 이면 기본 seam
+      ``src.search.reranker.score_pairs`` 를 함수 내부에서 지연 import 한다(무거운 의존을 플래그
+      off 환경에 당기지 않음 — 020 동형).
+
+    반환 ``(kept_rows, scores)`` — ``scores`` 는 cands **전체** 채점값(τ 필터 전)으로, 호출부가
+    ``rerank.top``(=max(scores))·``scored``(=len(cands)) 관측치를 만든다(FR-007).
+    """
+    cands = list(rows)[: int(top_r)]
+    if not cands:
+        return [], []
+    if rerank_fn is None:
+        from src.search.reranker import score_pairs as rerank_fn  # noqa: PLW2901 — lazy 기본 seam
+    scores = rerank_fn(
+        query,
+        [str(r.get("_rrtext") or r.get("summary") or "") for r in cands],
+        model_name=model_name,
+    )
+    kept = [
+        {**r, "similarity": float(sc)}
+        for r, sc in zip(cands, scores, strict=True)
+        if float(sc) >= tau
+    ]
+    kept.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
+    return kept, list(scores)
+
+
+def normalize_query(
+    query: str,
+    *,
+    enabled: bool,
+    llm_fn: Callable[[str], str] | None = None,
+) -> str:
+    """검색 질의를 LLM 핵심 명사구로 정규화하는 순수 토글 함수(029 FR-004, 기본 off).
+
+    028 후속 측정이 확인한 명사구 정규화('별 보는 방법'→'천체 관측' 0.009→0.227, 패러프레이즈
+    오컷 직격)를 **설정 토글**로 들인다. 021 FR-004(검색시점 LLM 금지)를 거버넌스 절차로 개정한
+    뒤에만 켜며(G2), 본 함수는 그 토글의 **순수 잎**이다 — ``llm_fn`` 주입 seam·네트워크 0·결정적.
+
+    - ``enabled=False``(기본): 원문 그대로 반환한다 — **바이트 동일 passthrough**(027 회귀 0의 봉인
+      지점). 빈/``None`` 질의도 정규화할 내용이 없으므로 그대로 반환한다(llm_fn 미호출 안전).
+    - ``enabled=True``: ``llm_fn(query)`` 가 돌려준 명사구를 반환한다. ``llm_fn`` 의 결정성(temp=0·
+      env 입력 0)은 호출부(G2 ``query_norm`` seam)가 보장한다 — 본 함수는 같은 입력에 같은 출력.
+      방어적으로 ``llm_fn`` 미주입(``None``)이면 정규화 수단이 없으므로 원문을 그대로 둔다(배선
+      누락이 결정성을 깨지 않게 — fail-safe to 027).
+    """
+    if not enabled or not query or llm_fn is None:
+        return query
+    return llm_fn(query)
+
+
 def fuse_hybrid(
     bm25_hits: Iterable[dict[str, Any]],
     knn_hits: Iterable[dict[str, Any]],
@@ -475,58 +548,56 @@ def search_assets_os(
         top, baseline = gate_signal(knn_cosines)
 
         has_lexical = any(r.get("_bm25") for r in fused)
-        if rerank_enabled:
-            # 028 평가 경로: cross-encoder 쌍별 절대 판정이 게이트·컷을 **대체**한다(순수 A/B —
-            # 효과 귀속이 명확하도록 코사인 통계 판정과 섞지 않는다). 융합 상위 R건을 (질의,
-            # summary) 쌍으로 채점 → τ 이상만 유지·점수 내림차순(동점 id) 재정렬. similarity 는
-            # rerank 점수(0~1 절대 — 쌍 단독·코퍼스 불변)로 교체된다(응답 동형 유지).
-            if rerank_fn is None:
-                from src.search.reranker import score_pairs as rerank_fn  # noqa: PLW2901 — lazy 기본 seam
-            cands = fused[: int(rerank_top_r)]
-            scores = rerank_fn(
-                query, [str(r.get("_rrtext") or r.get("summary") or "") for r in cands],
-                model_name=rerank_model,
-            )
-            scored = [
-                {**r, "similarity": float(sc)} for r, sc in zip(cands, scores) if float(sc) >= rerank_tau
-            ]
-            scored.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
-            kept = scored
-            gate_passed = bool(kept)
-            cut_count = len(fused) - len(kept)
-            clean = [
-                {key: val for key, val in row.items() if key not in ("_cos", "_bm25", "_rrtext")}
-                for row in kept[: int(k)]
-            ]
-            buckets[label] = clean
-            gate_meta[label] = {
-                "top": top, "baseline": baseline, "gate_passed": gate_passed,
-                "lexical_evidence": has_lexical, "cut_count": cut_count, "error": sub_error,
-                "rerank": {"enabled": True, "scored": len(cands), "kept": len(kept),
-                           "top": (max(scores) if scores else 0.0)},
-            }
-            continue
+        # 029 augment(replace→augment): rerank 는 게이트를 **대체하지 않고** 그 위에 얹는다. 우선순위를
+        # 코드로 강제한다 — ① 디버그 우회(cutoff off → 게이트·컷·rerank 모두 off) → ② 버킷 게이트
+        # (passes_cutoff)가 '없음' 버킷을 먼저 비움(rerank 가 못 하는 분포 기반 거부 — 차단 23/24 보존)
+        # → ③ **통과 버킷 안에서만** rerank 가 cut_rows 를 대체(τ 선별·점수 재정렬). rerank 가 결과를
+        # 가르는 잎은 'cutoff_enabled ∧ gate_passed' 단 하나다 — 게이트 실패·어휘 구제·빈 버킷 잎은 불변.
+        rerank_info: dict[str, Any] | None = None  # gate_passed ∧ rerank 잎에서만 meta 에 부착(FR-007)
         if not cutoff_enabled:
-            # 디버그 우회: 게이트·per-result 컷 모두 off → 융합 전체 노출.
+            # 디버그 우회(FR-003): 게이트·per-result 컷·rerank 를 **모두 off** → 융합 전체 노출(약한
+            # 후보까지 관측). 우회를 게이트·rerank 보다 **먼저** 둬, 종전 replace 경로가 rerank 를 cutoff
+            # 검사보다 앞세워 숨겼던 모호성을 코드로 해소한다.
             kept = fused
             gate_passed = True
+            cut_count = 0
         else:
             gate_passed = passes_cutoff(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
             if gate_passed:
-                kept = cut_rows(fused, result_floor=result_floor)
+                if rerank_enabled:
+                    # augment 핵심 잎(028 1순위 구성): 게이트가 통과시킨 버킷 안에서만 rerank 가
+                    # cut_rows 를 대체한다 — 융합 상위 R건을 (질의, 구조화 텍스트) 쌍으로 채점 →
+                    # τ 행 선별 + rerank 점수(0~1 절대) 재정렬(similarity 덮어쓰기·응답 동형).
+                    cands = fused[: int(rerank_top_r)]
+                    kept, scores = rerank_select(
+                        fused, query, rerank_fn,
+                        top_r=rerank_top_r, tau=rerank_tau, model_name=rerank_model,
+                    )
+                    # cut_count 는 **τ 선별**(채점 cands 대비 제거)로만 센다 — R 상한 절삭(fused 중
+                    # R 밖 행)은 컷이 아니라 후보 제한이므로 제외한다(FR-007 — 종전 len(fused)-len(kept)
+                    # 가 R 밖 행을 컷으로 과대보고하던 것을 교정).
+                    cut_count = len(cands) - len(kept)
+                    rerank_info = {
+                        "enabled": True, "scored": len(cands), "kept": len(kept),
+                        "top": (max(scores) if scores else 0.0),
+                    }
+                else:
+                    # 027 경로(rerank off): per-result 컷(BM25 매칭 OR cos≥result_floor)으로 노이즈 꼬리 제거.
+                    kept = cut_rows(fused, result_floor=result_floor)
+                    cut_count = len(fused) - len(kept)
             elif has_lexical and bm25_operator == "and":
-                # 어휘 구제(027 정밀화): 코사인 게이트가 실패해도 BM25 증거 행은 살린다 — 약한-있음
-                # 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음보다 버킷 통계상
-                # 약해지는 역전을 행 단위 증거로 해소. 단 ① 의미-노이즈 유입을 막기 위해 구제 시엔
-                # **어휘 증거 행만** 남기고(cos-only 배제), ② **operator='and'(전 토큰 매칭)일 때만**
-                # 적용한다 — 'or' 매칭은 단일 토큰 우연 일치도 _bm25=True 라 증거 강도가 없어
-                # 무관 결과가 구제를 타고 누수된다(리뷰 후속 — 전제의 코드 강제).
+                # 어휘 구제(027 정밀화·rerank 무관·불변): 코사인 게이트가 실패해도 BM25 증거 행은 살린다
+                # — 약한-있음 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음보다 버킷
+                # 통계상 약해지는 역전을 행 단위 증거로 해소. 단 ① 구제 시엔 **어휘 증거 행만** 남기고
+                # (cos-only 배제), ② **operator='and'(전 토큰 매칭)일 때만** 적용한다 — 'or' 매칭은
+                # 단일 토큰 우연 일치도 _bm25=True 라 증거 강도가 없어 무관 결과가 구제를 타고 누수된다.
                 kept = [r for r in fused if r.get("_bm25")]
+                cut_count = len(fused) - len(kept)
             else:
                 kept = []  # 어휘 증거도 없음 → 빈 버킷(no-match)
+                cut_count = len(fused) - len(kept)
 
-        cut_count = len(fused) - len(kept)  # 게이트·컷으로 제거된 행 수(상한 절삭 제외 — 컷 효과만).
-        # 내부키(_cos·_bm25) 제거 + 요청 k 상한(응답 동형·구 size=k 계약 보존).
+        # 내부키(_cos·_bm25·_rrtext) 제거 + 요청 k 상한(응답 동형·구 size=k 계약 보존).
         clean = [
             {key: val for key, val in row.items() if key not in ("_cos", "_bm25", "_rrtext")}
             for row in kept[: int(k)]
@@ -536,6 +607,8 @@ def search_assets_os(
             "top": top, "baseline": baseline, "gate_passed": gate_passed,
             "lexical_evidence": has_lexical, "cut_count": cut_count, "error": sub_error,
         }
+        if rerank_info is not None:
+            gate_meta[label]["rerank"] = rerank_info  # augment 관측: gate_passed ∧ rerank 잎에서만.
     return buckets, gate_meta
 
 
