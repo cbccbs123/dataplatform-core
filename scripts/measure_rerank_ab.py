@@ -79,11 +79,11 @@ def main() -> int:
     tau = args.tau if args.tau is not None else cfg.search_os_rerank_tau
     top_r = args.top_r if args.top_r is not None else cfg.search_os_rerank_top_r
 
-    common = dict(
-        modalities=_MODALITIES, k=20, channel=cfg.active_embed_channel,
-        weights=cfg.opensearch_fusion_weights, index=cfg.opensearch_index,
-        bm25_operator=cfg.search_os_bm25_operator,
-    )
+    common = {
+        "modalities": _MODALITIES, "k": 20, "channel": cfg.active_embed_channel,
+        "weights": cfg.opensearch_fusion_weights, "index": cfg.opensearch_index,
+        "bm25_operator": cfg.search_os_bm25_operator,
+    }
 
     if args.sweep:
         # τ 근거: 모달리티 후보의 rerank 점수 분포 — 있음(정답/비정답)·없음 구분. 채점 입력은 _rrtext(프로덕션 동치).
@@ -100,7 +100,7 @@ def main() -> int:
                 rr = _rrtext_map(client, cfg.opensearch_index, [str(r.get("id")) for r in cands])
                 texts = [rr.get(str(r.get("id"))) or str(r.get("summary") or "") for r in cands]
                 scores = score_pairs(q["query"], texts, model_name=cfg.search_os_rerank_model)
-                for r, sc in zip(cands, scores):
+                for r, sc in zip(cands, scores, strict=False):
                     if q.get("expect_empty"):
                         absent_scores.append(sc)
                     elif str(r.get("id")) in rel:
@@ -125,9 +125,9 @@ def main() -> int:
 
     # ── A/B/C 본 측정 ── A=027 / B=rerank-replace(028) / C=augment(029)
     modes = {
-        "A(027)": dict(cutoff_enabled=True, rerank_enabled=False),
-        "B(rerank-replace)": dict(cutoff_enabled=False, rerank_enabled=True),
-        "C(augment)": dict(cutoff_enabled=True, rerank_enabled=True),
+        "A(027)": {"cutoff_enabled": True, "rerank_enabled": False},
+        "B(rerank-replace)": {"cutoff_enabled": False, "rerank_enabled": True},
+        "C(augment)": {"cutoff_enabled": True, "rerank_enabled": True},
     }
     results = {}
     for mode, flags in modes.items():
@@ -160,9 +160,9 @@ def main() -> int:
                 p3s.append(sum(1 for a in top3 if a in rel) / max(len(top3), 1))
         avg = lambda xs: (sum(xs) / len(xs)) if xs else 0.0  # noqa: E731
         lat_s = sorted(lat)
-        results[mode] = dict(recall=avg(recalls), p3=avg(p3s), blocked=blocked,
-                             leaks=leaks, miscuts=miscuts,
-                             p50=lat_s[len(lat_s)//2], p95=lat_s[int(len(lat_s)*0.95)])
+        results[mode] = {"recall": avg(recalls), "p3": avg(p3s), "blocked": blocked,
+                             "leaks": leaks, "miscuts": miscuts,
+                             "p50": lat_s[len(lat_s)//2], "p95": lat_s[int(len(lat_s)*0.95)]}
         print(f"[{mode}] 측정 완료", file=sys.stderr)
 
     absent_n = sum(1 for q in queries if q.get("expect_empty"))
