@@ -1,8 +1,10 @@
-"""028 — reranker A/B 측정(맥북 로컬·실모델). 골든 58질의로 두 체제를 한 번에 비교한다.
+"""028→029 — reranker A/B/C 측정(맥북 로컬·실모델). 골든 58질의로 세 체제를 한 번에 비교한다.
 
-A = 현 체제(027: 게이트+컷·코사인 통계) / B = rerank 체제(cross-encoder 쌍별 절대 판정·τ).
-지표: 판정 recall@20(있음 — 각 체제의 행 선별 적용 후)·no-match 차단율·오컷/누수 목록·지연.
-τ 스윕 모드(--sweep)는 후보 점수 분포(있음 정답/비정답·없음)를 출력해 τ 선택 근거를 만든다.
+A = 027(게이트+컷·코사인 통계) / B = rerank-replace(028 평가 — 게이트 off·rerank가 대체) /
+C = augment(029 채택 — 게이트 on + 켜진 버킷 안에서 rerank가 cut_rows 대체).
+지표: 판정 recall@20(있음)·p@3·no-match 차단율·오컷/누수 목록·지연(p50/p95).
+τ 스윕 모드(--sweep)는 후보 점수 분포(있음 정답/비정답·없음)를 출력해 τ 선택 근거를 만든다 —
+채점 입력은 **프로덕션과 동일한 _rrtext**("요약: …\n키워드: …", OS mget 으로 키워드 동반).
 
 실행: conda run -n AuroraFS python scripts/measure_rerank_ab.py [--sweep] [--tau 0.05] [--top-r 10]
 """
@@ -35,9 +37,29 @@ def _union_rank(buckets) -> list[str]:
     return seen
 
 
+def _rrtext_map(client, index: str, ids: list[str]) -> dict[str, str]:
+    """후보 id → 프로덕션 채점 텍스트 _rrtext("요약: …\n키워드: …") 매핑(OS mget·fuse_hybrid 동일 규칙).
+
+    search_assets_os 가 응답에서 _rrtext 를 떼므로(clean), 스윕의 채점 입력을 프로덕션과 동치로 맞추려
+    OS 에서 summary·keywords 를 한 번에 mget 한다(요약 단독 채점의 τ 왜곡 제거 — 028 입력변형 결론).
+    """
+    if not ids:
+        return {}
+    resp = client.mget(index=index, body={"ids": ids}, _source=["summary", "keywords"])
+    out: dict[str, str] = {}
+    for d in resp.get("docs", []) or []:
+        src = d.get("_source") or {}
+        summ = str(src.get("summary") or "")
+        kw = src.get("keywords") if isinstance(src.get("keywords"), list) else []
+        out[str(d.get("_id"))] = (
+            f"요약: {summ}\n키워드: {' '.join(str(x) for x in kw)}" if kw else summ
+        )
+    return out
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="028 reranker A/B 측정")
-    parser.add_argument("--sweep", action="store_true", help="τ 분포 스윕만(채점 분포 출력)")
+    parser = argparse.ArgumentParser(description="028/029 reranker A/B/C 측정")
+    parser.add_argument("--sweep", action="store_true", help="τ 분포 스윕만(채점 분포 출력·_rrtext 동치)")
     parser.add_argument("--tau", type=float, default=None)
     parser.add_argument("--top-r", type=int, default=None)
     args = parser.parse_args()
@@ -64,7 +86,7 @@ def main() -> int:
     )
 
     if args.sweep:
-        # τ 근거: 모달리티 후보의 rerank 점수 분포 — 있음(정답/비정답)·없음 구분 출력.
+        # τ 근거: 모달리티 후보의 rerank 점수 분포 — 있음(정답/비정답)·없음 구분. 채점 입력은 _rrtext(프로덕션 동치).
         from src.search.reranker import score_pairs
 
         rel_scores, nonrel_scores, absent_scores = [], [], []
@@ -75,8 +97,9 @@ def main() -> int:
                 cands = b[:top_r]
                 if not cands:
                     continue
-                scores = score_pairs(q["query"], [str(r.get("summary") or "") for r in cands],
-                                     model_name=cfg.search_os_rerank_model)
+                rr = _rrtext_map(client, cfg.opensearch_index, [str(r.get("id")) for r in cands])
+                texts = [rr.get(str(r.get("id"))) or str(r.get("summary") or "") for r in cands]
+                scores = score_pairs(q["query"], texts, model_name=cfg.search_os_rerank_model)
                 for r, sc in zip(cands, scores):
                     if q.get("expect_empty"):
                         absent_scores.append(sc)
@@ -90,7 +113,7 @@ def main() -> int:
                 return "(없음)"
             xs = sorted(xs)
             return f"n={len(xs)} min={xs[0]:.4f} p25={xs[len(xs)//4]:.4f} p50={xs[len(xs)//2]:.4f} p75={xs[3*len(xs)//4]:.4f} max={xs[-1]:.4f}"
-        print("## rerank 점수 분포 (τ 선택 근거)")
+        print("## rerank 점수 분포 (τ 선택 근거·_rrtext 채점)")
         print("  있음-정답   :", stats(rel_scores))
         print("  있음-비정답 :", stats(nonrel_scores))
         print("  없음-후보   :", stats(absent_scores))
@@ -100,17 +123,21 @@ def main() -> int:
             print(f"  τ={t:0.2f}: 정답 유지율 {keep:.2%} · 없음 행 차단율 {block:.2%}")
         return 0
 
-    # ── A/B 본 측정 ──
+    # ── A/B/C 본 측정 ── A=027 / B=rerank-replace(028) / C=augment(029)
+    modes = {
+        "A(027)": dict(cutoff_enabled=True, rerank_enabled=False),
+        "B(rerank-replace)": dict(cutoff_enabled=False, rerank_enabled=True),
+        "C(augment)": dict(cutoff_enabled=True, rerank_enabled=True),
+    }
     results = {}
-    for mode in ("A(현 체제)", "B(rerank)"):
-        rer = mode.startswith("B")
+    for mode, flags in modes.items():
         recalls, p3s = [], []
         blocked, leaks, miscuts = 0, [], []
         lat: list[float] = []
         for q in queries:
             t0 = time.perf_counter()
             buckets, _meta = search_assets_os(
-                client, q["query"], cutoff_enabled=not rer, rerank_enabled=rer,
+                client, q["query"], **flags,
                 rerank_top_r=top_r, rerank_tau=tau, rerank_model=cfg.search_os_rerank_model,
                 cutoff_eps=cfg.search_os_cutoff_eps, cutoff_floor=cfg.search_os_cutoff_floor,
                 result_floor=cfg.search_os_result_floor, **common,
@@ -139,7 +166,7 @@ def main() -> int:
         print(f"[{mode}] 측정 완료", file=sys.stderr)
 
     absent_n = sum(1 for q in queries if q.get("expect_empty"))
-    print(f"## A/B (τ={tau} R={top_r})")
+    print(f"## A/B/C (τ={tau} R={top_r})")
     for mode, r in results.items():
         print(f"  {mode}: recall@20={r['recall']:.4f} p@3={r['p3']:.4f} 차단={r['blocked']}/{absent_n} "
               f"p50={r['p50']:.0f}ms p95={r['p95']:.0f}ms")
