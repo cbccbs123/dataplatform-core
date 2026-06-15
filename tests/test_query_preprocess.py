@@ -9,7 +9,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-from src.search.query_preprocess import structure_user_query
+from src.search.query_preprocess import noun_phrase_query, structure_user_query
 
 
 def _client_returning(content: str) -> MagicMock:
@@ -45,6 +45,82 @@ class TestStructureUserQueryFallback(unittest.TestCase):
         out = structure_user_query("워크숍 발표자료", client=c)
         self.assertIsInstance(out, dict)
         self.assertEqual(out["semantic_query"], "워크숍 발표자료")
+
+
+class TestNounPhraseQuery(unittest.TestCase):
+    """029 T007: 검색 질의 명사구 정규화(021 FR-004 토글 개정·헌법 §3 결정성 제약).
+
+    ``complete_json`` 단일 seam 경유 ``{"query_norm":…}`` 스키마 호출·``temperature=0``(비0 리터럴 0)·
+    프롬프트 env 입력 0(datetime/now/경로/랜덤 금지 — 021 비결정성 재도입 차단)·결정성·fail-safe(원문
+    폴백)를 가짜 client 주입으로 네트워크 없이 봉인한다. 028 측정 근거대로 **명사구 정규화만**(풀어쓰기·
+    HyDE 금지)."""
+
+    def test_parses_query_norm_from_json_schema(self) -> None:
+        # complete_json 의 {"query_norm":…} 스키마를 파싱해 명사구를 반환한다.
+        c = _client_returning('{"query_norm": "천체 관측"}')
+        self.assertEqual(noun_phrase_query("별 보는 방법", client=c), "천체 관측")
+
+    def test_prompt_requests_query_norm_schema_with_query(self) -> None:
+        # LLM 에 보낸 프롬프트가 query_norm 스키마 키와 사용자 질의를 담는다(complete_json 스키마 호출).
+        c = _client_returning('{"query_norm": "낚시"}')
+        noun_phrase_query("물고기 잡는 법", client=c)
+        sent = c.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("query_norm", sent)
+        self.assertIn("물고기 잡는 법", sent)
+
+    def test_uses_json_object_response_format(self) -> None:
+        # complete_text 가 아니라 complete_json 경유 — response_format=json_object 강제(평문 불가).
+        c = _client_returning('{"query_norm": "낚시"}')
+        noun_phrase_query("물고기 잡는 법", client=c)
+        self.assertEqual(
+            c.chat.completions.create.call_args.kwargs["response_format"], {"type": "json_object"}
+        )
+
+    def test_temperature_is_zero(self) -> None:
+        # 헌법 §3 결정 재현성: seam 기본 temperature=0 유지(비0 리터럴 미전달 — policy_gate 차단 회피).
+        c = _client_returning('{"query_norm": "낚시"}')
+        noun_phrase_query("물고기 잡는 법", client=c)
+        self.assertEqual(c.chat.completions.create.call_args.kwargs["temperature"], 0.0)
+
+    def test_prompt_has_no_env_dependent_input(self) -> None:
+        # 021 비결정성 재도입 차단: 프롬프트에 datetime/now/today/오늘/기준 시각/random 토큰 0
+        # (순수 질의→명사구 매핑 — reference_dates_block 의 datetime.now 같은 env 입력 없음).
+        c = _client_returning('{"query_norm": "낚시"}')
+        noun_phrase_query("물고기 잡는 법", client=c)
+        sent = c.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        for token in ("now", "today", "datetime", "timezone", "기준 시각", "오늘", "random"):
+            self.assertNotIn(token, sent)
+
+    def test_deterministic_same_query_same_phrase(self) -> None:
+        # SC-003 결정성: 같은 질의 → 같은 명사구(temp=0·env 입력 0·순수 매핑).
+        outs = [
+            noun_phrase_query("별 보는 방법", client=_client_returning('{"query_norm": "천체 관측"}'))
+            for _ in range(3)
+        ]
+        self.assertEqual(outs, ["천체 관측"] * 3)
+
+    def test_empty_query_norm_falls_back_to_original(self) -> None:
+        # fail-safe: query_norm 이 빈 문자열이면 원문 질의로 폴백(027 경로 — 정규화 실패가 검색을 깨지 않게).
+        c = _client_returning('{"query_norm": ""}')
+        self.assertEqual(noun_phrase_query("별 보는 방법", client=c), "별 보는 방법")
+
+    def test_missing_query_norm_falls_back_to_original(self) -> None:
+        c = _client_returning('{"other": "x"}')
+        self.assertEqual(noun_phrase_query("별 보는 방법", client=c), "별 보는 방법")
+
+    def test_non_string_query_norm_falls_back_to_original(self) -> None:
+        c = _client_returning('{"query_norm": 42}')
+        self.assertEqual(noun_phrase_query("별 보는 방법", client=c), "별 보는 방법")
+
+    def test_empty_response_falls_back_to_original(self) -> None:
+        c = _client_returning("")
+        self.assertEqual(noun_phrase_query("별 보는 방법", client=c), "별 보는 방법")
+
+    def test_empty_input_not_sent_to_llm(self) -> None:
+        # 빈 질의는 정규화할 내용이 없어 LLM 미호출·원문 반환.
+        c = _client_returning('{"query_norm": "X"}')
+        self.assertEqual(noun_phrase_query("", client=c), "")
+        c.chat.completions.create.assert_not_called()
 
 
 if __name__ == "__main__":

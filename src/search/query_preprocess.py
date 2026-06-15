@@ -104,3 +104,53 @@ def structure_user_query(
         return empty
     return parsed
 
+
+# ── 029 FR-004: 검색 질의 명사구 정규화(021 FR-004 토글 개정 — 헌법 §3 결정성 제약 준수) ──────────
+# 021 이 OS 검색 read 경로에서 LLM 질의 구조화를 제거한 실제 사유는 ``reference_dates_block`` 의
+# ``datetime.now``(env 의존 입력)였다. 029 명사구 정규화는 그 비결정성을 **재도입하지 않는다** — 아래
+# 프롬프트에 datetime/now/오늘/경로/랜덤 등 **env 의존 입력이 0**(순수 질의→명사구 매핑)이고, 호출은
+# ``complete_json`` 단일 seam(temperature 기본 0)을 경유한다. 028 측정 근거대로 **명사구 정규화로만 한정**
+# 한다 — 풀어쓰기·문장 확장·가설 답변(HyDE)은 역효과(측정)라 금지. 토글(SEARCH_OS_QUERY_NORM_ENABLED)
+# on 일 때만 호출되며, off(기본)면 normalize_query 가 원문 passthrough 한다(027 바이트 동일·SC-001).
+QUERY_NORM_PROMPT = """당신은 검색 질의 정규화기다. 사용자 한국어 질의를 검색에 가장 적합한 **핵심 명사구**로 바꿔라.
+규칙:
+- 질의 의도를 가장 잘 나타내는 핵심 명사구(주제어)만 남긴다.
+- "찾아줘·보여줘·추천해줘·방법·하는 법" 같은 검색 지시어·구어체 군더더기를 제거한다.
+- 풀어쓰기·문장 확장·가설 답변 금지 — 명사구 한 덩어리로만.
+- 모달리티 단어(사진·영상·문서·이미지)는 넣지 마라.
+반드시 아래 JSON 객체만 출력한다(설명 문장 금지).
+
+스키마:
+- query_norm: 문자열. 질의의 핵심 명사구. (예: "별 보는 방법" → "천체 관측", "물고기 잡는 법" → "낚시")
+
+사용자 질의:
+"""
+
+
+def noun_phrase_query(query: str, *, client: Any | None = None) -> str:
+    """검색 질의를 LLM 핵심 명사구로 정규화한다(029 FR-004·헌법 §3 결정성 제약).
+
+    ``src.llm.client.complete_json`` **단일 seam**을 경유해 ``{"query_norm": "<명사구>"}`` JSON 스키마를
+    요구하고 ``query_norm`` 을 파싱한다 — ``complete_text`` 의 평문은 seam 의 ``response_format=
+    json_object`` 강제로 받을 수 없으므로 complete_json 의 스키마 호출을 쓴다. ``temperature`` 인자를
+    전달하지 않아 seam 기본값 0 을 유지한다(결정 재현성 100%·numeric 비0 리터럴 미도입 — policy_gate).
+    프롬프트(``QUERY_NORM_PROMPT``)는 **순수 질의→명사구 매핑**으로 datetime/경로/랜덤 등 env 의존 입력이
+    0 이다(021 이 제거한 비결정성 재도입 차단).
+
+    fail-safe(원문 폴백 → 027 경로): LLM 응답이 비었거나(``{}``), ``query_norm`` 키가 없거나, 빈 문자열·
+    비-문자열이면 **원문 질의를 그대로 반환**한다 — 정규화 실패가 검색을 깨지 않게(SC-001). 빈/None 질의도
+    정규화할 내용이 없어 LLM 호출 없이 원문 그대로 반환한다.
+
+    ``client`` 미주입 시 공통 seam(``complete_json``)이 현 설정의 온프레미스 LLM 클라이언트를 쓴다 —
+    테스트는 ``client`` 주입으로 네트워크 없이 결정성을 검증한다.
+    """
+    if not query or not query.strip():
+        return query
+    from src.llm.client import complete_json
+
+    data = complete_json(QUERY_NORM_PROMPT + query.strip(), client=client)
+    norm = data.get("query_norm")
+    if isinstance(norm, str) and norm.strip():
+        return norm.strip()
+    return query  # fail-safe: 빈/스키마 위반 응답 → 원문 폴백(027 경로 — 결정성·회귀 0 보존)
+

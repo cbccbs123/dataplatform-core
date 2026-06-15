@@ -65,3 +65,19 @@ class RerankConstantsTest(unittest.TestCase):
         self.assertEqual(sc.OS_RERANK_MODEL_DEFAULT, "BAAI/bge-reranker-v2-m3")
         self.assertEqual(sc.OS_RERANK_TOP_R_DEFAULT, 10)
         self.assertIsInstance(sc.OS_RERANK_TAU_DEFAULT, float)
+
+
+class QueryNormConstantsTest(unittest.TestCase):
+    """029 T006: LLM 질의 명사구 정규화 토글 기본값 — 기본 off(회귀 0·021 FR-004 토글 개정).
+
+    021 FR-004 가 제거한 검색시점 LLM 을 029 가 기본 off 토글로만 재허용한다(§3 결정성 제약 강제).
+    기본값을 단일 출처(search_constants)에 둬 settings resolver·배선이 공유한다(027 F1). 기본 False 라
+    settings 미설정 환경·계약 테스트·027 폴백이 깨지지 않는다(채택은 .env.dev opt-in)."""
+
+    def test_query_norm_enabled_default_is_false(self) -> None:
+        # 기본 off — 명시 토글 없이는 검색시점 LLM 미실행(027 바이트 동일·SC-001).
+        self.assertIs(sc.OS_QUERY_NORM_ENABLED_DEFAULT, False)
+
+    def test_query_norm_default_registered_in_all(self) -> None:
+        # 단일 출처 공개 계약: __all__ 등재(settings·배선이 공개 상수로 참조).
+        self.assertIn("OS_QUERY_NORM_ENABLED_DEFAULT", sc.__all__)

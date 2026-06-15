@@ -94,6 +94,10 @@ class PipelineSettings:
     search_os_rerank_model: str
     search_os_rerank_top_r: int
     search_os_rerank_tau: float
+    # 029: LLM 질의 명사구 정규화 토글(021 FR-004 토글 개정). 기본 off — 미설정 시 검색시점 LLM 미실행
+    # (027 바이트 동일·회귀 0). on 이면 검색 직전 질의를 gemma 명사구로 정규화(temp=0·env 입력 0·단일
+    # seam)해 임베딩·BM25 양쪽에 동일 적용한다. 순수 토글이라 범위검증 불필요(_env_bool_default·cutoff 동형).
+    search_os_query_norm_enabled: bool
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
@@ -427,6 +431,11 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         ),
         search_os_rerank_top_r=_resolve_os_rerank_top_r(),
         search_os_rerank_tau=_resolve_os_rerank_tau(),
+        # 029: LLM 질의 명사구 정규화 토글(기본 off — 회귀 0). _env_bool_default 패턴(cutoff_enabled 동형).
+        # 잘못된 불리언 문자열은 _env_bool_default 가 _build_settings 시점에 즉시 ValueError(fail-fast).
+        search_os_query_norm_enabled=_env_bool_default(
+            "SEARCH_OS_QUERY_NORM_ENABLED", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
+        ),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),
         # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.

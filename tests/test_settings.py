@@ -57,6 +57,8 @@ _BACKEND_KEYS = (
     "SEARCH_OS_CUTOFF_FLOOR",
     # 027: per-result 컷 코사인 하한(probe_k·정규화 스케일 4종을 대체). 잔존값 오염 방지로 비운다.
     "SEARCH_OS_RESULT_FLOOR",
+    # 029: LLM 질의 명사구 정규화 토글(기본 off). 실행 환경 잔존값이 기본 off 단언을 오염시키지 않게 비운다.
+    "SEARCH_OS_QUERY_NORM_ENABLED",
     # 026 T006/T004 가 추가하는 색인 빌더 선택 env 키도 함께 비워, 실행 환경 잔존값이 기본값 단언을
     # 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
     "OPENSEARCH_NORI_USER_WORDS",
@@ -251,6 +253,38 @@ class TestSearchOsRerank(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
         with _env(SEARCH_OS_RERANK_TOP_R="0"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestSearchOsQueryNorm(unittest.TestCase):
+    """029 T006: LLM 질의 명사구 정규화 토글 ``search_os_query_norm_enabled`` — 기본 off·env override.
+
+    023 ``search_os_cutoff_enabled`` 의 bool resolver 패턴(``_env_bool_default``)을 미러한다 —
+    범위검증 불필요한 순수 토글. 기본값은 search_constants.OS_QUERY_NORM_ENABLED_DEFAULT 단일 출처(F1).
+    기본 off 라 미설정 환경·계약 테스트·027 폴백 불변(채택은 .env.dev opt-in)."""
+
+    def test_default_off_when_unset(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(
+            s.search_os_query_norm_enabled, search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
+        )
+        self.assertIs(s.search_os_query_norm_enabled, False)
+
+    def test_env_override_true(self) -> None:
+        with _env(SEARCH_OS_QUERY_NORM_ENABLED="true"):
+            s = _build_settings("dev")
+        self.assertIs(s.search_os_query_norm_enabled, True)
+
+    def test_env_override_false_explicit(self) -> None:
+        with _env(SEARCH_OS_QUERY_NORM_ENABLED="off"):
+            s = _build_settings("dev")
+        self.assertIs(s.search_os_query_norm_enabled, False)
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 검색하지 않게).
+        with _env(SEARCH_OS_QUERY_NORM_ENABLED="maybe"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 

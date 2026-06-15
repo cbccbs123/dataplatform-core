@@ -912,6 +912,59 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("rerank", meta["text"])
 
+    def test_query_norm_on_normalizes_embed_and_bm25(self) -> None:
+        # 029 T008: query_norm on 이면 검색 직전 질의를 1회 정규화 → 임베딩·BM25 **양쪽**이 정규화된
+        # 질의를 받는다(단일 query 지역변수 공유). 가짜 query_norm_fn 주입(네트워크 0).
+        norm_calls: list[str] = []
+        def fake_norm(q: str) -> str:
+            norm_calls.append(q)
+            return "천체 관측"
+        buckets, _ = search_assets_os(
+            self.client, "별 보는 방법", modalities=("text",), index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=False,
+            query_norm_enabled=True, query_norm_fn=fake_norm,
+        )
+        self.assertEqual(norm_calls, ["별 보는 방법"])               # 정규화 1회
+        self.assertEqual(self.embed_calls, [("천체 관측", "st")])    # 임베딩이 정규화된 질의
+        bm25_sub = self.client.msearch_calls[0][3]                    # [헤더,knn,헤더,bm25] → bm25
+        self.assertEqual(
+            bm25_sub["query"]["bool"]["must"][0]["multi_match"]["query"], "천체 관측"
+        )  # BM25 도 정규화된 질의
+
+    def test_query_norm_off_is_original_passthrough(self) -> None:
+        # off(기본): 원문 그대로 — query_norm_fn 미호출(바이트 동일·027 동치).
+        def boom(q: str) -> str:
+            raise AssertionError("off 면 query_norm_fn 을 호출하지 않아야 한다")
+        search_assets_os(
+            self.client, "별 보는 방법", modalities=("text",), index="assets",
+            embed_fn=self.fake_embed, cutoff_enabled=False,
+            query_norm_enabled=False, query_norm_fn=boom,
+        )
+        self.assertEqual(self.embed_calls, [("별 보는 방법", "st")])  # 원문 임베딩
+        bm25_sub = self.client.msearch_calls[0][3]
+        self.assertEqual(
+            bm25_sub["query"]["bool"]["must"][0]["multi_match"]["query"], "별 보는 방법"
+        )
+
+    def test_query_norm_default_is_off(self) -> None:
+        # 기본값 off(OS_QUERY_NORM_ENABLED_DEFAULT) — query_norm 인자 미전달 시 원문 임베딩(회귀 0).
+        self._run(modalities=("text",))
+        self.assertEqual(self.embed_calls, [(self.query, "st")])
+
+    def test_query_norm_lazy_imports_noun_phrase_when_fn_none(self) -> None:
+        # query_norm_fn 미주입 + enabled → noun_phrase_query 를 지연 import 해 사용(seam 기본·플래그 off
+        # 환경에 LLM seam 을 당기지 않음). 패치로 네트워크 없이 호출 경유만 검증.
+        from unittest import mock
+
+        import src.search.query_preprocess as qp
+        with mock.patch.object(qp, "noun_phrase_query", return_value="천체 관측") as m:
+            search_assets_os(
+                self.client, "별 보는 방법", modalities=("text",), index="assets",
+                embed_fn=self.fake_embed, cutoff_enabled=False, query_norm_enabled=True,
+            )
+        m.assert_called_once_with("별 보는 방법")
+        self.assertEqual(self.embed_calls, [("천체 관측", "st")])
+
     def test_fusion_uses_topk_knn_rows_not_gate_sample(self) -> None:
         # 융합 입력은 kNN **상위 k행만**(서버 융합 시절의 결과셋 범위와 동치) — 게이트 표본(50)을
         # 그대로 정규화에 쓰면 분모가 넓어져 상위 경계 순위가 흔들린다(골든 실측 -0.008 회귀 교정).

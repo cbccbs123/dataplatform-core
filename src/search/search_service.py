@@ -25,6 +25,7 @@ from src.search.media_search import EMBEDDING_KIND_ST, search_media_all_grouped
 # 함수 내부 지연 import)라 pg 기본 환경에서도 import 안전 — 실제 OS IO 는 backend='opensearch' 호출
 # 시에만 발생한다(플래그 off 순수성 보존).
 from src.search.opensearch_search import get_client as os_get_client
+from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
 
 _LOG = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ def _grouped_via_opensearch(
     disable_os_cutoff: bool,
     os_search_fn: Callable[..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]],
     os_client_fn: Callable[..., Any],
+    query_norm_fn: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
 
@@ -99,9 +101,15 @@ def _grouped_via_opensearch(
     ``_filter_by_min_score`` 공유 코드가 그대로 처리한다(응답 동형).
 
     설계 판단:
-    - **PG·LLM 미접촉(FR-002·SC-004)**: PG grouped(시각 CLIP 2단계)·``structure_user_query``(LLM)를
-      호출하지 않는다 — 원문 ``query`` 만 OS 에 넘긴다(멀티모달 LLM 0·ms). 따라서 PG 전용 파라미터
-      (structured·alpha·fusion·query_model_name·chunk_agg·grouped_fn)는 이 경로에서 제거됐다.
+    - **PG·LLM 미접촉(FR-002·SC-004)**: PG grouped(시각 CLIP 2단계)·``structure_user_query``(검색 질의
+      구조화 LLM)를 호출하지 않는다 — 멀티모달 LLM 0·ms. 따라서 PG 전용 파라미터(structured·alpha·
+      fusion·query_model_name·chunk_agg·grouped_fn)는 이 경로에서 제거됐다.
+    - **query-norm 토글(029 FR-004·021 개정)**: ``search_os_query_norm_enabled`` on(기본 off)이면 검색
+      직전 질의를 **명사구 정규화**(``noun_phrase_query``·gemma·temp=0·env 입력 0·src/llm/client 단일
+      seam)한 뒤 그 질의를 OS 에 넘긴다 — 정규화를 service 레벨에서 1회만 수행해(중복 LLM 0) 정규화된
+      질의가 OS seam 안에서 임베딩·BM25·rerank 채점에 동일 적용되게 한다. 관측성은 top-level
+      ``meta["query_norm"]`` 로 노출(os_gate 미오염). off 면 원문 passthrough(바이트 동일·noun_phrase
+      미호출 — 021 FR-004 기본 동작 보존, SC-001). ``query_norm_fn`` 은 테스트 주입 seam.
     - **(buckets, gate_meta) 튜플 수신(027)**: ``os_search_fn``(search_assets_os)은 클라이언트 융합
       전환으로 버킷과 함께 게이트 메타(모달리티별 top·baseline·gate_passed·cut_count)를 돌려준다 →
       ``meta["os_gate"]`` 로 합류시켜 빈 버킷이 no-match 판정인지 즉시 관측 가능하게 한다(F4 관측성).
@@ -131,10 +139,25 @@ def _grouped_via_opensearch(
         else getattr(cfg, "search_os_cutoff_enabled", search_constants.OS_CUTOFF_ENABLED_DEFAULT)
     )
 
+    # 029 query-norm(021 FR-004 토글 개정): cfg 토글(getattr 폴백=search_constants 단일 출처·기본 off)을
+    # 읽어, on 이면 검색 직전 질의를 **service 레벨에서 1회** 명사구 정규화한다. 정규화를 여기 한 곳에서
+    # 끝내는 이유: ① LLM 호출을 1회로(중복 0), ② 관측성(FR-007)을 top-level meta["query_norm"] 로 노출해
+    # 모달리티 키 dict 인 os_gate(gate_meta)를 오염시키지 않음(골든 하니스 등 gate_meta 순회 소비자 보호 —
+    # search_assets_os 는 별도 반환·gate_meta 오염 없이 정규화된 질의만 받음). off(기본)면 normalize_query
+    # 가 원문 그대로 돌려줘 noun_phrase_query 미호출·바이트 동일(SC-001·FR-008). 정규화된 질의가 OS seam
+    # 안에서 임베딩·BM25·rerank 채점에 동일 적용된다(query_norm_fn 미주입+enabled 면 noun_phrase_query 지연 import).
+    qn_enabled = getattr(
+        cfg, "search_os_query_norm_enabled", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
+    )
+    norm_fn = query_norm_fn
+    if qn_enabled and norm_fn is None:
+        from src.search.query_preprocess import noun_phrase_query as norm_fn
+    os_query = os_normalize_query(query, enabled=qn_enabled, llm_fn=norm_fn)
+
     client = os_client_fn()  # OS 클라이언트 생성 실패 시 예외 전파(FR-007)
     os_buckets, gate_meta = os_search_fn(
         client,
-        query,
+        os_query,  # 029: 정규화된 질의(off 면 원문 그대로) — 임베딩·BM25·rerank 채점에 동일 적용
         modalities=requested,  # 요청 전 모달리티(image/video 포함)를 한 번에 OS 검색
         k=limit_per_bucket,
         channel=text_channel,
@@ -158,6 +181,13 @@ def _grouped_via_opensearch(
     )  # client.msearch 미도달 예외도 전파(FR-007)
     # meta 에 게이트 관측성(os_gate) 합류 — 빈 버킷이 no-match 판정인지 즉시 확인(F4).
     grouped: dict[str, Any] = {"meta": {"backend": "opensearch", "os_gate": gate_meta}}
+    # 029 query-norm 관측성(FR-007): on 일 때만 top-level meta["query_norm"] 로 원문→정규화 매핑을 노출
+    # 한다(os_gate 는 모달리티 키 dict 이라 오염 금지). off(기본)면 키 자체를 두지 않아 027 meta 와 바이트
+    # 동일(SC-001 — 기존 meta 형태 봉인 테스트 무영향).
+    if qn_enabled:
+        grouped["meta"]["query_norm"] = {
+            "enabled": True, "original": query, "normalized": os_query,
+        }
     # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
     for m in requested:
         grouped[_MODALITY_BUCKETS[m]] = os_buckets.get(m, [])
@@ -185,6 +215,7 @@ def search_hybrid(
         ..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]
     ] = os_search_assets,
     _os_client_fn: Callable[..., Any] = os_get_client,
+    _query_norm_fn: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
@@ -227,10 +258,13 @@ def search_hybrid(
     video 모든 버킷**을 020 OS 인덱스(nori BM25 캡션·라벨 + ``embedding`` kNN + 정규화 융합)에서
     ``_os_search_fn`` 으로 검색해 **같은 키**(text_documents·audio·image·video)로 반환한다(022 — image/
     video 를 더 이상 PG CLIP 으로 보내지 않음, FR-003·SC-005 응답 동형). OS 경로는 PG grouped(시각
-    CLIP)·``structure_user_query``(LLM)·``structured`` 를 호출하지 않고 원문 ``query`` 를 쓴다(멀티모달
-    LLM 0 — FR-002·SC-004). OS 미도달이면 ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다
-    (FR-007·SC-006 — silent pg 폴백 금지). ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam
-    (기본 ``opensearch_search.search_assets_os``/``get_client``).
+    CLIP)·``structure_user_query``(검색 질의 구조화 LLM)·``structured`` 를 호출하지 않는다(멀티모달 LLM
+    0 — FR-002·SC-004). 다만 **029 query-norm 토글**(``search_os_query_norm_enabled``, 기본 off)이 on
+    이면 검색 직전 질의를 명사구 정규화(단일 seam·temp=0·env 입력 0)한 뒤 임베딩·BM25·rerank 채점에
+    동일 적용한다(021 FR-004 토글 개정) — off 면 원문 ``query`` 그대로(바이트 동일). OS 미도달이면
+    ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다(FR-007·SC-006 — silent pg 폴백 금지).
+    ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/
+    ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 ``noun_phrase_query`` 지연 import).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -294,6 +328,7 @@ def search_hybrid(
             disable_os_cutoff=disable_os_cutoff,
             os_search_fn=_os_search_fn,
             os_client_fn=_os_client_fn,
+            query_norm_fn=_query_norm_fn,
         )
     else:
         # backend != 'opensearch'(기본 pg): 기존 코드 경로 그대로 — 한 줄도 바꾸지 않는다(회귀 0·SC-001).

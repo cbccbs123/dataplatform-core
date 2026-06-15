@@ -618,6 +618,119 @@ class TestBackendOsPerResultCutDelegation(unittest.TestCase):
         self.assertEqual(out["meta"]["os_gate"], gate)
 
 
+class TestBackendOsRerankWiring(unittest.TestCase):
+    """029 T011: backend='opensearch' 가 cfg 의 rerank_* 4종을 ``os_search_fn`` 에 전달한다(027 cutoff 동형).
+
+    028 에서 rerank_enabled/top_r/tau/model 배선이 추가됐다 — 029 augment 전환 후에도 그 전달이
+    유지됨을 봉인한다(cfg→os seam·getattr 폴백). 두 토글 off(기본)면 rerank_enabled=False 가 전달돼
+    027 경로(게이트·컷) 그대로(SC-001)."""
+
+    def test_rerank_settings_forwarded_from_cfg(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch",
+            search_os_rerank_enabled=True,
+            search_os_rerank_top_r=7,
+            search_os_rerank_tau=0.2,
+            search_os_rerank_model="가짜-reranker",
+        )
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+
+        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
+            raise AssertionError("opensearch 백엔드에서 pg grouped 가 호출되면 안 됨")
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=fake_grouped,
+            )
+        self.assertIs(os_cap["rerank_enabled"], True)
+        self.assertEqual(os_cap["rerank_top_r"], 7)
+        self.assertEqual(os_cap["rerank_tau"], 0.2)
+        self.assertEqual(os_cap["rerank_model"], "가짜-reranker")
+
+    def test_rerank_falls_back_to_constants_when_cfg_missing(self) -> None:
+        # settings 미초기화(cfg=None) → search_constants 단일 출처 폴백(기본 off — 027 동치).
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        search_hybrid(
+            "질의", modalities=["text"], backend="opensearch",
+            _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+        )
+        self.assertIs(os_cap["rerank_enabled"], search_constants.OS_RERANK_ENABLED_DEFAULT)
+        self.assertEqual(os_cap["rerank_top_r"], search_constants.OS_RERANK_TOP_R_DEFAULT)
+        self.assertEqual(os_cap["rerank_tau"], search_constants.OS_RERANK_TAU_DEFAULT)
+        self.assertEqual(os_cap["rerank_model"], search_constants.OS_RERANK_MODEL_DEFAULT)
+
+
+class TestBackendOsQueryNormWiring(unittest.TestCase):
+    """029 T008/T011: query-norm 토글 배선 — service 가 cfg 토글(getattr 폴백)을 읽어 검색 직전 질의를
+    **service 레벨에서 1회** 명사구 정규화하고(단일 LLM 호출), 정규화된 질의를 OS seam 에 넘긴다.
+    관측성(FR-007)은 top-level ``meta["query_norm"]`` 로 노출해 모달리티 키 dict 인 ``os_gate``
+    (gate_meta)를 오염시키지 않는다(골든 하니스 보호). off(기본)면 원문 passthrough(바이트 동일)·
+    noun_phrase_query 미호출·meta 표식 없음(027 동일 — SC-001·FR-008)."""
+
+    def test_query_norm_on_passes_normalized_query_and_exposes_meta(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch", search_os_query_norm_enabled=True)
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        calls: list[str] = []
+
+        def fake_norm(q: str) -> str:
+            calls.append(q)
+            return "천체 관측"
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "별 보는 방법", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+                _query_norm_fn=fake_norm,
+            )
+        self.assertEqual(os_cap["query"], "천체 관측")   # OS seam 이 정규화된 질의를 받음
+        self.assertEqual(calls, ["별 보는 방법"])         # 정규화 1회(중복 LLM 호출 0)
+        qn = out["meta"]["query_norm"]
+        self.assertIs(qn["enabled"], True)
+        self.assertEqual(qn["original"], "별 보는 방법")
+        self.assertEqual(qn["normalized"], "천체 관측")
+        self.assertNotIn("query_norm", out["meta"]["os_gate"])  # gate_meta 미오염(F4 소비자 보호)
+
+    def test_query_norm_off_is_byte_identical_passthrough(self) -> None:
+        # off(기본): 원문 그대로 OS seam 에 전달·noun_phrase_query 미호출·meta 표식 없음(027 바이트 동일).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch", search_os_query_norm_enabled=False)
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+
+        def boom(q: str) -> str:
+            raise AssertionError("off 면 query-norm seam 을 호출하지 않아야 한다")
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "별 보는 방법", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+                _query_norm_fn=boom,
+            )
+        self.assertEqual(os_cap["query"], "별 보는 방법")  # 원문 passthrough(바이트 동일)
+        self.assertNotIn("query_norm", out["meta"])        # off 면 meta 표식 없음(027 동일)
+        self.assertNotIn("query_norm_enabled", os_cap)     # search_assets_os 에 토글 무전달(원문 동치)
+
+    def test_query_norm_falls_back_off_when_cfg_missing(self) -> None:
+        # settings 미초기화(cfg=None) → getattr 폴백 OS_QUERY_NORM_ENABLED_DEFAULT(False) → 원문 passthrough.
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+
+        def boom(q: str) -> str:
+            raise AssertionError("기본 off 폴백이면 query-norm 호출 0")
+
+        out = search_hybrid(
+            "별 보는 방법", modalities=["text"], backend="opensearch",
+            _os_search_fn=fake_os, _os_client_fn=lambda: "C", _grouped_fn=_fake_grouped,
+            _query_norm_fn=boom,
+        )
+        self.assertEqual(os_cap["query"], "별 보는 방법")
+        self.assertNotIn("query_norm", out["meta"])
+
+
 class TestBackendOsBm25OperatorWiring(unittest.TestCase):
     """025 G1: backend='opensearch' 가 cfg 의 bm25 operator 를 os_search_fn 에 전달(023 cutoff 동형)."""
 

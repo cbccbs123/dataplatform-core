@@ -31,15 +31,16 @@ from typing import Any
 
 from src.config.search_constants import (
     OS_BM25_OPERATOR_DEFAULT,
-    OS_RERANK_ENABLED_DEFAULT,
-    OS_RERANK_MODEL_DEFAULT,
-    OS_RERANK_TAU_DEFAULT,
-    OS_RERANK_TOP_R_DEFAULT,
     OS_CUTOFF_ENABLED_DEFAULT,
     OS_CUTOFF_EPS_DEFAULT,
     OS_CUTOFF_FLOOR_DEFAULT,
     OS_FUSION_WEIGHTS_DEFAULT,
     OS_KNN_SAMPLE_K,
+    OS_QUERY_NORM_ENABLED_DEFAULT,
+    OS_RERANK_ENABLED_DEFAULT,
+    OS_RERANK_MODEL_DEFAULT,
+    OS_RERANK_TAU_DEFAULT,
+    OS_RERANK_TOP_R_DEFAULT,
     OS_RESULT_FLOOR_DEFAULT,
 )
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
@@ -475,6 +476,8 @@ def search_assets_os(
     rerank_tau: float = OS_RERANK_TAU_DEFAULT,
     rerank_model: str = OS_RERANK_MODEL_DEFAULT,
     rerank_fn: Callable[..., list[float]] | None = None,
+    query_norm_enabled: bool = OS_QUERY_NORM_ENABLED_DEFAULT,
+    query_norm_fn: Callable[[str], str] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
 
@@ -501,9 +504,24 @@ def search_assets_os(
 
     OS 미도달(``client.msearch`` 예외)이면 **그대로 전파**한다(FR-007 — silent pg 폴백 금지: 결과가
     백엔드 가용성에 따라 달라지면 결정성·관측성 훼손). 검색은 OS 를 **읽기 전용**으로만 만진다(헌법 6조).
-    검색용 LLM 질의 구조화는 호출하지 않는다(원문 질의를 nori·임베딩에 직접).
+
+    **검색시점 LLM 질의 정규화(021 FR-004 — 029 토글 개정)**: 기본 off(``query_norm_enabled=False``)면
+    원문 질의를 nori·임베딩에 직접 쓴다(021 현행·회귀 0). ``query_norm_enabled=True`` 면 검색 직전 질의를
+    ``normalize_query`` 로 **핵심 명사구 정규화**(gemma·temp=0·env 입력 0·src/llm/client 단일 seam)한 뒤
+    임베딩·BM25·rerank 채점에 **동일 적용**한다 — 021 이 LLM-free 로 만든 OS 읽기 경로를 무단 회귀시키는
+    것이 아니라, 헌법 §Governance 절차로 021 FR-004 를 기본 off 토글 허용으로 정식 개정한 결과다(§3 결정성
+    제약 강제). ``query_norm_fn`` 미주입이고 enabled 면 ``noun_phrase_query`` 를 지연 import 해 쓴다.
     """
     labels = list(modalities)
+    # 029 query-norm(021 FR-004 토글 개정): 검색 직전 질의를 명사구로 **1회** 정규화한다(off=원문
+    # passthrough·바이트 동일). 임베딩(embed_fn)·BM25(build_bm25_body)·rerank 채점이 모두 아래 단일
+    # query 지역변수를 쓰므로 양쪽에 동일 적용된다. query_norm_fn 미주입이고 enabled 면 noun_phrase_query
+    # 를 지연 import 한다 — LLM seam(complete_json)을 플래그 off 환경(순수 단위)에 당기지 않으려는 것(020
+    # 동형). 단일 seam·temperature=0·env 입력 0(헌법 §3 결정성)은 noun_phrase_query 가 보장한다.
+    norm_fn = query_norm_fn
+    if query_norm_enabled and norm_fn is None:
+        from src.search.query_preprocess import noun_phrase_query as norm_fn
+    query = normalize_query(query, enabled=query_norm_enabled, llm_fn=norm_fn)
     query_vector = embed_fn(query, channel=channel)
     sample_k = max(int(k), OS_KNN_SAMPLE_K)  # 게이트 표본 하한(robust baseline 안정용).
 
