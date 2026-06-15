@@ -245,53 +245,65 @@ def cut_rows(rows: Iterable[dict[str, Any]], *, result_floor: float) -> list[dic
     return kept
 
 
-def rerank_select(
+def rerank_reorder(
     rows: Iterable[dict[str, Any]],
     query: str,
     rerank_fn: Callable[..., list[float]] | None = None,
     *,
     top_r: int,
-    tau: float,
+    tau: float = 0.0,
     model_name: str,
 ) -> tuple[list[dict[str, Any]], list[float]]:
-    """게이트 통과 버킷에서 cross-encoder 가 행을 선별·재정렬한다(순수·결정적, 029 FR-002).
+    """게이트·컷 통과 행을 cross-encoder 로 **재정렬**한다(순수·결정적, 029 FR-002 — G3 실측 정정).
 
-    029 augment 의 잎 함수다 — 게이트(``passes_cutoff``)가 '없음' 버킷을 먼저 비운 뒤, **통과
-    버킷 안에서만** ``cut_rows`` 를 대체해 호출된다(replace 아님). 028 평가가 1순위로 못박은
-    하이브리드 구성: 융합 상위 R건만 (질의, 구조화 텍스트) 쌍으로 채점 → τ 행 선별 + rerank
-    점수 재정렬. 종전 인라인(opensearch_search 의 replace 분기)을 **순수 함수로 추출**해 ``rerank_fn``
-    주입 seam·결정적·OS/DB 없이 단위 검증 가능하게 한다(헌법 3조).
+    029 augment 의 잎 함수다 — 게이트(``passes_cutoff``)가 '없음' 버킷을 비우고 ``cut_rows`` 가
+    행을 선별(027·recall·차단 보존)한 **뒤**, 통과 버킷의 생존자를 재정렬한다.
+    ⚠️ **cut_rows 를 대체하지 않는다**. 초기 029 구현은 리랭크가 선별까지(τ 드롭·R 절삭) 맡았으나
+    G3 실OS 측정에서 recall 0.9396→0.8999·차단 23→22 로 회귀했다(τ 가 약한-정답 행을 드롭하고
+    R=10 절삭이 융합 11~20위 정답을 잘랐다). 028 의 +1.7%p 하이브리드는 '선별=cut_rows·리랭크=
+    재정렬'이었다 — 리랭크는 **순서만** 바꾼다.
 
-    - ``cands = rows[:top_r]`` 만 채점한다 — R 밖 행은 rerank_fn 에 전달조차 않는다(지연 통제·
-      R 상한 절삭). 문서측 입력은 ``_rrtext``("요약: …\n키워드: …") 우선·없으면 ``summary`` 폴백
-      (028 구조화 입력 실측 최선 — 회식 0.003→0.071).
-    - ``rerank_fn`` 가 채점한 점수 중 ``sc ≥ tau`` 행만 유지하고, ``similarity`` 를 rerank 점수
-      (0~1 절대 — 쌍 단독·코퍼스 불변)로 **덮어쓴다**(응답 동형 유지).
-    - 정렬은 ``(-similarity, id)`` — 점수 desc·동점 id asc 결정적(헌법 3조).
-    - 빈 입력은 ``([], [])``(rerank_fn 미호출). ``rerank_fn is None`` 이면 기본 seam
-      ``src.search.reranker.score_pairs`` 를 함수 내부에서 지연 import 한다(무거운 의존을 플래그
-      off 환경에 당기지 않음 — 020 동형).
+    핵심(전역 union 랭킹과의 정합): 호출부의 자산 단위 합집합 랭킹이 ``similarity`` 로 재정렬하므로,
+    리랭크 점수(0~1 절대)를 그대로 덮으면 융합 점수(상대·min-max)와 **스케일이 어긋나** 모달리티
+    간 순위가 깨진다(reranked 행의 작은 절대점수가 타 버킷 융합점수에 밀려 recall 손실). 그래서
+    상위 R 행의 **융합 similarity 값 집합은 보존**하되 리랭크 점수 순서대로 **재배정**한다 —
+    best-reranked 행이 그 head 의 최고 융합점수를 받는다. 결과: 버킷이 union 에 기여하는 점수
+    분포 불변(recall 보존) + head 내 행 순서만 리랭크(p@3↑).
 
-    반환 ``(kept_rows, scores)`` — ``scores`` 는 cands **전체** 채점값(τ 필터 전)으로, 호출부가
-    ``rerank.top``(=max(scores))·``scored``(=len(cands)) 관측치를 만든다(FR-007).
+    - ``head = rows[:top_r]`` 만 채점(지연 통제)·``tail = rows[top_r:]`` 은 융합 순서 유지(뒤에 붙임).
+      문서측 입력은 ``_rrtext``("요약: …\n키워드: …") 우선·없으면 ``summary`` 폴백(028 구조화 입력).
+    - ``tau > 0`` 이면 head 중 rerank 점수 < τ 행을 **선택적** 드롭(정밀 필터). 기본 ``τ=0`` 은
+      드롭 0·순수 재정렬 — G3 실측상 τ 드롭이 recall 손실이라 augment 기본은 재정렬만이다.
+    - 빈 head 는 ``(list(rows), [])``(rerank_fn 미호출). ``rerank_fn is None`` 이면 기본 seam
+      ``src.search.reranker.score_pairs`` 를 지연 import(무거운 의존을 플래그 off 환경에 안 당김).
+
+    반환 ``(reordered_rows, scores)`` — ``scores`` 는 head 채점값(관측 ``rerank.top``·``scored`` 용).
     """
-    cands = list(rows)[: int(top_r)]
-    if not cands:
-        return [], []
+    rows = list(rows)
+    head = rows[: int(top_r)]
+    tail = rows[int(top_r):]
+    if not head:
+        return rows, []
     if rerank_fn is None:
         from src.search.reranker import score_pairs as rerank_fn  # noqa: PLW2901 — lazy 기본 seam
     scores = rerank_fn(
         query,
-        [str(r.get("_rrtext") or r.get("summary") or "") for r in cands],
+        [str(r.get("_rrtext") or r.get("summary") or "") for r in head],
         model_name=model_name,
     )
-    kept = [
-        {**r, "similarity": float(sc)}
-        for r, sc in zip(cands, scores, strict=True)
-        if float(sc) >= tau
-    ]
-    kept.sort(key=lambda r: (-_safe_float(r.get("similarity")), str(r.get("id") or "")))
-    return kept, list(scores)
+    pairs = list(zip(head, scores, strict=True))
+    if tau > 0.0:
+        pairs = [(r, sc) for r, sc in pairs if float(sc) >= tau]
+    if not pairs:
+        return tail, list(scores)
+    # 리랭크 순서(점수 desc·동점 id asc)로 head 정렬.
+    pairs.sort(key=lambda p: (-_safe_float(p[1]), str(p[0].get("id") or "")))
+    # 융합 similarity 값 집합 보존 → 리랭크 순서에 내림차순 재배정(best-reranked = 최고 융합점수).
+    # union 기여 분포 불변(recall) + 순서만 리랭크(p@3). reranked 행과 tail 은 자연히 분리(head 가
+    # 융합 상위라 tail 보다 큰 점수 — 재배정 후에도 head ≥ tail).
+    fusion_sims = sorted((_safe_float(r.get("similarity")) for r, _ in pairs), reverse=True)
+    reordered = [{**r, "similarity": fusion_sims[i]} for i, (r, _sc) in enumerate(pairs)]
+    return reordered + tail, list(scores)
 
 
 def normalize_query(
@@ -582,27 +594,22 @@ def search_assets_os(
         else:
             gate_passed = passes_cutoff(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
             if gate_passed:
-                if rerank_enabled:
-                    # augment 핵심 잎(028 1순위 구성): 게이트가 통과시킨 버킷 안에서만 rerank 가
-                    # cut_rows 를 대체한다 — 융합 상위 R건을 (질의, 구조화 텍스트) 쌍으로 채점 →
-                    # τ 행 선별 + rerank 점수(0~1 절대) 재정렬(similarity 덮어쓰기·응답 동형).
-                    cands = fused[: int(rerank_top_r)]
-                    kept, scores = rerank_select(
-                        fused, query, rerank_fn,
+                # 선별 = 027 cut_rows(BM25 매칭 OR cos≥result_floor) — recall·no-match 차단 보존.
+                kept = cut_rows(fused, result_floor=result_floor)
+                cut_count = len(fused) - len(kept)
+                if rerank_enabled and kept:
+                    # augment(028 1순위·G3 정정): 리랭크는 cut_rows 생존자를 **재정렬만** 한다(대체 아님).
+                    # 융합 상위 R건을 (질의, 구조화 텍스트) 쌍으로 채점 → head 순서를 리랭크로 바꾸되
+                    # 융합 점수 분포는 보존(rerank_reorder). 기본 τ=0 은 드롭 0(재정렬만).
+                    kept, scores = rerank_reorder(
+                        kept, query, rerank_fn,
                         top_r=rerank_top_r, tau=rerank_tau, model_name=rerank_model,
                     )
-                    # cut_count 는 **τ 선별**(채점 cands 대비 제거)로만 센다 — R 상한 절삭(fused 중
-                    # R 밖 행)은 컷이 아니라 후보 제한이므로 제외한다(FR-007 — 종전 len(fused)-len(kept)
-                    # 가 R 밖 행을 컷으로 과대보고하던 것을 교정).
-                    cut_count = len(cands) - len(kept)
+                    cut_count = len(fused) - len(kept)  # τ>0 선택적 드롭 반영(기본 τ=0 은 추가 컷 0).
                     rerank_info = {
-                        "enabled": True, "scored": len(cands), "kept": len(kept),
+                        "enabled": True, "scored": len(scores), "kept": len(kept),
                         "top": (max(scores) if scores else 0.0),
                     }
-                else:
-                    # 027 경로(rerank off): per-result 컷(BM25 매칭 OR cos≥result_floor)으로 노이즈 꼬리 제거.
-                    kept = cut_rows(fused, result_floor=result_floor)
-                    cut_count = len(fused) - len(kept)
             elif has_lexical and bm25_operator == "and":
                 # 어휘 구제(027 정밀화·rerank 무관·불변): 코사인 게이트가 실패해도 BM25 증거 행은 살린다
                 # — 약한-있음 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음보다 버킷

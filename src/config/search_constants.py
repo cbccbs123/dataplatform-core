@@ -43,7 +43,9 @@ OS_KNN_SAMPLE_K: int = 50
 OS_RERANK_ENABLED_DEFAULT: bool = False
 OS_RERANK_MODEL_DEFAULT: str = "BAAI/bge-reranker-v2-m3"
 OS_RERANK_TOP_R_DEFAULT: int = 10   # 모달리티당 채점 후보 상한(지연 통제)
-OS_RERANK_TAU_DEFAULT: float = 0.05  # G4 로짓 스윕으로 확정 예정(잠정 — 파일럿 분포 기준)
+OS_RERANK_TAU_DEFAULT: float = 0.0  # augment 기본 = 재정렬만(드롭 0). τ>0 은 선택적 정밀 필터 —
+# G3 실OS 측정: τ 드롭이 약한-정답 행을 잘라 recall 0.94→0.90·차단 23→22 회귀. 선별은 cut_rows 가
+# 맡고 리랭크는 순서만 바꾼다(rerank_reorder). τ 는 정밀이 더 필요한 운영점에서만 >0 으로 옵트인.
 
 # ── 029: LLM 질의 명사구 정규화 토글 기본값 ─────────────────────────────────
 # 기본 off(회귀 0 — 021 FR-004 가 제거한 검색시점 LLM 을 029 가 기본 off 토글로만 재허용한다). True 면
