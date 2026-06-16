@@ -38,7 +38,7 @@ from typing import Any
 
 from psycopg import Connection
 
-from src.app.run_ingest import OsIndexFn, process_asset
+from src.app.run_ingest import OsIndexFn, _make_opensearch_indexer, process_asset
 from src.ingest.router import route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed
 from src.pipeline.registry import DEFAULT_REGISTRY
@@ -65,12 +65,14 @@ def scan_received_assets(conn: Connection[Any], *, limit: int) -> list[tuple[uui
     """``received`` 자산을 생성순으로 ``limit`` 개 집어 ``(asset_id, fs_path)`` 목록 반환.
 
     dag_process 가 처리할 대상이다. modality 는 호출자(process_received_batch)가 ``route_file`` 로
-    재탐지한다(모델 0·결정적). 정렬은 created_at ASC — 먼저 들어온 파일을 먼저 처리(FIFO).
+    재탐지한다(모델 0·결정적). 정렬은 created_at ASC, asset_id ASC — 먼저 들어온 파일을 먼저 처리(FIFO)
+    하되 동일 created_at·대상>limit 면 asset_id(UUIDv7) 보조 정렬로 경계를 결정적으로 고정한다
+    (헌법 3조·FR-012, 형제 scan_unresolved_assets 와 동형).
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT asset_id, fs_path FROM asset "
-            "WHERE status = 'received' ORDER BY created_at ASC LIMIT %s",
+            "WHERE status = 'received' ORDER BY created_at ASC, asset_id ASC LIMIT %s",
             (limit,),
         )
         return [(r[0], r[1]) for r in cur.fetchall()]
@@ -85,13 +87,15 @@ def scan_stuck_assets(
     ``claim_asset(expected=status, next='received')`` 로 received 리셋해 재처리한다(self-healing,
     불변식 #2). 종료 계열(registered/failed/deferred)은 IN 목록에서 빠져 재스캔되지 않는다(불변식 #4).
     ``updated_at`` 이 NULL 이면(전이 전) 비교가 거짓이라 자연 제외된다(received 는 애초에 대상 아님).
+    정렬은 updated_at ASC, asset_id ASC — 동일 updated_at·대상>limit 시 asset_id(UUIDv7) 보조 정렬로
+    경계를 결정적으로 고정한다(헌법 3조·FR-012).
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT asset_id, status FROM asset "
             "WHERE status IN ('routing', 'classifying', 'extracting') "
             "  AND updated_at < now() - make_interval(secs => %s) "
-            "ORDER BY updated_at ASC LIMIT %s",
+            "ORDER BY updated_at ASC, asset_id ASC LIMIT %s",
             (older_than_s, limit),
         )
         return [(r[0], r[1]) for r in cur.fetchall()]
@@ -254,6 +258,13 @@ def process_received_batch(
            않는다**(자산별 try).
     """
     report = BatchReport()
+
+    # OpenSearch 증분 색인기 — os_index 미주입 시 배치당 1회 생성(run_ingest CLI 동형, FR-002·US1§2).
+    # opensearch_sync_enabled off(기본)면 콜러블이 즉시 반환하므로 미도입 환경에서 무해(회귀 0). 클라이언트는
+    # 첫 색인에서 만들어 배치 전체 재사용(자산마다 새 연결 X). process_asset 의 finalize 직후 os_index(asset_id)
+    # 로 호출된다. 호출자가 os_index 를 직접 주입하면 새로 만들지 않고 그대로 쓴다(중복 생성 회피).
+    if os_index is None:
+        os_index = _make_opensearch_indexer(db=db, settings=settings)
 
     # 1) 고착 리셋(옵션) — 비종료 고착 자산을 received 로 되돌려 이번/다음 run 재처리.
     if older_than_s is not None:

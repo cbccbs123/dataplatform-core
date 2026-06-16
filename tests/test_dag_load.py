@@ -196,6 +196,21 @@ class TestThinWrappers(unittest.TestCase):
         for kw in ("limit", "max_failures", "older_than_s"):
             self.assertIn(kw, m_batch.call_args.kwargs)
 
+    def test_process_callable_passes_settings_for_inline_opensearch(self) -> None:
+        # 코드리뷰 #1(FR-002·US1§2): dag_process 자동 적재분도 OpenSearch 인라인 색인을 하려면
+        # init_settings 가 돌려준 활성 설정이 배치로 전달돼야 한다(배치가 _make_opensearch_indexer 에 사용).
+        from src.ingest.batch_runner import BatchReport
+
+        cb = _callable("dag_process", _PROCESS_TASK)
+        db, _c, _cur = _fake_db()
+        with mock.patch.dict(os.environ, {"META_ENV": "dev"}), \
+                mock.patch("src.config.settings.init_settings") as m_init, \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("src.ingest.batch_runner.process_received_batch",
+                           return_value=BatchReport()) as m_batch:
+            cb()
+        self.assertIs(m_batch.call_args.kwargs.get("settings"), m_init.return_value)
+
     def test_relations_callable_scans_then_delegates_run_relations(self) -> None:
         cb = _callable("dag_relations", _RELATIONS_TASK)
         db, _c, _cur = _fake_db()
