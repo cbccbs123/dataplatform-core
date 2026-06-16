@@ -5,7 +5,11 @@ LLM/DB 불요 — 후보 recall(대칭 인정)·관계 P/R·kind/고립 정확�
 """
 import unittest
 
-from src.relations.quality.metrics import candidate_recall, relation_metrics
+from src.relations.quality.metrics import (
+    candidate_recall,
+    relation_metrics,
+    threshold_sweep,
+)
 from src.relations.quality.snapshot import ProposedEdge
 
 
@@ -50,6 +54,19 @@ class TestRelationMetrics(unittest.TestCase):
             proposed={"iso1": [ProposedEdge("x", "same_domain", 0.9)]},
             confidence_min=0.0)
         self.assertEqual(m["isolation_accuracy"], 0.5)  # iso2만 엣지0
+
+
+class TestSweep(unittest.TestCase):
+    def test_sweep_monotone(self):
+        proposed = {"a": [ProposedEdge("b", "same_series", 0.9),
+                          ProposedEdge("z", "x", 0.4)]}
+        rows = threshold_sweep(
+            triples=[("a", "b", "same_series")], isolated=set(),
+            proposed=proposed, thresholds=[0.0, 0.5, 0.95])
+        self.assertEqual([r["confidence_min"] for r in rows], [0.0, 0.5, 0.95])
+        self.assertEqual(rows[0]["precision"], 0.5)  # 0.0: 2엣지
+        self.assertEqual(rows[1]["precision"], 1.0)  # 0.5: (a,b)만
+        self.assertEqual(rows[2]["recall"], 0.0)     # 0.95: 아무 엣지도 통과 못함
 
 
 if __name__ == "__main__":

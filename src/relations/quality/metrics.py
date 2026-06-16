@@ -73,3 +73,21 @@ def relation_metrics(
         "isolation_accuracy": isolation_accuracy,
         "n_pairs": len(golden_pairs), "n_isolated": len(isolated),
         "n_accepted": len(accepted)}
+
+
+def threshold_sweep(
+    *,
+    triples: list[tuple[str, str, str]],
+    isolated: set[str],
+    proposed: dict[str, list[ProposedEdge]],
+    thresholds: list[float],
+) -> list[dict]:
+    """각 임계에서 `relation_metrics`를 재사용해 P/R 곡선을 반환한다(FR-006·DRY).
+
+    동결 스냅샷 입력이면 LLM 재호출 0·결정적(SC-002).
+    """
+    return [
+        {"confidence_min": t,
+         **relation_metrics(triples=triples, isolated=isolated,
+                            proposed=proposed, confidence_min=t)}
+        for t in thresholds]
