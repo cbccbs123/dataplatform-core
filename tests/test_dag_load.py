@@ -40,7 +40,8 @@ try:
 except Exception:  # noqa: BLE001 — airflow 미설치/임포트 실패 시 전 테스트 skip(회귀 0)
     _AIRFLOW_AVAILABLE = False
 
-# 프로젝트 루트 기준 DAG 폴더(테스트가 어디서 실행돼도 절대경로).
+# 프로젝트 루트 기준 DAG 폴더(테스트가 어디서 실행돼도 절대경로). dags 는 repo 정본 —
+#   운영 스택(/work/docker)은 이 dags 를 복사/마운트해 쓴다(소스는 repo 가 기준).
 _DAG_FOLDER = str(Path(__file__).resolve().parents[1] / "airflow" / "dags")
 
 _EXPECTED_DAGS = {"dag_collect", "dag_process", "dag_relations"}
@@ -81,6 +82,13 @@ def _fake_db(*, fetchone=None):
     return db, conn, cur
 
 
+def _fake_context(xcom_value):
+    """게이트 callable 용 가짜 태스크 컨텍스트 — ``context['ti'].xcom_pull(...)`` 가 주어진 값을 돌려준다."""
+    ti = mock.MagicMock(name="ti")
+    ti.xcom_pull.return_value = xcom_value
+    return {"ti": ti}
+
+
 @unittest.skipUnless(_AIRFLOW_AVAILABLE, "apache-airflow 미설치 — DagBag 파싱 불가")
 class TestDagBagIntegrity(unittest.TestCase):
     """SC-008: Airflow 미기동에서 DagBag 파싱만으로 세 DAG 가 무오류·안전 가드 유지."""
@@ -103,21 +111,40 @@ class TestDagBagIntegrity(unittest.TestCase):
             self.assertFalse(dag.catchup, msg=f"{dag_id} catchup")
             self.assertIsNotNone(dag.schedule, msg=f"{dag_id} schedule")
 
-    def test_each_dag_has_single_python_task(self) -> None:
+    def test_dag_task_structure(self) -> None:
+        # (a) push 체이닝 — collect/process 는 [래퍼 → 게이트(ShortCircuit) → 다음 DAG 트리거] 3태스크,
+        #     relations 는 종단이라 단일 태스크. 게이트는 신규 산출이 있을 때만 트리거를 통과시킨다(빈 처리 회피).
         bag = _dagbag()
-        expected_task = {
-            "dag_collect": _COLLECT_TASK,
-            "dag_process": _PROCESS_TASK,
-            "dag_relations": _RELATIONS_TASK,
+        expected_tasks = {
+            "dag_collect": {_COLLECT_TASK, "gate_new_received", "trigger_process"},
+            "dag_process": {_PROCESS_TASK, "gate_new_registered", "trigger_relations"},
+            "dag_relations": {_RELATIONS_TASK},
         }
-        for dag_id, task_id in expected_task.items():
-            dag = bag.dags[dag_id]
-            self.assertEqual([t.task_id for t in dag.tasks], [task_id],
+        for dag_id, tasks in expected_tasks.items():
+            self.assertEqual({t.task_id for t in bag.dags[dag_id].tasks}, tasks,
                              msg=f"{dag_id} 태스크 구성")
-            task = dag.get_task(task_id)
-            # PythonOperator(또는 동급) — python_callable 이 있는 얇은 래퍼.
+        # 기본 래퍼는 여전히 python_callable 을 가진 얇은 래퍼(FR-011).
+        for dag_id, task_id in (("dag_collect", _COLLECT_TASK), ("dag_process", _PROCESS_TASK),
+                                ("dag_relations", _RELATIONS_TASK)):
+            task = bag.dags[dag_id].get_task(task_id)
             self.assertTrue(callable(getattr(task, "python_callable", None)),
                             msg=f"{dag_id}.{task_id} python_callable")
+
+    def test_push_chaining_to_next_dag(self) -> None:
+        # (a) TriggerDagRunOperator push 체이닝 — collect→process→relations. 게이트가 빈 산출에 트리거를 막고,
+        #     cron 은 안전망으로 유지(트리거 유실·크래시 시 다음 주기에 PG 상태로 복구 — self-healing).
+        bag = _dagbag()
+        coll = bag.dags["dag_collect"]
+        self.assertEqual(coll.get_task("trigger_process").trigger_dag_id, "dag_process")
+        # collect_inbox → gate_new_received → trigger_process (게이트가 신규 received 없으면 트리거 스킵).
+        self.assertIn("gate_new_received", coll.get_task(_COLLECT_TASK).downstream_task_ids)
+        self.assertIn("trigger_process", coll.get_task("gate_new_received").downstream_task_ids)
+        proc = bag.dags["dag_process"]
+        self.assertEqual(proc.get_task("trigger_relations").trigger_dag_id, "dag_relations")
+        self.assertIn("gate_new_registered", proc.get_task(_PROCESS_TASK).downstream_task_ids)
+        self.assertIn("trigger_relations", proc.get_task("gate_new_registered").downstream_task_ids)
+        # relations 는 종단 — 하위 트리거 없음.
+        self.assertEqual(bag.dags["dag_relations"].get_task(_RELATIONS_TASK).downstream_task_ids, set())
 
     def test_process_dag_pins_gpu_pool(self) -> None:
         # 단일 GPU OOM 차단 — dag_process 태스크는 크기 1 Pool('gpu')에 묶인다(FR-010).
@@ -177,6 +204,21 @@ class TestThinWrappers(unittest.TestCase):
                 mock.patch("src.app.run_ingest.collect_file") as m_collect:
             cb()
         m_collect.assert_not_called()
+
+    def test_collect_counts_only_created_received(self) -> None:
+        # 해시 dup·누락(collect_file → asset_id=None)은 collected 에 세지 않는다 → 게이트가 헛 트리거 안 함.
+        cb = _callable("dag_collect", _COLLECT_TASK)
+        db, _conn, _cur = _fake_db(fetchone=None)  # fs_path 미존재 → collect_file 까지 진행
+        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "META_ENV": "dev"}), \
+                mock.patch("src.config.settings.init_settings"), \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("src.ingest.collector.collect_files",
+                           return_value=["/inbox/a.txt", "/inbox/b.txt"]), \
+                mock.patch("src.app.run_ingest.collect_file",
+                           return_value=mock.Mock(asset_id=None)) as m_collect:
+            collected = cb()
+        self.assertEqual(m_collect.call_count, 2)   # 두 파일 다 시도는 함
+        self.assertEqual(collected, 0)              # 생성 0(전부 dup/누락) → 트리거 게이트 False
 
     def test_process_callable_calls_process_received_batch(self) -> None:
         from src.ingest.batch_runner import BatchReport
@@ -240,6 +282,20 @@ class TestThinWrappers(unittest.TestCase):
             cb()
         # 미해소 0건이면 run_relations 를 부르지 않는다(빈 배치 호출 회피).
         m_rr.assert_not_called()
+
+    def test_collect_gate_passes_only_when_new_received(self) -> None:
+        # (a) 게이트 — 신규 수집이 있을 때만 trigger_process 통과(빈 인입에 GPU 배치 헛 기동 차단).
+        gate = _callable("dag_collect", "gate_new_received")
+        self.assertTrue(gate(**_fake_context(2)))       # 신규 2건 → 통과
+        self.assertFalse(gate(**_fake_context(0)))      # 0건 → ShortCircuit 스킵
+        self.assertFalse(gate(**_fake_context(None)))   # XCom 없음 → 스킵
+
+    def test_process_gate_passes_only_when_new_registered(self) -> None:
+        # (a) 게이트 — 신규 registered 가 있을 때만 trigger_relations 통과.
+        gate = _callable("dag_process", "gate_new_registered")
+        self.assertTrue(gate(**_fake_context({"registered": 3, "deferred": 1})))   # 신규 3건 → 통과
+        self.assertFalse(gate(**_fake_context({"registered": 0, "deferred": 2})))  # 0건 → 스킵
+        self.assertFalse(gate(**_fake_context(None)))                              # XCom 없음 → 스킵
 
 
 if __name__ == "__main__":
