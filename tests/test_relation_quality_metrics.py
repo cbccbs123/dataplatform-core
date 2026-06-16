@@ -5,7 +5,8 @@ LLM/DB 불요 — 후보 recall(대칭 인정)·관계 P/R·kind/고립 정확�
 """
 import unittest
 
-from src.relations.quality.metrics import candidate_recall
+from src.relations.quality.metrics import candidate_recall, relation_metrics
+from src.relations.quality.snapshot import ProposedEdge
 
 
 class TestCandidateRecall(unittest.TestCase):
@@ -22,6 +23,33 @@ class TestCandidateRecall(unittest.TestCase):
 
     def test_empty_pairs(self):
         self.assertEqual(candidate_recall([], {}), 0.0)
+
+
+class TestRelationMetrics(unittest.TestCase):
+    def _proposed(self):
+        return {"a": [ProposedEdge("b", "same_series", 0.9),
+                      ProposedEdge("z", "same_domain", 0.4)]}
+
+    def test_precision_recall_kind(self):
+        m = relation_metrics(
+            triples=[("a", "b", "same_series")], isolated=set(),
+            proposed=self._proposed(), confidence_min=0.0)
+        self.assertEqual(m["recall"], 1.0)         # 골든 (a,b) 회수
+        self.assertEqual(m["precision"], 0.5)      # 2엣지 중 (a,b)만 정답
+        self.assertEqual(m["kind_accuracy"], 1.0)  # 매칭된 (a,b) kind 일치
+
+    def test_confidence_min_filters(self):
+        m = relation_metrics(
+            triples=[("a", "b", "same_series")], isolated=set(),
+            proposed=self._proposed(), confidence_min=0.5)  # 0.4 엣지 탈락
+        self.assertEqual(m["precision"], 1.0)
+
+    def test_isolation_accuracy(self):
+        m = relation_metrics(
+            triples=[], isolated={"iso1", "iso2"},
+            proposed={"iso1": [ProposedEdge("x", "same_domain", 0.9)]},
+            confidence_min=0.0)
+        self.assertEqual(m["isolation_accuracy"], 0.5)  # iso2만 엣지0
 
 
 if __name__ == "__main__":
