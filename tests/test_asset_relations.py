@@ -525,6 +525,7 @@ _FAKE_CFG = types.SimpleNamespace(
     relation_min_sim=0.2,
     relation_path_top_k=10,
     relation_auto_approve_min=0.75,
+    relation_auto_approve_emb_min=0.0,  # 033: 무력 기본값(자동승인 emb 게이트 미적용)
 )
 
 
@@ -555,8 +556,10 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         ]
         captured: dict = {}
 
-        def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min):
+        def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min,
+                       target_emb_scores=None, auto_approve_emb_min=0.0):  # 033 FR-003 신규 kwargs
             captured["allowed"] = allowed_target_ids
+            captured["emb_scores"] = target_emb_scores
             return 1, 0
 
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \

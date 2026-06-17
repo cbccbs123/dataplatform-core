@@ -18,7 +18,7 @@ from unittest import mock
 
 from dotenv import load_dotenv
 
-from src.relations.asset_entry import union_candidates
+from src.relations.asset_entry import target_emb_score_map, union_candidates
 from src.relations.path_signal import (
     find_path_signal_candidates,
     normalize_stem,
@@ -277,6 +277,26 @@ class TestUnionCandidates(unittest.TestCase):
         emb = [_emb(_T1, 0.5)]
         out = union_candidates(emb, [])
         self.assertEqual([c["id"] for c in out], [_T1])
+
+
+class TestTargetEmbScoreMap(unittest.TestCase):
+    """T006 [FR-003] — 후보 {asset_id: emb_score} 맵(자동승인 AND 게이트 전달용)."""
+
+    def test_embedding_score_preserved(self) -> None:
+        m = target_emb_score_map([_emb(_T1, 0.77)])
+        self.assertEqual(m[_T1], 0.77)
+
+    def test_path_only_is_zero_sentinel(self) -> None:
+        # path-only 후보는 0.0 → emb_min>0 이면 자동승인 불가(의도된 보수성).
+        m = target_emb_score_map([_path(_T2)])
+        self.assertEqual(m[_T2], 0.0)
+
+    def test_union_then_map_keeps_embedding_value(self) -> None:
+        # union(C-3 임베딩 우선) 결과를 맵핑하면 겹친 id 는 실측 emb_score 가 담긴다.
+        out = union_candidates([_emb(_T1, 0.91)], [_path(_T1), _path(_T2)])
+        m = target_emb_score_map(out)
+        self.assertEqual(m[_T1], 0.91)
+        self.assertEqual(m[_T2], 0.0)
 
     def test_dedup_within_path_preserves_first(self) -> None:
         # 경로 신호 내부 중복 asset_id 도 dedup(첫 항목 유지, 결정적).

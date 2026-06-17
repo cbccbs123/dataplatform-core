@@ -82,6 +82,15 @@ def union_candidates(
     return out
 
 
+def target_emb_score_map(candidates: list[EmbeddingCandidate]) -> dict[str, float]:
+    """후보의 ``{asset_id: emb_score}`` 맵 — 자동승인 AND 게이트(033 FR-003)에 전달.
+
+    path-only 후보는 ``emb_score=0.0`` sentinel 을 그대로 유지(``emb_min>0`` 이면 자동승인 불가).
+    union 에서 임베딩 후보가 우선이라 겹친 id 는 실측 emb_score 가 담긴다.
+    """
+    return {str(c["id"]): float(c["emb_score"]) for c in candidates}
+
+
 def propose_relations_for_asset(
     db: PostgresUtil,
     source_asset_id: str,
@@ -141,9 +150,13 @@ def propose_relations_for_asset(
         # 신규 kind는 inactive로 먼저 등록 — 검토자가 active로 승인하기 전까지 그래프에 반영 안 됨.
         kinds_registered, kinds_skipped = register_new_relation_kinds(
             conn, edges=edges, active_kind_codes=active_codes)
+        # 033 FR-003: 후보 emb_score 맵 + emb 하한을 persist 로 전달 → 자동승인 AND 게이트.
+        # 기본 auto_approve_emb_min=0.0 이면 emb 변이 무력 → 현행과 동일(SC-001).
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
-            allowed_target_ids=candidate_ids, auto_approve_min=cfg.relation_auto_approve_min)
+            allowed_target_ids=candidate_ids, auto_approve_min=cfg.relation_auto_approve_min,
+            target_emb_scores=target_emb_score_map(candidates),
+            auto_approve_emb_min=cfg.relation_auto_approve_emb_min)
         # 계보 기록: 이 자산에 대해 관계 제안이 실행되었음을 asset_lineage에 남긴다.
         # run_relations.py 가 재실행될 때 이중 기록이 생길 수 있으나, idempotent=False로
         # 트랜잭션 실패 시 롤백되어 반쪽 기록은 남지 않는다.
