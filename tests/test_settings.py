@@ -66,6 +66,10 @@ _BACKEND_KEYS = (
     "OPENSEARCH_FILENAME_NOISE_PATTERNS",
     # 033 T002: 자동승인 emb_score 하한 선택 env 키도 비워, 실행 환경 잔존값이 기본 0.0 단언을 오염시키지 않게 한다.
     "RELATION_AUTO_APPROVE_EMB_MIN",
+    # 038: OS 증분 색인 토글. 기본 True(037 후 적재=색인) 단언을 실행 환경 잔존값이 오염시키지 않게 비운다.
+    # 또한 정합 가드(backend=opensearch ∧ ¬sync → ValueError)가 _build_settings 를 부르는 모든 케이스에
+    # 결정적으로 통과하도록(미설정 → 기본 True) 격리한다.
+    "OPENSEARCH_SYNC_ENABLED",
 )
 
 
@@ -527,6 +531,40 @@ class TestSearchBackendWiring(unittest.TestCase):
             )
         self.assertEqual(os_calls, [1])  # 기본값으로도 OS seam 사용(037 단일 경로)
         self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
+
+
+class TestOpenSearchSyncGuard(unittest.TestCase):
+    """038 T001/T002: OS read ⇒ OS write 정합 가드 + 증분 색인 기본 활성화.
+
+    037 로 ``search_backend`` 가 OpenSearch 단일이 된 뒤, 적재 시 OS 증분 색인
+    (``opensearch_sync_enabled``)이 꺼져 있으면 신규·변경 자산이 검색에서 조용히 누락된다(PG 폴백 없음).
+    이 반쪽 마이그레이션 조합(``backend=opensearch ∧ ¬sync``)을 ``_build_settings`` 시점에 즉시
+    ``ValueError`` 로 차단한다(``_resolve_search_backend`` 동형 fail-fast). 기본값은 ``True`` —
+    미설정 환경도 적재=색인이 정합이다(가드와 한 쌍: 가드만 두고 기본 False 면 기본 설정 build 가 전부
+    깨진다). ``_BACKEND_KEYS`` 가 ``OPENSEARCH_SYNC_ENABLED`` 를 비우므로 미설정=기본값 경로로 검증된다.
+    """
+
+    def test_default_sync_enabled_is_true(self) -> None:
+        # SC-001: 미설정 → 기본 True(037 후 적재=색인). _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            settings = _build_settings("dev")
+        self.assertIs(settings.opensearch_sync_enabled, True)
+
+    def test_opensearch_backend_with_sync_off_raises(self) -> None:
+        # SC-002: backend=opensearch(기본) ∧ sync=false → 빌드 시 즉시 ValueError(반쪽 마이그레이션 차단).
+        with _env(OPENSEARCH_SYNC_ENABLED="false"):
+            with self.assertRaises(ValueError) as cm:
+                _build_settings("dev")
+        msg = str(cm.exception)
+        self.assertIn("OPENSEARCH_SYNC_ENABLED", msg)
+        self.assertIn("SEARCH_BACKEND", msg)
+
+    def test_consistent_on_builds_ok(self) -> None:
+        # SC-002: 둘 다 일관(opensearch + true)이면 정상 빌드.
+        with _env(OPENSEARCH_SYNC_ENABLED="true"):
+            settings = _build_settings("dev")
+        self.assertIs(settings.opensearch_sync_enabled, True)
+        self.assertEqual(settings.search_backend, "opensearch")
 
 
 if __name__ == "__main__":

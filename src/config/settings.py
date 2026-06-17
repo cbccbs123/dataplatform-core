@@ -66,9 +66,12 @@ class PipelineSettings:
     chunk_agg: str
     chunk_agg_k: int        # topk_mean 상위 k(기본 3)
     chunk_agg_mix_w: float  # mix 가중치 w: w*MAX + (1-w)*AVG (기본 0.5)
-    # 020: OpenSearch 동기화(검색 엔진 도입·CQRS). 모두 선택 필드(018/019 동형) — 미설정 시 기존
-    # 동작 무영향(SC-001). opensearch_sync_enabled 기본 False 면 run_ingest 증분 훅이 실행되지 않고
-    # opensearch_sync/opensearch-py 를 import 조차 하지 않는다. url/index 는 증분 훅·복구 도구가 참조.
+    # 020: OpenSearch 동기화(검색 엔진 도입·CQRS). url/index 는 증분 훅·복구 도구가 참조하는 선택 필드.
+    # 038: opensearch_sync_enabled 기본 True — 037 로 검색이 OS 단일이 된 뒤 적재 시 증분 색인이 꺼져
+    # 있으면 신규 자산이 검색에서 누락된다(PG 폴백 없음). 정합 가드(_validate_settings_consistency)가
+    # backend=opensearch ∧ ¬sync 조합을 _build_settings 시점에 차단하므로 기본값·가드는 한 쌍이다.
+    # (off 로 두면 run_ingest 증분 훅이 즉시 반환·opensearch-py 미import 하던 020 동작이지만, OS 백엔드
+    #  하에선 가드가 false 를 불허한다 — OS-less 운영은 검색 자체가 037 전제상 불가.)
     opensearch_url: str
     opensearch_index: str
     opensearch_sync_enabled: bool
@@ -210,6 +213,23 @@ def _resolve_search_backend() -> str:
             f"지원하지 않는 검색 백엔드: SEARCH_BACKEND={value!r} (지원: {list(_SEARCH_BACKENDS)})"
         )
     return value
+
+
+def _validate_settings_consistency(settings: PipelineSettings) -> None:
+    """교차필드 정합 fail-fast(038 — 037 불변식 'OS read ⇒ OS write 필수').
+
+    검색을 OpenSearch 에서 읽는데(``search_backend=='opensearch'``) 적재 시 OS 증분 색인이 꺼져 있으면
+    (``¬opensearch_sync_enabled``) 신규·변경 자산이 검색에서 조용히 누락된다(037 로 PG 폴백 없음).
+    이 반쪽 마이그레이션을 ``_build_settings`` 시점에 즉시 차단한다 — 단일 필드 화이트리스트를 보는
+    ``_resolve_search_backend`` 와 달리 두 필드의 결합 불변식이라 빌드 완료 후 검증한다(런타임까지
+    오설정이 숨지 않게). 037 로 ``search_backend`` 가 'opensearch' 단일이므로 사실상 'sync 는 항상 켜야
+    한다'와 같지만, 결합 형태로 적어 의도(왜 켜야 하나)를 드러내고 향후 백엔드 추가에도 견고하게 둔다."""
+    if settings.search_backend == "opensearch" and not settings.opensearch_sync_enabled:
+        raise ValueError(
+            "설정 불일치: SEARCH_BACKEND=opensearch 인데 OPENSEARCH_SYNC_ENABLED=false 입니다. "
+            "OS 검색은 적재 시 OS 증분 색인이 필수입니다(037 이후 PG 폴백 없음 — 끄면 신규 자산이 "
+            "검색에서 누락). OPENSEARCH_SYNC_ENABLED=true 로 설정하세요."
+        )
 
 
 def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
@@ -370,7 +390,7 @@ def _resolve_os_rerank_tau() -> float:
 
 
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
-    return PipelineSettings(
+    settings = PipelineSettings(
         profile=profile,
         meta_model=_require_env("META_MODEL"),
         openai_base_url=_require_env("OPENAI_BASE_URL"),
@@ -409,10 +429,12 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         chunk_agg=_env_str_default("SEARCH_CHUNK_AGG", "max"),
         chunk_agg_k=_env_int_default("SEARCH_CHUNK_AGG_K", 3),
         chunk_agg_mix_w=_env_float_default("SEARCH_CHUNK_AGG_MIX_W", 0.5),
-        # 020: OpenSearch 동기화 선택 설정. 미설정 시 url/index 기본값·sync off(기존 동작 불변).
+        # 020: OpenSearch 동기화 선택 설정. 미설정 시 url/index 기본값.
+        # 038: sync 기본 True(037 후 적재=색인 정합). backend=opensearch ∧ ¬sync 조합은 빌드 말미
+        #   _validate_settings_consistency 가 ValueError 로 차단한다(아래 return 직전).
         opensearch_url=_env_str_default("OPENSEARCH_URL", "http://localhost:9200"),
         opensearch_index=_env_str_default("OPENSEARCH_INDEX", "assets"),
-        opensearch_sync_enabled=_env_bool_default("OPENSEARCH_SYNC_ENABLED", False),
+        opensearch_sync_enabled=_env_bool_default("OPENSEARCH_SYNC_ENABLED", True),
         # 021/037: 검색 백엔드 선택. 037 에서 PG 경로 제거로 미설정 시 기본 'opensearch'. search_backend
         # 화이트리스트 검증·융합 가중치 범위검증은 _resolve_* 헬퍼가 _build_settings 시점에 수행한다(fail-fast).
         search_backend=_resolve_search_backend(),
@@ -446,6 +468,10 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         opensearch_nori_user_words=resolve_opensearch_nori_user_words(),
         opensearch_filename_noise_patterns=resolve_opensearch_filename_noise_patterns(),
     )
+    # 038: 단일 필드 fail-fast(_resolve_*)로 못 잡는 교차필드 불변식(OS read ⇒ OS write 필수)을
+    # 빌드 완료 후 검증한다 — 오설정이 런타임까지 숨지 않게(init_settings=_build_settings 검증 지점).
+    _validate_settings_consistency(settings)
+    return settings
 
 
 def init_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
