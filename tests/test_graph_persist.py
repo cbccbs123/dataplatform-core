@@ -220,6 +220,10 @@ class TestGraphPersistDB(unittest.TestCase):
         self.assertEqual(topic2, "게임")            # 보존
         self.assertEqual(reason2, "r2")
         self.assertEqual(float(conf2), 0.9)         # GREATEST
+        self._sync_edge(src_id, dst_id, confidence=0.9, topic_ko="동률", reason="r4")  # 동률(==) → strict > 라 보존
+        topic3, reason3, _, _ = self._edge_row(src_id, dst_id)
+        self.assertEqual(topic3, "게임")            # 동률은 갱신 안 함(strict > 경계·결정적)
+        self.assertEqual(reason3, "r2")
 
     def test_conflict_preserves_status_even_higher_confidence(self):
         src_id = _make_registered_asset(self.db, self._ids)
