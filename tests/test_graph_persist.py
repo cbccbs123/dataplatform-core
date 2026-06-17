@@ -183,6 +183,58 @@ class TestGraphPersistDB(unittest.TestCase):
             (n,) = cur.fetchone()
         self.assertEqual(n, 1)   # 멱등: 1건 유지
 
+    # ── 032: 충돌 시 confidence 더 큰 제안의 topic·reason 갱신(status 보존) ──
+    def _sync_edge(self, src_id, dst_id, *, confidence, topic_ko, reason):
+        """단일 derived_from(비대칭 — canonical 방향 유지) 엣지 sync. (upserted, skipped) 반환."""
+        from src.relations.graph_persist import sync_graph_edges
+        edges = [{
+            "target_media_item_id": dst_id, "relation_type_code": "derived_from",
+            "topic_ko": topic_ko, "topic_en": "", "subtopic_ko": "", "subtopic_en": "",
+            "confidence": confidence, "reason": reason,
+        }]
+        return self.db.execute_in_transaction(
+            lambda conn: sync_graph_edges(
+                conn, source_asset_id=src_id, edges=edges, allowed_target_ids=frozenset({dst_id})),
+            idempotent=False)
+
+    def _edge_row(self, src_id, dst_id):
+        with self.db.transaction() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ge.topic->>'topic_ko', ge.reason, ge.confidence, ge.status FROM graph_edge ge "
+                "JOIN node sn ON sn.node_id = ge.src_node AND sn.asset_id = %s "
+                "JOIN node dn ON dn.node_id = ge.dst_node AND dn.asset_id = %s",
+                (src_id, dst_id))
+            return cur.fetchone()
+
+    def test_conflict_refreshes_topic_when_higher_confidence(self):
+        src_id = _make_registered_asset(self.db, self._ids)
+        dst_id = _make_registered_asset(self.db, self._ids)
+        self._sync_edge(src_id, dst_id, confidence=0.5, topic_ko="기타", reason="r1")
+        self._sync_edge(src_id, dst_id, confidence=0.9, topic_ko="게임", reason="r2")  # 더 높음 → 갱신
+        topic, reason, conf, _ = self._edge_row(src_id, dst_id)
+        self.assertEqual(topic, "게임")
+        self.assertEqual(reason, "r2")
+        self.assertEqual(float(conf), 0.9)
+        self._sync_edge(src_id, dst_id, confidence=0.3, topic_ko="잡담", reason="r3")  # 더 낮음 → 보존
+        topic2, reason2, conf2, _ = self._edge_row(src_id, dst_id)
+        self.assertEqual(topic2, "게임")            # 보존
+        self.assertEqual(reason2, "r2")
+        self.assertEqual(float(conf2), 0.9)         # GREATEST
+
+    def test_conflict_preserves_status_even_higher_confidence(self):
+        src_id = _make_registered_asset(self.db, self._ids)
+        dst_id = _make_registered_asset(self.db, self._ids)
+        self._sync_edge(src_id, dst_id, confidence=0.5, topic_ko="기타", reason="r1")
+        with self.db.transaction() as conn, conn.cursor() as cur:  # 사람이 rejected 처리
+            cur.execute(
+                "UPDATE graph_edge ge SET status='rejected' FROM node sn, node dn "
+                "WHERE sn.node_id=ge.src_node AND sn.asset_id=%s "
+                "AND dn.node_id=ge.dst_node AND dn.asset_id=%s",
+                (src_id, dst_id))
+        self._sync_edge(src_id, dst_id, confidence=0.95, topic_ko="게임", reason="r2")  # 높아도
+        _, _, _, status = self._edge_row(src_id, dst_id)
+        self.assertEqual(status, "rejected")        # status 보존(사람 결정 무손상)
+
 
 if __name__ == "__main__":
     unittest.main()

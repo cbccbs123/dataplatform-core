@@ -149,12 +149,17 @@ def sync_graph_edges(
                 DO UPDATE SET
                     confidence = GREATEST(
                         COALESCE(graph_edge.confidence, 0), COALESCE(EXCLUDED.confidence, 0)),
+                    topic = CASE
+                        WHEN COALESCE(EXCLUDED.confidence, 0) > COALESCE(graph_edge.confidence, 0)
+                        THEN EXCLUDED.topic ELSE graph_edge.topic END,
+                    reason = CASE
+                        WHEN COALESCE(EXCLUDED.confidence, 0) > COALESCE(graph_edge.confidence, 0)
+                        THEN EXCLUDED.reason ELSE graph_edge.reason END,
                     updated_at = now()
                 """,
-                # ON CONFLICT 시 confidence만 GREATEST로 화해하고
-                # status·reason·topic은 갱신하지 않는다.
-                # 이유: 대칭 엣지를 양방향에서 재제안할 때 신뢰도 불일치가 발생할 수 있고,
-                # 사람이 한 번 내린 검토 결정(특히 rejected)을 LLM 재제안이 덮어쓰면 안 된다.
+                # ON CONFLICT(032·#5): confidence 더 큰 재제안의 topic·reason 만 갱신(작거나 같으면 기존 유지)
+                # — 첫 제안 stale topic 고정을 해소한다. confidence 는 GREATEST 화해.
+                # ★ status 는 **미갱신** — 사람이 한 번 내린 검토 결정(특히 rejected)을 LLM 재제안이 덮어쓰면 안 된다.
                 (uuid7_str(), a_node, b_node, kind_id, conf_f, reason, topic_json, status_val),
             )
         upserted += 1
