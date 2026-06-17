@@ -170,10 +170,11 @@ class TestLoadGolden(unittest.TestCase):
 
 
 class TestTopicPrefixRule(unittest.TestCase):
-    """골든셋 주제(파일명 prefix) 추출·질의 생성 규칙(순수 단위, DB 무관) — 결정적(T010 재설계).
+    """골든셋 주제(파일명) 추출·질의 생성 규칙(순수 단위, DB 무관) — 결정적(T010 재설계).
 
-    데이터 파일명은 ``<주제>_<YouTube ID(11자)>_<제목>.<ext>`` 로 자연 군집한다. 같은 주제 =
-    관련 자산이므로 주제 prefix 를 정답군으로 쓴다. 추출 규칙(정규식)을 여러 케이스로 고정한다.
+    코퍼스는 3종 명명 규약이 혼재한다(2026-06 증분): 구형 ``<주제>_<ID(11자)>_<제목>`` 과 신규
+    출처-prefix ``youtube_<주제>_<id>`` / ``wikipedia_<주제>_<id>``. ``_extract_topic`` 는 셋 다에서
+    ``(그룹키, 표시주제)`` 를 뽑고, 그룹키(주제의 첫 밑줄 토큰)로 출처를 가로질러 병합한다.
     """
 
     @classmethod
@@ -181,32 +182,57 @@ class TestTopicPrefixRule(unittest.TestCase):
         cls.mod = _load_draft_module()
 
     def test_simple_two_token_topic(self) -> None:
-        # <주제(밑줄 포함)>_<11자 ID>_<제목> — ID 직전까지가 주제.
+        # 구형 <주제(밑줄 포함)>_<11자 ID>_<제목> — ID 직전까지가 표시주제, 첫 토큰이 그룹키.
         name = "무선_충전기_7iTajgt8pec_Qi2 다 같은 Qi2 아니죠 UGREEN 무선 충전기.jpg"
-        self.assertEqual(self.mod._topic_from_filename(name), "무선_충전기")
+        self.assertEqual(self.mod._extract_topic(name), ("무선", "무선_충전기"))
 
     def test_single_token_topic(self) -> None:
         name = "선거_DOYCfVbioXQ_정원오 44.9% 오세훈 39.8% 서울시장 선거.mp4"
-        self.assertEqual(self.mod._topic_from_filename(name), "선거")
+        self.assertEqual(self.mod._extract_topic(name), ("선거", "선거"))
 
     def test_three_token_topic(self) -> None:
         name = "주식_투자_기초_AbCdEfGhIjK_초보 투자자를 위한 가이드.mp3"
-        self.assertEqual(self.mod._topic_from_filename(name), "주식_투자_기초")
+        self.assertEqual(self.mod._extract_topic(name), ("주식", "주식_투자_기초"))
 
     def test_youtube_id_with_underscore_and_dash(self) -> None:
-        # 실제 ID 는 [A-Za-z0-9_-] 11자 — 밑줄/하이픈을 포함할 수 있다(주제 토큰과 구분).
+        # 구형 ID 는 [A-Za-z0-9_-] 11자 — 밑줄/하이픈을 포함할 수 있다(주제 토큰과 구분).
         name = "스마트폰_5ncp-_GXBsU_YENA (최예나) - SMARTPHONE MV.jpg"
-        self.assertEqual(self.mod._topic_from_filename(name), "스마트폰")
+        self.assertEqual(self.mod._extract_topic(name), ("스마트폰", "스마트폰"))
 
     def test_double_extension_still_matches_prefix(self) -> None:
         # .ko.txt / .stt.txt 같은 이중 확장자도 prefix 추출에는 무관(앞에서만 매칭).
         name = "라면_끓이기_GMjx9GrF1nY_3분 라면 황금레시피.ko.txt"
-        self.assertEqual(self.mod._topic_from_filename(name), "라면_끓이기")
+        self.assertEqual(self.mod._extract_topic(name), ("라면", "라면_끓이기"))
+
+    def test_youtube_source_prefix(self) -> None:
+        # 신규 youtube_<주제>_<id>.<ext> — 2번째 필드가 주제(밑줄 없음 → 그룹키=주제).
+        self.assertEqual(
+            self.mod._extract_topic("youtube_사막_3bTA2c2n2QI.jpg"), ("사막", "사막")
+        )
+
+    def test_wikipedia_source_prefix(self) -> None:
+        # 신규 wikipedia_<주제>_<문서id>.txt — 숫자 id 라도 2번째 필드가 주제.
+        self.assertEqual(
+            self.mod._extract_topic("wikipedia_고려청자_1031019.txt"), ("고려청자", "고려청자")
+        )
+
+    def test_source_prefix_topic_with_space(self) -> None:
+        # 신규 주제는 공백을 포함할 수 있다(밑줄로 구분되는 단일 필드): "기후 변화".
+        self.assertEqual(
+            self.mod._extract_topic("youtube_기후 변화_3CHPt7zk5fE.mp4"), ("기후 변화", "기후 변화")
+        )
+
+    def test_old_and_new_share_group_key(self) -> None:
+        # 출처 교차 병합: 구형 ``등산_입문`` 과 신규 ``youtube_등산`` 이 같은 그룹키 ``등산``.
+        old_key, _ = self.mod._extract_topic("등산_입문_ZyXwVuTsRqP_초보 가이드.mp4")
+        yt_key, _ = self.mod._extract_topic("youtube_등산_3c4S1GpVFDQ.txt")
+        self.assertEqual(old_key, yt_key)
+        self.assertEqual(old_key, "등산")
 
     def test_non_matching_name_returns_none(self) -> None:
         # 주제 패턴이 아닌 파일명은 None(골든셋에서 제외).
-        self.assertIsNone(self.mod._topic_from_filename("manifest.json"))
-        self.assertIsNone(self.mod._topic_from_filename("그냥파일.txt"))
+        self.assertIsNone(self.mod._extract_topic("manifest.json"))
+        self.assertIsNone(self.mod._extract_topic("그냥파일.txt"))
 
     def test_query_from_topic_underscore_to_space(self) -> None:
         # 질의 = 주제명(밑줄→공백) — 자연어 질의.
@@ -214,11 +240,9 @@ class TestTopicPrefixRule(unittest.TestCase):
         self.assertEqual(self.mod._query_from_topic("선거"), "선거")
 
     def test_rule_is_deterministic(self) -> None:
-        # 같은 입력 2회 → 같은 주제(결정성, 헌법 3조).
+        # 같은 입력 2회 → 같은 결과(결정성, 헌법 3조).
         name = "등산_입문_ZyXwVuTsRqP_초보 등산 가이드.mp4"
-        self.assertEqual(
-            self.mod._topic_from_filename(name), self.mod._topic_from_filename(name)
-        )
+        self.assertEqual(self.mod._extract_topic(name), self.mod._extract_topic(name))
 
 
 class TestBuildDraftsTopicGrouping(unittest.TestCase):
@@ -276,6 +300,37 @@ class TestBuildDraftsTopicGrouping(unittest.TestCase):
         ]
         drafts = self.mod.build_drafts(self._conn(rows), min_group=2)
         self.assertEqual(drafts[0]["relevant_asset_ids"], ["id-1", "id-2"])
+
+    def test_excludes_curated_mislabel_files(self) -> None:
+        # 수기 검증 오라벨(``_EXCLUDE_FILES``)은 정답군에서 빠진다. 나머지 동일 토픽 자산은 유지.
+        rows = [
+            {"asset_id": "id-bad", "fs_path": "/d/wikipedia_도예_10011.txt"},  # 오라벨(이란 기사)
+            {"asset_id": "id-1", "fs_path": "/d/도예_DIY_aaaaaaaaaaa_a.mp4"},
+            {"asset_id": "id-2", "fs_path": "/d/youtube_도예_bbbbbbbbbbb.txt"},
+        ]
+        drafts = self.mod.build_drafts(self._conn(rows), min_group=2)
+        ids = [a for d in drafts for a in d["relevant_asset_ids"]]
+        self.assertNotIn("id-bad", ids)
+        self.assertIn("id-1", ids)
+        self.assertIn("id-2", ids)
+
+    def test_excluded_file_constant_nonempty(self) -> None:
+        # 제외 목록은 위키 오라벨 파일명 집합(회귀 방지 — 비어 있으면 반영 누락).
+        self.assertIn("wikipedia_영어 회화_32276.txt", self.mod._EXCLUDE_FILES)
+        self.assertGreaterEqual(len(self.mod._EXCLUDE_FILES), 12)
+
+    def test_cross_source_merge_uses_longest_label(self) -> None:
+        # 출처 교차: 구형 ``등산_입문``·신규 ``youtube_등산``·``wikipedia_등산`` 이 키 ``등산`` 으로
+        # 한 그룹. 정답은 세 출처 합집합, 질의는 가장 서술적인(긴) 표시주제("등산 입문").
+        rows = [
+            {"asset_id": "id-old", "fs_path": "/d/등산_입문_aaaaaaaaaaa_t.mp4"},
+            {"asset_id": "id-yt", "fs_path": "/d/youtube_등산_3c4S1GpVFDQ.txt"},
+            {"asset_id": "id-wiki", "fs_path": "/d/wikipedia_등산_294538.txt"},
+        ]
+        drafts = self.mod.build_drafts(self._conn(rows), min_group=2)
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0]["query"], "등산 입문")  # 최장 표시주제
+        self.assertEqual(drafts[0]["relevant_asset_ids"], ["id-old", "id-wiki", "id-yt"])
 
 
 def _finite_sim(row: dict) -> float:

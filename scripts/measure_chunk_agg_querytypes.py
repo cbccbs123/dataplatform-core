@@ -24,7 +24,7 @@ def main() -> int:
         print("RUN_DB_E2E=1 필요(실DB 측정).")
         return 0
     from dotenv import load_dotenv
-    from scripts.build_golden_ko_draft import _fetch_assets, _topic_from_filename
+    from scripts.build_golden_ko_draft import _EXCLUDE_FILES, _extract_topic, _fetch_assets
     from scripts.measure_chunk_agg_kpi import (
         compute_agg_kpi_table,
         format_comparison_table,
@@ -64,12 +64,18 @@ def main() -> int:
         with db.transaction() as conn:
             assets = _fetch_assets(conn)  # st_bge registered: asset_id·fs_path
 
-        # 주제 prefix 로 자산 그룹화
+        # 주제로 자산 그룹화(_extract_topic 의 표시주제 label = 구형 '무선_충전기' / 신규 '사막').
+        # 오라벨 파일은 정답군에서 제외(빌더와 동일 규약). combo=주제구·word=첫 토큰 구분은 유지.
         topic_assets: dict[str, set[str]] = {}
         for row in assets:
-            topic = _topic_from_filename(Path(row["fs_path"]).name)
-            if topic:
-                topic_assets.setdefault(topic, set()).add(str(row["asset_id"]))
+            name = Path(row["fs_path"]).name
+            if name in _EXCLUDE_FILES:
+                continue
+            extracted = _extract_topic(name)
+            if extracted is None:
+                continue
+            _key, label = extracted
+            topic_assets.setdefault(label, set()).add(str(row["asset_id"]))
         topic_assets = {t: ids for t, ids in topic_assets.items() if len(ids) >= 2}
 
         # (b) 단어조합 질의 = 주제명(공백), relevant = 그 주제 그룹

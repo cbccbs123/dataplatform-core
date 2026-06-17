@@ -4,19 +4,31 @@
 017 A/B(KoSimCSE vs BGE-M3) 하니스(`tests/test_embedding_ab_kpi.py`)는 **사람이 검수·확정한**
 한국어 골든셋(`tests/fixtures/search/golden_ko.json`)으로 두 채널 retrieval 품질을 비교한다.
 
-이 데이터는 파일명이 ``<주제>_<YouTube ID(11자)>_<제목>.<ext>`` 패턴으로 자연 군집한다
-(예: ``무선_충전기_7iTajgt8pec_…``, ``라면_끓이기_GMjx9GrF1nY_…``). **같은 주제 = 관련 자산**
-이므로, 주제 prefix 로 자산을 묶어 정답군으로 쓰면 "자기 자산 1건"보다 훨씬 의미 있는 골든셋이
-된다(검수 부담도 작다 — 주제 그룹이 자동 정답). 이 스크립트는 주제별 그룹을 **결정적**으로 뽑아
-``tests/fixtures/search/golden_ko.draft.json`` 에 기록한다.
+이 데이터는 파일명이 주제별로 자연 군집한다. **같은 주제 = 관련 자산**이므로, 주제로 자산을 묶어
+정답군으로 쓰면 "자기 자산 1건"보다 훨씬 의미 있는 골든셋이 된다(검수 부담도 작다 — 주제 그룹이
+자동 정답). 이 스크립트는 주제별 그룹을 **결정적**으로 뽑아 ``--out`` 경로(기본
+``tests/fixtures/search/golden_ko.draft.json``)에 기록한다.
+
+코퍼스는 **3종 명명 규약**이 혼재한다(2026-06 대량 증분 이후) — 추출기가 셋 다 처리한다:
+  - 신규 출처-prefix: ``youtube_<주제>_<영상ID>.<ext>`` / ``wikipedia_<주제>_<문서ID>.<ext>``
+    (예: ``youtube_사막_3bTA2c2n2QI.jpg``, ``wikipedia_고려청자_1031019.txt``). 주제 = 2번째
+    밑줄 필드(밑줄 없는 단일 토큰, 공백 포함 가능: ``기후 변화``·``우주 탐사``).
+  - 구형: ``<주제>_<YouTube ID(11자)>_<제목>.<ext>``(예: ``무선_충전기_7iTajgt8pec_…``).
+    주제 = ID 직전 prefix(밑줄 포함: ``등산_입문``).
 
 규칙
-  - **주제 prefix 추출**: basename 에서 ``<주제>_<11자 ID>_`` 의 ID 직전까지를 주제로 한다
-    (``_topic_from_filename``). YouTube ID 는 ``[A-Za-z0-9_-]`` 11자(밑줄/하이픈 포함 가능)라
-    한국어 주제 토큰과 구조적으로 구분된다. 패턴이 아니면 제외(예: ``manifest.json``).
-  - **질의**: 주제명을 자연어로(밑줄→공백, 예: ``무선_충전기`` → "무선 충전기").
+  - **주제 추출**(``_extract_topic``): 위 3종 규약에서 (그룹키, 표시주제)를 뽑는다. 구형 ID 는
+    ``[A-Za-z0-9_-]`` 11자라 한국어 주제 토큰과 구조적으로 구분된다. 패턴이 아니면 제외(예:
+    ``manifest.json``).
+  - **출처 교차 병합**: 그룹키 = 주제의 첫 밑줄 토큰. 구형 ``등산_입문``·신규 ``youtube_등산``·
+    ``wikipedia_등산`` 이 모두 키 ``등산`` 으로 병합돼 한 질의의 정답이 출처·모달리티를 가로지른다
+    (질의 "등산" 의 진짜 정답 = 출처 불문 모든 등산 자산). 신규 주제는 밑줄이 없어 키=주제.
+  - **질의**: 그룹 내 가장 서술적인(긴) 원문 주제를 자연어로(밑줄→공백, ``무선_충전기`` → "무선 충전기").
   - **정답**: 그 주제의 ``channel='st_bge'`` 백필된 자산 전부(평가 풀과 정합 — st_bge 없는 자산
     제외). 두 채널 공존 자산만 하니스가 평가하므로 st_bge 보유를 그룹 모집단으로 삼는다.
+  - **오라벨 제외**(``_EXCLUDE_FILES``): 수기 검증된 도메인-무관 위키 파일(파일명 토픽 ≠ 본문 내용,
+    예: ``영어 회화`` 파일이 오르세 미술관 기사)은 정답군에서 뺀다. 정답이 1건만 남아 ``min-group``
+    미만이 되면 그 주제 질의 자체가 빠진다(오염된 소그룹 질의 제거).
   - **--min-group N**(기본 2): 자산 수 N 미만 주제 제외(단일 자산 주제 노이즈↓).
 
 ⚠️ **초안은 사람 최종 확인이 필요하다 — 하니스는 확정본(golden_ko.json)만 사용한다.**
@@ -55,10 +67,38 @@ _LOG = logging.getLogger("meta_extract.build_golden_ko_draft")
 # 초안 출력 경로(사람이 검수해 golden_ko.json 으로 확정). 초안 파일 자체는 커밋 대상 아님.
 _DRAFT_PATH = _REPO_ROOT / "tests" / "fixtures" / "search" / "golden_ko.draft.json"
 
-# 파일명 주제 prefix 규칙: <주제(밑줄 포함)>_<YouTube ID 11자>_<제목>.
+# 신규 출처-prefix 명명: youtube_/wikipedia_ 다음 필드가 주제(다음 _ 까지). 주제엔 밑줄이 없어
+# 공백 포함 단일 토큰으로 잡힌다(``기후 변화``·``우주 탐사``).
+_SRC_PREFIXES = ("youtube", "wikipedia")
+# 구형 주제 prefix 규칙: <주제(밑줄 포함)>_<YouTube ID 11자>_<제목>.
 # YouTube ID = [A-Za-z0-9_-] 11자(밑줄/하이픈 포함 가능). 주제는 비탐욕(.+?)으로 ID 직전까지.
 # 한국어 주제 토큰은 ASCII 가 아니므로, ID 직전 11자 ASCII 토큰이 유일하게 매칭된다.
 _TOPIC_ID_RE = re.compile(r"^(?P<topic>.+?)_(?P<id>[A-Za-z0-9_-]{11})_")
+
+# 수기 검증된 **도메인-무관 오라벨** 파일(파일명 토픽 ≠ 본문 내용) — 골든 정답에서 제외(2026-06-17).
+# 위키 본문 표제어가 토픽과 무관한 사례(예: `영어 회화` 파일이 오르세 미술관 기사). 이런 자산이
+# 정답군에 섞이면 recall 을 거짓으로 낮춘다(검색은 올바르게 미반환). 소스 파일을 재라벨/삭제하면
+# 이 목록에서 빼면 된다. 인물·하위주제·동의어 기사(농구→서장훈, 초밥→스시 등)는 토픽 관련이라 제외 안 함.
+_EXCLUDE_FILES = frozenset({
+    "wikipedia_영어 회화_32276.txt",   # 오르세 미술관(박물관)
+    "wikipedia_바둑_307905.txt",       # 배우 유오성
+    "wikipedia_야구_744753.txt",       # 배우 박서준
+    "wikipedia_자수_8613.txt",         # 오리온자리(별자리)
+    "wikipedia_기타_110277.txt",       # 정액(생식) — 동음이의 '기타=etc'
+    "wikipedia_도예_10011.txt",        # 이란 이슬람 공화국
+    "wikipedia_드론_4148426.txt",      # 2026 이란 전쟁
+    "wikipedia_요가_587393.txt",       # 레노버 그룹(노트북 'Yoga')
+    "wikipedia_종이접기_241748.txt",   # 키노피오(마리오 캐릭터)
+    "wikipedia_사막_5736.txt",         # 동아시아(지역)
+    "wikipedia_첼로_13319.txt",        # 비올라(다른 악기)
+    "wikipedia_김밥_3769997.txt",      # 전주 조직폭력배 범죄사건
+    # 경계(주제 아닌 회사/영화/행정구역 기사 — 본문 표제어가 토픽과 다름):
+    "wikipedia_전기차_3731649.txt",    # (주)서진시스템(부품사)
+    "wikipedia_와인_953218.txt",       # LVMH(명품 그룹)
+    "wikipedia_로봇_117998.txt",       # 영화 《A.I.》
+    "wikipedia_수채화_1078581.txt",    # 영화 《비 오는 날 수채화》
+    "wikipedia_캠핑_34998.txt",        # 성주군(행정구역)
+})
 
 
 def _configure_logging() -> None:
@@ -71,17 +111,28 @@ def _configure_logging() -> None:
     _LOG.propagate = False
 
 
-def _topic_from_filename(name: str) -> str | None:
-    """파일 basename 에서 주제 prefix(밑줄 보존)를 추출한다(패턴 아니면 None).
+def _extract_topic(name: str) -> tuple[str, str] | None:
+    """파일 basename 에서 ``(그룹키, 표시주제)`` 를 추출한다(3종 규약 대응, 패턴 아니면 None).
 
-    ``무선_충전기_7iTajgt8pec_…`` → ``무선_충전기``. ID 가 밑줄을 포함해도(``5ncp-_GXBsU``)
-    11자 ASCII 토큰으로 한 번에 매칭되므로 주제(``스마트폰``)가 정확히 잘린다.
+    - 신규 ``youtube_<주제>_<id>.<ext>`` / ``wikipedia_<주제>_<id>.<ext>``: 주제 = 2번째 밑줄 필드
+      (``youtube_사막_3bTA2c2n2QI.jpg`` → ``사막``). 신규 주제는 밑줄이 없어 그룹키 = 주제 그대로.
+    - 구형 ``무선_충전기_7iTajgt8pec_…`` → 표시주제 ``무선_충전기``. ID 가 밑줄을 포함해도
+      (``5ncp-_GXBsU``) 11자 ASCII 토큰으로 한 번에 매칭돼 주제가 정확히 잘린다.
+
+    그룹키 = 표시주제의 첫 밑줄 토큰 → 구형 ``등산_입문`` 과 신규 ``등산`` 이 키 ``등산`` 으로 병합
+    (출처 교차). 신규 주제(밑줄 없음)는 키 = 주제.
     """
+    parts = name.split("_")
+    if len(parts) >= 3 and parts[0] in _SRC_PREFIXES:
+        topic = parts[1].strip()
+        return (topic, topic) if topic else None
     m = _TOPIC_ID_RE.match(name)
     if not m:
         return None
     topic = m.group("topic").strip()
-    return topic or None
+    if not topic:
+        return None
+    return (topic.split("_", 1)[0], topic)
 
 
 def _query_from_topic(topic: str) -> str:
@@ -110,28 +161,40 @@ def _fetch_assets(conn: Any) -> list[dict[str, Any]]:
 def build_drafts(conn: Any, *, min_group: int = 2) -> list[dict[str, Any]]:
     """주제별 그룹으로 골든셋 초안 ``[{"query", "relevant_asset_ids"}]`` 을 만든다(결정적).
 
-    파일명에서 주제 prefix 를 추출해 자산을 묶고, 자산 수 ``min_group`` 미만 주제는 제외한다.
-    질의=주제명(밑줄→공백), 정답=주제 자산 전부(중복 제거·asset_id 정렬). 주제명 정렬로 결정적.
+    파일명에서 (그룹키, 표시주제)를 추출해 그룹키로 자산을 묶고(출처 교차 병합), 자산 수
+    ``min_group`` 미만 그룹은 제외한다. 질의 = 그룹 내 가장 서술적인(긴) 표시주제(밑줄→공백),
+    정답 = 그룹 자산 전부(중복 제거·asset_id 정렬). 그룹키 정렬로 결정적.
     """
     rows = _fetch_assets(conn)
     groups: dict[str, set[str]] = {}
+    labels: dict[str, set[str]] = {}  # 그룹키 → 본 표시주제들(질의 문구 선정용)
+    excluded = 0
     for row in rows:
-        topic = _topic_from_filename(Path(row["fs_path"]).name)
-        if topic is None:
+        name = Path(row["fs_path"]).name
+        if name in _EXCLUDE_FILES:  # 수기 검증 오라벨 — 정답군에서 제외
+            excluded += 1
             continue
-        groups.setdefault(topic, set()).add(str(row["asset_id"]))
+        extracted = _extract_topic(name)
+        if extracted is None:
+            continue
+        key, label = extracted
+        groups.setdefault(key, set()).add(str(row["asset_id"]))
+        labels.setdefault(key, set()).add(label)
 
     drafts: list[dict[str, Any]] = []
     skipped = 0
-    for topic in sorted(groups):
-        ids = sorted(groups[topic])
+    for key in sorted(groups):
+        ids = sorted(groups[key])
         if len(ids) < min_group:
             skipped += 1
             continue
-        drafts.append({"query": _query_from_topic(topic), "relevant_asset_ids": ids})
+        # 질의 문구 = 가장 서술적인(긴) 표시주제(동률은 정렬로 결정적). 구형 데이터가 있으면
+        # ``등산 입문`` 처럼 기존 골든 문구를 보존하고, 신규-only 그룹은 단일 주제(``초콜릿``)가 된다.
+        label = sorted(labels[key], key=lambda s: (-len(s), s))[0]
+        drafts.append({"query": _query_from_topic(label), "relevant_asset_ids": ids})
     _LOG.info(
-        "초안 생성: 주제 %s개 (조회 %s건, min-group<%s 제외 %s개)",
-        len(drafts), len(rows), min_group, skipped,
+        "초안 생성: 주제 %s개 (조회 %s건, 오라벨 제외 %s건, min-group<%s 제외 %s개)",
+        len(drafts), len(rows), excluded, min_group, skipped,
     )
     return drafts
 
@@ -153,6 +216,10 @@ def main() -> int:
         "--min-group", type=int, default=2, dest="min_group",
         help="정답군 최소 자산 수(미만 주제 제외, 기본 2)",
     )
+    parser.add_argument(
+        "--out", type=Path, default=_DRAFT_PATH,
+        help="출력 경로(기본 golden_ko.draft.json). 확정본 직접 생성 시 golden_ko.json 지정.",
+    )
     args = parser.parse_args()
 
     _configure_logging()
@@ -165,16 +232,16 @@ def main() -> int:
     with db, db.transaction() as conn:
         drafts = build_drafts(conn, min_group=args.min_group)
 
-    _DRAFT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _DRAFT_PATH.write_text(
+    out_path: Path = args.out
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
         json.dumps(drafts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    _LOG.info("기록: %s (%s주제)", _DRAFT_PATH, len(drafts))
+    _LOG.info("기록: %s (%s주제)", out_path, len(drafts))
     print(
-        f"초안 {len(drafts)}주제 기록 → {_DRAFT_PATH}\n"
-        "다음: 사람이 질의 문장·주제 선택을 검수·보정해 "
-        "tests/fixtures/search/golden_ko.json 으로 확정하세요(질의 20~50건 권장). "
-        "초안은 자동 군집일 뿐, 하니스는 확정본(golden_ko.json)만 사용합니다."
+        f"골든셋 {len(drafts)}주제 기록 → {out_path}\n"
+        "초안(--out 미지정)은 자동 군집일 뿐 — 사람이 질의 문장·주제 선택을 검수·보정해 "
+        "tests/fixtures/search/golden_ko.json 으로 확정하세요. 하니스는 확정본만 사용합니다."
     )
     return 0
 

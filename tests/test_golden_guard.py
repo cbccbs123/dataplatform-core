@@ -13,8 +13,16 @@ from src.search.golden_guard import topic_of_filename, uncovered_topics
 
 class TopicOfFilenameTest(unittest.TestCase):
     def test_first_token_of_slug(self) -> None:
+        # 구형 <주제>_<11자ID>_<제목> → 첫 토큰이 주제.
         self.assertEqual(topic_of_filename("등산_입문_TUWlGnSstVI_제목.mp4"), "등산")
         self.assertEqual(topic_of_filename("무선_충전기_x.jpg"), "무선")
+
+    def test_source_prefix_uses_second_token(self) -> None:
+        # 신규 youtube_/wikipedia_ 출처-prefix → 2번째 토큰이 진짜 주제(prefix 는 주제 아님).
+        self.assertEqual(topic_of_filename("youtube_사막_3bTA2c2n2QI.jpg"), "사막")
+        self.assertEqual(topic_of_filename("wikipedia_고려청자_1031019.txt"), "고려청자")
+        # 주제에 공백이 있어도 한 필드(밑줄로만 분리).
+        self.assertEqual(topic_of_filename("youtube_기후 변화_3CHPt7zk5fE.mp4"), "기후 변화")
 
     def test_no_underscore_returns_stem(self) -> None:
         self.assertEqual(topic_of_filename("manifest.json"), "manifest")
