@@ -40,7 +40,12 @@ def _canonical_pair(src: str, dst: str, *, symmetric: bool) -> tuple[str, str]:
     return src, dst
 
 
-def _decide_status(conf_f, emb_score, auto_approve_min, auto_approve_emb_min):
+def _decide_status(
+    conf_f: float | None,
+    emb_score: float | None,
+    auto_approve_min: float,
+    auto_approve_emb_min: float,
+) -> str:
     """신규 엣지 status 결정 — LLM conf AND emb_score 두 게이트(033 FR-001).
 
     - conf 가 None 이거나 auto_approve_min 미만이면 'proposed'(현행과 동일).
