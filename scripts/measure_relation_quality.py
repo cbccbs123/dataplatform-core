@@ -84,6 +84,7 @@ def build_snapshot(
     ``llm_fn`` 주입 시 실 LLM 대신 그 함수로 프롬프트→JSON(테스트·e2e용). 미주입이면 단일 seam ``propose_edges_json``.
     LLM 호출은 **트랜잭션 밖**에서(헌법 ⑤ — 풀 점유 최소).
     """
+    from src.relations.asset_entry import target_emb_score_map
     from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
 
     fn: LlmFn = llm_fn if llm_fn is not None else propose_edges_json
@@ -96,16 +97,22 @@ def build_snapshot(
     for sid in source_ids:
         with db.transaction() as conn:  # 짧은 읽기 트랜잭션 — 후보·프롬프트만
             cands, prompt = _read_candidates_prompt(conn, sid, _settings(), config)
+        # 033 FR-006: 후보의 {id: emb_score} 맵을 동결해 제안 엣지에 부착(2D 자동승인 스윕/AND 게이트가 참조).
+        # path-only 후보·후보 맵 밖 타깃(LLM 환각)은 0.0 sentinel — target_emb_score_map 이 union 후보 그대로 보존.
+        emb_map = target_emb_score_map(cands)
         raw = fn(prompt)  # ★ LLM(또는 주입) — 트랜잭션 밖
         edges = parse_and_normalize_edges(raw)
         sources[sid] = SourceSnapshot(
-            candidates=tuple(str(c["id"]) for c in cands),
+            # 033 FR-004: 후보를 (id, emb_score) 로 동결 → N1 min_sim 스윕이 후보 단계 recall 을
+            # 점수 임계로 재측정(전체 후보 기준 — proposed 부분집합 아님). path-only=0.0 그대로.
+            candidates=tuple((str(c["id"]), float(c["emb_score"])) for c in cands),
             proposed=tuple(
                 ProposedEdge(
                     target=str(e["target_media_item_id"]),
                     kind=str(e.get("relation_type_code") or ""),
                     confidence=float(e.get("confidence") or 0.0),
                     topic_ko=str(e.get("topic_ko") or ""),
+                    emb_score=emb_map.get(str(e["target_media_item_id"]), 0.0),
                 )
                 for e in edges
             ),
@@ -201,13 +208,51 @@ def cmd_snapshot(db: PostgresUtil, golden: Golden, *, config: dict, out_path: st
     return {"sources": len(snap.sources), "missing_keys": len(missing), "out": out_path}
 
 
+# 033 FR-004·005: measure 가 출력하는 임계 스윕 격자.
+#   N1(min_sim): 후보 코사인 유사도 하한 후보 — recall/통과 후보 수.
+#   #3(auto_approve 2D): LLM conf × 후보 emb_score 격자 — 자동승인 precision/승인 수.
+_MIN_SIM_GRID = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+_AA_CONF_GRID = [0.8, 0.85, 0.9, 0.95]
+_AA_EMB_GRID = [0.0, 0.3, 0.4, 0.5, 0.6]
+
+
+def _resolve_golden_pairs(golden: Golden, key_to_id: dict[str, str]) -> list[tuple[str, str]]:
+    """골든 쌍을 asset_id 공간으로 정합(양쪽 해소된 쌍만). 스윕 입력용·결정적."""
+    pairs: list[tuple[str, str]] = []
+    for p in golden.pairs:
+        a, b = key_to_id.get(p.a), key_to_id.get(p.b)
+        if a is not None and b is not None:
+            pairs.append((a, b))
+    return pairs
+
+
 def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
-    """골든+스냅샷 → 리포트. LLM 0·DB 0(스냅샷에 key_to_id 포함 — 결정적·SC-002)."""
+    """골든+스냅샷 → 리포트. LLM 0·DB 0(스냅샷에 key_to_id 포함 — 결정적·SC-002).
+
+    033 FR-004·005: 동결 스냅샷 위에서 min_sim 스윕(N1)·2D 자동승인 스윕(#3) 표를 더해 출력한다.
+    **읽기 전용** — graph_edge/relation_kind 미기록(measure 의 측정 전용 성질 보존·SC-004).
+    - N1 스윕 후보 신호 = 동결된 SourceSnapshot.candidates 의 (id, emb_score)(전체 후보 — FR-004).
+    - #3 스윕 신호 = 제안 엣지의 emb_score(자동승인 대상은 제안 엣지이므로).
+    ※ 스윕 하한 탐색범위는 스냅샷 생성 시 후보 조회 min_sim(현 0.2) 이상 — 그 아래를 보려면 더 낮은
+      floor 로 스냅샷 재생성. N1 감사 목표는 "0.2 과느슨 → 상향"이라 상향 스윕으로 충분.
+    """
     with open(snapshot_path, encoding="utf-8") as f:
         payload = json.load(f)
     snap = load_snapshot(payload["snapshot"])
     key_to_id = {str(k): str(v) for k, v in payload.get("key_to_id", {}).items()}
-    return build_report(golden, snap, key_to_id)
+    report = build_report(golden, snap, key_to_id)
+
+    # 033 스윕 — 동결 스냅샷(asset_id 공간) 위 결정적 재측정. 골든은 key_to_id 로 정합.
+    from src.relations.quality.metrics import auto_approve_sweep, min_sim_sweep
+
+    gpairs = _resolve_golden_pairs(golden, key_to_id)
+    proposed = {sid: list(ss.proposed) for sid, ss in snap.sources.items()}
+    # N1: 동결된 후보 (id, emb_score) 전체를 신호로 — 후보 단계 recall 을 점수 임계로 재측정(FR-004).
+    cand_by_src = {sid: list(ss.candidates) for sid, ss in snap.sources.items()}
+    report["min_sim_sweep"] = min_sim_sweep(gpairs, cand_by_src, thresholds=_MIN_SIM_GRID)
+    report["auto_approve_sweep"] = auto_approve_sweep(
+        gpairs, proposed, conf_thresholds=_AA_CONF_GRID, emb_thresholds=_AA_EMB_GRID)
+    return report
 
 
 def _load_golden(path: str) -> Golden:

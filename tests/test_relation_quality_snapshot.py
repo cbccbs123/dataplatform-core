@@ -20,7 +20,7 @@ class TestSnapshot(unittest.TestCase):
         s = Snapshot(
             config={"top_k": 10, "min_sim": 0.2, "embedding_kind": "both"},
             sources={"a1": SourceSnapshot(
-                candidates=("a2", "a3"),
+                candidates=(("a2", 0.5), ("a3", 0.4)),
                 proposed=(ProposedEdge("a2", "same_series", 0.85, "게임"),))})
         d = dump_snapshot(s)
         json.dumps(d)  # 직렬화 가능
@@ -31,7 +31,7 @@ class TestSnapshot(unittest.TestCase):
         snap = Snapshot(
             config={},
             sources={"src1": SourceSnapshot(
-                candidates=("dst1",),
+                candidates=(("dst1", 0.71),),
                 proposed=(ProposedEdge("dst1", "same_series", 0.95, "여행", emb_score=0.71),))})
         back = load_snapshot(json.loads(json.dumps(dump_snapshot(snap))))
         self.assertAlmostEqual(back.sources["src1"].proposed[0].emb_score, 0.71)

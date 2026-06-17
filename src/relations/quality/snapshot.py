@@ -23,8 +23,13 @@ class ProposedEdge:
 
 @dataclass(frozen=True)
 class SourceSnapshot:
-    """한 소스 자산의 동결 결과 — union 후보 집합 + LLM 제안 엣지."""
-    candidates: tuple[str, ...]
+    """한 소스 자산의 동결 결과 — union 후보 집합 + LLM 제안 엣지.
+
+    033 FR-004: candidates 는 ``(target_id, emb_score)`` 쌍으로 동결한다 — N1 min_sim 스윕이
+    후보 단계 recall(=골든 양성이 후보로 회수되는지)을 점수 임계로 재측정하려면 후보 코사인
+    유사도가 필요하기 때문(proposed 엣지는 LLM 이 고른 부분집합이라 후보 recall 을 과소측정).
+    """
+    candidates: tuple[tuple[str, float], ...]
     proposed: tuple[ProposedEdge, ...]
 
 
@@ -42,7 +47,7 @@ def dump_snapshot(s: Snapshot) -> dict:
         "config": s.config,
         "sources": {
             sid: {
-                "candidates": list(ss.candidates),
+                "candidates": [[cid, score] for cid, score in ss.candidates],
                 "proposed": [
                     {"target": e.target, "kind": e.kind,
                      "confidence": e.confidence, "topic_ko": e.topic_ko,
@@ -59,7 +64,10 @@ def load_snapshot(d: dict) -> Snapshot:
         raise ValueError(f"snapshot version must be 1: {d.get('version')!r}")
     sources = {
         sid: SourceSnapshot(
-            candidates=tuple(v.get("candidates", [])),
+            # (id, emb_score) 쌍으로 복원. 문자열만 있는 구 형식은 emb_score=0.0 으로 흡수.
+            candidates=tuple(
+                (str(c), 0.0) if isinstance(c, str) else (str(c[0]), float(c[1]))
+                for c in v.get("candidates", [])),
             proposed=tuple(
                 ProposedEdge(e["target"], e["kind"], float(e["confidence"]),
                              str(e.get("topic_ko") or ""),

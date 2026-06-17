@@ -277,6 +277,49 @@ class TestGraphPersistDB(unittest.TestCase):
         _, _, _, status = self._edge_row(src_id, dst_id)
         self.assertEqual(status, "rejected")        # status 보존(사람 결정 무손상)
 
+    # ── 033 T007: 자동승인 AND 게이트 실 DB e2e(SC-001/SC-002) ──
+    def _sync_gated_edge(self, src_id, dst_id, *, confidence, target_emb_scores=None,
+                         auto_approve_emb_min=0.0, auto_approve_min=0.9):
+        """단일 same_domain 엣지를 AND 게이트 인자와 함께 sync. (upserted, skipped) 반환.
+
+        auto_approve_min 기본 0.9 — 고conf(0.95) 엣지가 conf 게이트는 통과하도록 낮춘다.
+        emb 인자(target_emb_scores·auto_approve_emb_min)로 emb 게이트 동작을 검증한다.
+        """
+        from src.relations.graph_persist import sync_graph_edges
+        edges = [{
+            "target_media_item_id": dst_id, "relation_type_code": "same_domain",
+            "topic_ko": "일반", "topic_en": "general", "subtopic_ko": "", "subtopic_en": "",
+            "confidence": confidence, "reason": "게이트 e2e",
+        }]
+        return self.db.execute_in_transaction(
+            lambda conn: sync_graph_edges(
+                conn, source_asset_id=src_id, edges=edges,
+                allowed_target_ids=frozenset({dst_id}),
+                auto_approve_min=auto_approve_min,
+                target_emb_scores=target_emb_scores,
+                auto_approve_emb_min=auto_approve_emb_min),
+            idempotent=False)
+
+    def test_auto_approve_default_high_conf_active(self):
+        # SC-001: emb 인자 미전달(기본 0.0=무력) + 고conf(0.95≥auto_approve_min 0.9) → 현행대로 active.
+        src_id = _make_registered_asset(self.db, self._ids)
+        dst_id = _make_registered_asset(self.db, self._ids)
+        up, sk = self._sync_gated_edge(src_id, dst_id, confidence=0.95)
+        self.assertEqual((up, sk), (1, 0))
+        _, _, _, status = self._edge_row(src_id, dst_id)
+        self.assertEqual(status, "active")           # emb 게이트 무력 → conf 단독 자동승인
+
+    def test_auto_approve_emb_below_min_proposed(self):
+        # SC-002: auto_approve_emb_min=0.5 + 타깃 emb_score=0.4(미달) → 고conf(0.95)여도 proposed.
+        src_id = _make_registered_asset(self.db, self._ids)
+        dst_id = _make_registered_asset(self.db, self._ids)
+        up, sk = self._sync_gated_edge(
+            src_id, dst_id, confidence=0.95,
+            target_emb_scores={dst_id: 0.4}, auto_approve_emb_min=0.5)
+        self.assertEqual((up, sk), (1, 0))
+        _, _, _, status = self._edge_row(src_id, dst_id)
+        self.assertEqual(status, "proposed")         # emb 미달 → 자동승인 차단(AND 게이트)
+
 
 if __name__ == "__main__":
     unittest.main()
