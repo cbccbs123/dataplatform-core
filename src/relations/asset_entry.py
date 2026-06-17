@@ -96,7 +96,7 @@ def propose_relations_for_asset(
     source_asset_id: str,
     *,
     top_k: int | None = None,
-    embedding_kind: EmbeddingKindFilter = "both",
+    embedding_kind: EmbeddingKindFilter = "st",  # 036: bge-only 기본(단일 st_bge 공간·척도 일관)
     llm_fn: Callable[[str], dict[str, Any]] | None = None,  # 테스트용 주입(미주입=실 LLM 호출)
 ) -> tuple[int, int, int, int]:
     """

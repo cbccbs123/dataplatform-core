@@ -197,7 +197,9 @@ def run_relations(
     *,
     db: PostgresUtil,
     top_k: int | None = None,
-    embedding_kind: EmbeddingKindFilter = "both",
+    # 036: 관계 후보는 bge-only(st_bge) 기본 — 4모달리티가 캡션으로 공유하는 단일 텍스트 공간.
+    # 'both'(st_bge+clip)는 텍스트·시각 코사인을 MAX로 섞어 척도가 달라 emb_score 의미가 흐려진다.
+    embedding_kind: EmbeddingKindFilter = "st",
     max_attempts: int | None = None,
     _domain_fn: Callable[[PostgresUtil, str], str] | None = None,
 ) -> dict[str, list[Any]]:
@@ -304,7 +306,8 @@ def main() -> int:
     )
     parser.add_argument("--top-k", dest="top_k", type=int, default=None)
     parser.add_argument(
-        "--embedding-kind", dest="embedding_kind", choices=["st", "clip", "both"], default="both"
+        # 036: 기본 bge-only(st_bge). 필요 시 --embedding-kind both|clip 로 시각 채널 포함 가능.
+        "--embedding-kind", dest="embedding_kind", choices=["st", "clip", "both"], default="st"
     )
     parser.add_argument("asset_ids", nargs="*", metavar="ASSET_ID")
     args = parser.parse_args()
