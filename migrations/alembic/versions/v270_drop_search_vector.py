@@ -27,8 +27,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     # 구조만 복원(데이터 비복원): 컬럼 재생성 후 GIN 인덱스 재생성. 기존 행의 search_vector 는
     # NULL 로 남으므로 FTS 를 다시 쓰려면 to_tsvector 재적재(또는 백필)가 필요하다.
-    op.execute("ALTER TABLE asset_metadata ADD COLUMN search_vector TSVECTOR")
+    op.execute("ALTER TABLE asset_metadata ADD COLUMN IF NOT EXISTS search_vector TSVECTOR")
     op.execute(
-        "CREATE INDEX idx_asset_metadata_search_vector "
+        "CREATE INDEX IF NOT EXISTS idx_asset_metadata_search_vector "
         "ON asset_metadata USING GIN (search_vector)"
     )
