@@ -9,5 +9,23 @@
 DB/LLM 글루(키 해소·러너)는 이 패키지 밖(러너/사람 몫)이다.
 """
 from src.relations.quality.golden import Golden, GoldenPair, parse_golden
+from src.relations.quality.metrics import (
+    candidate_recall,
+    relation_metrics,
+    threshold_sweep,
+)
+from src.relations.quality.report import build_report
+from src.relations.quality.snapshot import (
+    ProposedEdge,
+    Snapshot,
+    SourceSnapshot,
+    dump_snapshot,
+    load_snapshot,
+)
 
-__all__ = ["Golden", "GoldenPair", "parse_golden"]
+__all__ = [
+    "Golden", "GoldenPair", "parse_golden",
+    "ProposedEdge", "Snapshot", "SourceSnapshot", "dump_snapshot", "load_snapshot",
+    "candidate_recall", "relation_metrics", "threshold_sweep",
+    "build_report",
+]
