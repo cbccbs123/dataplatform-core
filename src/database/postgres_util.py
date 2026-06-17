@@ -196,6 +196,12 @@ class PostgresUtil:
         return None
 
     def _is_retryable_error(self, exc: BaseException) -> bool:
+        """일시(transient) 오류만 True — 재시도해 성공 가능한 것만 가른다(run_with_retry chokepoint).
+
+        우선순위: config 의 SQLSTATE 제외/포함 목록이 최종 결정권(운영 튜닝 hook). 그 외엔 커넥션
+        계열(Operational/Interface) + 직렬화 실패·교착·커넥션 예외만 재시도. 무결성 위반·문법 오류
+        등 영구 오류는 재시도해도 동일하므로 False(즉시 raise — 헛 재시도·중복 부작용 방지).
+        """
         sqlstate = self._extract_sqlstate(exc)
         if self.config is not None and sqlstate is not None:
             if sqlstate in self.config.retry_exclude_sqlstates:
