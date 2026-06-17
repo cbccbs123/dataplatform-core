@@ -1,7 +1,7 @@
 """030 G3(T008) — Airflow DAG 무결성·얇은 래퍼 단위 테스트 [US5·FR-011·SC-008].
 
 목적
-    `airflow/dags/` 의 세 DAG(dag_collect·dag_process·dag_relations)이
+    `deploy/airflow/dags/` 의 세 DAG(dag_collect·dag_process·dag_relations)이
       1. **Airflow 미기동(메타DB·스케줄러 없이)에서 DagBag 파싱만으로** 무오류로 로드되고
          (import_errors 0·cycle 0·3개 DAG 존재·max_active_runs==1·catchup==False),
       2. **각 태스크 callable 이 G1/G2 순수 함수의 얇은 래퍼**임(collect_file·process_received_batch·
@@ -42,7 +42,7 @@ except Exception:  # noqa: BLE001 — airflow 미설치/임포트 실패 시 전
 
 # 프로젝트 루트 기준 DAG 폴더(테스트가 어디서 실행돼도 절대경로). dags 는 repo 정본 —
 #   운영 스택(/work/docker)은 이 dags 를 복사/마운트해 쓴다(소스는 repo 가 기준).
-_DAG_FOLDER = str(Path(__file__).resolve().parents[1] / "airflow" / "dags")
+_DAG_FOLDER = str(Path(__file__).resolve().parents[1] / "deploy" / "airflow" / "dags")
 
 _EXPECTED_DAGS = {"dag_collect", "dag_process", "dag_relations"}
 _COLLECT_TASK = "collect_inbox"
