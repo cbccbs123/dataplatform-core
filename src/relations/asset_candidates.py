@@ -21,8 +21,8 @@ from typing import Any, Literal, TypedDict
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.config.embedding_constants import EMBEDDING_KIND_CLIP, EMBEDDING_KIND_ST
 from src.config.settings import active_embed_channel
-from src.search.media_search import EMBEDDING_KIND_CLIP, EMBEDDING_KIND_ST
 
 _LOG = logging.getLogger(__name__)
 

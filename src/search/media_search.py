@@ -11,11 +11,15 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
-from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME, FIX_EMBEDDING_DIMENSION
-from src.config.settings import ChunkAggConfig, chunk_agg_config, get_current_settings
+from src.config.embedding_constants import (
+    DEFAULT_CLIP_MODEL_NAME,
+    EMBEDDING_KIND_CLIP,
+    EMBEDDING_KIND_ST,
+    FIX_EMBEDDING_DIMENSION,
+)
+from src.config.settings import ChunkAggConfig, chunk_agg_config
 from src.database.postgres_util import PostgresUtil
 from src.embedders.image_embedder import embed_clip_text_query_for_image_search
-from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
 from src.file.file_type_defs import (
     ALLOWED_TEXT_META_FILE_KINDS,
     MEDIA_TYPES_CLIP_CHUNK_SEARCH,
@@ -23,12 +27,10 @@ from src.file.file_type_defs import (
     MediaKind,
 )
 from src.preprocess.media_item_search_text import MEDIA_ITEM_FTS_CONFIG
-from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 from src.search.fusion import RRF_DEFAULT_K, fuse_rrf
+from src.search.query_embed import embed_query_for_media_search
 from src.search.query_preprocess import structure_user_query
 
-EMBEDDING_KIND_ST = "st"
-EMBEDDING_KIND_CLIP = "clip"
 # FTS tsquery 는 사용자 질의를 ``to_tsvector`` 로 토큰화한 뒤 ``tok | tok | ...``(OR) 로 조립한다
 # (원문을 to_tsquery 에 직접 넣으면 ``& | : ( )`` 등에서 구문 오류). 아래 토큰은 너무 일반적이라
 # OR 매칭에 들어가면 과매칭을 유발하므로 tsquery 조립에서 제외한다(SQL 의 ``tok <> ALL(%s)``).
@@ -532,26 +534,6 @@ def _apply_fusion(
     ]
     fused = fuse_rrf([emb_ranked, bm25_ranked], k=k)
     return [by_id[i] for i, _ in fused if i in by_id]
-
-
-def embed_query_for_media_search(
-    query: str, *, model_name: str | None = None
-) -> list[float]:
-    """질의 텍스트를 임베딩한다(017 A/B). ``model_name`` 미지정 시 기존대로 ``cfg.text_embedding_model``
-    (KoSimCSE)을 쓴다 — 기본 경로 완전 동치. ``model_name`` 을 주면 그 모델로 질의를 임베딩해
-    해당 채널의 문서 임베딩과 같은 벡터 공간에서 비교한다(FR-004 질의-문서 모델 일치)."""
-    cfg = get_current_settings()
-    mn = model_name if model_name is not None else cfg.text_embedding_model
-    raw = query.strip() if query.strip() else " "
-    q = normalize_text_for_embedding(raw)
-    if not q.strip():
-        q = " "
-    row = embed_texts(
-        [q],
-        model_name=mn,
-        normalize_embeddings=cfg.text_embedding_normalize,
-    )[0]
-    return pad_embedding_to_storage_dim(row)
 
 
 def _run_hybrid_search(

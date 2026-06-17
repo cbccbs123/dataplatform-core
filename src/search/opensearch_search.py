@@ -440,13 +440,13 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
 def embed_query(query: str, *, channel: str) -> list[float]:
     """질의를 인덱스와 **동일 채널·모델**로 임베딩한다(FR-004 질의-문서 일치, 018 단일 출처).
 
-    적재·검색이 공유하는 텍스트 임베더(`media_search.embed_query_for_media_search`)를 **재사용**한다
+    적재·검색이 공유하는 텍스트 임베더(`query_embed.embed_query_for_media_search`)를 **재사용**한다
     — 임베딩 로직을 복제하지 않는다. 채널→모델 해소는 단일 출처 ``settings.model_for_channel``
     (017 A/B)로 한다(기본 ``'st'`` → KoSimCSE, ``'st_bge'`` → BGE-M3). 020 인덱스가 활성 채널
     임베딩을 색인하므로, 질의도 같은 채널 모델로 임베딩해야 같은 벡터 공간에서 비교된다.
     """
     from src.config.settings import model_for_channel
-    from src.search.media_search import embed_query_for_media_search
+    from src.search.query_embed import embed_query_for_media_search
 
     return embed_query_for_media_search(query, model_name=model_for_channel(channel))
 

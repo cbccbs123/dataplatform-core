@@ -13,13 +13,14 @@ from collections.abc import Callable
 from typing import Any
 
 from src.config import search_constants
+from src.config.embedding_constants import EMBEDDING_KIND_ST
 from src.config.settings import (
     ChunkAggConfig,
     active_embed_channel,
     get_current_settings,
     model_for_channel,
 )
-from src.search.media_search import EMBEDDING_KIND_ST, search_media_all_grouped
+from src.search.media_search import search_media_all_grouped
 
 # 021 G3: OpenSearch 백엔드 분기용 seam. opensearch_search 모듈 상단은 순수(opensearch-py·임베더는
 # 함수 내부 지연 import)라 pg 기본 환경에서도 import 안전 — 실제 OS IO 는 backend='opensearch' 호출
