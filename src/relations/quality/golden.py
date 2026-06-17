@@ -11,9 +11,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+from psycopg import Connection
 
 # 허용 키 타입 — fs_path(파일 경로) 또는 content_hash(파일 해시).
 _KEY_TYPES = ("fs_path", "content_hash")
+# key_type → asset 컬럼. 화이트리스트라 SQL 식별자 보간 안전(주입 불가).
+_KEY_COLUMN = {"fs_path": "fs_path", "content_hash": "file_hash"}
 
 
 @dataclass(frozen=True)
@@ -53,3 +58,29 @@ def parse_golden(data: dict) -> Golden:
         pairs.append(GoldenPair(str(a), str(b), str(kind), str(p.get("note") or "")))
     isolated = tuple(str(x) for x in data.get("isolated", []))
     return Golden(kt, tuple(pairs), isolated)
+
+
+def resolve_asset_keys(
+    conn: Connection[Any], golden: Golden
+) -> tuple[dict[str, str], list[str]]:
+    """골든 키(fs_path|content_hash)를 현재 ``asset_id``로 해소한다 (T006·DB·읽기 전용).
+
+    ``key_type=fs_path`` → ``asset.fs_path``, ``content_hash`` → ``asset.file_hash`` 와 매칭한다.
+    트랜잭션 경계는 호출자가 제어한다(conn-우선 관례). graph 무기록(측정 전용·SC-004).
+
+    Returns:
+        ``(mapping, missing)`` — ``mapping``=키→asset_id, ``missing``=해소 안 된 키(정렬·결정적).
+    """
+    col = _KEY_COLUMN[golden.key_type]  # 화이트리스트(parse_golden 검증 통과 key_type)
+    keys = {k for p in golden.pairs for k in (p.a, p.b)} | set(golden.isolated)
+    mapping: dict[str, str] = {}
+    if keys:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {col} AS k, asset_id FROM asset WHERE {col} = ANY(%s)",  # noqa: S608 (화이트리스트 식별자)
+                (list(keys),),
+            )
+            for k, aid in cur.fetchall():
+                mapping[str(k)] = str(aid)
+    missing = sorted(k for k in keys if k not in mapping)
+    return mapping, missing
