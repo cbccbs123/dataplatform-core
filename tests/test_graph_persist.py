@@ -33,6 +33,25 @@ class TestCanonicalOrdering(unittest.TestCase):
         self.assertEqual(_canonical_pair(a, b, symmetric=False), (a, b))
 
 
+class TestDecideStatus(unittest.TestCase):
+    """033 T003(FR-001): AND 게이트 순수 헬퍼 `_decide_status` — emb_min<=0.0 무력=현행."""
+
+    def test_decide_status_and_gate(self) -> None:
+        from src.relations.graph_persist import _decide_status
+        # 무력 기본값: emb_min=0.0 → conf 단독 결정(현행 동일)
+        self.assertEqual(_decide_status(0.95, 0.10, 0.9, 0.0), "active")
+        self.assertEqual(_decide_status(0.80, 0.99, 0.9, 0.0), "proposed")
+        # emb_min>0: conf 충분해도 emb 미달이면 proposed (SC-002)
+        self.assertEqual(_decide_status(0.95, 0.40, 0.9, 0.5), "proposed")
+        # 둘 다 통과해야 active
+        self.assertEqual(_decide_status(0.95, 0.60, 0.9, 0.5), "active")
+
+    def test_decide_status_none_conf_is_proposed(self) -> None:
+        from src.relations.graph_persist import _decide_status
+        # conf 미상(None)은 자동승인 대상 아님(현행 status_val 식과 동일).
+        self.assertEqual(_decide_status(None, 0.99, 0.9, 0.0), "proposed")
+
+
 class TestSyncGraphEdgesUnit(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = mock.MagicMock()
@@ -75,6 +94,25 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
         self.assertEqual(params[-1], "proposed")  # status_val 은 INSERT 마지막 바인딩
 
     def test_status_active_at_or_above_auto_approve(self) -> None:
+        params = self._insert_params([self._edge(confidence=0.95)], auto_approve_min=0.9)
+        self.assertEqual(params[-1], "active")
+
+    def test_status_proposed_when_emb_below_emb_min(self) -> None:
+        # 033 T003: 고conf(0.95)여도 타깃 emb_score(0.40)가 emb_min(0.5) 미달이면 proposed (SC-002).
+        params = self._insert_params(
+            [self._edge(confidence=0.95)], auto_approve_min=0.9,
+            target_emb_scores={_T1: 0.40}, auto_approve_emb_min=0.5)
+        self.assertEqual(params[-1], "proposed")
+
+    def test_status_active_when_both_pass(self) -> None:
+        # conf·emb 둘 다 통과하면 active.
+        params = self._insert_params(
+            [self._edge(confidence=0.95)], auto_approve_min=0.9,
+            target_emb_scores={_T1: 0.60}, auto_approve_emb_min=0.5)
+        self.assertEqual(params[-1], "active")
+
+    def test_status_unchanged_when_emb_args_omitted(self) -> None:
+        # 무력 기본값(emb 인자 미전달) → conf 단독 결정(현행 동일, 동작 보존).
         params = self._insert_params([self._edge(confidence=0.95)], auto_approve_min=0.9)
         self.assertEqual(params[-1], "active")
 

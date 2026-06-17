@@ -49,6 +49,9 @@ class PipelineSettings:
     # 아래 두 필드는 이번 브랜치(relations-catalog-slim)에서 추가된 관계 제안 품질 게이트.
     relation_min_sim: float       # 후보 코사인 유사도 하한 — 이 미만은 LLM 에 넣지 않음 (기본 0.2)
     relation_auto_approve_min: float  # 이 이상이면 HITL 없이 자동 승인 (기본 0.9)
+    # 033 FR-002: 자동승인 emb_score(후보 코사인 유사도) 하한 — 기본 0.0=무력(현 동작).
+    # AND 게이트(LLM conf AND emb_score)에서 0 이면 emb 변이가 빠져 conf 단독 결정으로 회귀.
+    relation_auto_approve_emb_min: float
     # 경로 신호(path_signal) 후보의 별도 한도(008, C-2). 임베딩 top_k 와 독립적으로 LIMIT 해
     # 동일 폴더 폭주를 차단한다. union 총 후보 ≤ relation_top_k + relation_path_top_k.
     relation_path_top_k: int
@@ -398,6 +401,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         relation_top_k=_env_int_default("RELATION_TOP_K", 10),
         relation_min_sim=_env_float_default("RELATION_MIN_SIM", 0.2),
         relation_auto_approve_min=_env_float_default("RELATION_AUTO_APPROVE_MIN", 0.9),
+        relation_auto_approve_emb_min=_env_float_default("RELATION_AUTO_APPROVE_EMB_MIN", 0.0),
         relation_path_top_k=_env_int_default("RELATION_PATH_TOP_K", 10),
         relation_retry_max_attempts=_env_int_default("RELATION_RETRY_MAX_ATTEMPTS", 3),
         search_min_scores=resolve_search_min_scores(),

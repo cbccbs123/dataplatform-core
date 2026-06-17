@@ -11,11 +11,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ProposedEdge:
-    """LLM이 제안한 관계 엣지 — 타깃 자산·관계 kind·신뢰도(+주제)."""
+    """LLM이 제안한 관계 엣지 — 타깃 자산·관계 kind·신뢰도(+주제·후보 임베딩 유사도)."""
     target: str
     kind: str
     confidence: float
     topic_ko: str = ""
+    # 033 FR-006: 후보 단계의 코사인 유사도(emb_score) 동결값. 기본 0.0 =
+    # path-only 후보(임베딩 신호 없음)·구 스냅샷 호환. 2D 자동승인 스윕/AND 게이트가 참조한다.
+    emb_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,8 @@ def dump_snapshot(s: Snapshot) -> dict:
                 "candidates": list(ss.candidates),
                 "proposed": [
                     {"target": e.target, "kind": e.kind,
-                     "confidence": e.confidence, "topic_ko": e.topic_ko}
+                     "confidence": e.confidence, "topic_ko": e.topic_ko,
+                     "emb_score": e.emb_score}
                     for e in ss.proposed],
             }
             for sid, ss in s.sources.items()},
@@ -58,7 +62,8 @@ def load_snapshot(d: dict) -> Snapshot:
             candidates=tuple(v.get("candidates", [])),
             proposed=tuple(
                 ProposedEdge(e["target"], e["kind"], float(e["confidence"]),
-                             str(e.get("topic_ko") or ""))
+                             str(e.get("topic_ko") or ""),
+                             float(e.get("emb_score") or 0.0))  # 키 없는 구 스냅샷은 0.0
                 for e in v.get("proposed", [])))
         for sid, v in d.get("sources", {}).items()}
     return Snapshot(config=dict(d.get("config", {})), sources=sources)

@@ -40,6 +40,21 @@ def _canonical_pair(src: str, dst: str, *, symmetric: bool) -> tuple[str, str]:
     return src, dst
 
 
+def _decide_status(conf_f, emb_score, auto_approve_min, auto_approve_emb_min):
+    """신규 엣지 status 결정 — LLM conf AND emb_score 두 게이트(033 FR-001).
+
+    - conf 가 None 이거나 auto_approve_min 미만이면 'proposed'(현행과 동일).
+    - auto_approve_emb_min<=0.0 이면 emb 변이가 **무력**화돼 conf 단독 결정(동작 보존·SC-001).
+    - emb_min>0 이고 emb_score 가 그 하한 미달이면(또는 None) conf 충분해도 'proposed'(SC-002).
+    - 둘 다 통과해야 'active'.
+    """
+    if conf_f is None or conf_f < auto_approve_min:
+        return "proposed"
+    if auto_approve_emb_min > 0.0 and (emb_score is None or emb_score < auto_approve_emb_min):
+        return "proposed"
+    return "active"
+
+
 def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
     """asset_id 의 asset-노드를 보장하고 node_id(UUID str) 반환.
 
@@ -86,11 +101,16 @@ def sync_graph_edges(
     edges: list[dict[str, Any]],
     allowed_target_ids: frozenset[str],
     auto_approve_min: float = 1.01,
+    target_emb_scores: dict[str, float] | None = None,
+    auto_approve_emb_min: float = 0.0,
 ) -> tuple[int, int]:
     """후보 집합 안 타깃·active kind 만 graph_edge 에 upsert. Returns (upserted, skipped).
 
-    신규 엣지 status: confidence >= auto_approve_min 이면 'active'(자동승인), 아니면 'proposed'(검토 대기).
-    기본 1.01 = 자동승인 없음(전부 proposed). 충돌 시 status 는 보존(사람 결정 유지), confidence 만 GREATEST.
+    신규 엣지 status: LLM conf AND emb_score 두 게이트를 모두 통과하면 'active'(자동승인),
+    아니면 'proposed'(검토 대기). conf>=auto_approve_min 이고 (emb_min>0 일 때) 타깃 emb_score>=emb_min.
+    기본 auto_approve_min=1.01·auto_approve_emb_min=0.0(또는 맵 미전달)이면 emb 변이 무력 →
+    현행과 비트-동일(동작 보존·033 SC-001). 충돌 시 status 는 보존(사람 결정 유지), confidence 만 GREATEST.
+    target_emb_scores: {타깃 id: 후보 코사인 유사도}. 미전달 타깃은 0.0(emb_min>0 이면 proposed).
     """
     allowed = frozenset(str(t) for t in allowed_target_ids)
     upserted = 0
@@ -135,7 +155,9 @@ def sync_graph_edges(
         reason = str(edge.get("reason") or "").strip() or None
         # auto_approve_min 기본값 1.01 = 신뢰도가 1.0을 초과할 수 없으므로 사실상 자동승인 없음.
         # 운영에서 임계를 낮추면(예: 0.85) 해당 구간 이상 엣지는 HITL 없이 바로 'active'.
-        status_val = "active" if (conf_f is not None and conf_f >= auto_approve_min) else "proposed"
+        # 033 FR-001: emb_min>0 이면 타깃 emb_score 도 통과해야 active(AND 게이트). 맵 미전달·emb_min=0 이면 무력.
+        emb_s = (target_emb_scores or {}).get(tid, 0.0)
+        status_val = _decide_status(conf_f, emb_s, auto_approve_min, auto_approve_emb_min)
 
         dst_node = ensure_asset_node(conn, tid)
         a_node, b_node = _canonical_pair(src_node, dst_node, symmetric=symmetric)

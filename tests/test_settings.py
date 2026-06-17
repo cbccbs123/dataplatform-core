@@ -63,6 +63,8 @@ _BACKEND_KEYS = (
     # 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
     "OPENSEARCH_NORI_USER_WORDS",
     "OPENSEARCH_FILENAME_NOISE_PATTERNS",
+    # 033 T002: 자동승인 emb_score 하한 선택 env 키도 비워, 실행 환경 잔존값이 기본 0.0 단언을 오염시키지 않게 한다.
+    "RELATION_AUTO_APPROVE_EMB_MIN",
 )
 
 
@@ -432,6 +434,24 @@ class TestG3FieldNameContract(unittest.TestCase):
         self.assertEqual(settings.search_backend, "pg")
         self.assertEqual(settings.opensearch_fusion_weights, search_constants.OS_FUSION_WEIGHTS_DEFAULT)
         self.assertEqual(settings.search_os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
+
+
+class TestRelationAutoApproveEmbMin(unittest.TestCase):
+    """033 T002(FR-002): 자동승인 emb_score 하한 ``relation_auto_approve_emb_min`` —
+    기본 0.0(무력=현 동작)·env ``RELATION_AUTO_APPROVE_EMB_MIN`` 오버라이드.
+
+    기존 ``relation_auto_approve_min``(_env_float_default) 패턴을 그대로 미러. 기본 0.0 이라
+    이 값이 0 이면 AND 게이트의 emb 변이가 무력화돼 LLM conf 단독 결정(현행 status 보존)."""
+
+    def test_default_zero_when_unset(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.relation_auto_approve_emb_min, 0.0)
+
+    def test_env_override(self) -> None:
+        with _env(RELATION_AUTO_APPROVE_EMB_MIN="0.5"):
+            s = _build_settings("dev")
+        self.assertEqual(s.relation_auto_approve_emb_min, 0.5)
 
 
 class TestSearchBackendWiring(unittest.TestCase):
