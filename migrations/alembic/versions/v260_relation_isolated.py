@@ -24,10 +24,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 'isolated' 행을 되돌릴 곳이 모호하므로(고립의 종전 표현은 pending/failed 양쪽) 안전하게 'failed'로
-    # 접고 CHECK 를 원복한다. 'isolated'를 'failed'로 흡수해야 신규 CHECK 제거 시 위반이 없다.
+    # 비대칭(의도적): upgrade backfill 은 failed+'isolated:no_edges' 만 isolated 로 복구하지만, downgrade 는
+    # 모든 isolated 를 failed 로 접는다(고립의 종전 표현이 pending/failed 양쪽이라 정확한 역매핑 불가).
+    # 'isolated'를 먼저 흡수해야 3-어휘 CHECK 재적용 시 위반이 없다. 라운드트립 안전: 재 upgrade 시 backfill
+    # 키('isolated:no_edges')가 다시 일치해 복구된다(reason 은 downgrade 가 건드리지 않음).
     op.execute("UPDATE relation_resolution SET status = 'failed' WHERE status = 'isolated'")
-    op.execute("ALTER TABLE relation_resolution DROP CONSTRAINT IF EXISTS relation_resolution_status_check")
+    op.execute(
+        "ALTER TABLE relation_resolution "
+        "DROP CONSTRAINT IF EXISTS relation_resolution_status_check"
+    )
     op.execute(
         "ALTER TABLE relation_resolution ADD CONSTRAINT relation_resolution_status_check "
         "CHECK (status IN ('pending', 'resolved', 'failed'))"
