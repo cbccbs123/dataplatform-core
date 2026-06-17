@@ -38,7 +38,7 @@ def _row_similarity(row: dict[str, Any]) -> float:
     """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
 
     ``search_service._row_similarity`` 와 동일 규칙의 작은 사본이다. search_service 를 import 하면
-    media_search→torch 체인을 끌어와 "완전 순수" 주장이 깨지므로, 정화 함수만 사본화한다.
+    opensearch_search→임베더(torch) 체인을 끌어와 "완전 순수" 주장이 깨지므로, 정화 함수만 사본화한다.
     """
     value = row.get("similarity")
     try:
