@@ -707,10 +707,11 @@ class TestZeroNormGuardDB(unittest.TestCase):
             # SC-001: 방금 넣은 영노름 타깃이 후보에 없음.
             self.assertNotIn(zero_id, ids)
         finally:
-            with self.db.transaction() as conn:
-                with conn.cursor() as cur:
-                    for aid in (src_id, zero_id):
-                        if aid:
+            # 자산별 독립 트랜잭션 — 한 자산 정리 실패가 다른 자산 정리를 롤백하지 않도록(리뷰 권고).
+            for aid in (src_id, zero_id):
+                if aid:
+                    with self.db.transaction() as conn:
+                        with conn.cursor() as cur:
                             cur.execute("DELETE FROM asset_embedding WHERE asset_id=%s", (aid,))
                             cur.execute("DELETE FROM asset WHERE asset_id=%s", (aid,))
 
