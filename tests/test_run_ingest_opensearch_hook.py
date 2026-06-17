@@ -184,7 +184,7 @@ class TestRunIngestOffPathUnchanged(unittest.TestCase):
                 res = ri.run_ingest(
                     ["/d/a.txt"],
                     db=db,
-                    extract_fn=lambda ctx: m["_AssetRecord"](fts_plain="x"),
+                    extract_fn=lambda ctx: m["_AssetRecord"](),
                     classify_fn=lambda p, mod: __import__(
                         "src.classify.types", fromlist=["ClassificationResult"]
                     ).ClassificationResult(final_label="general", confidence=0.7, decided_stage=2),

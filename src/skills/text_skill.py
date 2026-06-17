@@ -16,7 +16,6 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
     # 모든 LLM 은 설정된 단일 온프레미스 엔드포인트를 사용한다(외부 LLM 미사용).
     from src.extractors.text_meta_extractor import extract_text_meta
     from src.llm.text_summarizer import summarize_and_extract_keywords
-    from src.preprocess.media_item_search_text import build_media_item_fts_plain
 
     cfg = ctx.settings or get_current_settings()
     file_kind = ctx.modality
@@ -29,10 +28,9 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
     )
     # | 연산자로 dict 머지 — 오른쪽(요약)이 같은 키를 덮어쓴다.
     meta = meta | summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)
-    fts_plain = build_media_item_fts_plain(file_uri=ctx.file_path, meta=meta)
     core_meta, ext_meta = split_core_ext(meta)
     # embeddings=[] — embed 슬롯은 _embed_text 가 별도로 채운다(분리 설계).
-    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
+    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], embeddings=[])
 
 
 def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:

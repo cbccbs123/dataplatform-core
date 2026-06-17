@@ -10,10 +10,10 @@ from src.dispatch.types import AssetRecord, ExtractContext
 class TestDispatchSplit(unittest.TestCase):
     def test_dispatch_extract_meta_routes_to_text(self) -> None:
         from src.dispatch import dispatcher
-        with mock.patch("src.dispatch.dispatcher._extract_text_meta", return_value=AssetRecord(fts_plain="t")) as m:
+        with mock.patch("src.dispatch.dispatcher._extract_text_meta", return_value=AssetRecord(tags=["t"])) as m:
             rec = dispatcher.dispatch_extract_meta(ExtractContext(file_path="/a.txt", modality="txt"))
         m.assert_called_once()
-        self.assertEqual(rec.fts_plain, "t")
+        self.assertEqual(rec.tags, ["t"])
 
     def test_dispatch_embed_routes_to_text(self) -> None:
         from src.dispatch import dispatcher

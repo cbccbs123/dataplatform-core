@@ -62,7 +62,6 @@ def _record() -> AssetRecord:
         core_meta={"size": 12},
         ext_meta={"summary": "골든 요약"},
         tags=["golden"],
-        fts_plain="golden text 골든",
         embeddings=[EmbeddingItem(channel="st", vector=_vec(), model_name="fake-st", chunk_index=0)],
     )
 
@@ -138,12 +137,12 @@ class TestRunIngestE2E(unittest.TestCase):
         self.assertEqual(modality, "txt")
         self.assertEqual(domain, "general")
 
-        summary, tags, search_vector = self._q(
-            "SELECT ext_meta->>'summary', tags, search_vector FROM asset_metadata WHERE asset_id=%s", (aid,)
+        # 037: search_vector(PG FTS) 컬럼은 v270 에서 제거 — 적재 라운드트립은 core/ext/tags 만 검증.
+        summary, tags = self._q(
+            "SELECT ext_meta->>'summary', tags FROM asset_metadata WHERE asset_id=%s", (aid,)
         )
         self.assertEqual(summary, "골든 요약")
         self.assertIn("golden", tags)
-        self.assertIsNotNone(search_vector)
 
         (n_emb,) = self._q("SELECT count(*) FROM asset_embedding WHERE asset_id=%s", (aid,))
         self.assertEqual(n_emb, 1)

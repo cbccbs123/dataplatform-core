@@ -63,7 +63,6 @@ def _make_sample_asset(db, ids: list, vec: list[float]) -> str:
             conn,
             aid,
             AssetRecord(
-                fts_plain="sample",
                 embeddings=[EmbeddingItem(channel="st", vector=vec, model_name="m")],
             ),
         )

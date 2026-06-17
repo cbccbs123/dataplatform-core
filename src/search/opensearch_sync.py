@@ -121,7 +121,7 @@ def clean_file_name(name: str, *, noise_patterns: Iterable[str] = ()) -> str:
     새 명명 규약 대응) ② ``_is_id_like_token`` 잡음 토큰 제거 → 남은 토큰을 공백으로 결합.
     한글 토큰은 항상 보존되고, 모든 토큰이 잡음이면 빈 문자열을 돌려준다(파일명 신호 0·안전).
 
-    ``vlm_text_for_embedding``/``media_item_search_text`` 의 파일명 처리와 결을 맞춰, 파일명 노이즈가
+    ``vlm_text_for_embedding`` 의 파일명 처리와 결을 맞춰, 파일명 노이즈가
     BM25·임베딩을 오염시키지 않게 한다(F8 — 어떤 명명 규약의 파일이 와도 피해 반경을 제한).
     """
     if not name:

@@ -138,7 +138,7 @@ class TestProcessAsset(unittest.TestCase):
             m = self._patch(stack)
             outcome = ri.process_asset(
                 _AID, db=self.db, fs_path="/d/a.txt", modality="txt", domain="general",
-                classify_fn=lambda p, mod: _cls(), extract_fn=lambda ctx: AssetRecord(fts_plain="x"),
+                classify_fn=lambda p, mod: _cls(), extract_fn=lambda ctx: AssetRecord(),
                 settings=object(), os_index=os_index,
             )
         self.assertEqual(outcome, "registered")
@@ -184,7 +184,7 @@ class TestProcessAsset(unittest.TestCase):
             self._patch(stack)
             outcome = ri.process_asset(
                 _AID, db=self.db, fs_path="/d/a.txt", modality="txt", domain="general",
-                classify_fn=lambda p, mod: _cls(), extract_fn=lambda ctx: AssetRecord(fts_plain="x"),
+                classify_fn=lambda p, mod: _cls(), extract_fn=lambda ctx: AssetRecord(),
                 settings=object(),
             )
         self.assertEqual(outcome, "registered")
@@ -239,7 +239,7 @@ class TestRunIngestSplitSeal(unittest.TestCase):
             self._record_seq(stack, seq, route=_route())
             res = ri.run_ingest(
                 ["/d/a.txt"], db=mock.MagicMock(),
-                extract_fn=lambda ctx: AssetRecord(fts_plain="x"),
+                extract_fn=lambda ctx: AssetRecord(),
                 classify_fn=lambda p, m: _cls(), settings=object(),
             )
         self.assertEqual(res["registered"], [_AID])
@@ -285,7 +285,7 @@ class TestRunIngestSplitSeal(unittest.TestCase):
             self._record_seq(stack, seq, route=_route(), dup=_EXISTING)
             res = ri.run_ingest(
                 ["/d/a.txt"], db=mock.MagicMock(),
-                extract_fn=lambda ctx: AssetRecord(fts_plain="x"),
+                extract_fn=lambda ctx: AssetRecord(),
                 classify_fn=lambda p, m: _cls(), settings=object(),
             )
         self.assertEqual(res["registered"], [])

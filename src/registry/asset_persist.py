@@ -79,25 +79,26 @@ def create_asset(
 def finalize_asset(conn: Connection[Any], asset_id: uuid.UUID, record: AssetRecord) -> None:
     """``AssetRecord`` 의 메타·임베딩을 적재하고 상태를 ``registered`` 로 전이한다.
 
-    ``asset_metadata`` 1행(core/ext jsonb, tags, search_vector) + ``asset_embedding`` N행을 삽입.
+    ``asset_metadata`` 1행(core/ext jsonb, tags) + ``asset_embedding`` N행을 삽입.
     마지막에 ``set_status(..., REGISTERED)`` — 현재 상태가 ``extracting`` 이어야 한다(상태 머신 검증).
 
     임베딩이 없을 때(record.embeddings 빈 리스트) executemany 를 건너뛴다.
     벡터는 항상 ``FIX_EMBEDDING_DIMENSION``(1536D) ::vector 캐스트로 저장 — DB CHECK 제약과 일치해야 한다.
-    search_vector 는 'simple' 사전으로 FTS 인덱스 생성(언어 무관 토크나이징).
+
+    037(OS 전용): 종전 PG FTS 컬럼(v270 에서 드롭)을 제거했다. 풀텍스트 색인은 OpenSearch 동기화가
+    ``ext_meta`` 기반으로 생성하므로 적재 시 FTS 평문을 더 이상 채우지 않는다(INSERT 4컬럼만).
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags, search_vector)
-            VALUES (%s, %s::jsonb, %s::jsonb, %s, to_tsvector('simple', coalesce(%s, '')))
+            INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags)
+            VALUES (%s, %s::jsonb, %s::jsonb, %s)
             """,
             (
                 asset_id,
                 json.dumps(record.core_meta, ensure_ascii=False),
                 json.dumps(record.ext_meta, ensure_ascii=False),
                 list(record.tags),
-                record.fts_plain,
             ),
         )
         if record.embeddings:

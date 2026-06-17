@@ -124,7 +124,6 @@ class TestPortalE2E(unittest.TestCase):
                     core_meta=core_meta or {},
                     ext_meta=ext_meta or {},
                     tags=["portal_e2e"],
-                    fts_plain="portal e2e",
                     embeddings=[
                         EmbeddingItem(channel="st", vector=_onehot(), model_name="m")
                     ],

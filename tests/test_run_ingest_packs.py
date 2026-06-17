@@ -22,7 +22,7 @@ def _fake_registry(captured):
     r.register("classify", "cascade_v1", lambda ctx: ClassificationResult(final_label="general", confidence=0.7, decided_stage=2))
 
     def _extract(ctx):
-        return AssetRecord(fts_plain="x")
+        return AssetRecord()
 
     def _embed(ctx, rec):
         captured["embed_called"] = True
@@ -61,7 +61,7 @@ class TestRunIngestPackPath(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             self._patch(stack)
             ri.run_ingest(["/d/a.txt"], db=mock.MagicMock(), registry=reg,
-                          extract_fn=lambda ctx: AssetRecord(fts_plain="ov"),
+                          extract_fn=lambda ctx: AssetRecord(),
                           classify_fn=lambda p, m: ClassificationResult(final_label="general", confidence=0.7, decided_stage=2),
                           settings=object())
         self.assertNotIn("embed_called", captured)      # override 경로는 embed 슬롯 미호출

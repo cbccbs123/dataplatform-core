@@ -28,7 +28,6 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     )
     from src.extractors.image_meta_extractor import extract_image_meta
     from src.llm.image_summarizer import summarize_image_caption_keywords_objects
-    from src.preprocess.media_item_search_text import build_media_item_fts_plain
 
     cfg = ctx.settings or get_current_settings()
     file = ctx.file_path
@@ -38,7 +37,6 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     summary = summarize_image_caption_keywords_objects(file_path=file)
     objects = summary.get("objects") or []
     meta = meta | summary
-    meta_for_fts = dict(meta)
 
     # 3) CLIP 이미지 임베딩 + 한글 라벨 제로샷
     # VLM 이 추출한 objects 를 CLIP 제로샷 후보로 전달 — 빈 리스트면 제로샷 미수행.
@@ -51,16 +49,14 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
             it for it in labels_all if float(it.get("score") or 0.0) >= cfg.labels_score_min
         ][: cfg.image_labels_meta_top_k]
         meta = meta | {"labels": labels}
-        meta_for_fts = meta_for_fts | {"labels": labels}
 
-    fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta_for_fts)
     meta.pop("objects", None)  # objects 는 CLIP 후보용일 뿐 최종 meta 에서 제외
 
     # 계약: _embed_image 는 반드시 같은 ctx 로 이 함수 실행 후 호출되어야 한다.
     ctx.scratch["clip_vec"] = zs["clip_image_embedding"]
 
     core_meta, ext_meta = split_core_ext(meta)
-    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
+    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], embeddings=[])
 
 
 def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:

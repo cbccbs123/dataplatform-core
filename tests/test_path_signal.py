@@ -369,8 +369,8 @@ class TestPathSignalDB(unittest.TestCase):
                     (aid, path, aid.hex),
                 )
                 cur.execute(
-                    "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags, search_vector) "
-                    "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}', to_tsvector('simple', ''))",
+                    "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags) "
+                    "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}')",
                     (aid, json.dumps({"summary": path}, ensure_ascii=False)),
                 )
 

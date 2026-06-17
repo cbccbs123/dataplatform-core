@@ -62,7 +62,7 @@ class TestRunIngest(unittest.TestCase):
         return res, m
 
     def test_success_path(self) -> None:
-        res, m = self._ingest(["/d/a.txt"], _route(), extract_fn=lambda ctx: AssetRecord(fts_plain="x"))
+        res, m = self._ingest(["/d/a.txt"], _route(), extract_fn=lambda ctx: AssetRecord())
         self.assertEqual(res["registered"], [1])
         m["create_asset"].assert_called_once()
         m["record_classification"].assert_called_once()

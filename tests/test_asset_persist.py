@@ -49,7 +49,6 @@ class TestFinalizeAsset(unittest.TestCase):
             core_meta={"width": 10},
             ext_meta={"summary": "s"},
             tags=["t"],
-            fts_plain="hello",
             embeddings=[EmbeddingItem(channel="st", vector=[0.1, 0.2], model_name="legacy")],
         )
         finalize_asset(conn, _FIXED, rec)
@@ -57,6 +56,10 @@ class TestFinalizeAsset(unittest.TestCase):
         self.assertEqual(len(meta_ins), 1)
         self.assertEqual(meta_ins[0].args[1][0], _FIXED)
         self.assertEqual(meta_ins[0].args[1][3], ["t"])
+        # 037: search_vector 컬럼·to_tsvector·fts_plain 파라미터 제거 — INSERT 는 4개 컬럼만.
+        self.assertNotIn("search_vector", meta_ins[0].args[0])
+        self.assertNotIn("to_tsvector", meta_ins[0].args[0])
+        self.assertEqual(len(meta_ins[0].args[1]), 4)
         self.assertEqual(cur.executemany.call_count, 1)
         emb_rows = cur.executemany.call_args.args[1]
         self.assertEqual(emb_rows, [(_FIXED, "st", 0, [0.1, 0.2], "legacy", None)])
@@ -68,7 +71,7 @@ class TestFinalizeAsset(unittest.TestCase):
 
     def test_no_embeddings_skips_executemany(self) -> None:
         conn, cur = _mock_conn({"status": "extracting"})
-        finalize_asset(conn, _FIXED, AssetRecord(fts_plain="x"))
+        finalize_asset(conn, _FIXED, AssetRecord())
         self.assertEqual(cur.executemany.call_count, 0)
         upd = [c for c in _executes(cur) if "UPDATE asset SET status" in c.args[0]]
         self.assertEqual(upd[0].args[1], ("registered", None, _FIXED, "extracting"))

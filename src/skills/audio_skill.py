@@ -21,19 +21,17 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
     """
     from src.extractors.audio_meta_extractor import extract_audio_meta
     from src.llm.text_summarizer import summarize_and_extract_keywords_from_audio
-    from src.preprocess.media_item_search_text import build_media_item_fts_plain
     from src.preprocess.stt import transcribe_audio_local
 
     file = ctx.file_path
     stt_result = transcribe_audio_local(file_path=file)
     meta = extract_audio_meta(file_path=file)
     meta = meta | summarize_and_extract_keywords_from_audio(text=stt_result["text"])
-    fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta)
 
     ctx.scratch["stt_text"] = stt_result["text"]  # 임베딩 슬롯 재사용(whisper 재실행 방지)
 
     core_meta, ext_meta = split_core_ext(meta)
-    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
+    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], embeddings=[])
 
 
 def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:

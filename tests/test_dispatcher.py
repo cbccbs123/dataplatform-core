@@ -17,7 +17,9 @@ def _ctx(modality: str, domain: str = "general") -> ExtractContext:
 class TestTypes(unittest.TestCase):
     def test_assetrecord_defaults(self) -> None:
         r = AssetRecord()
-        self.assertEqual((r.core_meta, r.ext_meta, r.tags, r.fts_plain, r.embeddings), ({}, {}, [], "", []))
+        self.assertEqual((r.core_meta, r.ext_meta, r.tags, r.embeddings), ({}, {}, [], []))
+        # 037: fts_plain 필드 제거(OS 전용·PG FTS 폐기) — 더 이상 존재하지 않아야 한다.
+        self.assertFalse(hasattr(r, "fts_plain"))
 
     def test_embeddingitem_defaults(self) -> None:
         e = EmbeddingItem(channel="clip", vector=[0.0], model_name="legacy")

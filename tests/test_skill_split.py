@@ -19,8 +19,7 @@ class TestTextSplit(unittest.TestCase):
     def test_extract_meta_has_no_embeddings(self) -> None:
         from src.skills import text_skill
         with mock.patch.multiple("src.extractors.text_meta_extractor", extract_text_meta=mock.Mock(return_value={"size": 1})), \
-             mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords=mock.Mock(return_value={"summary": "s", "keywords": ["k"]})), \
-             mock.patch.multiple("src.preprocess.media_item_search_text", build_media_item_fts_plain=mock.Mock(return_value="fts")):
+             mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords=mock.Mock(return_value={"summary": "s", "keywords": ["k"]})):
             ctx = _ctx()
             ctx.settings = mock.Mock(encoding="utf-8", text_embedding_chunk_size=100,
                                      text_embedding_model="m", text_embedding_normalize=True)
@@ -28,7 +27,8 @@ class TestTextSplit(unittest.TestCase):
         self.assertIsInstance(rec, AssetRecord)
         self.assertEqual(rec.embeddings, [])
         self.assertEqual(rec.ext_meta.get("summary"), "s")
-        self.assertEqual(rec.fts_plain, "fts")
+        # 037: fts_plain 제거 — 더 이상 AssetRecord 에 존재하지 않는다.
+        self.assertFalse(hasattr(rec, "fts_plain"))
 
     def test_embed_returns_items_and_wrapper_composes(self) -> None:
         from src.skills import text_skill
@@ -60,8 +60,7 @@ class TestImageSplit(unittest.TestCase):
              mock.patch.multiple("src.llm.image_summarizer", summarize_image_caption_keywords_objects=mock.Mock(return_value={"summary": "s", "objects": ["고양이"]})), \
              mock.patch.multiple("src.embedders.image_embedder",
                                  zero_shot_tag_image_korean_clip=mock.Mock(return_value=zs),
-                                 clip_zero_shot_ko_meta_items=mock.Mock(return_value=[{"label": "고양이", "score": 0.9}])), \
-             mock.patch.multiple("src.preprocess.media_item_search_text", build_media_item_fts_plain=mock.Mock(return_value="fts")):
+                                 clip_zero_shot_ko_meta_items=mock.Mock(return_value=[{"label": "고양이", "score": 0.9}])):
             rec = image_skill._extract_image_meta(ctx)
         self.assertEqual(rec.embeddings, [])
         self.assertEqual(ctx.scratch["clip_vec"], [0.5] * 4)
@@ -87,8 +86,7 @@ class TestAudioSplit(unittest.TestCase):
                                  text_embedding_normalize=True, active_embed_channel="st")
         with mock.patch.multiple("src.preprocess.stt", transcribe_audio_local=mock.Mock(return_value={"text": "안녕"})), \
              mock.patch.multiple("src.extractors.audio_meta_extractor", extract_audio_meta=mock.Mock(return_value={"dur": 3})), \
-             mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords_from_audio=mock.Mock(return_value={"summary": "s"})), \
-             mock.patch.multiple("src.preprocess.media_item_search_text", build_media_item_fts_plain=mock.Mock(return_value="fts")):
+             mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords_from_audio=mock.Mock(return_value={"summary": "s"})):
             rec = audio_skill._extract_audio_meta(ctx)
         self.assertEqual(rec.embeddings, [])
         self.assertEqual(ctx.scratch["stt_text"], "안녕")
@@ -118,8 +116,7 @@ class TestVideoSplit(unittest.TestCase):
              mock.patch.multiple("src.llm.image_summarizer",
                                  summarize_image_caption_keywords_objects_from_jpeg_bytes=mock.Mock(return_value={"summary": "s", "objects": ["k"]})), \
              mock.patch.multiple("src.llm.video_summarizer", summarize_video_from_scene_results=mock.Mock(return_value={"summary": "v"})), \
-             mock.patch.multiple("src.embedders.video_embedder", embed_video_keyframes_clip=mock.Mock(return_value=clip_ve)), \
-             mock.patch.multiple("src.preprocess.media_item_search_text", build_media_item_fts_plain=mock.Mock(return_value="fts")):
+             mock.patch.multiple("src.embedders.video_embedder", embed_video_keyframes_clip=mock.Mock(return_value=clip_ve)):
             rec = video_skill._extract_video_meta(ctx)
         self.assertEqual(rec.embeddings, [])
         self.assertEqual(len(ctx.scratch["keyframes"]), 1)

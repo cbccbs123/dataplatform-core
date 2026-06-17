@@ -35,7 +35,7 @@ ALLOWED_TEXT_META_FILE_KINDS = {
 }
 
 # ``media_chunks`` 에 ``embedding_kind=st`` 청크가 있는 media_type(문서·오디오 STT·영상 VLM 텍스트 등).
-# 벡터 검색과 별도로 풀텍스트는 ``media_items.search_vector``(메타 기반)에서 처리한다.
+# 벡터 검색과 별도로 풀텍스트(BM25)는 OpenSearch 색인(메타 기반)에서 처리한다(037 OS 전용; PG FTS 폐기).
 MEDIA_TYPES_ST_CHUNK_SEARCH = frozenset(
     {*ALLOWED_TEXT_META_FILE_KINDS, MediaKind.AUDIO.value, MediaKind.VIDEO.value}
 )

@@ -28,7 +28,6 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     from src.embedders.video_embedder import embed_video_keyframes_clip
     from src.llm.image_summarizer import summarize_image_caption_keywords_objects_from_jpeg_bytes
     from src.llm.video_summarizer import summarize_video_from_scene_results
-    from src.preprocess.media_item_search_text import build_media_item_fts_plain
     from src.preprocess.video_keyframes import (
         extract_video_basic_meta,
         extract_video_representative_frame_bytes,
@@ -77,7 +76,6 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     meta["keyframes"] = [
         {k: v for k, v in kf.items() if k != "clip_image_embedding"} for kf in clip_ve["keyframes"]
     ]
-    fts_plain = build_media_item_fts_plain(file_uri=file, meta=meta)
 
     # 키프레임별 임베딩 입력을 stash(키프레임/CLIP/VLM 재실행 방지)
     # stash 순서 = clip_ve["keyframes"] 순서 = scene 순서 → _embed_video 가 chunk_index 로 활용.
@@ -95,7 +93,7 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     ctx.scratch["keyframes"] = stash
 
     core_meta, ext_meta = split_core_ext(meta)
-    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], fts_plain=fts_plain, embeddings=[])
+    return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], embeddings=[])
 
 
 def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:

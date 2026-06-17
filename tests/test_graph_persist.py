@@ -162,7 +162,7 @@ def _make_registered_asset(db, ids: list) -> str:
         set_status(conn, aid, AssetStatus.EXTRACTING)
     with db.transaction() as conn:
         finalize_asset(conn, aid, AssetRecord(
-            fts_plain="x", embeddings=[EmbeddingItem(channel="st", vector=_vec(), model_name="m")]))
+            embeddings=[EmbeddingItem(channel="st", vector=_vec(), model_name="m")]))
     return str(aid)
 
 

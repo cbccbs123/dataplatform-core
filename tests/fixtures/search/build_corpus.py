@@ -70,7 +70,8 @@ def build_corpus(
         noise_idx = 1000 + rng.randrange(500)
         vec = _vec(strong_idx, noise_idx, 0.05)
         assets.append((aid, "txt", f"{CORPUS_FS_PREFIX}{aid}.txt", aid.hex))
-        metas.append((aid, json.dumps({"summary": summary}, ensure_ascii=False), fts))
+        # 037: search_vector(PG FTS) 제거(v270) — fts 평문은 더 이상 적재하지 않는다(OS 색인이 풀텍스트 담당).
+        metas.append((aid, json.dumps({"summary": summary}, ensure_ascii=False)))
         embs.append((aid, "st", 0, vec))
         return str(aid)
 
@@ -97,8 +98,8 @@ def build_corpus(
                 assets,
             )
             cur.executemany(
-                "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags, search_vector) "
-                "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}', to_tsvector('simple', coalesce(%s,'')))",
+                "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags) "
+                "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}')",
                 metas,
             )
             cur.executemany(
@@ -173,7 +174,8 @@ def build_disagreement_corpus(
     def _add(vec: list[float], fts: str, summary: str) -> str:
         aid = uuid7()
         assets.append((aid, "txt", f"{DISAGREE_FS_PREFIX}{aid}.txt", aid.hex))
-        metas.append((aid, json.dumps({"summary": summary}, ensure_ascii=False), fts))
+        # 037: search_vector(PG FTS) 제거(v270) — fts 평문은 더 이상 적재하지 않는다(OS 색인이 풀텍스트 담당).
+        metas.append((aid, json.dumps({"summary": summary}, ensure_ascii=False)))
         embs.append((aid, "st", 0, vec))
         return str(aid)
 
@@ -206,8 +208,8 @@ def build_disagreement_corpus(
                 assets,
             )
             cur.executemany(
-                "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags, search_vector) "
-                "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}', to_tsvector('simple', coalesce(%s,'')))",
+                "INSERT INTO asset_metadata (asset_id, core_meta, ext_meta, tags) "
+                "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}')",
                 metas,
             )
             cur.executemany(

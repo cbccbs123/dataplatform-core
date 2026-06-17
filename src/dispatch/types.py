@@ -42,10 +42,13 @@ class ExtractContext:
 
 @dataclass
 class AssetRecord:
-    """추출 결과의 통일 표현. asset_metadata(core/ext/tags/fts) + asset_embedding(embeddings)."""
+    """추출 결과의 통일 표현. asset_metadata(core/ext/tags) + asset_embedding(embeddings).
+
+    037(OS 전용): 종전 PG FTS 평문 입력 필드를 제거했다. 풀텍스트 색인은 OpenSearch
+    동기화가 ``ext_meta`` 에서 생성하므로 적재 계약에 별도 FTS 입력이 필요 없다.
+    """
 
     core_meta: dict[str, Any] = field(default_factory=dict)  # 파일/시스템 메타
     ext_meta: dict[str, Any] = field(default_factory=dict)  # 도메인 신호(summary/keywords/labels 등)
     tags: list[str] = field(default_factory=list)
-    fts_plain: str = ""  # FTS 평문 (to_tsvector 입력)
     embeddings: list[EmbeddingItem] = field(default_factory=list)
