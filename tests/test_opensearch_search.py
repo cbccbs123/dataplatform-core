@@ -559,7 +559,8 @@ class RerankReorderTest(unittest.TestCase):
         rows = [self._row(c, s) for c, s in (("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6))]
         seen = []
         def fake(query, texts, *, model_name):
-            seen.extend(texts); return [0.5] * len(texts)
+            seen.extend(texts)
+            return [0.5] * len(texts)
         kept, scores = rerank_reorder(rows, "질의", fake, top_r=2, model_name="가짜")
         self.assertEqual(seen, ["요약 a", "요약 b"])              # head 2건만 채점
         self.assertEqual(len(scores), 2)
@@ -606,7 +607,8 @@ class RerankReorderTest(unittest.TestCase):
         rows = [self._row("a", 0.5, rrtext="요약: A\n키워드: 키1"), self._row("b", 0.5)]
         seen = []
         def fake(query, texts, *, model_name):
-            seen.extend(texts); return [0.9] * len(texts)
+            seen.extend(texts)
+            return [0.9] * len(texts)
         rerank_reorder(rows, "질의", fake, top_r=10, model_name="가짜")
         self.assertEqual(seen, ["요약: A\n키워드: 키1", "요약 b"])
 
@@ -867,7 +869,8 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         client = _FakeMsearchClient(knn_by_label={"text":[hit]}, bm25_by_label={"text":[]})
         seen=[]
         def spy(query, texts, *, model_name):
-            seen.extend(texts); return [0.9]*len(texts)
+            seen.extend(texts)
+            return [0.9]*len(texts)
         buckets,_=search_assets_os(
             client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
             rerank_enabled=True, rerank_tau=0.0, rerank_fn=spy,
@@ -930,7 +933,8 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         # 회귀 0: rerank 기본 off 면 027 경로(게이트·컷) 그대로 — rerank_fn 미호출.
         calls=[]
         def boom(query, texts, *, model_name):
-            calls.append(1); return [1.0]*len(texts)
+            calls.append(1)
+            return [1.0]*len(texts)
         client = _FakeMsearchClient(
             knn_by_label={"text": [_knn_hit_os("t1", 0.85)]},
             bm25_by_label={"text": [_bm25_hit_os("t1", 9.0)]},
@@ -1093,7 +1097,8 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         # 우선순위를 코드로 강제한다(현 replace 경로가 rerank 를 cutoff 검사보다 먼저 둬서 숨겼던 모호성 해소).
         calls: list[int] = []
         def boom(query, texts, *, model_name):
-            calls.append(1); return [1.0] * len(texts)
+            calls.append(1)
+            return [1.0] * len(texts)
         buckets, gate_meta = self._run(cutoff_enabled=False, rerank_enabled=True, rerank_fn=boom)
         ids = {r["id"] for r in buckets["text"]}
         self.assertEqual(ids, {"t1", "t2", "t3", "t4"})    # 융합 전체(약 후보 포함)
