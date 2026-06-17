@@ -35,17 +35,22 @@ def decide_resolution_status(
 ) -> tuple[str, int]:
     """다음 큐 상태를 결정하는 순수 함수. (status, attempts) 반환.
 
-    규칙(FR-008, 결정적):
-      * 예외 없음 & 엣지≥1  → ('resolved', attempts)           # 관계 생성 성공, attempts 불변
-      * 그 외(엣지0 또는 예외) → 시도 실패로 간주, attempts+1:
-          - attempts+1 < max_attempts → ('pending', attempts+1)   # 일시 실패·고립
+    규칙(FR-008 + 035 #2, 결정적):
+      * error None & 엣지≥1 → ('resolved', attempts)           # 관계 생성 성공, attempts 불변
+      * error None & 엣지==0 → ('resolved', attempts)           # 035 #2: 고립 = 정상 평가·결과 0
+      * 예외(error 있음)     → attempts+1, 재시도 대상:
+          - attempts+1 < max_attempts → ('pending', attempts+1)   # 일시 실패 재시도
           - attempts+1 >= max_attempts → ('failed', attempts+1)   # 상한 도달 DLQ 승격
 
-    엣지0(고립)과 예외(일시 실패)는 last_reason 으로만 구분하고 status 전이는 동일하다
-    (둘 다 pending 흡수, 상한 도달 시 failed). resolved 는 attempts 를 올리지 않는다.
+    035 #2: 고립(엣지0·예외 없음)은 후보 검색(SQL)·LLM(temp=0)이 결정적이라 재시도해도 동일 결과 →
+    'resolved'로 즉시 종료(재시도·attempts 증가·DLQ 없음, LLM 낭비 제거). 호출부가 last_reason 으로
+    성공/고립을 구분 표식한다(status 어휘는 pending/resolved/failed 불변·마이그레이션 0). 일시 실패
+    (예외)만 재시도 흐름 유지 — 다음 주기에 인프라가 살아있으면 성공할 수 있어 의미가 있다.
     """
-    if error is None and edges_upserted >= 1:
+    if error is None:
+        # 성공(엣지≥1) 또는 고립(엣지0) — 둘 다 정상 평가 완료 → resolved.
         return STATUS_RESOLVED, attempts
+    # 예외(일시 실패)만 재시도 대상.
     next_attempts = attempts + 1
     if next_attempts >= max_attempts:
         return STATUS_FAILED, next_attempts

@@ -162,7 +162,13 @@ def _record_resolution(
     status, next_attempts = decide_resolution_status(
         edges_upserted, cur_attempts, error=error, max_attempts=max_attempts
     )
-    reason = type(error).__name__ if error is not None else _REASON_ISOLATED
+    # 035 #2: last_reason 3분기 — 예외=타입명(비식별), 고립(엣지0)=표식, 성공(엣지≥1)=None(reason 불요).
+    if error is not None:
+        reason: str | None = type(error).__name__
+    elif edges_upserted == 0:
+        reason = _REASON_ISOLATED
+    else:
+        reason = None
     try:
         def _run(conn: Connection[Any]) -> None:
             upsert_resolution(conn, aid, status=status, attempts=next_attempts, reason=reason)

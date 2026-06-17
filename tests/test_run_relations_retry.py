@@ -90,12 +90,13 @@ class _FakeCursor:
 class TestRecordResolutionIsolation(unittest.TestCase):
     """_record_resolution: 자산별 fresh 트랜잭션 격리 + 비식별 last_reason."""
 
-    def test_edges_zero_writes_pending_isolated_reason(self) -> None:
+    def test_edges_zero_writes_resolved_isolated_reason(self) -> None:
+        # 035 #2: 고립(엣지0·예외 없음)은 resolved(attempts 불변)·last_reason=고립 표식.
         db = _FakeDB(attempts={})
         rr._record_resolution(db, _A1, 0, error=None, max_attempts=3)
         self.assertEqual(len(db.upserts), 1)
         aid, status, attempts, reason = db.upserts[0]
-        self.assertEqual((aid, status, attempts), (_A1, "pending", 1))
+        self.assertEqual((aid, status, attempts), (_A1, "resolved", 0))
         self.assertEqual(reason, rr._REASON_ISOLATED)  # 고립 비식별 표식
 
     def test_exception_writes_pending_type_name_only(self) -> None:
@@ -150,8 +151,8 @@ class TestRunRelationsQueueWiring(unittest.TestCase):
         self.assertEqual(len(res["done"]), 2)   # A1, A3
         self.assertEqual(len(res["failed"]), 1)  # A2
         by_aid = {u[0]: u for u in db.upserts}
-        self.assertEqual(by_aid[_A1][1:3], ("pending", 1))   # 고립
-        self.assertEqual(by_aid[_A2][1:3], ("pending", 1))   # 예외
+        self.assertEqual(by_aid[_A1][1:3], ("resolved", 0))  # 035 #2: 고립=resolved(재시도 없음)
+        self.assertEqual(by_aid[_A2][1:3], ("pending", 1))   # 예외(일시 실패)는 재시도 유지
         self.assertEqual(by_aid[_A2][3], "RuntimeError")     # 비식별 타입명
         self.assertEqual(by_aid[_A3][1:3], ("resolved", 0))  # 성공
 
@@ -290,17 +291,24 @@ class TestResolutionPersistDB(unittest.TestCase):
 
             raise Rollback()  # 테스트 격리: 변경 폐기(PostgresUtil transaction 이 Rollback 을 잡아 롤백)
 
-    def test_decide_status_matches_persisted_flow(self) -> None:
-        """순수 함수 결정과 실 DB 영속 흐름이 일치(엣지0→pending·증분)."""
+    def test_isolation_resolved_and_excluded_from_rescan(self) -> None:
+        """035 #2 SC-005: 고립(엣지0·예외없음) → 순수 결정·실 DB 영속 모두 resolved,
+        미해소 스캔에서 제외(재시도·DLQ 없음)."""
         with self.db.transaction() as conn:
             aid = self._insert_registered_asset_with_embedding(conn, 10)
+            # 전제: 큐 행 없으면 미해소로 선택된다.
+            self.assertIn(aid, fetch_unresolved_asset_ids(conn))
             status, attempts = decide_resolution_status(0, 0, error=None, max_attempts=3)
-            upsert_resolution(conn, aid, status=status, attempts=attempts, reason="isolated:no_edges")
+            self.assertEqual((status, attempts), ("resolved", 0))  # 035 #2: 고립=resolved(attempts 불변)
+            upsert_resolution(conn, aid, status=status, attempts=attempts, reason=rr._REASON_ISOLATED)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status, attempts FROM relation_resolution WHERE asset_id=%s", (aid,)
+                    "SELECT status, attempts, last_reason FROM relation_resolution WHERE asset_id=%s",
+                    (aid,),
                 )
-                self.assertEqual(tuple(cur.fetchone()), ("pending", 1))
+                self.assertEqual(tuple(cur.fetchone()), ("resolved", 0, "isolated:no_edges"))
+            # resolved 라 미해소 스캔에서 제외 → 다음 tick 재선택 안 됨(고립 무한 재시도·DLQ 방지).
+            self.assertNotIn(aid, fetch_unresolved_asset_ids(conn))
             raise Rollback()  # 테스트 격리: 변경 폐기
 
 
