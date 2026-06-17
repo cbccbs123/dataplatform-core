@@ -88,6 +88,9 @@ def find_embedding_candidates(
             FROM asset_embedding
             WHERE asset_id = %s
               AND embedding IS NOT NULL
+              -- 034: 영노름(빈/실패 콘텐츠) 벡터 제외. 영벡터 코사인은 NaN 이고 PG 는 NaN 을
+              --      HAVING(NaN>=min_sim TRUE)·ORDER BY DESC(최댓값)로 통과시켜 후보를 오염시킨다.
+              AND vector_norm(embedding) > 0
               AND channel = ANY(%s)
         ),
         cand AS (
@@ -99,6 +102,8 @@ def find_embedding_candidates(
             INNER JOIN src_vecs sv ON sv.channel = ae.channel
             WHERE ae.asset_id <> %s
               AND ae.embedding IS NOT NULL
+              -- 034: 영노름 타깃 제외(위와 동일 — NaN 코사인이 top_k 를 점령하는 근원 차단).
+              AND vector_norm(ae.embedding) > 0
         ),
         per_item AS (
             -- 한 자산에 청크/키프레임이 여러 개일 때 가장 가까운 쌍 1개만 대표값으로 사용.

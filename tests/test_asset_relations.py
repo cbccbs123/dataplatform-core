@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import math
+import os
 import unittest
 import uuid
 from unittest import mock
@@ -121,6 +123,21 @@ class TestDeterministicOrdering(unittest.TestCase):
         norm = " ".join(cur.execute.call_args.args[0].split())
         order_clause = norm[norm.index("ORDER BY"):]
         self.assertLess(order_clause.index("best_sim"), order_clause.index("p.id"))
+
+
+class TestZeroNormGuard(unittest.TestCase):
+    """034 — 영노름(vector_norm=0) 임베딩을 후보 비교에서 제외(NaN 코사인 오염 차단).
+
+    영벡터 타깃과의 코사인 1-(a<=>b)=NaN → PG가 HAVING NaN>=min_sim TRUE·ORDER BY DESC 최댓값
+    정렬로 top_k 점령 → 진짜 후보 축출. 소스·타깃 모두 vector_norm>0 으로 영벡터를 비교에서 뺀다.
+    """
+
+    def test_sql_excludes_zero_norm_source_and_target(self) -> None:
+        conn, cur = _mock_conn([])
+        find_embedding_candidates(conn, source_asset_id=_SRC, top_k=5)
+        norm = " ".join(cur.execute.call_args.args[0].split())
+        self.assertIn("vector_norm(embedding) > 0", norm)     # src_vecs 소스 제외
+        self.assertIn("vector_norm(ae.embedding) > 0", norm)  # cand 타깃 제외
 
 
 # ── [008 그룹3] T009~T012: run_relations cross_asset 슬롯 resolve 전환 ──────────
@@ -621,6 +638,81 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         t1 = [c for c in cands if c["id"] == _T1]
         self.assertEqual(len(t1), 1)
         self.assertEqual(t1[0]["emb_score"], 0.77)
+
+
+@unittest.skipUnless(os.environ.get("RUN_DB_E2E") == "1", "실 DB 게이트(RUN_DB_E2E=1)")
+class TestZeroNormGuardDB(unittest.TestCase):
+    """034 SC-001/002 실 DB — 영노름 타깃이 후보에서 빠지고 결과 emb_score 에 NaN 이 없다.
+
+    실 dev DB 에는 영노름 임베딩(st_bge 31·st 11)이 있어, 가드 전이면 정상 소스의 후보에도
+    NaN 이 끼어 상위를 점령한다. 가드 후엔 영노름이 제외돼 결과 emb_score 가 전부 유한이어야 한다.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+
+        from dotenv import load_dotenv
+
+        from src.config.settings import init_settings
+        from src.database.postgres_util import PostgresUtil
+
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env.dev", override=False)
+        init_settings("dev")
+        cls.db = PostgresUtil()
+        cls.db.open_pool()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.db.close()
+
+    def _insert(self, conn, vec_str: str) -> str:
+        from src.config.settings import active_embed_channel
+        from src.database.ids import uuid7_str
+
+        aid = uuid7_str()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO asset (asset_id, fs_path, modality, status, file_hash, created_at) "
+                "VALUES (%s, %s, 'txt', 'registered', %s, now())",
+                (aid, f"/tmp/zn_{aid}.txt", f"hash_{aid}"),
+            )
+            cur.execute(
+                "INSERT INTO asset_embedding (asset_id, channel, chunk_index, embedding, model_name) "
+                "VALUES (%s, %s, 0, %s::vector, 'test')",
+                (aid, active_embed_channel(), vec_str),
+            )
+        return aid
+
+    def test_zero_norm_excluded_and_no_nan(self) -> None:
+        from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+
+        d = FIX_EMBEDDING_DIMENSION
+        normal = "[" + ",".join(["1"] + ["0"] * (d - 1)) + "]"  # 노름 1
+        zero = "[" + ",".join(["0"] * d) + "]"                   # 영노름
+        src_id = zero_id = None
+        try:
+            with self.db.transaction() as conn:
+                src_id = self._insert(conn, normal)
+                zero_id = self._insert(conn, zero)
+            with self.db.transaction() as conn:
+                cands = find_embedding_candidates(
+                    conn, source_asset_id=src_id, top_k=50, embedding_kind="st", min_sim=0.2)
+            scores = [c["emb_score"] for c in cands]
+            ids = [c["id"] for c in cands]
+            # SC-002: 결과 emb_score 에 NaN 없음(영노름 자산이 NaN 으로 끼지 않음).
+            self.assertFalse(
+                any(isinstance(s, float) and math.isnan(s) for s in scores),
+                msg=f"후보 emb_score 에 NaN 존재: {scores[:5]}")
+            # SC-001: 방금 넣은 영노름 타깃이 후보에 없음.
+            self.assertNotIn(zero_id, ids)
+        finally:
+            with self.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    for aid in (src_id, zero_id):
+                        if aid:
+                            cur.execute("DELETE FROM asset_embedding WHERE asset_id=%s", (aid,))
+                            cur.execute("DELETE FROM asset WHERE asset_id=%s", (aid,))
 
 
 if __name__ == "__main__":
