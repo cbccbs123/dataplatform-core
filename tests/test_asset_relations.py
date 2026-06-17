@@ -140,6 +140,24 @@ class TestZeroNormGuard(unittest.TestCase):
         self.assertIn("vector_norm(ae.embedding) > 0", norm)  # cand 타깃 제외
 
 
+class TestRelationDefaultEmbeddingKind(unittest.TestCase):
+    """036 — 관계 후보 기본 embedding_kind = bge-only('st'). 4모달리티 캡션 공유 단일 공간·척도 일관."""
+
+    def test_propose_default_is_st(self) -> None:
+        import inspect
+
+        from src.relations.asset_entry import propose_relations_for_asset
+        sig = inspect.signature(propose_relations_for_asset)
+        self.assertEqual(sig.parameters["embedding_kind"].default, "st")
+
+    def test_runner_default_is_st(self) -> None:
+        import inspect
+
+        from src.app.run_relations import run_relations
+        sig = inspect.signature(run_relations)
+        self.assertEqual(sig.parameters["embedding_kind"].default, "st")
+
+
 # ── [008 그룹3] T009~T012: run_relations cross_asset 슬롯 resolve 전환 ──────────
 from src.pipeline.packs import GENERAL_PACK, MEDICAL_PACK, for_domain  # noqa: E402
 from src.pipeline.registry import StrategyRegistry  # noqa: E402
@@ -369,7 +387,7 @@ class TestRunRelationsSlotRouting(unittest.TestCase):
         self.assertIn(self._A_MED, failed_ids)
         self.assertEqual(result["done"], [(self._A_GEN, 5, 1)])
         # 일반 자산에 대해서만 propose 위임이 일어난다(의료는 resolve 단계에서 차단).
-        m.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="both")
+        m.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="st")
 
 
 # ── [016 G3] T013~T015: 비일반 팩 → 제네릭 러너 라우팅 + _domain_fn seam ──────
@@ -513,7 +531,7 @@ class TestRunRelationsRunnerRouting(unittest.TestCase):
             )
         # 샘플 → 러너 1회, 일반 → propose 1회.
         runner.assert_called_once()
-        prop.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="both")
+        prop.assert_called_once_with(db, self._A_GEN, top_k=None, embedding_kind="st")
         self.assertEqual(result["failed"], [])
         # done 순서: 샘플(러너 반환 2, 카탈로그 N/A 0) → 일반(propose 3·4 위치 → 5,1).
         self.assertEqual(
