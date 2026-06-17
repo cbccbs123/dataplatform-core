@@ -1,7 +1,9 @@
 """
 사용자 질의를 검색용 구조화 JSON(keywords, semantic_query 등)으로 바꾼다.
 
-``src/search/media_search.py`` 의 하이브리드 검색에서 사용한다(현행 `asset_metadata`/`asset_embedding` 스키마 기반).
+검색 질의 구조화(``structure_user_query``)·명사구 정규화(``noun_phrase_query``)의 단일 정의처.
+현 OpenSearch 검색 경로에서 직접 호출되지는 않으나(search_service 는 query-norm 토글 on 일 때만 사용),
+질의 전처리 LLM seam 의 표준 위치로 보존한다(현행 `asset_metadata`/`asset_embedding` 스키마 기반).
 
 필요: 프로젝트 루트의 ``.env.dev`` / ``.env.prod`` (OPENAI_BASE_URL, OPENAI_API_KEY, META_MODEL 등)
 """

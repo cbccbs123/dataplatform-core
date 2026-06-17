@@ -2,8 +2,8 @@
 
 per-asset 파이프라인의 ST 채널 벡터를 여기서 만든다: 텍스트/오디오(STT) 본문 청크와
 이미지/영상의 VLM 텍스트(캡션·키워드·라벨)가 모두 이 모듈을 거친다(``src/skills/*_skill.py``).
-검색 쿼리 측(``src/search/media_search.py``)도 동일 함수(``embed_texts``·
-``pad_embedding_to_storage_dim``)를 공유한다 — 인덱싱과 질의가 같은 벡터 공간이어야
+검색 쿼리 측(``src/search/query_embed.py`` — OpenSearch kNN 질의 임베딩)도 동일 함수
+(``embed_texts``·``pad_embedding_to_storage_dim``)를 공유한다 — 인덱싱과 질의가 같은 벡터 공간이어야
 코사인 유사도가 성립하기 때문이다. 따라서 모델 체크포인트는 적재·검색이 동일해야 한다.
 
 모든 출력 벡터는 ``pad_embedding_to_storage_dim`` 으로 DB ``vector(1536)`` 차원에 맞춘다
@@ -72,7 +72,7 @@ def embed_texts(
 ) -> list[list[float]]:
     """문자열 배치를 그대로 ST 인코딩하는 저수준 seam(패딩 전·청크 분할 없음).
 
-    인덱싱(skills)과 검색 쿼리(media_search)가 함께 호출하는 지점 — 양측이 같은
+    인덱싱(skills)과 검색 쿼리(query_embed → OpenSearch kNN)가 함께 호출하는 지점 — 양측이 같은
     ``model_name``·``normalize_embeddings`` 를 줘야 벡터 공간이 일치한다.
     """
     if not texts:

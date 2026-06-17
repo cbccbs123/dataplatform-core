@@ -4,7 +4,8 @@
 선택 필드 패턴(``_env_str_default``/``_env_bool_default`` + ``_build_settings`` 조립)을 따라,
 021 검색 read path 전환(spec 021 FR-005·006·010)에 필요한 아래 3필드를 정식화한다.
 
-  - ``search_backend``           : 기본 ``"pg"``, 화이트리스트 ``{"pg","opensearch"}`` — 그 외 값이면
+  - ``search_backend``           : 037 OpenSearch 전용 정리 후 기본 ``"opensearch"``, 화이트리스트
+                                   ``{"opensearch"}`` — 그 외 값(과거 ``"pg"`` 포함)이면
                                    ``_build_settings``(=init_settings 검증 지점)에서 **즉시 ValueError**
                                    (런타임까지 숨지 않게 — 백로그 '설정 fail-late' 교정).
   - ``opensearch_fusion_weights`` : 기본 ``search_constants.OS_FUSION_WEIGHTS_DEFAULT``(=(0.5,0.5)).
@@ -13,9 +14,9 @@
 027 갱신: 서버 정규화 융합 파이프라인이 클라이언트 융합으로 대체되며 파이프라인 메타 필드·env 키가
 제거됐다. 임계 기본값은 ``search_constants`` 단일 출처(F1)를 참조한다.
 
-⚠️ G3(``search_service.search_hybrid``)가 이 필드들을 ``getattr(cfg, "search_backend", "pg")`` /
-``getattr(cfg, "opensearch_fusion_weights", …)`` 로 읽으므로 **필드명·기본값이 정확히 일치**해야 한다 —
-``TestG3FieldNameContract`` 가 그 계약을 봉인한다.
+⚠️ ``search_service.search_hybrid`` 가 OS 컷오프·융합 필드들을 ``getattr(cfg, "opensearch_fusion_weights",
+…)`` 로 읽으므로 **필드명·기본값이 정확히 일치**해야 한다 — ``TestG3FieldNameContract`` 가 그 계약을
+봉인한다. 037: search_backend 기본값은 'pg'→'opensearch' 로 전환됐다(PG 검색 경로 제거).
 
 ``_build_settings`` 는 11개 필수 env 를 요구하므로(test_settings_relation_retry 동형), 그 최소 env 를
 임시로 채운 뒤 검색 백엔드 키만 토글한다(다른 테스트 환경을 오염시키지 않도록 정확히 원복).
@@ -88,12 +89,14 @@ def _env(**overrides: str):
 
 
 class TestSearchBackend(unittest.TestCase):
-    """``search_backend``: 기본 'pg' · 화이트리스트 fail-fast(FR-010·plan §3)."""
+    """``search_backend``: 037 OpenSearch 전용 정리 후 기본 'opensearch' · 화이트리스트 {'opensearch'}
+    fail-fast(FR-010·037 plan §B4). 과거 'pg' 도 미지원 값이 됐다."""
 
-    def test_default_is_pg_when_unset(self) -> None:
+    def test_default_is_opensearch_when_unset(self) -> None:
+        # 037: PG 검색 경로 제거로 기본값이 'pg'→'opensearch' 로 전환됐다.
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_backend, "pg")
+        self.assertEqual(settings.search_backend, "opensearch")
 
     def test_env_override_opensearch(self) -> None:
         with _env(SEARCH_BACKEND="opensearch"):
@@ -106,11 +109,17 @@ class TestSearchBackend(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
+    def test_pg_backend_now_unsupported(self) -> None:
+        # 037: 과거 기본값 'pg' 는 검색 경로 제거로 미지원 값이 됐다 → 즉시 ValueError(fail-fast).
+        with _env(SEARCH_BACKEND="pg"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
     def test_invalid_backend_empty_after_strip_uses_default(self) -> None:
-        # 공백만 있으면 _env_str_default 관례상 미설정 취급 → 기본 'pg'(빈 문자열로 검증 실패시키지 않음).
+        # 공백만 있으면 _env_str_default 관례상 미설정 취급 → 기본 'opensearch'(빈 문자열로 검증 실패시키지 않음).
         with _env(SEARCH_BACKEND="   "):
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_backend, "pg")
+        self.assertEqual(settings.search_backend, "opensearch")
 
 
 class TestOpenSearchFusionWeights(unittest.TestCase):
@@ -408,13 +417,14 @@ class TestOpenSearchFilenameNoisePatterns(unittest.TestCase):
 
 
 class TestG3FieldNameContract(unittest.TestCase):
-    """G3(search_service.search_hybrid) getattr 계약 봉인 — 필드명·기본값 정확 일치.
+    """search_service.search_hybrid getattr 계약 봉인 — 필드명·기본값 정확 일치.
 
-    G3 가 ``getattr(cfg, "search_backend", "pg")`` / ``getattr(cfg, "opensearch_fusion_weights",
-    search_constants.OS_FUSION_WEIGHTS_DEFAULT)`` / ``getattr(cfg, "search_os_result_floor",
-    search_constants.OS_RESULT_FLOOR_DEFAULT)`` 로 읽으므로, 정식화된 필드명·기본값이 그 폴백값과
-    어긋나면 동작이 갈라진다(회귀). 이 계약을 직접 봉인한다. 027: 서버 파이프라인 메타 필드는
-    클라이언트 융합 전환으로 제거됐다 — 제거 봉인은 아래 '제거된 필드 부재' 단언이 담당한다.
+    OS 경로가 ``getattr(cfg, "opensearch_fusion_weights", search_constants.OS_FUSION_WEIGHTS_DEFAULT)``
+    / ``getattr(cfg, "search_os_result_floor", search_constants.OS_RESULT_FLOOR_DEFAULT)`` 등으로 cfg
+    필드를 읽으므로, 정식화된 필드명·기본값이 그 폴백값과 어긋나면 동작이 갈라진다(회귀). 이 계약을
+    직접 봉인한다. 037: search_backend 는 settings 단일 경로 결정 필드로, 기본값이 'pg'→'opensearch' 로
+    전환됐다(아래 단언). 027: 서버 파이프라인 메타 필드는 클라이언트 융합 전환으로 제거됐다 —
+    제거 봉인은 아래 '제거된 필드 부재' 단언이 담당한다.
     """
 
     # 027: 제거된 파이프라인 메타 필드명(부재를 봉인). 리터럴을 한 곳에만 두어 잔존 참조와 구분한다.
@@ -430,8 +440,8 @@ class TestG3FieldNameContract(unittest.TestCase):
         # 027: 제거된 필드들은 더 이상 존재하지 않는다(서버 융합 파이프라인·정규화 스케일 임계 0)
         for removed in self._REMOVED_FIELDS:
             self.assertFalse(hasattr(settings, removed), f"제거된 필드가 잔존: {removed}")
-        # 기본값이 G3 getattr 폴백(search_constants 단일 출처)과 동일(미설정 시 동작 불변)
-        self.assertEqual(settings.search_backend, "pg")
+        # 037: 기본 search_backend 가 'pg'→'opensearch' 로 전환됐다(PG 검색 경로 제거).
+        self.assertEqual(settings.search_backend, "opensearch")
         self.assertEqual(settings.opensearch_fusion_weights, search_constants.OS_FUSION_WEIGHTS_DEFAULT)
         self.assertEqual(settings.search_os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
 
@@ -455,12 +465,12 @@ class TestRelationAutoApproveEmbMin(unittest.TestCase):
 
 
 class TestSearchBackendWiring(unittest.TestCase):
-    """T008 스모크: ``SEARCH_BACKEND`` 설정이 ``search_hybrid`` 백엔드 경로에 반영된다.
+    """T008 스모크(037 갱신): ``SEARCH_BACKEND`` 설정과 ``search_hybrid`` 경로 — OS 단일 백엔드.
 
     진입점(run_search·portal_api·sample_search_api)은 ``backend`` 인자 없이 ``search_hybrid`` 를
-    호출하므로, 백엔드 선택은 전적으로 ``settings.search_backend`` 가 제어한다 — 즉 진입점 **호출부
-    코드 변경이 불필요**함을 봉인한다(plan §4). settings 전역을 오염시키지 않도록 ``get_current_settings``
-    를 모킹해 빌드된 설정을 주입한다.
+    호출하며, 037 OpenSearch 전용 정리로 검색 경로는 OS 단일이다 — 즉 진입점 **호출부 코드 변경이
+    불필요**함을 봉인한다(plan §B). settings 전역을 오염시키지 않도록 ``get_current_settings`` 를
+    모킹해 빌드된 설정을 주입한다.
     """
 
     def test_opensearch_setting_routes_search_hybrid_to_os(self) -> None:
@@ -481,9 +491,6 @@ class TestSearchBackendWiring(unittest.TestCase):
             # 목적이라 OS 경로가 호출부 필터를 적용하지 않으므로 행은 그대로 보존된다.
             return {"text": [{"id": "os_t", "similarity": 0.9}]}, {}
 
-        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
-            raise AssertionError("opensearch 백엔드 text 버킷에 pg grouped 가 쓰이면 안 됨")
-
         # backend 인자 미전달(진입점 호출부와 동일) → settings.search_backend 가 경로를 결정한다.
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             out = svc.search_hybrid(
@@ -491,25 +498,25 @@ class TestSearchBackendWiring(unittest.TestCase):
                 modalities=["text"],
                 _os_search_fn=fake_os,
                 _os_client_fn=lambda: "FAKE",
-                _grouped_fn=fake_grouped,
             )
         self.assertEqual(out["results"]["text_documents"], [{"id": "os_t", "similarity": 0.9}])
         self.assertEqual(os_cap["client"], "FAKE")
 
-    def test_default_pg_setting_routes_search_hybrid_to_pg(self) -> None:
+    def test_default_setting_routes_search_hybrid_to_os(self) -> None:
+        # 037: SEARCH_BACKEND 미설정(기본 'opensearch') → backend 인자 없이도 OS seam 으로 라우팅된다.
         import src.search.search_service as svc
 
-        with _env():  # SEARCH_BACKEND 미설정 → 기본 'pg'
+        with _env():  # SEARCH_BACKEND 미설정 → 기본 'opensearch'
             cfg = _build_settings("dev")
+        self.assertEqual(cfg.search_backend, "opensearch")
 
         os_calls: list[object] = []
 
-        def fake_os(*a: object, **k: object) -> tuple[dict[str, list[dict[str, object]]], dict]:
+        def fake_os(
+            client: object, query: str, **kw: object
+        ) -> tuple[dict[str, list[dict[str, object]]], dict]:
             os_calls.append(1)
-            return {}, {}
-
-        def fake_grouped(query: str, **kw: object) -> dict[str, object]:
-            return {"text_documents": [{"id": "pg_t"}], "meta": {}}
+            return {"text": [{"id": "os_t"}]}, {}
 
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             out = svc.search_hybrid(
@@ -517,10 +524,9 @@ class TestSearchBackendWiring(unittest.TestCase):
                 modalities=["text"],
                 _os_search_fn=fake_os,
                 _os_client_fn=lambda: "FAKE",
-                _grouped_fn=fake_grouped,
             )
-        self.assertEqual(os_calls, [])  # 기본 pg → OS seam 미접촉(회귀 0·SC-001)
-        self.assertEqual(out["results"]["text_documents"], [{"id": "pg_t"}])
+        self.assertEqual(os_calls, [1])  # 기본값으로도 OS seam 사용(037 단일 경로)
+        self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
 
 
 if __name__ == "__main__":

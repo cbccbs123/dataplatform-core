@@ -4,7 +4,7 @@
   - 인덱싱 측: 이미지/키프레임을 CLIP 이미지 인코더로 벡터화(``src/skills/image_skill.py``·
     ``video_embedder``). 동시에 VLM 이 준 한글 후보 라벨로 제로샷 점수도 매긴다(이미지 인코딩 1회 재사용).
   - 검색 측: 텍스트 질의를 CLIP **텍스트** 인코더로 벡터화(``embed_clip_text_query_for_image_search``),
-    DB의 CLIP 이미지 벡터와 같은 공간에서 비교(``src/search/media_search.py``).
+    저장된 CLIP 이미지 벡터와 같은 공간에서 비교(검색 read path 는 037 이후 OpenSearch 하이브리드).
 
 따라서 적재·검색이 동일 ``model_name``(기본 ``DEFAULT_CLIP_MODEL_NAME``)을 써야 한다.
 모든 출력 벡터는 ``clip_image_row_to_embedding_1536`` 으로 DB ``vector(1536)`` 에 맞춘다
@@ -164,7 +164,7 @@ def embed_clip_text_query_for_image_search(
     DB에 저장된 CLIP 이미지 벡터(``clip_image_row_to_embedding_1536``)와 같은 공간의
     **CLIP 텍스트 인코더** 쿼리 벡터. 인덱싱 시 ``model_name`` 과 같아야 한다.
 
-    검색 단계에서는 ``media_search`` 가 이 벡터와 ``media_items.search_vector`` FTS를 함께 쓴다.
+    검색 단계(037 이후 OpenSearch 하이브리드)에서 이 CLIP 텍스트 질의 벡터로 시각 자산을 회수한다.
     """
     raw = (query or "").strip() or " "
     q = normalize_text_for_embedding(raw)

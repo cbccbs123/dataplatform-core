@@ -1,8 +1,14 @@
 """하이브리드 검색 서비스 진입점 — 호출부(CLI/HTTP)에 독립적인 함수 계층.
 
-요청(query·modalities·limit·alpha)을 받아 ``search_media_all_grouped`` 로 모달리티별
-버킷 결과를 만든 뒤, 요청한 모달리티만 골라 일정한 모양으로 반환한다. 실제 검색·LLM·DB는
-``media_search`` 가 담당하고, 본 모듈은 요청 정규화·필터·응답 형태만 책임진다(F-4.3, 단계 C+).
+요청(query·modalities·limit)을 받아 OpenSearch 하이브리드 검색으로 모달리티별 버킷 결과를 만든 뒤,
+요청한 모달리티만 골라 일정한 모양으로 반환한다. 실제 검색·임베딩은 ``opensearch_search`` 가
+담당하고, 본 모듈은 요청 정규화·채널 해소·응답 형태만 책임진다(F-4.3).
+
+037 OpenSearch 전용 정리: 021 의 PG(``media_search`` FTS/벡터) 백엔드 분기를 걷어내고 OS 단일
+경로만 남겼다. 공개 API(``search_hybrid``) 시그니처는 호출부(portal ``search_group`` 등) 무영향을
+위해 유지하되, 내부에서는 ``_grouped_via_opensearch`` 만 호출한다 — PG 전용 인자
+(``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·``min_scores``)는
+하위호환 수용을 위해 시그니처에 남지만 OS 경로에서는 사용되지 않는다(no-op).
 """
 
 from __future__ import annotations
@@ -18,20 +24,18 @@ from src.config.settings import (
     ChunkAggConfig,
     active_embed_channel,
     get_current_settings,
-    model_for_channel,
 )
-from src.search.media_search import search_media_all_grouped
 
-# 021 G3: OpenSearch 백엔드 분기용 seam. opensearch_search 모듈 상단은 순수(opensearch-py·임베더는
-# 함수 내부 지연 import)라 pg 기본 환경에서도 import 안전 — 실제 OS IO 는 backend='opensearch' 호출
-# 시에만 발생한다(플래그 off 순수성 보존).
+# 037: 검색 read path 단일 백엔드 = OpenSearch. opensearch_search 모듈 상단은 순수(opensearch-py·임베더는
+# 함수 내부 지연 import)라 OS 미연결 환경(순수 단위 등)에서도 import 안전 — 실제 OS IO 는 search_hybrid
+# 호출 시에만 발생한다.
 from src.search.opensearch_search import get_client as os_get_client
 from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
 
 _LOG = logging.getLogger(__name__)
 
-# 요청 모달리티 라벨 → ``search_media_all_grouped`` 결과 버킷 키.
+# 요청 모달리티 라벨 → OS 버킷 결과 키.
 # 결정성(헌법 3조): 결과 버킷 조립이 ``list(.items())`` 순회 순서에 의존하므로 삽입 순서를
 # 보존한다(dict 는 3.7+ 삽입 순서 보장). set 등 순서 비보장 타입으로 대체 금지.
 _MODALITY_BUCKETS: dict[str, str] = {
@@ -41,22 +45,21 @@ _MODALITY_BUCKETS: dict[str, str] = {
     "video": "video",
 }
 
-# 022 백엔드 분담: backend='opensearch' 면 text·audio·**image·video 모두** 020 OS 인덱스(하이브리드)에서
-# 검색한다(021 의 image/video→PG CLIP 경로를 OS 로 전환). image/video 는 020 assets 인덱스에 한국어 VLM
+# 022/037 백엔드 단일화: text·audio·**image·video 모두** 020 OS 인덱스(하이브리드)에서 검색한다(021 의
+# image/video→PG CLIP 경로를 OS 로 전환·037 PG 경로 제거). image/video 는 020 assets 인덱스에 한국어 VLM
 # 캡션(nori) + KoSimCSE 캡션 임베딩(embedding)으로 이미 색인돼 있어 text/audio 와 동일 하이브리드로
 # 회수된다(CLIP 아님 — 시각-내용 매칭은 후속 spec). 따라서 OS 경로는 요청 모달리티 전체를 한 번의
-# search_assets_os 호출로 처리하며, PG/모달리티 분기(021 의 _OS_MODALITIES·_PG_VISUAL_MODALITIES)는 제거됐다.
+# search_assets_os 호출로 처리한다.
 
 # 027: OS 융합·게이트·컷 기본값은 모듈 중복 상수(_DEFAULT_OS_*)를 두지 않고 src.config.search_constants
 # 단일 출처(F1)를 직접 참조한다 — settings 미초기화(순수 단위 등) getattr 폴백도 같은 공개 상수를 쓴다
-# (cross-module private import 없음·하드코딩 0). 미초기화 시 게이트 기본은 운영 기본과 동일(enabled True)
-# 이며, search_backend='pg'(기본)면 OS 경로 자체가 미실행이라 회귀 0(SC-001).
+# (cross-module private import 없음·하드코딩 0). 미초기화 시 게이트 기본은 운영 기본과 동일(enabled True)이다.
 
 
 def _row_similarity(row: dict[str, Any]) -> float:
     """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
 
-    media_search 의 비공개 헬퍼에 의존하지 않도록 서비스 계층에 작은 정화 함수를 둔다.
+    검색 백엔드의 비공개 헬퍼에 의존하지 않도록 서비스 계층에 작은 정화 함수를 둔다.
     """
     value = row.get("similarity")
     try:
@@ -97,14 +100,14 @@ def _grouped_via_opensearch(
     text·audio·**image·video 모든 버킷**을 020 OS 인덱스에서 동일 하이브리드(nori BM25 캡션·라벨 +
     ``embedding`` kNN + **클라이언트 융합**)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM
     캡션·KoSimCSE 캡션 임베딩으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속).
-    요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 현 pg 분기와 같은
-    키(text_documents·audio·image·video·meta)로 담는다 — 반환 grouped 는 pg 분기와 동일 모양이라 호출부의
-    ``_filter_by_min_score`` 공유 코드가 그대로 처리한다(응답 동형).
+    요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 응답 표준 키
+    (text_documents·audio·image·video·meta)로 담는다 — 호출부의 ``_filter_by_min_score`` 공유 코드가
+    그대로 처리한다(응답 동형, SC-005).
 
     설계 판단:
-    - **PG·LLM 미접촉(FR-002·SC-004)**: PG grouped(시각 CLIP 2단계)·``structure_user_query``(검색 질의
-      구조화 LLM)를 호출하지 않는다 — 멀티모달 LLM 0·ms. 따라서 PG 전용 파라미터(structured·alpha·
-      fusion·query_model_name·chunk_agg·grouped_fn)는 이 경로에서 제거됐다.
+    - **LLM 미접촉(FR-002·SC-004)**: ``structure_user_query``(검색 질의 구조화 LLM)를 호출하지 않는다
+      — 멀티모달 LLM 0·ms. 037 PG 검색 제거로 PG 전용 파라미터(structured·alpha·fusion·query_model_name·
+      chunk_agg·grouped_fn)는 search_hybrid 시그니처에만 하위호환으로 남고 이 경로에서는 쓰이지 않는다.
     - **query-norm 토글(029 FR-004·021 개정)**: ``search_os_query_norm_enabled`` on(기본 off)이면 검색
       직전 질의를 **명사구 정규화**(``noun_phrase_query``·gemma·temp=0·env 입력 0·src/llm/client 단일
       seam)한 뒤 그 질의를 OS 에 넘긴다 — 정규화를 service 레벨에서 1회만 수행해(중복 LLM 0) 정규화된
@@ -211,61 +214,43 @@ def search_hybrid(
     text_query_model: str | None = None,
     chunk_agg: ChunkAggConfig | None = None,
     backend: str | None = None,
-    _grouped_fn: Callable[..., dict[str, Any]] = search_media_all_grouped,
     _os_search_fn: Callable[
         ..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]
     ] = os_search_assets,
     _os_client_fn: Callable[..., Any] = os_get_client,
     _query_norm_fn: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
-    """질의를 하이브리드 검색해 모달리티 버킷으로 반환한다.
+    """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
     ``modalities`` 가 ``None`` 이면 전체 버킷(text/audio/image/video)을, 지정하면 해당
-    버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``. 요청에 image·video 가
-    하나도 없으면(text/audio 전용) grouped 에 ``include_visual=False`` 를 넘겨 시각 2단계
-    (CLIP)를 건너뛴다 — 버려질 시각 후보를 계산하지 않아 비용↓, 반환 버킷은 동일.
-    ``structured`` 를 넘기면 그대로 grouped 검색에 전달돼 LLM 질의 구조화를 건너뛴다
-    (이미 구조화됐거나 LLM 없이 테스트할 때). ``_grouped_fn`` 은 테스트 주입 seam.
-    ``min_scores`` 는 모달리티 라벨→적합도 하한(0.0=비활성); 각 버킷에서 ``similarity`` 가
-    임계값 미만인 행을 응답에서 제외한다(미지정 모달리티는 필터하지 않음). ⚠️ **pg 경로 전용**이다 —
-    OS 경로(backend='opensearch')는 per-result 컷이 ``search_assets_os`` 내부 코사인 스케일
-    (``cut_rows``·``result_floor``)로 이동했으므로 전달 ``min_scores``(PG 코사인 스케일)를 적용하지
-    않는다(스케일 불일치 방지·F1). pg 경로는 종전대로 전달 ``min_scores`` 그대로(회귀 0).
+    버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``.
+
+    037 OpenSearch 전용 정리: text·audio·image·video **모든 버킷**을 020 OS 인덱스(nori BM25 캡션·라벨
+    + ``embedding`` kNN + 클라이언트 융합)에서 ``_os_search_fn`` 으로 검색해 같은 키(text_documents·
+    audio·image·video)로 반환한다(022 — image/video 도 020 assets 인덱스에 한국어 VLM 캡션·KoSimCSE
+    캡션 임베딩으로 색인돼 text/audio 와 동일 하이브리드, CLIP 아님). OS 미도달이면
+    ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다(FR-007·SC-006 — silent 폴백 금지).
+
     ``disable_os_cutoff`` 는 OS 경로의 **게이트·per-result 컷을 모두 끄는 디버그 우회**다(기본 False).
-    True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(sample_search_api ``no_cutoff``
-    배선). pg 경로엔 무영향.
-    ``fusion`` 은 ST 하이브리드 융합 방식(기본 ``alpha``=기존 동작; ``rrf``=순위 융합 프로토타입).
-    ⚠️ 한계: ``rrf`` 는 현재 grouped 출력에 반영되지 않는다 — 버킷 cap 이 ``similarity`` 로
-    재정렬하므로 RRF 순서는 ``_run_hybrid_search`` 레벨에서만 효과(KPI 측정용). 설계 §8 후속.
-    ``chunk_agg`` 는 per-asset 청크 집계 방식(019)이다. 미지정(None)이면 검색 SQL 빌더 호출부가
-    ``chunk_agg_config()`` 로 활성 설정을 해소한다(기본 ``max``=종전 동치, 회귀 0). 명시 전달은
-    그대로 grouped 경로로 흘러 우선한다(017 채널처럼 측정 seam — KPI 하니스가 집계 방식을 주입).
+    True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(sample_search_api ``no_cutoff`` 배선).
+    **029 query-norm 토글**(``search_os_query_norm_enabled``, 기본 off)이 on 이면 검색 직전 질의를
+    명사구 정규화(단일 seam·temp=0·env 입력 0)한 뒤 임베딩·BM25·rerank 채점에 동일 적용한다 — off 면
+    원문 ``query`` 그대로(바이트 동일).
 
-    ``text_channel``/``text_query_model`` 은 텍스트 임베딩 채널 선택이다(텍스트 채널 한정, 시각
-    CLIP 경로 무변경). **미지정(None)** 이면 운영 활성 프로파일(018, 적재·검색·관계 단일 출처)로
-    해소한다 — ``text_channel`` 은 ``active_embed_channel()``, 질의 모델은 (해소된) 채널의
-    ``model_for_channel`` 로 일치시킨다(FR-004 질의-문서 모델 일치). 017 A/B 하니스처럼 **명시
-    전달은 그대로 우선**한다(명시 채널/모델이면 활성 해소를 건너뜀).
+    ``text_channel`` 은 텍스트 임베딩 채널 선택이다(텍스트 채널 한정). **미지정(None)** 이면 운영 활성
+    프로파일(018, 적재·검색·관계 단일 출처)로 해소한다 — ``active_embed_channel()``. 017 A/B 하니스처럼
+    **명시 전달은 그대로 우선**한다. 해소된 채널은 OS seam(``opensearch_search``)에 넘어가 질의 임베딩
+    모델(``model_for_channel(channel)``)을 일치시킨다(FR-004 질의-문서 모델 일치). settings 미초기화
+    (순수 단위 등)에서는 활성 해소가 ``RuntimeError`` 이므로 기존 기본 채널 ``'st'`` 로 보수적 폴백한다.
 
-    회귀 0(SC-002): 기본 active='st' → channel='st'·KoSimCSE(=``model_for_channel('st')``=
-    ``cfg.text_embedding_model``) 로 기존 동작과 동치. settings 미초기화(순수 단위 등)에서는
-    활성 해소가 ``RuntimeError`` 이므로 기존 기본 ``('st', None)`` 으로 보수적 폴백한다 —
-    이때 ``query_model_name=None`` 을 넘겨 media_search 가 기존대로 KoSimCSE 로 해소한다(006/017
-    검색 단위가 settings 없이 그대로 동작). 미지원 채널은 ``model_for_channel`` 이 ``ValueError``.
-
-    ``backend`` 는 검색 read path 백엔드(021)다. **미지정(None)** 이면 ``settings.search_backend``
-    (없으면 ``'pg'`` — 020 opt-in 폴백 동형, 필드 정식화는 G4)로 해소한다. ``'opensearch'`` **외엔
-    전부 현 pg 경로**(``_grouped_fn`` 무변경 → 회귀 0·SC-001). ``'opensearch'`` 면 **text·audio·image·
-    video 모든 버킷**을 020 OS 인덱스(nori BM25 캡션·라벨 + ``embedding`` kNN + 정규화 융합)에서
-    ``_os_search_fn`` 으로 검색해 **같은 키**(text_documents·audio·image·video)로 반환한다(022 — image/
-    video 를 더 이상 PG CLIP 으로 보내지 않음, FR-003·SC-005 응답 동형). OS 경로는 PG grouped(시각
-    CLIP)·``structure_user_query``(검색 질의 구조화 LLM)·``structured`` 를 호출하지 않는다(멀티모달 LLM
-    0 — FR-002·SC-004). 다만 **029 query-norm 토글**(``search_os_query_norm_enabled``, 기본 off)이 on
-    이면 검색 직전 질의를 명사구 정규화(단일 seam·temp=0·env 입력 0)한 뒤 임베딩·BM25·rerank 채점에
-    동일 적용한다(021 FR-004 토글 개정) — off 면 원문 ``query`` 그대로(바이트 동일). OS 미도달이면
-    ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다(FR-007·SC-006 — silent pg 폴백 금지).
     ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/
     ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 ``noun_phrase_query`` 지연 import).
+
+    하위호환(037): ``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·
+    ``min_scores``·``text_query_model``·``backend`` 인자는 호출부(portal 등) 무영향을 위해 시그니처에
+    남지만, OS 단일 경로에서는 사용되지 않는다(PG 검색 제거로 no-op). per-result 컷은 ``search_assets_os``
+    내부 코사인 스케일(``cut_rows``·``result_floor``)로 이루어지므로 호출부 ``min_scores`` 필터는 적용하지
+    않는다. ``backend`` 는 'opensearch' 외 값을 받으면 ``ValueError``(미지원 백엔드).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -275,81 +260,52 @@ def search_hybrid(
     else:
         label_keys = list(_MODALITY_BUCKETS.items())
 
-    # 시각 2단계(CLIP)는 image·video 버킷에만 기여한다. 둘 다 요청하지 않았으면(text/audio 전용)
-    # grouped 에 include_visual=False 를 넘겨 CLIP 경로를 통째로 건너뛴다 — 어차피 버려질 시각
-    # 후보를 계산하지 않아 비용↓·결과 동치. 전체(None) 또는 image/video 포함이면 기존대로 True.
-    include_visual = modalities is None or bool(set(modalities) & {"image", "video"})
+    # 037: 백엔드는 OS 단일 경로다. backend 명시 인자는 하위호환 수용용이며 'opensearch' 외엔 미지원
+    # (settings._SEARCH_BACKENDS 와 동형 fail-fast). 미지정(None)이면 OS 경로를 그대로 실행한다.
+    if backend is not None and backend != "opensearch":
+        raise ValueError(
+            f"지원하지 않는 검색 백엔드: backend={backend!r} (지원: ['opensearch'])"
+        )
 
-    # 채널·질의모델 해소(018, FR-004). 명시 전달은 그대로 우선(A/B). 미지정(None)이면 운영 활성
-    # 프로파일(적재·검색·관계 단일 출처)로 해소한다 — text_channel 은 active_embed_channel(),
-    # 질의 모델은 (해소된) 채널의 model_for_channel 로 일치시킨다.
-    # settings 미초기화(순수 단위 등)에서는 활성 해소가 RuntimeError 이므로 기존 기본('st', None)으로
-    # 보수적 폴백한다 — query_model_name=None 은 media_search 가 기존대로 KoSimCSE 로 해소(회귀 0).
-    query_model_name = text_query_model
+    # 텍스트 임베딩 채널 해소(018, FR-004). 명시 전달은 그대로 우선(A/B). 미지정(None)이면 운영 활성
+    # 프로파일(적재·검색·관계 단일 출처)로 해소한다 — text_channel 은 active_embed_channel().
+    # OS 경로는 채널만 쓴다(질의 모델은 opensearch_search 가 model_for_channel(channel) 로 해소).
+    # settings 미초기화(순수 단위 등)에서는 활성 해소가 RuntimeError 이므로 기존 기본 채널 'st' 로
+    # 보수적 폴백한다(검색 단위가 settings 없이 그대로 동작).
     try:
         if text_channel is None:
             text_channel = active_embed_channel()
-        if query_model_name is None:
-            query_model_name = model_for_channel(text_channel)
     except RuntimeError:
-        # settings 미초기화: 기존 검색 단위(006/017 기본 경로)가 settings 없이 그대로 동작.
-        # 운영 진입점(run_search 등)은 항상 init_settings 하므로 이 폴백은 비운영(테스트) 경로다 —
-        # 오설정(운영서 init_settings 누락)을 관측 가능하게 warning 으로 남긴다(동작 불변).
+        # settings 미초기화: 운영 진입점(run_search 등)은 항상 init_settings 하므로 이 폴백은 비운영
+        # (테스트) 경로다 — 오설정(운영서 init_settings 누락)을 관측 가능하게 warning 으로 남긴다(동작 불변).
         _LOG.warning("settings 미초기화 — 활성 임베딩 채널 'st' 보수 폴백(운영은 init_settings 필수)")
         if text_channel is None:
             text_channel = EMBEDDING_KIND_ST
-        # query_model_name 은 None 유지 → media_search 가 기존대로 cfg.text_embedding_model 로 해소.
 
-    # 백엔드 해소(021, 020 opt-in 동형): backend 인자 우선, 미지정이면 settings.search_backend(없으면
-    # 'pg'). search_backend 필드 정식화·화이트리스트 검증은 G4(T007) — 여기선 'opensearch' 외엔 전부
-    # 현 pg 경로다. settings 미초기화(순수 단위 등)면 cfg=None → getattr 폴백으로 'pg'(회귀 0).
+    # OS 컷오프 설정을 읽기 위한 cfg. settings 미초기화(순수 단위 등)면 cfg=None → _grouped_via_opensearch
+    # 의 getattr 폴백이 search_constants 단일 출처 기본값을 쓴다(F1).
     try:
         cfg = get_current_settings()
     except RuntimeError:
         cfg = None
-    backend_name = backend if backend is not None else getattr(cfg, "search_backend", "pg")
 
-    # 027: per-result 적합도 컷은 backend 별로 다른 곳에서 한다. OS 경로는 search_assets_os 내부 코사인
-    # 스케일(cut_rows·result_floor)이 노이즈 꼬리를 거르므로 호출부 _filter_by_min_score 를 적용하지
-    # 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에 무의미·스케일 불일치).
-    # pg 경로만 전달 min_scores 그대로 적용한다(회귀 0 — FR-002). 024 의 effective_min_scores 분기·
-    # 빈 dict 센티넬은 제거됐다(OS 컷이 seam 내부로 이동·디버그 우회는 disable_os_cutoff 가 담당).
-    filter_min_scores = {} if backend_name == "opensearch" else min_scores
-
-    if backend_name == "opensearch":
-        # 022: text·audio·image·video 전 모달리티를 OS(020 인덱스)로 검색(PG CLIP·LLM 미접촉).
-        # OS 미도달 예외는 전파(FR-007). PG 전용 인자(structured·alpha·fusion·query_model_name·
-        # chunk_agg·_grouped_fn)는 OS 경로 미사용이라 넘기지 않는다(아래 else pg 분기에서만 사용).
-        grouped = _grouped_via_opensearch(
-            query,
-            modalities=modalities,
-            limit_per_bucket=limit_per_bucket,
-            text_channel=text_channel,
-            cfg=cfg,
-            disable_os_cutoff=disable_os_cutoff,
-            os_search_fn=_os_search_fn,
-            os_client_fn=_os_client_fn,
-            query_norm_fn=_query_norm_fn,
-        )
-    else:
-        # backend != 'opensearch'(기본 pg): 기존 코드 경로 그대로 — 한 줄도 바꾸지 않는다(회귀 0·SC-001).
-        grouped = _grouped_fn(
-            query,
-            structured=structured,
-            limit_per_bucket=limit_per_bucket,
-            text_hybrid_alpha=text_hybrid_alpha,
-            image_search_alpha=image_search_alpha,
-            fusion=fusion,
-            channel=text_channel,
-            query_model_name=query_model_name,
-            chunk_agg=chunk_agg,
-            include_visual=include_visual,
-        )
-    # per-result 적합도 필터(027): pg 경로만 전달 min_scores 를 적용한다(PG 코사인 스케일). OS 경로는
-    # filter_min_scores={} 라 무필터(컷은 search_assets_os 내부에서 이미 수행). 0.0(미설정/빈)이면
-    # 비활성(_filter_by_min_score 원본 반환).
+    # 037: text·audio·image·video 전 모달리티를 OS(020 인덱스)로 검색한다. OS 미도달 예외는 전파(FR-007).
+    grouped = _grouped_via_opensearch(
+        query,
+        modalities=modalities,
+        limit_per_bucket=limit_per_bucket,
+        text_channel=text_channel,
+        cfg=cfg,
+        disable_os_cutoff=disable_os_cutoff,
+        os_search_fn=_os_search_fn,
+        os_client_fn=_os_client_fn,
+        query_norm_fn=_query_norm_fn,
+    )
+    # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 수행하므로
+    # 호출부 필터는 적용하지 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에
+    # 무의미·스케일 불일치 — 037 PG 제거로 no-op). 빈 임계(0.0)면 _filter_by_min_score 가 원본을 그대로 반환.
     results = {
-        key: _filter_by_min_score(grouped.get(key, []), (filter_min_scores or {}).get(label, 0.0))
-        for label, key in label_keys
+        key: _filter_by_min_score(grouped.get(key, []), 0.0)
+        for _label, key in label_keys
     }
     return {"query": query, "results": results, "meta": grouped.get("meta", {})}

@@ -72,17 +72,15 @@ class PipelineSettings:
     opensearch_url: str
     opensearch_index: str
     opensearch_sync_enabled: bool
-    # 021: 검색 read path 백엔드 전환(CQRS·검색 엔진 도입). 모두 선택 필드(020 동형) — 미설정 시 기존
-    # 동작 무영향(SC-001). search_backend 기본 'pg' 면 search_service.search_hybrid 가 현 media_search
-    # 경로 그대로(회귀 0). 화이트리스트 밖 값은 _build_settings(=init_settings)에서 즉시 ValueError로
-    # 차단한다(fail-fast — 런타임까지 오설정이 숨지 않게, 백로그 '설정 fail-late' 교정).
-    # opensearch_fusion_weights 는 클라이언트 융합(027)의 (BM25,kNN) 가중치다.
+    # 021/037: 검색 read path 백엔드(CQRS·검색 엔진 도입). 037 에서 PG 검색 경로를 제거하며 'opensearch'
+    # 전용으로 정리했다 — 기본값 'opensearch', 화이트리스트도 그 하나뿐이라 과거 'pg' 값은 _build_settings
+    # (=init_settings)에서 즉시 ValueError 로 차단한다(fail-fast — 런타임까지 오설정이 숨지 않게,
+    # 백로그 '설정 fail-late' 교정). opensearch_fusion_weights 는 클라이언트 융합(027)의 (BM25,kNN) 가중치다.
     search_backend: str
     opensearch_fusion_weights: tuple[float, float]
     # 023/027: OS 검색 버킷 게이트(robust baseline) 설정. 모두 선택 필드(021 동형) — 미설정 시
-    # ``search_constants`` 단일 출처 기본값(F1). 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로 enabled
-    # 기본 True 라도 search_backend='pg'(기본)면 OS 경로 자체가 미실행이라 동작 불변(SC-001). eps=상대
-    # 신호(top-baseline) 하한·floor=코사인 절대 backstop. 범위 밖 값은 _resolve_* 헬퍼가 _build_settings
+    # ``search_constants`` 단일 출처 기본값(F1). 게이트는 OS 검색 경로(037 단일 백엔드)에 적용된다.
+    # eps=상대 신호(top-baseline) 하한·floor=코사인 절대 backstop. 범위 밖 값은 _resolve_* 헬퍼가 _build_settings
     # 시점에 즉시 ValueError 로 차단한다(fail-fast). 027 클라이언트 융합 전환으로 게이트 표본 수 설정·
     # 정규화 융합 검색 파이프라인 메타 필드는 제거됐다 — 게이트 신호는 같은 kNN 표본에서 직접 잰다(추가 검색 0).
     search_os_cutoff_enabled: bool
@@ -193,18 +191,20 @@ def resolve_search_min_scores() -> dict[str, float]:
     }
 
 
-# 021: 검색 read path 백엔드 화이트리스트. 'pg'=현 media_search 경로(기본·회귀 0), 'opensearch'=020 OS
-# 인덱스 하이브리드. 그 외 값은 잘못된 백엔드로 검색하지 않도록 _resolve_search_backend 가 즉시 차단한다.
-_SEARCH_BACKENDS = ("pg", "opensearch")
+# 037 OpenSearch 전용 정리: 검색 read path 는 020 OS 인덱스 하이브리드 단일 경로다. 021 의 'pg'
+# (media_search FTS/벡터) 분기는 제거됐으므로 화이트리스트도 'opensearch' 하나만 남긴다 — 과거 기본값
+# 'pg' 를 포함한 그 외 값은 잘못된 백엔드로 검색하지 않도록 _resolve_search_backend 가 즉시 차단한다.
+_SEARCH_BACKENDS = ("opensearch",)
 
 
 def _resolve_search_backend() -> str:
-    """검색 read path 백엔드(021, FR-010). ``SEARCH_BACKEND`` 미설정 시 기본 ``'pg'``(현 경로·동작 불변).
+    """검색 read path 백엔드(021, FR-010·037 전환). ``SEARCH_BACKEND`` 미설정 시 기본 ``'opensearch'``.
 
-    화이트리스트 ``{pg, opensearch}`` 밖 값은 **즉시 ValueError** 로 차단한다 — 오설정이 런타임까지
+    037 에서 PG 검색 경로를 제거하며 기본값을 'pg'→'opensearch' 로 전환했다. 화이트리스트
+    ``{opensearch}`` 밖 값(과거 'pg' 포함)은 **즉시 ValueError** 로 차단한다 — 오설정이 런타임까지
     숨지 않게(fail-fast, 백로그 '설정 fail-late' 교정). 019 chunk_agg(헬퍼 지연 검증)와 달리 검증을
     ``_build_settings`` 시점에 끌어와 프로세스 시작 시 빠르게 실패시킨다(잘못된 백엔드 선택 차단)."""
-    value = _env_str_default("SEARCH_BACKEND", "pg")
+    value = _env_str_default("SEARCH_BACKEND", "opensearch")
     if value not in _SEARCH_BACKENDS:
         raise ValueError(
             f"지원하지 않는 검색 백엔드: SEARCH_BACKEND={value!r} (지원: {list(_SEARCH_BACKENDS)})"
@@ -242,12 +242,11 @@ def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
 # 023/027: OS 검색 버킷 게이트 + per-result 컷 설정 해소. 021 _resolve_opensearch_fusion_weights 와
 # 동형으로 환경 파싱·범위 검증·fail-fast 를 _build_settings 시점에 끌어와, 잘못된 임계로 검색하지 않도록
 # 프로세스 시작 시 즉시 실패시킨다. 기본값은 모두 search_constants 단일 출처(F1 — 하드코딩 제거).
-# enabled 기본 True 라도 search_backend='pg'(기본)면 OS 경로 미실행 → 동작 불변.
+# 게이트는 OS 검색 경로(037 단일 백엔드)에 적용된다.
 def _resolve_os_cutoff_enabled() -> bool:
     """OS 검색 게이트 활성 여부(023·027, FR-001). 미설정 시 기본 ``OS_CUTOFF_ENABLED_DEFAULT``(True).
 
-    bool 파싱은 020 ``_env_bool_default`` 재사용. 게이트는 OS 백엔드(이미 opt-in)에만 적용되므로
-    기본 True 라도 ``search_backend='pg'``(기본)면 OS 경로 자체가 실행되지 않아 동작 불변(SC-001)."""
+    bool 파싱은 020 ``_env_bool_default`` 재사용. 게이트는 OS 검색 경로(037 단일 백엔드)에 적용된다."""
     return _env_bool_default("SEARCH_OS_CUTOFF_ENABLED", search_constants.OS_CUTOFF_ENABLED_DEFAULT)
 
 
@@ -414,13 +413,13 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         opensearch_url=_env_str_default("OPENSEARCH_URL", "http://localhost:9200"),
         opensearch_index=_env_str_default("OPENSEARCH_INDEX", "assets"),
         opensearch_sync_enabled=_env_bool_default("OPENSEARCH_SYNC_ENABLED", False),
-        # 021: 검색 백엔드 선택. 미설정 시 기본 pg(현 경로·회귀 0). search_backend 화이트리스트 검증·
-        # 융합 가중치 범위검증은 _resolve_* 헬퍼가 _build_settings 시점에 수행한다(fail-fast).
+        # 021/037: 검색 백엔드 선택. 037 에서 PG 경로 제거로 미설정 시 기본 'opensearch'. search_backend
+        # 화이트리스트 검증·융합 가중치 범위검증은 _resolve_* 헬퍼가 _build_settings 시점에 수행한다(fail-fast).
         search_backend=_resolve_search_backend(),
         opensearch_fusion_weights=_resolve_opensearch_fusion_weights(),
         # 023/027: OS 검색 버킷 게이트 + per-result 컷. 범위 검증·fail-fast 는 _resolve_* 헬퍼가
         # _build_settings 시점에 수행(021 fusion_weights 동형). 기본값은 search_constants 단일 출처(F1).
-        # 기본 enabled=True 라도 pg 백엔드(기본)면 OS 경로 미실행 → 회귀 0.
+        # 게이트는 OS 검색 경로(037 단일 백엔드)에 적용된다.
         search_os_cutoff_enabled=_resolve_os_cutoff_enabled(),
         search_os_cutoff_eps=_resolve_os_cutoff_eps(),
         search_os_cutoff_floor=_resolve_os_cutoff_floor(),

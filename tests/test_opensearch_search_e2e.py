@@ -269,8 +269,10 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         """search_hybrid(backend='opensearch') text/audio 경로에서 LLM 질의 구조화 0회(seam 미접촉)."""
         from src.search import search_service
 
+        # 037: media_search 삭제로 structure_user_query 정의처는 query_preprocess 단일이다. OS 경로는
+        # 어떤 모듈의 structure_user_query 도 호출하지 않으므로 patch 대상을 살아있는 모듈로 두고 0회를 봉인.
         with mock.patch(
-            "src.search.media_search.structure_user_query"
+            "src.search.query_preprocess.structure_user_query"
         ) as m_llm:
             result = search_service.search_hybrid(
                 "재무 매출 보고서",
@@ -278,7 +280,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
                 backend="opensearch",
             )
         self.assertEqual(m_llm.call_count, 0, "OS text/audio 경로는 LLM 질의 구조화 0(FR-004·SC-004)")
-        # 응답 동형(SC-005): pg 분기와 같은 버킷 키.
+        # 응답 동형(SC-005): 표준 버킷 키.
         self.assertIn("text_documents", result["results"])
         self.assertIn("audio", result["results"])
         self.assertEqual(result["meta"].get("backend"), "opensearch")
@@ -384,7 +386,8 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         """search_hybrid(backend='opensearch') image/video 경로도 LLM 질의 구조화 0회(seam 미접촉)."""
         from src.search import search_service
 
-        with mock.patch("src.search.media_search.structure_user_query") as m_llm:
+        # 037: media_search 삭제로 patch 대상을 살아있는 query_preprocess 로 둔다(OS 경로는 미호출 — 0회 봉인).
+        with mock.patch("src.search.query_preprocess.structure_user_query") as m_llm:
             result = search_service.search_hybrid(
                 "반려동물 산책 사진 영상",
                 modalities=["image", "video"],
