@@ -23,6 +23,7 @@ from psycopg import Connection
 # ── 큐 상태 상수 ────────────────────────────────────────────────────────────
 STATUS_PENDING = "pending"
 STATUS_RESOLVED = "resolved"
+STATUS_ISOLATED = "isolated"  # 035 #2: 평가 완료·관계 0(고립). 실패 아님 — 재시도·DLQ 없음, #6 재평가 대상.
 STATUS_FAILED = "failed"
 
 
@@ -37,19 +38,20 @@ def decide_resolution_status(
 
     규칙(FR-008 + 035 #2, 결정적):
       * error None & 엣지≥1 → ('resolved', attempts)           # 관계 생성 성공, attempts 불변
-      * error None & 엣지==0 → ('resolved', attempts)           # 035 #2: 고립 = 정상 평가·결과 0
+      * error None & 엣지==0 → ('isolated', attempts)           # 035 #2: 고립 = 평가 완료·관계 0
       * 예외(error 있음)     → attempts+1, 재시도 대상:
           - attempts+1 < max_attempts → ('pending', attempts+1)   # 일시 실패 재시도
           - attempts+1 >= max_attempts → ('failed', attempts+1)   # 상한 도달 DLQ 승격
 
     035 #2: 고립(엣지0·예외 없음)은 후보 검색(SQL)·LLM(temp=0)이 결정적이라 재시도해도 동일 결과 →
-    'resolved'로 즉시 종료(재시도·attempts 증가·DLQ 없음, LLM 낭비 제거). 호출부가 last_reason 으로
-    성공/고립을 구분 표식한다(status 어휘는 pending/resolved/failed 불변·마이그레이션 0). 일시 실패
-    (예외)만 재시도 흐름 유지 — 다음 주기에 인프라가 살아있으면 성공할 수 있어 의미가 있다.
+    'isolated'로 즉시 종료(재시도·attempts 증가·DLQ 없음, LLM 낭비 제거). resolved(관계 있음)와 별도
+    상태라 #6(증분 재평가)이 WHERE status='isolated'로 재평가 대상을 깔끔히 집는다. 'isolated'는 미해소
+    스캔(pending OR 큐행없음)에서 자연 제외돼 재시도되지 않는다. 일시 실패(예외)만 재시도 흐름 유지 —
+    다음 주기에 인프라가 살아있으면 성공할 수 있어 의미가 있다.
     """
     if error is None:
-        # 성공(엣지≥1) 또는 고립(엣지0) — 둘 다 정상 평가 완료 → resolved.
-        return STATUS_RESOLVED, attempts
+        # 035 #2(B): 엣지≥1=resolved(관계 있음) / 엣지0=isolated(관계 없음·평가 완료). 둘 다 재시도·DLQ 없음.
+        return (STATUS_RESOLVED if edges_upserted >= 1 else STATUS_ISOLATED), attempts
     # 예외(일시 실패)만 재시도 대상.
     next_attempts = attempts + 1
     if next_attempts >= max_attempts:

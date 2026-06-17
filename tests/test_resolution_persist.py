@@ -4,8 +4,8 @@
 DB 없이 검증한다. 엣지수·attempts·예외·상한의 결정적 함수다(헌법 3조 결정 재현성).
 
 규칙(FR-008 + 035 #2):
-  * error None & 엣지≥1 → ('resolved', attempts)          ※ 성공(시도 성공·attempts 불변)
-  * error None & 엣지==0 → ('resolved', attempts)          ※ 035 #2 고립 = 정상 평가·결과 0 → resolved(재시도·DLQ 없음)
+  * error None & 엣지≥1 → ('resolved', attempts)          ※ 성공(관계 있음·attempts 불변)
+  * error None & 엣지==0 → ('isolated', attempts)          ※ 035 #2 고립 = 평가 완료·관계 0(재시도·DLQ 없음, #6 재평가 대상)
   * 예외(error 있음)     → ('pending', attempts+1)          ※ 일시 실패만 재시도
     단, attempts+1 이 max_attempts 에 도달 시 → ('failed', max_attempts)  ※ DLQ 승격
 """
@@ -30,17 +30,17 @@ class TestDecideResolutionStatus(unittest.TestCase):
         self.assertEqual(status, "resolved")
         self.assertEqual(attempts, 2)
 
-    # ── 엣지0 & error None → resolved (035 #2 고립) ──────────────────────────
-    def test_edges_zero_isolation_resolved(self) -> None:
-        # 035 #2: 고립(후보0/관계0·예외 없음)은 정상 평가 완료 → resolved, attempts 불변(재시도 없음).
+    # ── 엣지0 & error None → isolated (035 #2 고립) ──────────────────────────
+    def test_edges_zero_isolation_isolated(self) -> None:
+        # 035 #2: 고립(후보0/관계0·예외 없음)은 평가 완료 → isolated, attempts 불변(재시도 없음).
         status, attempts = decide_resolution_status(0, 0, error=None, max_attempts=3)
-        self.assertEqual(status, "resolved")
+        self.assertEqual(status, "isolated")
         self.assertEqual(attempts, 0)
 
     def test_edges_zero_isolation_never_escalates_to_failed(self) -> None:
-        # 고립은 attempts 가 상한 근처여도 failed(DLQ)로 가지 않는다 — resolved 즉시 종료.
+        # 고립은 attempts 가 상한 근처여도 failed(DLQ)로 가지 않는다 — isolated 즉시 종료.
         status, attempts = decide_resolution_status(0, 2, error=None, max_attempts=3)
-        self.assertEqual(status, "resolved")
+        self.assertEqual(status, "isolated")
         self.assertEqual(attempts, 2)
 
     # ── 예외 → pending(attempts+1) 일시 실패 ─────────────────────────────────
