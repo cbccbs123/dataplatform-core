@@ -5,7 +5,7 @@
 큐(Redis/Kafka)·FS 이벤트원은 추후 도입(이 모듈을 대체/감싸는 형태).
 
 DB·LLM 불필요(순수 파일시스템). 기존 ``directory_paths.list_file_paths_under_directory`` 와
-``run_pipeline.py`` 의 ``--input-dir``/``--file-list`` 수집 규칙을 재사용한다.
+``run_ingest`` 진입점의 ``--input-dir``/``--file-list`` 수집 규칙을 재사용한다.
 """
 
 from __future__ import annotations
