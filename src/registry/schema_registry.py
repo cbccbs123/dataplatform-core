@@ -33,6 +33,34 @@ def fetch_allowed_ext_keys(conn: Connection[Any], domain: str) -> set[str]:
         return {r["meta_key"] for r in cur.fetchall()}
 
 
+def _schema_is_validatable(schema: dict[str, Any] | None) -> bool:
+    return bool(schema and isinstance(schema, dict) and schema.get("type"))
+
+
+def check_ext_meta_values(
+    schemas: dict[str, dict[str, Any]],
+    ext_meta: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    """``ext_meta`` 에 존재하고 ``schemas`` 에 validatable 스키마가 있는 키만 검증.
+
+    위반은 ``(key, message)`` 튜플로 수집해 키·메시지 기준 정렬해 반환한다.
+    """
+    if not ext_meta:
+        return []
+    from jsonschema import Draft202012Validator, ValidationError
+
+    violations: list[tuple[str, str]] = []
+    for key in sorted(ext_meta.keys()):
+        schema = schemas.get(key)
+        if not _schema_is_validatable(schema):
+            continue
+        try:
+            Draft202012Validator(schema).validate(ext_meta[key])
+        except ValidationError as exc:
+            violations.append((key, exc.message))
+    return sorted(violations, key=lambda x: (x[0], x[1]))
+
+
 def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, Any] | None) -> None:
     """``ext_meta`` 키가 도메인 허용 집합 안인지 검증. 위반 시 ``ExtMetaValidationError``.
 
