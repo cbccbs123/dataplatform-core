@@ -5,5 +5,5 @@
 - ``asset_persist``         : ``asset``/``asset_metadata``/``asset_embedding`` — 모델 A(received 조기 INSERT → finalize registered) + 해시 dedup
 - ``classification_persist``: ``asset_classification`` 적재 + ``asset.domain_label``/``domain_confidence`` 갱신
 - ``lineage_persist``       : ``asset_lineage`` PROV-DM 처리 이력 한 행
-- ``schema_registry``       : ``ext_meta`` 키 허용목록 검증(``schema_registry`` 테이블 기반)
+- ``ext_meta_field_registry``: ``ext_meta`` 키·값·tier 검증(``ext_meta_field_registry`` 테이블 기반; 레거시 ``schema_registry`` 병행)
 """

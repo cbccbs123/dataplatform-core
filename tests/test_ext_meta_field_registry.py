@@ -1,11 +1,11 @@
-"""F-4.13 ext_meta JSON Schema 값 검증 단위 테스트 (spec 039)."""
+"""F-4.13 ext_meta 필드 레지스트리 단위·e2e 테스트 (spec 039·041)."""
 from __future__ import annotations
 
 import os
 import unittest
 from unittest import mock
 
-from src.registry.schema_registry import (
+from src.registry.ext_meta_field_registry import (
     ExtMetaValidationError,
     check_ext_meta_values,
     fetch_ext_key_schemas,
@@ -80,12 +80,12 @@ class FetchExtKeySchemasTest(unittest.TestCase):
             },
         )
         sql = cur.execute.call_args.args[0]
-        self.assertIn("schema_registry", sql)
+        self.assertIn("ext_meta_field_registry", sql)
         self.assertIn("json_schema", sql)
         self.assertEqual(cur.execute.call_args.args[1], ("general",))
 
 
-class _SchemaRegistryFakeCursor:
+class _FieldRegistryFakeCursor:
     def __init__(self, key_rows, schema_rows):
         self._key_rows = key_rows
         self._schema_rows = schema_rows
@@ -106,9 +106,9 @@ class _SchemaRegistryFakeCursor:
         return self._key_rows
 
 
-class _SchemaRegistryFakeConn:
+class _FieldRegistryFakeConn:
     def __init__(self, key_rows, schema_rows):
-        self._cur = _SchemaRegistryFakeCursor(key_rows, schema_rows)
+        self._cur = _FieldRegistryFakeCursor(key_rows, schema_rows)
 
     def cursor(self, *args, **kwargs):
         return self._cur
@@ -126,14 +126,14 @@ _GENERAL_SCHEMAS = [
 
 class ValidateExtMetaTest(unittest.TestCase):
     def test_key_violation_message_unchanged(self):
-        conn = _SchemaRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
+        conn = _FieldRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
         with self.assertRaises(ExtMetaValidationError) as cm:
             validate_ext_meta(conn, "general", {"unknown_key": "x"})
         self.assertIn("미등록 ext_meta 키", str(cm.exception))
         self.assertIn("unknown_key", str(cm.exception))
 
     def test_value_violation_raises(self):
-        conn = _SchemaRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
+        conn = _FieldRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
         with self.assertRaises(ExtMetaValidationError) as cm:
             validate_ext_meta(conn, "general", {"keywords": [1, 2]})
         msg = str(cm.exception)
@@ -141,25 +141,25 @@ class ValidateExtMetaTest(unittest.TestCase):
         self.assertIn("keywords", msg)
 
     def test_key_violation_before_value(self):
-        conn = _SchemaRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
+        conn = _FieldRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
         with self.assertRaises(ExtMetaValidationError) as cm:
             validate_ext_meta(conn, "general", {"bad_key": "x", "keywords": [1]})
         self.assertIn("미등록 ext_meta 키", str(cm.exception))
 
     def test_valid_ext_meta_passes(self):
-        conn = _SchemaRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
+        conn = _FieldRegistryFakeConn(_GENERAL_KEYS, _GENERAL_SCHEMAS)
         validate_ext_meta(conn, "general", {"summary": "요약", "keywords": ["a"]})
 
     def test_empty_allowed_keys_skips_all(self):
-        conn = _SchemaRegistryFakeConn([], [])
+        conn = _FieldRegistryFakeConn([], [])
         validate_ext_meta(conn, "unknown_domain", {"anything": 1})
 
 
 _RUN = os.getenv("RUN_DB_E2E") == "1"
 
 
-@unittest.skipUnless(_RUN, "RUN_DB_E2E=1 일 때만(실 PostgreSQL·v280 head)")
-class SchemaRegistryDbE2eTest(unittest.TestCase):
+@unittest.skipUnless(_RUN, "RUN_DB_E2E=1 일 때만(실 PostgreSQL·v291 head)")
+class ExtMetaFieldRegistryDbE2eTest(unittest.TestCase):
     db = None  # type: ignore[assignment]
 
     @classmethod
@@ -176,9 +176,9 @@ class SchemaRegistryDbE2eTest(unittest.TestCase):
             cls.db = PostgresUtil()
             cls.db.__enter__()
             with cls.db.transaction() as conn, conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM schema_registry LIMIT 1")
+                cur.execute("SELECT 1 FROM ext_meta_field_registry LIMIT 1")
                 if cur.fetchone() is None:
-                    raise unittest.SkipTest("schema_registry 시드 없음")
+                    raise unittest.SkipTest("ext_meta_field_registry 시드 없음(v291)")
         except unittest.SkipTest:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -189,10 +189,10 @@ class SchemaRegistryDbE2eTest(unittest.TestCase):
         if cls.db is not None:
             cls.db.__exit__(None, None, None)
 
-    def test_v280_labels_schema_has_string_items(self):
+    def test_labels_schema_has_string_items(self):
         with self.db.transaction() as conn:
             row = conn.execute(
-                "SELECT json_schema FROM schema_registry "
+                "SELECT json_schema FROM ext_meta_field_registry "
                 "WHERE domain='general' AND meta_key='labels'"
             ).fetchone()
         self.assertIsNotNone(row)
@@ -209,8 +209,10 @@ class SchemaRegistryDbE2eTest(unittest.TestCase):
             validate_ext_meta(
                 conn,
                 "general",
-                {
-                    "summary": "요약",
-                    "keywords": ["키워드"],
-                },
+                {"summary": "요약", "keywords": ["키워드"]},
             )
+
+    def test_backfill_row_count_matches_general_plus_medical(self):
+        with self.db.transaction() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM ext_meta_field_registry").fetchone()[0]
+        self.assertGreaterEqual(count, 14)

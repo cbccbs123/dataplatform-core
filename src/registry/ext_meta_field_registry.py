@@ -1,13 +1,12 @@
-"""F-4.13 ext_meta 키·값 검증 — ``schema_registry`` 레지스트리 기반.
+"""F-4.13 ext_meta 키·값 검증 — ``ext_meta_field_registry`` 레지스트리 기반.
 
-도메인별 허용 ext_meta 키(``status='active'``)를 ``schema_registry`` 에서 읽어,
+도메인별 허용 ext_meta 키(``status='active'``)를 ``ext_meta_field_registry`` 에서 읽어,
 ``asset_metadata.ext_meta`` 의 키가 허용 집합 안인지 검증한다(키-허용목록).
 
 값 검증은 동일 레지스트리의 ``json_schema``(JSON Schema)로 수행한다.
 ``type`` 키가 없거나 빈 스키마는 값 검증에서 skip 한다.
 
-- 해당 도메인 정의가 0개면 검증을 **skip**(미시드 도메인이 무조건 실패하는 부작용 차단).
-  general 은 마이그레이션(v220)에서 시드되므로 정상 게이트로 동작한다.
+레거시 ``schema_registry`` 테이블은 main 호환을 위해 유지하나 OM 런타임은 본 테이블만 사용한다.
 """
 
 from __future__ import annotations
@@ -23,13 +22,11 @@ class ExtMetaValidationError(ValueError):
 
 
 def fetch_allowed_ext_keys(conn: Connection[Any], domain: str) -> set[str]:
-    """``domain`` 의 활성(status='active') ext_meta 허용 키 집합.
-
-    deprecated 키는 DB 에 남아도 결과에서 제외된다.
-    """
+    """``domain`` 의 활성(status='active') ext_meta 허용 키 집합."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT meta_key FROM schema_registry WHERE domain = %s AND status = 'active'",
+            "SELECT meta_key FROM ext_meta_field_registry "
+            "WHERE domain = %s AND status = 'active'",
             (domain,),
         )
         return {r["meta_key"] for r in cur.fetchall()}
@@ -43,10 +40,7 @@ def check_ext_meta_values(
     schemas: dict[str, dict[str, Any]],
     ext_meta: dict[str, Any] | None,
 ) -> list[tuple[str, str]]:
-    """``ext_meta`` 에 존재하고 ``schemas`` 에 validatable 스키마가 있는 키만 검증.
-
-    위반은 ``(key, message)`` 튜플로 수집해 키·메시지 기준 정렬해 반환한다.
-    """
+    """``ext_meta`` 에 존재하고 ``schemas`` 에 validatable 스키마가 있는 키만 검증."""
     if not ext_meta:
         return []
     from jsonschema import Draft202012Validator, ValidationError
@@ -67,7 +61,7 @@ def fetch_ext_key_schemas(conn: Connection[Any], domain: str) -> dict[str, dict[
     """``domain`` 의 활성 ext_meta 키→JSON Schema 맵(validatable 스키마만)."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT meta_key, json_schema FROM schema_registry "
+            "SELECT meta_key, json_schema FROM ext_meta_field_registry "
             "WHERE domain = %s AND status = 'active'",
             (domain,),
         )
@@ -83,7 +77,7 @@ def fetch_access_tiers(conn: Connection[Any], domain: str) -> dict[str, str]:
     """``domain`` 의 활성 ext_meta 키→access_tier 맵."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT meta_key, access_tier FROM schema_registry "
+            "SELECT meta_key, access_tier FROM ext_meta_field_registry "
             "WHERE domain = %s AND status = 'active'",
             (domain,),
         )
@@ -91,18 +85,9 @@ def fetch_access_tiers(conn: Connection[Any], domain: str) -> dict[str, str]:
 
 
 def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, Any] | None) -> None:
-    """``ext_meta`` 키·값을 도메인 레지스트리 기준으로 검증. 위반 시 ``ExtMetaValidationError``.
-
-    순서: (1) 키 허용목록 (2) JSON Schema 값 검증. 키 위반 시 값 검증은 생략한다.
-
-    **함정**: 허용 키가 0개면 검증을 skip 한다(통과). 이는 새 도메인 시드 누락 시
-    무조건 실패하는 부작용을 막기 위한 의도적 설계다. general 도메인은 v220
-    마이그레이션에서 시드되므로 정상 게이트로 동작한다. 새 도메인 키를 추가하지 않으면
-    게이트가 무력화됨에 주의.
-    """
+    """``ext_meta`` 키·값을 도메인 레지스트리 기준으로 검증. 위반 시 ``ExtMetaValidationError``."""
     allowed = fetch_allowed_ext_keys(conn, domain)
     if not allowed:
-        # 시드 미등록 도메인은 검증 생략 — 의도적 방어 설계(위 docstring 참조)
         return
     violations = sorted(k for k in (ext_meta or {}) if k not in allowed)
     if violations:

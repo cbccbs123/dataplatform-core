@@ -13,7 +13,7 @@ from src.registry.access_tier import (
     domain_floor,
     max_tier,
 )
-from src.registry.schema_registry import fetch_access_tiers
+from src.registry.ext_meta_field_registry import fetch_access_tiers
 
 
 class DomainFloorTest(unittest.TestCase):
@@ -54,7 +54,7 @@ class FetchAccessTiersTest(unittest.TestCase):
         out = fetch_access_tiers(conn, "general")
         self.assertEqual(out, {"summary": AUTHENTICATED, "stt": AUTHORIZED})
         sql = cur.execute.call_args.args[0]
-        self.assertIn("schema_registry", sql)
+        self.assertIn("ext_meta_field_registry", sql)
         self.assertIn("access_tier", sql)
         self.assertEqual(cur.execute.call_args.args[1], ("general",))
 
@@ -62,8 +62,8 @@ class FetchAccessTiersTest(unittest.TestCase):
 _RUN = os.getenv("RUN_DB_E2E") == "1"
 
 
-@unittest.skipUnless(_RUN, "RUN_DB_E2E=1 일 때만(실 PostgreSQL·v290 head)")
-class SchemaRegistryAccessTierDbE2eTest(unittest.TestCase):
+@unittest.skipUnless(_RUN, "RUN_DB_E2E=1 일 때만(실 PostgreSQL·v291 head)")
+class ExtMetaFieldRegistryAccessTierDbE2eTest(unittest.TestCase):
     db = None  # type: ignore[assignment]
 
     @classmethod
@@ -81,11 +81,11 @@ class SchemaRegistryAccessTierDbE2eTest(unittest.TestCase):
             cls.db.__enter__()
             with cls.db.transaction() as conn, conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_name='schema_registry' AND column_name='access_tier'"
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name='ext_meta_field_registry'"
                 )
                 if cur.fetchone() is None:
-                    raise unittest.SkipTest("access_tier 컬럼 없음(v290 미적용)")
+                    raise unittest.SkipTest("ext_meta_field_registry 없음(v291 미적용)")
         except unittest.SkipTest:
             raise
         except Exception as exc:  # noqa: BLE001
