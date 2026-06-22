@@ -91,6 +91,22 @@ class TestFetchAssetDetail(unittest.TestCase):
         for ch in out["embedding_channels"]:
             self.assertEqual(set(ch.keys()), {"channel", "chunk_count"})
 
+    @patch("src.portal.asset_detail.fetch_access_tiers")
+    @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
+    def test_clearance_projects_ext_meta(self, mock_rel, mock_tiers) -> None:
+        mock_rel.return_value = []
+        mock_tiers.return_value = {"summary": "authenticated", "stt": "authorized"}
+        row = dict(_REGISTERED_ROW)
+        row["ext_meta"] = {"summary": "요약", "stt": "전문"}
+        conn, _ = _conn_for_detail(row, [])
+        from src.portal.asset_detail import fetch_asset_detail
+        from src.registry.access_tier import AUTHENTICATED, PUBLIC
+
+        anon = fetch_asset_detail(conn, asset_id="A1", clearance=PUBLIC)
+        self.assertEqual(anon["ext_meta"], {})
+        auth = fetch_asset_detail(conn, asset_id="A1", clearance=AUTHENTICATED)
+        self.assertEqual(auth["ext_meta"], {"summary": "요약"})
+
     @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
     def test_embedding_query_is_count_aggregate_not_raw_select(self, mock_rel) -> None:
         # 집계 SQL 이 COUNT(*)·GROUP BY/ORDER BY channel 인지(원시 벡터 SELECT 금지, FR-005·헌법 6조).

@@ -21,8 +21,13 @@
       ``graph_query`` 결정성에 위임한다(라우터는 추가 정렬을 하지 않는다).
     - **읽기 전용(헌법 6조)**: 스키마·쓰기 0. DB 접근은 조회 트랜잭션(idempotent)만.
 
-인증은 후속(plan §0.1) — 현재 권한=단일(인증 도입 전엔 전체 열람). 미들웨어/``Depends`` 주입은
-후속 010-follow plan 에서 일괄 삽입한다(YAGNI: 지금은 placeholder 의존성도 두지 않는다).
+인증·ext_meta 키 omit(spec 042 · 010 US4 흡수)
+    JWT Bearer ``Depends(require_principal)`` — 검색·상세·다운로드·묶음.
+    ``PORTAL_AUTH_DISABLED=1`` — dev bypass(anonymous → public tier 키만 ext_meta 에 남음).
+    ``GET /me`` · ``POST /auth/token``(dev 발급).
+
+ext_meta read 집행(042)
+    ``project_ext_meta`` — clearance 미달 키 **응답에서 제거**(null 아님). ingest(039)는 DB 전량 유지.
 """
 from __future__ import annotations
 
@@ -31,11 +36,11 @@ import os
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from src.config.settings import get_current_settings
@@ -43,6 +48,8 @@ from src.config.settings import get_current_settings
 # 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
 from src.portal.asset_detail import fetch_asset_detail
+from src.portal.auth import Principal, require_principal
+from src.portal.auth.dev_issuer import issue_dev_token
 from src.portal.download import (
     build_bundle_zip,
     collect_bundle_assets,
@@ -50,6 +57,8 @@ from src.portal.download import (
     resolve_download_target,
 )
 from src.portal.search_group import group_ranked
+from src.registry.access_tier import project_ext_meta
+from src.registry.ext_meta_field_registry import fetch_access_tiers
 from src.search.search_service import search_hybrid
 
 _ENV = os.getenv("PORTAL_API_ENV", "dev")
@@ -95,13 +104,63 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
-# 인증 후속: 여기에 미들웨어/Depends(get_principal) 를 일괄 삽입한다(plan §0.1, 010-follow).
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     """헬스 체크(부트스트랩·라우팅 확인용)."""
     return {"status": "ok", "env": _ENV}
+
+
+@app.post("/auth/token")
+def auth_token(body: dict[str, str]) -> dict[str, str]:
+    """dev JWT 발급 — ``auth.dev_issuer``. 로컬 스모크용(비밀번호 검증 없음)."""
+    user_id = (body.get("username") or body.get("user_id") or "dev-user").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="username 또는 user_id 필요")
+    return {"access_token": issue_dev_token(user_id=user_id), "token_type": "bearer"}
+
+
+@app.get("/me")
+def me(principal: Annotated[Principal, Depends(require_principal)]) -> dict[str, str]:
+    """현재 principal(user_id·clearance)."""
+    return {"user_id": principal.user_id, "clearance": principal.clearance}
+
+
+def _project_grouped_search(
+    conn: Any,
+    grouped: dict[str, list[dict[str, Any]]],
+    *,
+    clearance: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """검색 hit ``summary`` 에 tier 기반 키 omit (042).
+
+    ``summary`` 를 mini ext_meta 로 ``project_ext_meta`` 에 넘김 — 미달 시 행에서 ``summary`` 키 제거.
+    OpenSearch 색인은 변경 없음(API 응답 단계만).
+    """
+    tiers_cache: dict[str, dict[str, str]] = {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for modality, rows in grouped.items():
+        projected: list[dict[str, Any]] = []
+        for row in rows:
+            domain = str(row.get("domain_label") or "general")
+            if domain not in tiers_cache:
+                tiers_cache[domain] = fetch_access_tiers(conn, domain)
+            summary = row.get("summary") or ""
+            masked = project_ext_meta(
+                {"summary": summary} if summary else {},
+                tiers_cache[domain],
+                domain=domain,
+                clearance=clearance,
+            )
+            new_row = dict(row)
+            if summary and "summary" not in masked:
+                new_row.pop("summary", None)
+            elif "summary" in masked:
+                new_row["summary"] = masked["summary"]
+            projected.append(new_row)
+        out[modality] = projected
+    return out
 
 
 def _search_min_scores() -> dict[str, float] | None:
@@ -142,6 +201,7 @@ def search(
         None, description="콤마 구분: text,image,video,audio (미지정=전체)"
     ),
     size: int = Query(20, ge=1, le=100, description="모달리티별 최대 결과 수(top-N)"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003).
 
@@ -164,6 +224,11 @@ def search(
 
     # FR-014: 버킷별 의료 배제 + 모달리티별 독립 랭킹·top-N. results 는 {modality: [rows]}.
     grouped = group_ranked(result, limit_per_modality=size, exclude_domains=_EXCLUDE_DOMAINS)
+    grouped = _run_in_db(
+        lambda conn: _project_grouped_search(
+            conn, grouped, clearance=principal.clearance
+        )
+    )
     counts = {modality: len(rows) for modality, rows in grouped.items()}
 
     return {
@@ -174,13 +239,20 @@ def search(
 
 
 @app.get("/assets/{asset_id}")
-def asset_detail(asset_id: str) -> dict[str, Any]:
+def asset_detail(
+    asset_id: str,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
     """자산 1건 상세(메타·임베딩 채널 요약·관계 미니뷰)를 반환한다(FR-004/005/006).
 
     노출 게이트(FR-014)는 ``fetch_asset_detail`` 이 책임진다 — 없음/비registered/의료면 None →
     404(자산 데이터 노출 0).
     """
-    detail = _run_in_db(lambda conn: fetch_asset_detail(conn, asset_id=asset_id))
+    detail = _run_in_db(
+        lambda conn: fetch_asset_detail(
+            conn, asset_id=asset_id, clearance=principal.clearance
+        )
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 노출 대상이 아님")
     return detail
@@ -219,7 +291,11 @@ def _file_iterator(path: str, start: int, end: int) -> Iterator[bytes]:
 
 
 @app.get("/assets/{asset_id}/download")
-def download(asset_id: str, request: Request) -> StreamingResponse:
+def download(
+    asset_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> StreamingResponse:
     """단일 자산 원본을 스트리밍한다 — HTTP ``Range`` 부분 요청(206) 지원(FR-007/009).
 
     절차
@@ -275,7 +351,10 @@ def download(asset_id: str, request: Request) -> StreamingResponse:
 
 
 @app.get("/assets/{asset_id}/bundle")
-def bundle(asset_id: str) -> Response:
+def bundle(
+    asset_id: str,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> Response:
     """seed 자산 기준 관계 ego-network(seed + 1-hop active 이웃)를 zip 으로 묶어 내려준다(FR-008).
 
     seed 는 ``resolve_download_target`` 로 게이팅한다 — None(없음/의료/비registered) → 404. 이로써

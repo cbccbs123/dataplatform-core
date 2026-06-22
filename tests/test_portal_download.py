@@ -167,6 +167,22 @@ class TestCollectBundleAssets(unittest.TestCase):
         self.assertEqual([t["asset_id"] for t in out], ["SEED", "N1"])
 
     @patch("src.portal.download.fetch_active_relations_for_asset")
+    def test_non_registered_neighbor_excluded_by_bundle_sql(self, mock_rel) -> None:
+        # SQL 게이트: 비registered·의료 이웃은 path 조회에서 제외된다(042 FR-007).
+        mock_rel.return_value = [_rel("N_OK", 0.9), _rel("N_FAIL", 0.8)]
+        path_rows = [
+            {"asset_id": "SEED", "fs_path": "/d/seed.txt"},
+            {"asset_id": "N_OK", "fs_path": "/d/n_ok.txt"},
+        ]
+        conn, cur = _conn_paths(path_rows)
+        from src.portal.download import collect_bundle_assets
+
+        collect_bundle_assets(conn, seed_asset_id="SEED")
+        sql = cur.execute.call_args[0][0]
+        self.assertIn("registered", sql)
+        self.assertIn("medical", sql)
+
+    @patch("src.portal.download.fetch_active_relations_for_asset")
     def test_determinism_same_input_same_output(self, mock_rel) -> None:
         # 헌법 3조: 동일 입력 2회 동일 순서.
         from src.portal.download import collect_bundle_assets

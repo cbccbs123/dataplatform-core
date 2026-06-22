@@ -36,6 +36,27 @@ def _passthrough_db(callback):
     return callback(object())
 
 
+def _empty_tiers(*_args, **_kwargs):
+    """registry 미조회 단위 테스트 — tier 미등록 키는 projection 통과."""
+    return {}
+
+
+_AUTH_DISABLED_ENV = {
+    "PORTAL_AUTH_DISABLED": "1",
+    "PORTAL_JWT_SECRET": "test-secret",
+}
+
+
+def _enable_portal_test_auth_bypass(test_case: unittest.TestCase) -> None:
+    """보호 라우트 단위 테스트용 dev bypass + DB/tier mock."""
+    env = patch.dict(os.environ, _AUTH_DISABLED_ENV, clear=False)
+    env.start()
+    test_case.addCleanup(env.stop)
+    db = patch("src.app.portal_api._run_in_db", _passthrough_db)
+    db.start()
+    test_case.addCleanup(db.stop)
+
+
 def _fake_search_result() -> dict:
     """``search_hybrid`` 가 돌려주는 모달리티 버킷 결과 대역.
 
@@ -83,6 +104,10 @@ class TestSearch(unittest.TestCase):
     """``/search`` — 모달리티별 그룹 응답·버킷별 의료배제·size top-N."""
 
     def setUp(self) -> None:
+        _enable_portal_test_auth_bypass(self)
+        tiers = patch("src.app.portal_api.fetch_access_tiers", side_effect=_empty_tiers)
+        tiers.start()
+        self.addCleanup(tiers.stop)
         self.client = TestClient(app)
 
     @patch("src.app.portal_api.search_hybrid")
@@ -154,11 +179,11 @@ class TestSearch(unittest.TestCase):
         self.assertIsNone(mock_search.call_args.kwargs["min_scores"])
 
 
-@patch("src.app.portal_api._run_in_db", _passthrough_db)
 class TestAssetDetail(unittest.TestCase):
     """``/assets/{id}`` — 상세 200 / 노출 게이트 404."""
 
     def setUp(self) -> None:
+        _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
 
     @patch("src.app.portal_api.fetch_asset_detail")
@@ -188,11 +213,11 @@ class TestAssetDetail(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
-@patch("src.app.portal_api._run_in_db", _passthrough_db)
 class TestDownload(unittest.TestCase):
     """``/assets/{id}/download`` — 전체/Range/누락/게이트."""
 
     def setUp(self) -> None:
+        _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
         # 알려진 10바이트 임시 원본 — Range 바이트 무결성 검증용.
         self.tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
@@ -255,11 +280,11 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
-@patch("src.app.portal_api._run_in_db", _passthrough_db)
 class TestBundle(unittest.TestCase):
     """``/assets/{id}/bundle`` — zip 응답 / seed 게이트 404."""
 
     def setUp(self) -> None:
+        _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
 
     @patch("src.app.portal_api.build_bundle_zip", return_value=b"PK\x03\x04zipbytes")
@@ -286,6 +311,36 @@ class TestBundle(unittest.TestCase):
         resp = self.client.get("/assets/medseed/bundle")
         self.assertEqual(resp.status_code, 404)
         mock_collect.assert_not_called()
+
+
+class TestPortalAuth(unittest.TestCase):
+    """042 JWT · /me · 보호 라우트 401."""
+
+    def setUp(self) -> None:
+        self._env = patch.dict(
+            os.environ,
+            {"PORTAL_AUTH_DISABLED": "0", "PORTAL_JWT_SECRET": "test-secret"},
+            clear=False,
+        )
+        self._env.start()
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self._env.stop()
+
+    def test_search_without_token_returns_401(self) -> None:
+        resp = self.client.get("/search", params={"q": "x"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_me_with_valid_token(self) -> None:
+        token_resp = self.client.post("/auth/token", json={"username": "alice"})
+        self.assertEqual(token_resp.status_code, 200)
+        token = token_resp.json()["access_token"]
+        me_resp = self.client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(me_resp.status_code, 200)
+        body = me_resp.json()
+        self.assertEqual(body["user_id"], "alice")
+        self.assertEqual(body["clearance"], "authenticated")
 
 
 if __name__ == "__main__":

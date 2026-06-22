@@ -255,6 +255,7 @@ def process_asset(
 
     # 4) 검증 + 적재 + registered — 한 트랜잭션
     with db.transaction() as conn:
+        # 039 ext_meta 키·값 검증 — tier(040)는 write 에서 검사하지 않음(042 read 전용).
         validate_ext_meta(conn, domain, record.ext_meta)
         finalize_asset(conn, asset_id, record)
         record_lineage(conn, asset_id, activity="ingest.registered.v1",

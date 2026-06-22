@@ -38,8 +38,15 @@ WHERE asset_id = %s
 LIMIT 1
 """
 
-# 묶음 자산들의 파일 경로 일괄 조회. 정렬은 파이썬에서 결정적으로 하므로 ORDER BY 불필요.
-_BUNDLE_PATHS_SQL = "SELECT asset_id, fs_path FROM asset WHERE asset_id = ANY(%s)"
+# 묶음 이웃 경로 조회 (010 P1 · 042 FR-007).
+# seed 는 ``resolve_download_target`` 로 registered·비의료 게이트됨 — 이웃만 SQL 로 재필터.
+# 비registered·medical 이웃은 fs_path 없이 묶음에서 제외(의료 seed 는 상위 404).
+_BUNDLE_PATHS_SQL = """
+SELECT asset_id, fs_path FROM asset
+WHERE asset_id = ANY(%s)
+  AND status = 'registered'
+  AND domain_label <> 'medical'
+"""
 
 
 def parse_range_header(range_value: str | None, file_size: int) -> tuple[int, int] | None:

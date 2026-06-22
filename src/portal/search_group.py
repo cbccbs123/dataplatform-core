@@ -14,7 +14,7 @@
       ``search_service._row_similarity`` 와 동일 규칙의 작은 사본(None/NaN/inf → 0.0).
     - 각 버킷은 ``limit_per_modality`` 까지만(섹션별 top-N, 페이징 없음 — 설계 승인).
     - ``exclude_domains`` 에 드는 ``domain_label`` 행은 해당 버킷에서 제외(FR-014, 의료 배제).
-    - 반환 dict 는 입력 ``results`` 에 **존재하는 버킷만** 모달리티 라벨로 키잉한다(삽입 순서 보존).
+    - ``domain_label`` 을 응답 항목에 포함(042) — ``portal_api`` tier projection 에 사용.
 
 DB·네트워크·파일 IO 없음. 표준 라이브러리만 import(완전 순수).
 """
@@ -62,13 +62,18 @@ def _sort_key(item: dict[str, Any]) -> tuple[float, str]:
 
 
 def _shape(row: dict[str, Any], modality: str) -> dict[str, Any]:
-    """원시 검색 행을 포탈 응답 항목 5키로 정형한다."""
+    """원시 검색 행 → 포탈 응답 항목.
+
+    ``domain_label``(042): ``fetch_access_tiers``·``domain_floor`` 합성용.
+    OS hit 에 없으면 ``general`` 폴백.
+    """
     return {
         "asset_id": str(row.get("id", "")),
         "modality": modality,
         "similarity": _row_similarity(row),
         "summary": row.get("summary", "") or "",
         "file_name": _basename(str(row.get("file_uri", ""))),
+        "domain_label": row.get("domain_label") or "general",
     }
 
 
@@ -80,7 +85,7 @@ def group_ranked(
 ) -> dict[str, list[dict[str, Any]]]:
     """모달리티 버킷 dict 를 모달리티별 독립 랭킹 ``{modality: [rows]}`` 로 묶는다.
 
-    각 항목: ``{"asset_id","modality","similarity","summary","file_name"}``. 버킷 내부에서만
+    각 항목: ``asset_id``·``modality``·``similarity``·``summary``·``file_name``·``domain_label``.
     ``(-round(similarity,6), asset_id)`` 로 정렬하고(cross-modal 병합 없음), 의료 배제 후 상위
     ``limit_per_modality`` 건만 담는다. 입력에 존재하는 버킷만 결과 키로 등장한다(빈 입력 → ``{}``).
     """

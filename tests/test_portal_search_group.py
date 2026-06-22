@@ -53,19 +53,27 @@ class TestGroupRanked(unittest.TestCase):
         self.assertEqual(ids, ["b", "c", "a"])  # 0.9 동점 b<c, 그다음 0.5 a
 
     def test_item_shape_and_modality_label(self) -> None:
-        # 각 항목은 asset_id/modality/similarity/summary/file_name 5키, 버킷키→모달리티 라벨.
+        # 각 항목은 asset_id/modality/similarity/summary/file_name/domain_label, 버킷키→모달리티 라벨.
         from src.portal.search_group import group_ranked
 
         result = _result(
             {"text_documents": [
-                {"id": "a", "similarity": 0.5, "file_uri": "/d/sub/report.txt", "summary": "S"}
+                {
+                    "id": "a",
+                    "similarity": 0.5,
+                    "file_uri": "/d/sub/report.txt",
+                    "summary": "S",
+                    "domain_label": "review",
+                }
             ]}
         )
         item = group_ranked(result, limit_per_modality=20)["text"][0]
         self.assertEqual(
-            set(item.keys()), {"asset_id", "modality", "similarity", "summary", "file_name"}
+            set(item.keys()),
+            {"asset_id", "modality", "similarity", "summary", "file_name", "domain_label"},
         )
         self.assertEqual(item["modality"], "text")
+        self.assertEqual(item["domain_label"], "review")
         self.assertEqual(item["file_name"], "report.txt")
         self.assertEqual(item["summary"], "S")
 

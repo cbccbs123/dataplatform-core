@@ -23,22 +23,20 @@ from psycopg.rows import dict_row
 
 
 class AssetStatus(str, Enum):
-    """``asset.status`` CHECK 제약과 동일한 값.
+    """``asset.status`` CHECK 제약과 동일한 값 (v160).
 
-    DB CHECK 제약(v160 마이그레이션)과 반드시 동기화해야 한다.
-    새 상태를 추가할 때는 DDL CHECK 와 ALLOWED_TRANSITIONS 를 함께 갱신할 것.
+    정상 경로: received → routing → classifying → extracting → registered.
+    진행형 마커는 단계 **진입 시** set_status, 종착(registered/deferred/failed)만 **완료 후** 기록.
+    ``tests/test_status_vocab`` 에서 CHECK 집합 교차 검증 — 신규 값은 DDL·ALLOWED_TRANSITIONS 동시 갱신.
     """
 
-    RECEIVED = "received"
-    ROUTING = "routing"
-    CLASSIFYING = "classifying"
-    EXTRACTING = "extracting"
-    REGISTERED = "registered"
-    FAILED = "failed"
-    # DEFERRED: 의료 표준 포맷(DICOM/HL7/FHIR) 감지 시 classifying 단계에서 진입.
-    # 추출 실패가 아니라 단계 D 의료 어댑터 완성 전까지의 계획적 보류.
-    # 일반 임베딩 stopgap 이 적용될 수 있음(docs/memory 참조).
-    DEFERRED = "deferred"
+    RECEIVED = "received"  # 파일 픽업·asset 행 생성 직후(오케스트레이터 진입점).
+    ROUTING = "routing"  # route_file 완료 마커 — classifying 과 동트랜잭션·단독 관측 드묾.
+    CLASSIFYING = "classifying"  # 도메인·modality 분류 진행 중.
+    EXTRACTING = "extracting"  # extract·embed·persist 스킬 실행 중.
+    REGISTERED = "registered"  # 적재 완료·종착 — 포탈·검색·관계 배치 노출 대상.
+    FAILED = "failed"  # 임의 비종료 단계에서 오류 종착 — status_reason 에 사유.
+    DEFERRED = "deferred"  # 의료 표준 포맷(DICOM/HL7/FHIR) 추출 보류·종착(실패 아님, 단계 D 대기).
 
 
 # 불변식: TERMINAL 상태는 ALLOWED_TRANSITIONS 에서 빈 집합을 가져야 한다.
