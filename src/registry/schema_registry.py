@@ -1,9 +1,11 @@
-"""F-4.13 ext_meta 키 검증 — ``schema_registry`` 레지스트리 기반.
+"""F-4.13 ext_meta 키·값 검증 — ``schema_registry`` 레지스트리 기반.
 
 도메인별 허용 ext_meta 키(``status='active'``)를 ``schema_registry`` 에서 읽어,
 ``asset_metadata.ext_meta`` 의 키가 허용 집합 안인지 검증한다(키-허용목록).
 
-- 값(JSON Schema) 검증은 후속(``jsonschema`` 미선언). ``json_schema`` 컬럼은 시드만, 본 검증은 키만 본다.
+값 검증은 동일 레지스트리의 ``json_schema``(JSON Schema)로 수행한다.
+``type`` 키가 없거나 빈 스키마는 값 검증에서 skip 한다.
+
 - 해당 도메인 정의가 0개면 검증을 **skip**(미시드 도메인이 무조건 실패하는 부작용 차단).
   general 은 마이그레이션(v220)에서 시드되므로 정상 게이트로 동작한다.
 """
@@ -17,7 +19,7 @@ from psycopg.rows import dict_row
 
 
 class ExtMetaValidationError(ValueError):
-    """``ext_meta`` 에 도메인 레지스트리 미등록 키가 있음."""
+    """``ext_meta`` 키 위반(미등록 키) 또는 값 위반(JSON Schema 불일치)."""
 
 
 def fetch_allowed_ext_keys(conn: Connection[Any], domain: str) -> set[str]:
@@ -61,8 +63,26 @@ def check_ext_meta_values(
     return sorted(violations, key=lambda x: (x[0], x[1]))
 
 
+def fetch_ext_key_schemas(conn: Connection[Any], domain: str) -> dict[str, dict[str, Any]]:
+    """``domain`` 의 활성 ext_meta 키→JSON Schema 맵(validatable 스키마만)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT meta_key, json_schema FROM schema_registry "
+            "WHERE domain = %s AND status = 'active'",
+            (domain,),
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for row in cur.fetchall():
+            schema = row["json_schema"]
+            if _schema_is_validatable(schema):
+                out[row["meta_key"]] = schema
+        return out
+
+
 def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, Any] | None) -> None:
-    """``ext_meta`` 키가 도메인 허용 집합 안인지 검증. 위반 시 ``ExtMetaValidationError``.
+    """``ext_meta`` 키·값을 도메인 레지스트리 기준으로 검증. 위반 시 ``ExtMetaValidationError``.
+
+    순서: (1) 키 허용목록 (2) JSON Schema 값 검증. 키 위반 시 값 검증은 생략한다.
 
     **함정**: 허용 키가 0개면 검증을 skip 한다(통과). 이는 새 도메인 시드 누락 시
     무조건 실패하는 부작용을 막기 위한 의도적 설계다. general 도메인은 v220
@@ -76,3 +96,9 @@ def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, An
     violations = sorted(k for k in (ext_meta or {}) if k not in allowed)
     if violations:
         raise ExtMetaValidationError(f"미등록 ext_meta 키(domain={domain}): {violations}")
+    schemas = fetch_ext_key_schemas(conn, domain)
+    value_violations = check_ext_meta_values(schemas, ext_meta)
+    if value_violations:
+        raise ExtMetaValidationError(
+            f"ext_meta 값 위반(domain={domain}): {value_violations}"
+        )
