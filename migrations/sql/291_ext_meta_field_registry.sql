@@ -1,6 +1,7 @@
 -- =============================================================================
 -- F-4.13 — ext_meta_field_registry 신설 + schema_registry backfill (spec 041).
 -- schema_registry DDL 무터치(DROP/ALTER/RENAME 없음). OM 런타임 정본은 신규 테이블.
+-- 이후 ext_meta 필드 시드는 ext_meta_field_registry만 대상(레거시 schema_registry 동기화 없음).
 -- 선행: v290(access_tier on schema_registry). 적용 순서: v290 이후.
 -- =============================================================================
 

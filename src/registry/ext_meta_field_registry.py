@@ -88,6 +88,7 @@ def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, An
     """``ext_meta`` 키·값을 도메인 레지스트리 기준으로 검증. 위반 시 ``ExtMetaValidationError``."""
     allowed = fetch_allowed_ext_keys(conn, domain)
     if not allowed:
+        # 시드 미등록 도메인은 검증 생략(무조건 실패 방지) — 키 미등록 시 게이트 무력화 주의
         return
     violations = sorted(k for k in (ext_meta or {}) if k not in allowed)
     if violations:
