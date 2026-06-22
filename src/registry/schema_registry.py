@@ -79,6 +79,17 @@ def fetch_ext_key_schemas(conn: Connection[Any], domain: str) -> dict[str, dict[
         return out
 
 
+def fetch_access_tiers(conn: Connection[Any], domain: str) -> dict[str, str]:
+    """``domain`` 의 활성 ext_meta 키→access_tier 맵."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT meta_key, access_tier FROM schema_registry "
+            "WHERE domain = %s AND status = 'active'",
+            (domain,),
+        )
+        return {row["meta_key"]: row["access_tier"] for row in cur.fetchall()}
+
+
 def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, Any] | None) -> None:
     """``ext_meta`` 키·값을 도메인 레지스트리 기준으로 검증. 위반 시 ``ExtMetaValidationError``.
 
