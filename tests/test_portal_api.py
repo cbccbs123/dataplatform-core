@@ -382,5 +382,22 @@ class TestPortalAuthDevToken(unittest.TestCase):
         self.assertEqual(me_resp.json()["clearance"], "authorized")
 
 
+class TestPortalOpenApiSecurity(unittest.TestCase):
+    """Swagger /docs — HTTPBearer Authorize 버튼(OpenAPI securitySchemes)."""
+
+    def setUp(self) -> None:
+        self.client = TestClient(app)
+
+    def test_openapi_exposes_http_bearer_security(self) -> None:
+        spec = self.client.get("/openapi.json").json()
+        schemes = spec.get("components", {}).get("securitySchemes", {})
+        self.assertIn("HTTPBearer", schemes)
+        self.assertEqual(schemes["HTTPBearer"]["scheme"], "bearer")
+        search = spec["paths"]["/search"]["get"]
+        self.assertIn({"HTTPBearer": []}, search.get("security", []))
+        params = search.get("parameters", [])
+        self.assertFalse(any(p.get("name") == "authorization" for p in params))
+
+
 if __name__ == "__main__":
     unittest.main()

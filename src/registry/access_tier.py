@@ -16,6 +16,7 @@ AUTHENTICATED = AccessTier.AUTHENTICATED
 AUTHORIZED = AccessTier.AUTHORIZED
 REGULATED = AccessTier.REGULATED
 
+# ordinal 낮→높. tier_allows·max_tier·effective_field_tier 가 이 순서에 의존.
 TIER_ORDER: tuple[AccessTier, ...] = (
     AccessTier.PUBLIC,
     AccessTier.AUTHENTICATED,
@@ -23,6 +24,7 @@ TIER_ORDER: tuple[AccessTier, ...] = (
     AccessTier.REGULATED,
 )
 
+# 도메인 바닥 — 필드 tier 와 합성 시 더 높은 쪽이 effective_field_tier(042 read omit 판정).
 _DOMAIN_FLOORS: dict[str, AccessTier] = {
     "medical": REGULATED,
     "review": AUTHORIZED,
@@ -89,6 +91,7 @@ def project_ext_meta(
     for key, value in ext_meta.items():
         tier = field_tiers.get(key)
         if tier is None:
+            # 041 레지스트리 미등록 키 — 레거시·커스텀 보존(ingest 039 키 게이트와 별개).
             out[key] = value
             continue
         if tier_allows(clearance, effective_field_tier(tier, domain)):

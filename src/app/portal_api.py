@@ -25,6 +25,7 @@
     JWT Bearer ``Depends(require_principal)`` — 검색·상세·다운로드·묶음.
     ``PORTAL_AUTH_DISABLED=1`` — dev bypass(anonymous → public). JWT → authorized(2-tier MVP).
     ``GET /me`` · ``POST /auth/token``(dev 전용, auth disabled 일 때만).
+    Swagger ``/docs`` — ``Authorize`` 에 JWT **토큰만** 입력(Bearer 접두사 불필요).
 
 ext_meta read 집행(042)
     ``project_ext_meta`` — clearance 미달 키 **응답에서 제거**(null 아님). ingest(039)는 DB 전량 유지.
@@ -51,6 +52,7 @@ from src.portal.asset_detail import fetch_asset_detail
 from src.portal.auth import Principal, require_principal
 from src.portal.auth.config import load_portal_auth_config
 from src.portal.auth.dev_issuer import issue_dev_token
+from src.portal.auth.schemas import DevTokenRequest
 from src.portal.download import (
     build_bundle_zip,
     collect_bundle_assets,
@@ -114,11 +116,14 @@ def health() -> dict[str, str]:
 
 
 @app.post("/auth/token")
-def auth_token(body: dict[str, str]) -> dict[str, str]:
-    """dev JWT 발급 — ``PORTAL_AUTH_DISABLED=1`` 일 때만. 로컬 스모크용."""
+def auth_token(body: DevTokenRequest) -> dict[str, str]:
+    """dev JWT 발급 — ``PORTAL_AUTH_DISABLED=1`` 일 때만. 로컬 스모크·Swagger Authorize 용.
+
+    운영(``PORTAL_AUTH_DISABLED=0``)에서는 404 — IdP 연동 전 dev 엔드포인트 노출 방지.
+    """
     if not load_portal_auth_config().auth_disabled:
         raise HTTPException(status_code=404, detail="dev 토큰 발급 비활성")
-    user_id = (body.get("username") or body.get("user_id") or "dev-user").strip()
+    user_id = (body.user_id or body.username or "dev-user").strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="username 또는 user_id 필요")
     return {"access_token": issue_dev_token(user_id=user_id), "token_type": "bearer"}

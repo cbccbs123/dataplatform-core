@@ -73,6 +73,7 @@ def fetch_asset_detail(
 
     ext_meta = row["ext_meta"]
     if clearance is not None:
+        # 포탈 API(042) — principal.clearance 로 read projection. None 이면 DB 원본 그대로(내부·테스트).
         domain = str(row["domain_label"])
         tiers = fetch_access_tiers(conn, domain)  # 040/041 레지스트리
         ext_meta = project_ext_meta(

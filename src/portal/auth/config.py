@@ -42,8 +42,10 @@ def load_portal_auth_config() -> PortalAuthConfig:
     auth_disabled = _env_bool("PORTAL_AUTH_DISABLED")
     raw_secret = os.getenv("PORTAL_JWT_SECRET", "").strip()
     if auth_disabled:
+        # dev bypass — secret 미설정 시 고정 기본값(로컬 스모크·단위 테스트).
         secret = raw_secret or _DEFAULT_DEV_SECRET
     elif not raw_secret:
+        # 운영·인증 활성 — 위조 방지를 위해 기동 시점 fail-fast.
         raise ValueError(
             "PORTAL_AUTH_DISABLED=0 인데 PORTAL_JWT_SECRET 미설정 — "
             "운영·인증 활성 환경에서는 서명 키가 필요합니다"

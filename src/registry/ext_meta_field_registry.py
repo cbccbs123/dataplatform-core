@@ -112,6 +112,7 @@ def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, An
     if violations:
         raise ExtMetaValidationError(f"미등록 ext_meta 키(domain={domain}): {violations}")
     schemas = fetch_ext_key_schemas(conn, domain)
+    # 키 게이트 통과 후 값 검증(039) — tier(040)는 write path 에서 검사하지 않음.
     value_violations = check_ext_meta_values(schemas, ext_meta)
     if value_violations:
         raise ExtMetaValidationError(

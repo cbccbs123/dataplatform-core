@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 from src.portal.auth import authenticate_token, get_principal, issue_dev_token
 from src.portal.auth.verifier import _reset_verifier_for_tests
@@ -34,13 +35,13 @@ class PortalAuthTest(unittest.TestCase):
 
     def test_get_principal_requires_token_when_auth_enabled(self):
         with self.assertRaises(HTTPException) as cm:
-            get_principal(authorization=None)
+            get_principal(credentials=None)
         self.assertEqual(cm.exception.status_code, 401)
 
     def test_get_principal_auth_disabled_anonymous(self):
         with mock.patch.dict(os.environ, {"PORTAL_AUTH_DISABLED": "1"}):
             _reset_verifier_for_tests()
-            p = get_principal(authorization=None)
+            p = get_principal(credentials=None)
         self.assertEqual(p.user_id, "anonymous")
         self.assertEqual(p.clearance, PUBLIC)
 
@@ -48,6 +49,8 @@ class PortalAuthTest(unittest.TestCase):
         token = issue_dev_token(user_id="bob")
         with mock.patch.dict(os.environ, {"PORTAL_AUTH_DISABLED": "1"}):
             _reset_verifier_for_tests()
-            p = get_principal(authorization=f"Bearer {token}")
+            p = get_principal(
+                credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+            )
         self.assertEqual(p.user_id, "bob")
         self.assertEqual(p.clearance, AUTHORIZED)

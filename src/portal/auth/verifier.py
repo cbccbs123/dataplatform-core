@@ -31,7 +31,7 @@ class LocalHs256Verifier:
         return jwt.decode(token, self._secret, algorithms=["HS256"])
 
 
-_verifier: TokenVerifier | None = None
+_verifier: TokenVerifier | None = None  # 프로세스 내 싱글턴 — secret·backend 변경은 재기동 전제.
 
 
 def get_token_verifier(*, config: PortalAuthConfig | None = None) -> TokenVerifier:

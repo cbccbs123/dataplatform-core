@@ -18,8 +18,9 @@ def issue_dev_token(*, user_id: str) -> str:
     cfg = load_portal_auth_config()
     now = datetime.now(UTC)
     payload = {
-        "sub": user_id,
+        "sub": user_id,  # ``claims_to_principal`` 이 user_id 로 읽음
         "iat": now,
         "exp": now + timedelta(seconds=cfg.jwt_ttl_seconds),
+        # MVP: roles·clearance claim 없음 — 검증 후 코드가 authorized 부여(042 2-tier).
     }
     return jwt.encode(payload, cfg.jwt_secret, algorithm="HS256")

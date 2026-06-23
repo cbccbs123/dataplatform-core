@@ -1,6 +1,6 @@
 """포탈 인증 공개 API (spec 042 · 010 US4).
 
-    ``config`` / ``verifier`` / ``principal`` / ``dev_issuer`` / ``deps``
+    ``config`` / ``verifier`` / ``principal`` / ``dev_issuer`` / ``deps`` / ``schemas``
 """
 
 from src.portal.auth.deps import authenticate_token, get_principal, require_principal
