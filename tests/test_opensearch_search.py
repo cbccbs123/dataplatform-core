@@ -51,7 +51,7 @@ _NORI_TEXT_FIELDS = {"summary^3", "keywords^2", "labels^1", "file_name^0.5", "se
 
 class OsHitToRowTest(unittest.TestCase):
     def test_maps_to_media_search_bucket_shape(self) -> None:
-        # OS hit → media_search 버킷 행 핵심 키(id·modality·similarity·summary·file_uri).
+        # OS hit → media_search 버킷 행 핵심 키(id·modality·domain_label·similarity·summary·file_uri).
         hit = {
             "_id": "asset-uuid-1",
             "_score": 0.87,
@@ -68,22 +68,25 @@ class OsHitToRowTest(unittest.TestCase):
         self.assertEqual(row["id"], "asset-uuid-1")
         self.assertIsInstance(row["id"], str)
         self.assertEqual(row["modality"], "text")
+        self.assertEqual(row["domain_label"], "general")
         # similarity = _score(검색 파이프라인 정규화·융합 점수).
         self.assertEqual(row["similarity"], 0.87)
         self.assertEqual(row["summary"], "요약 텍스트")
         self.assertEqual(row["file_uri"], "/data/보고서.txt")
 
     def test_row_keys_homogeneous_with_media_search_bucket(self) -> None:
-        # SC-005 응답 동형: media_search 버킷 행 핵심 키 집합과 동일(id·file_uri·modality·summary·similarity).
+        # SC-005 응답 동형: media_search 버킷 행 핵심 키 집합과 동일(042 domain_label 포함).
         hit = {
             "_id": "x",
             "_score": 1.0,
-            "_source": {"asset_id": "x", "modality": "audio"},
+            "_source": {"asset_id": "x", "modality": "audio", "domain_label": "review"},
         }
         row = os_hit_to_row(hit)
         self.assertEqual(
-            set(row), {"id", "file_uri", "modality", "summary", "similarity"}
+            set(row),
+            {"id", "file_uri", "modality", "domain_label", "summary", "similarity"},
         )
+        self.assertEqual(row["domain_label"], "review")
 
     def test_missing_source_safe(self) -> None:
         # 엣지: _source 누락·_score None 안전 처리.
@@ -93,6 +96,7 @@ class OsHitToRowTest(unittest.TestCase):
         self.assertEqual(row["summary"], "")
         self.assertEqual(row["file_uri"], "")
         self.assertIsNone(row["modality"])
+        self.assertIsNone(row["domain_label"])
 
     def test_none_meta_safe(self) -> None:
         # 엣지: 메타 필드 None 안전 처리(빈 문자열/None).
@@ -110,6 +114,7 @@ class OsHitToRowTest(unittest.TestCase):
         self.assertEqual(row["summary"], "")
         self.assertEqual(row["file_uri"], "")
         self.assertIsNone(row["modality"])
+        self.assertIsNone(row["domain_label"])
 
     def test_score_nan_safe(self) -> None:
         # 비유한 점수(NaN/inf) 방어 → 0.0.
@@ -505,7 +510,7 @@ class FuseHybridTest(unittest.TestCase):
         row = out[0]
         self.assertEqual(
             set(row),
-            {"id", "file_uri", "modality", "summary", "similarity", "_cos", "_bm25", "_rrtext"},
+            {"id", "file_uri", "modality", "domain_label", "summary", "similarity", "_cos", "_bm25", "_rrtext"},
         )
         self.assertEqual(row["modality"], "text")
 
@@ -811,7 +816,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         for r in text:
             self.assertNotIn("_cos", r)
             self.assertNotIn("_bm25", r)
-            self.assertEqual(set(r), {"id", "file_uri", "modality", "summary", "similarity"})
+            self.assertEqual(set(r), {"id", "file_uri", "modality", "domain_label", "summary", "similarity"})
 
     def test_gate_pass_keeps_bucket(self) -> None:
         # 강한 신호(top 0.85·robust baseline 낮음) → 게이트 통과·버킷 유지, gate_passed True.

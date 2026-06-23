@@ -407,8 +407,10 @@ def fuse_hybrid(
 def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
     """OpenSearch hit 을 media_search 버킷 행과 동형(SC-005)인 dict 로 매핑한다(순수·결정적).
 
-    media_search 버킷 행의 핵심 키(``id``·``file_uri``·``modality``·``summary``·``similarity``)에
-    맞춘다 — 검색 서비스가 OS 버킷과 PG 버킷을 같은 모양으로 병합할 수 있게 한다(응답 동형).
+    media_search 버킷 행의 핵심 키(``id``·``file_uri``·``modality``·``summary``·``similarity``·
+    ``domain_label``)에 맞춘다 — 검색 서비스가 OS 버킷과 PG 버킷을 같은 모양으로 병합할 수 있게
+    한다(응답 동형). ``domain_label`` 은 020 인덱스 ``_source`` 에서 그대로 옮겨 042 포탈 tier
+    projection·``group_ranked`` 의료 배제 2차 방어에 쓴다(사용자 검색 파라미터 아님).
     ``similarity`` 는 hit 의 원시 ``_score`` 다(서브검색 단독 점수) — 027 클라이언트 융합에서는
     ``fuse_hybrid`` 가 이 값을 **융합 점수로 덮어쓴다**(min-max+가중평균). ``_source`` 누락·메타
     None 도 안전 처리한다.
@@ -422,6 +424,7 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
         "id": str(asset_id) if asset_id is not None else None,
         "file_uri": str(src.get("fs_uri") or ""),
         "modality": src.get("modality"),
+        "domain_label": src.get("domain_label"),
         "summary": str(src.get("summary") or ""),
         "similarity": _safe_float(hit.get("_score"), 0.0),
     }
