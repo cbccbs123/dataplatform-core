@@ -25,8 +25,8 @@ class AccessTier(StrEnum):
     """
 
     PUBLIC = "public"  # 익명·비인증 principal.
-    AUTHENTICATED = "authenticated"  # 유효 JWT(MVP clearance 상한).
-    AUTHORIZED = "authorized"  # 역할·Policy 집행(후속 RBAC).
+    AUTHENTICATED = "authenticated"  # 필드 tier·중간 clearance.
+    AUTHORIZED = "authorized"  # JWT 2-tier MVP clearance 상한(042).
     REGULATED = "regulated"  # 규제·의료 등 최고 등급 — ``domain_floor(medical)`` 바닥.
 
 

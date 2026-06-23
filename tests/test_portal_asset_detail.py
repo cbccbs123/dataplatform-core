@@ -100,12 +100,12 @@ class TestFetchAssetDetail(unittest.TestCase):
         row["ext_meta"] = {"summary": "요약", "stt": "전문"}
         conn, _ = _conn_for_detail(row, [])
         from src.portal.asset_detail import fetch_asset_detail
-        from src.registry.access_tier import AUTHENTICATED, PUBLIC
+        from src.registry.access_tier import AUTHORIZED, PUBLIC
 
         anon = fetch_asset_detail(conn, asset_id="A1", clearance=PUBLIC)
         self.assertEqual(anon["ext_meta"], {})
-        auth = fetch_asset_detail(conn, asset_id="A1", clearance=AUTHENTICATED)
-        self.assertEqual(auth["ext_meta"], {"summary": "요약"})
+        auth = fetch_asset_detail(conn, asset_id="A1", clearance=AUTHORIZED)
+        self.assertEqual(auth["ext_meta"], {"summary": "요약", "stt": "전문"})
 
     @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
     def test_embedding_query_is_count_aggregate_not_raw_select(self, mock_rel) -> None:

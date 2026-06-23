@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from src.portal.auth import authenticate_token, get_principal, issue_dev_token
 from src.portal.auth.verifier import _reset_verifier_for_tests
-from src.registry.access_tier import AUTHENTICATED, PUBLIC
+from src.registry.access_tier import AUTHORIZED, PUBLIC
 
 
 class PortalAuthTest(unittest.TestCase):
@@ -30,7 +30,7 @@ class PortalAuthTest(unittest.TestCase):
         token = issue_dev_token(user_id="alice")
         p = authenticate_token(token)
         self.assertEqual(p.user_id, "alice")
-        self.assertEqual(p.clearance, AUTHENTICATED)
+        self.assertEqual(p.clearance, AUTHORIZED)
 
     def test_get_principal_requires_token_when_auth_enabled(self):
         with self.assertRaises(HTTPException) as cm:
@@ -50,4 +50,4 @@ class PortalAuthTest(unittest.TestCase):
             _reset_verifier_for_tests()
             p = get_principal(authorization=f"Bearer {token}")
         self.assertEqual(p.user_id, "bob")
-        self.assertEqual(p.clearance, AUTHENTICATED)
+        self.assertEqual(p.clearance, AUTHORIZED)

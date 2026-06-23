@@ -317,6 +317,9 @@ class TestPortalAuth(unittest.TestCase):
     """042 JWT · /me · 보호 라우트 401."""
 
     def setUp(self) -> None:
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+
+        _reset_verifier_for_tests()
         self._env = patch.dict(
             os.environ,
             {"PORTAL_AUTH_DISABLED": "0", "PORTAL_JWT_SECRET": "test-secret"},
@@ -326,21 +329,57 @@ class TestPortalAuth(unittest.TestCase):
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+
         self._env.stop()
+        _reset_verifier_for_tests()
 
     def test_search_without_token_returns_401(self) -> None:
         resp = self.client.get("/search", params={"q": "x"})
         self.assertEqual(resp.status_code, 401)
 
+    def test_auth_token_disabled_when_auth_enabled(self) -> None:
+        resp = self.client.post("/auth/token", json={"username": "alice"})
+        self.assertEqual(resp.status_code, 404)
+
     def test_me_with_valid_token(self) -> None:
-        token_resp = self.client.post("/auth/token", json={"username": "alice"})
-        self.assertEqual(token_resp.status_code, 200)
-        token = token_resp.json()["access_token"]
+        from src.portal.auth.dev_issuer import issue_dev_token
+
+        token = issue_dev_token(user_id="alice")
         me_resp = self.client.get("/me", headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(me_resp.status_code, 200)
         body = me_resp.json()
         self.assertEqual(body["user_id"], "alice")
-        self.assertEqual(body["clearance"], "authenticated")
+        self.assertEqual(body["clearance"], "authorized")
+
+
+class TestPortalAuthDevToken(unittest.TestCase):
+    """042 dev /auth/token — auth disabled 일 때만."""
+
+    def setUp(self) -> None:
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+
+        _reset_verifier_for_tests()
+        self._env = patch.dict(
+            os.environ,
+            {"PORTAL_AUTH_DISABLED": "1", "PORTAL_JWT_SECRET": "test-secret"},
+            clear=False,
+        )
+        self._env.start()
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+
+        self._env.stop()
+        _reset_verifier_for_tests()
+
+    def test_auth_token_issues_jwt(self) -> None:
+        token_resp = self.client.post("/auth/token", json={"username": "alice"})
+        self.assertEqual(token_resp.status_code, 200)
+        token = token_resp.json()["access_token"]
+        me_resp = self.client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(me_resp.json()["clearance"], "authorized")
 
 
 if __name__ == "__main__":

@@ -23,8 +23,8 @@
 
 인증·ext_meta 키 omit(spec 042 · 010 US4 흡수)
     JWT Bearer ``Depends(require_principal)`` — 검색·상세·다운로드·묶음.
-    ``PORTAL_AUTH_DISABLED=1`` — dev bypass(anonymous → public tier 키만 ext_meta 에 남음).
-    ``GET /me`` · ``POST /auth/token``(dev 발급).
+    ``PORTAL_AUTH_DISABLED=1`` — dev bypass(anonymous → public). JWT → authorized(2-tier MVP).
+    ``GET /me`` · ``POST /auth/token``(dev 전용, auth disabled 일 때만).
 
 ext_meta read 집행(042)
     ``project_ext_meta`` — clearance 미달 키 **응답에서 제거**(null 아님). ingest(039)는 DB 전량 유지.
@@ -49,6 +49,7 @@ from src.config.settings import get_current_settings
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
 from src.portal.asset_detail import fetch_asset_detail
 from src.portal.auth import Principal, require_principal
+from src.portal.auth.config import load_portal_auth_config
 from src.portal.auth.dev_issuer import issue_dev_token
 from src.portal.download import (
     build_bundle_zip,
@@ -114,7 +115,9 @@ def health() -> dict[str, str]:
 
 @app.post("/auth/token")
 def auth_token(body: dict[str, str]) -> dict[str, str]:
-    """dev JWT 발급 — ``auth.dev_issuer``. 로컬 스모크용(비밀번호 검증 없음)."""
+    """dev JWT 발급 — ``PORTAL_AUTH_DISABLED=1`` 일 때만. 로컬 스모크용."""
+    if not load_portal_auth_config().auth_disabled:
+        raise HTTPException(status_code=404, detail="dev 토큰 발급 비활성")
     user_id = (body.get("username") or body.get("user_id") or "dev-user").strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="username 또는 user_id 필요")

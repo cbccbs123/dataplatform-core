@@ -43,12 +43,13 @@ def max_tier(*tiers: str | AccessTier | None) -> str:
 
 
 def principal_clearance(*, authenticated: bool) -> str:
-    """요청 principal clearance(MVP · 042).
+    """요청 principal clearance (042 MVP · 2-tier).
 
-    anonymous → ``public``. 유효 JWT → ``authenticated`` (MVP 상한).
-    ``authorized`` tier 필드 집행은 후속 RBAC spec 에서 clearance 확장 시 처리.
+    anonymous → ``public``. 유효 JWT → ``authorized`` (general 전 필드·``stt`` 포함).
+    ``regulated`` 는 부여하지 않음 — medical 등은 ``domain_floor`` 로 read 차단.
+    역할·Policy RBAC(OM ②)는 IdP·계정 도입 후 별 spec.
     """
-    return AUTHENTICATED.value if authenticated else PUBLIC.value
+    return AUTHORIZED.value if authenticated else PUBLIC.value
 
 
 def effective_field_tier(field_tier: str, domain: str) -> str:

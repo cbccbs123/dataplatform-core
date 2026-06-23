@@ -28,7 +28,7 @@ ANONYMOUS = Principal(
 def claims_to_principal(claims: dict[str, Any]) -> Principal:
     """검증된 JWT claims → ``Principal``.
 
-    MVP: ``sub`` → user_id, 유효 토큰이면 clearance ``authenticated``.
+    MVP: ``sub`` → user_id, 유효 토큰이면 clearance ``authorized`` (2-tier MVP).
     clearance 는 JWT payload 에 넣지 않음 — 검증 후 코드에서 부여.
     """
     user_id = claims.get("sub")

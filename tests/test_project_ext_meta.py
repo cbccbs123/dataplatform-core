@@ -5,9 +5,10 @@ import unittest
 
 from src.registry.access_tier import (
     AUTHENTICATED,
+    AUTHORIZED,
     PUBLIC,
-    project_ext_meta,
     principal_clearance,
+    project_ext_meta,
     tier_allows,
 )
 
@@ -16,8 +17,8 @@ class PrincipalClearanceTest(unittest.TestCase):
     def test_anonymous_is_public(self):
         self.assertEqual(principal_clearance(authenticated=False), PUBLIC)
 
-    def test_jwt_is_authenticated(self):
-        self.assertEqual(principal_clearance(authenticated=True), AUTHENTICATED)
+    def test_jwt_is_authorized(self):
+        self.assertEqual(principal_clearance(authenticated=True), AUTHORIZED)
 
 
 class TierAllowsTest(unittest.TestCase):
@@ -25,6 +26,9 @@ class TierAllowsTest(unittest.TestCase):
         self.assertTrue(tier_allows(AUTHENTICATED, PUBLIC))
         self.assertTrue(tier_allows(AUTHENTICATED, AUTHENTICATED))
         self.assertFalse(tier_allows(AUTHENTICATED, "authorized"))
+
+    def test_authorized_sees_authorized_tier(self):
+        self.assertTrue(tier_allows(AUTHORIZED, "authorized"))
 
 
 class ProjectExtMetaTest(unittest.TestCase):
@@ -35,16 +39,25 @@ class ProjectExtMetaTest(unittest.TestCase):
         out = project_ext_meta(ext, self._TIERS, domain="general", clearance=PUBLIC)
         self.assertEqual(out, {})
 
-    def test_authenticated_keeps_summary_hides_stt(self):
+    def test_jwt_clearance_keeps_all_general_keys_including_stt(self):
         ext = {"summary": "요약", "stt": "전문", "keywords": ["a"]}
-        out = project_ext_meta(ext, self._TIERS, domain="general", clearance=AUTHENTICATED)
-        self.assertEqual(out, {"summary": "요약", "keywords": ["a"]})
-        self.assertNotIn("stt", out)
+        out = project_ext_meta(
+            ext,
+            self._TIERS,
+            domain="general",
+            clearance=principal_clearance(authenticated=True),
+        )
+        self.assertEqual(out, ext)
 
-    def test_medical_floor_blocks_authenticated_on_general_tier_field(self):
+    def test_jwt_clearance_still_blocked_on_medical_floor(self):
         ext = {"summary": "요약"}
         tiers = {"summary": "authenticated"}
-        out = project_ext_meta(ext, tiers, domain="medical", clearance=AUTHENTICATED)
+        out = project_ext_meta(
+            ext,
+            tiers,
+            domain="medical",
+            clearance=principal_clearance(authenticated=True),
+        )
         self.assertEqual(out, {})
 
     def test_unlisted_key_passes_through(self):
