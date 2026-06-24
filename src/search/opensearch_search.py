@@ -46,7 +46,7 @@ from src.config.search_constants import (
     SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
 )
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
-from src.search.query_evidence import evidence_score, lexical_rescue_keep, strong_evidence_score
+from src.search.bucket_policy import apply_bucket_policy
 from src.search.query_plan import SearchPolicy, build_search_policy
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
@@ -617,84 +617,40 @@ def search_assets_os(
         knn_cosines = [knn_score_to_cosine(h.get("_score")) for h in knn_hits]
         top, baseline = gate_signal(knn_cosines)
 
-        has_lexical = any(r.get("_bm25") for r in fused)
-        # 029 augment(replace→augment): rerank 는 게이트를 **대체하지 않고** 그 위에 얹는다. 우선순위를
-        # 코드로 강제한다 — ① 디버그 우회(cutoff off → 게이트·컷·rerank 모두 off) → ② 버킷 게이트
-        # (passes_cutoff)가 '없음' 버킷을 먼저 비움(rerank 가 못 하는 분포 기반 거부 — 차단 23/24 보존)
-        # → ③ **통과 버킷 안에서만** rerank 가 cut_rows 를 대체(τ 선별·점수 재정렬). rerank 가 결과를
-        # 가르는 잎은 'cutoff_enabled ∧ gate_passed' 단 하나다 — 게이트 실패·어휘 구제·빈 버킷 잎은 불변.
-        rerank_info: dict[str, Any] | None = None  # gate_passed ∧ rerank 잎에서만 meta 에 부착(FR-007)
-        if not cutoff_enabled:
-            # 디버그 우회(FR-003): 게이트·per-result 컷·rerank 를 **모두 off** → 융합 전체 노출(약한
-            # 후보까지 관측). 우회를 게이트·rerank 보다 **먼저** 둬, 종전 replace 경로가 rerank 를 cutoff
-            # 검사보다 앞세워 숨겼던 모호성을 코드로 해소한다.
-            kept = fused
-            gate_passed = True
-            cut_count = 0
-        else:
-            gate_passed = passes_cutoff(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
-            if gate_passed:
-                # 선별 = 027 cut_rows(BM25 매칭 OR cos≥result_floor) — recall·no-match 차단 보존.
-                kept = cut_rows(fused, result_floor=result_floor)
-                cut_count = len(fused) - len(kept)
-                if rerank_enabled and kept:
-                    # augment(028 1순위·G3 정정): 리랭크는 cut_rows 생존자를 **재정렬만** 한다(대체 아님).
-                    # 융합 상위 R건을 (질의, 구조화 텍스트) 쌍으로 채점 → head 순서를 리랭크로 바꾸되
-                    # 융합 점수 분포는 보존(rerank_reorder). 기본 τ=0 은 드롭 0(재정렬만).
-                    kept, scores = rerank_reorder(
-                        kept, query, rerank_fn,
-                        top_r=rerank_top_r, tau=rerank_tau, model_name=rerank_model,
-                    )
-                    cut_count = len(fused) - len(kept)  # τ>0 선택적 드롭 반영(기본 τ=0 은 추가 컷 0).
-                    rerank_info = {
-                        "enabled": True, "scored": len(scores), "kept": len(kept),
-                        "top": (max(scores) if scores else 0.0),
-                    }
-            elif has_lexical and bm25_operator == "and":
-                # 044 evidence rescue: env off → 027 legacy(어휘 BM25 행 전부 keep). env on →
-                # matched_queries·policy 로 행 단위 keep/drop(FR-202). gate_passed 경로는 불변.
-                kept = []
-                for row in fused:
-                    if not row.get("_bm25"):
-                        continue
-                    keep, reason = lexical_rescue_keep(
-                        row.get("matched_queries"),
-                        policy=policy,
-                        rescue_enabled=evidence_rescue_enabled,
-                    )
-                    if keep:
-                        tagged = dict(row)
-                        tagged["_keep_reason"] = reason
-                        kept.append(tagged)
-                cut_count = len(fused) - len(kept)
-            else:
-                kept = []  # 어휘 증거도 없음 → 빈 버킷(no-match)
-                cut_count = len(fused) - len(kept)
-
-        # 내부키(_cos·_bm25·_rrtext·_keep_reason) 제거 + debug meta(FR-405) + 요청 k 상한.
-        clean: list[dict[str, Any]] = []
-        for row in kept[: int(k)]:
-            out_row = {
-                key: val
-                for key, val in row.items()
-                if key not in ("_cos", "_bm25", "_rrtext", "_keep_reason")
-            }
-            if evidence_debug:
-                mq = out_row.get("matched_queries")
-                out_row["evidence_score"] = evidence_score(mq)
-                out_row["strong_evidence_score"] = strong_evidence_score(mq)
-                out_row["gate_passed"] = gate_passed
-                out_row["keep_reason"] = row.get("_keep_reason") or (
-                    "gate_passed" if gate_passed else "unknown"
-                )
-            clean.append(out_row)
-        buckets[label] = clean
+        outcome = apply_bucket_policy(
+            fused,
+            query=query,
+            top=top,
+            baseline=baseline,
+            k=int(k),
+            cutoff_enabled=cutoff_enabled,
+            cutoff_eps=cutoff_eps,
+            cutoff_floor=cutoff_floor,
+            result_floor=result_floor,
+            bm25_operator=bm25_operator,
+            rerank_enabled=rerank_enabled,
+            rerank_fn=rerank_fn,
+            rerank_top_r=rerank_top_r,
+            rerank_tau=rerank_tau,
+            rerank_model=rerank_model,
+            policy=policy,
+            evidence_rescue_enabled=evidence_rescue_enabled,
+            evidence_debug=evidence_debug,
+            passes_cutoff_fn=passes_cutoff,
+            cut_rows_fn=cut_rows,
+            rerank_reorder_fn=rerank_reorder,
+        )
+        buckets[label] = outcome.rows
         gate_meta[label] = {
-            "top": top, "baseline": baseline, "gate_passed": gate_passed,
-            "lexical_evidence": has_lexical, "cut_count": cut_count, "error": sub_error,
+            "top": top,
+            "baseline": baseline,
+            "gate_passed": outcome.gate_passed,
+            "lexical_evidence": outcome.lexical_evidence,
+            "cut_count": outcome.cut_count,
+            "error": sub_error,
         }
-        if rerank_info is not None:
-            gate_meta[label]["rerank"] = rerank_info  # augment 관측: gate_passed ∧ rerank 잎에서만.
+        if outcome.rerank is not None:
+            gate_meta[label]["rerank"] = outcome.rerank
     return buckets, gate_meta
 
 
