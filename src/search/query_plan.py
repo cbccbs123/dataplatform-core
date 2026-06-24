@@ -37,16 +37,43 @@ def _normalize_token(text: str) -> str:
 def is_generic_single_term(
     q: str,
     *,
-    seed: tuple[str, ...] = sc.GENERIC_SINGLE_TERM_SEED,
+    seed: tuple[str, ...] | None = None,
 ) -> bool:
     """단일 일반어 seed + 1토큰 휴리스틱(공백 없음·len≤12)."""
+    effective = seed if seed is not None else resolve_generic_term_seed()
     token = q.strip()
     if not token or " " in token:
         return False
     if len(token) > 12:
         return False
     norm = _normalize_token(token)
-    return norm in {_normalize_token(s) for s in seed}
+    return norm in {_normalize_token(s) for s in effective}
+
+
+def merge_generic_term_seed(
+    base: tuple[str, ...],
+    extra: tuple[str, ...],
+) -> tuple[str, ...]:
+    """core seed + env extra — NFKC+casefold 중복 제거(결정적·base 우선)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in (*base, *extra):
+        norm = _normalize_token(raw)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(raw.strip())
+    return tuple(out)
+
+
+def resolve_generic_term_seed() -> tuple[str, ...]:
+    """settings 초기화 시 merge seed, 미초기화면 core 6개만."""
+    try:
+        from src.config.settings import get_current_settings
+
+        return get_current_settings().search_generic_term_seed
+    except RuntimeError:
+        return sc.GENERIC_SINGLE_TERM_SEED
 
 
 def build_search_policy(q: str, mode: str = "auto") -> SearchPolicy:
@@ -99,5 +126,7 @@ __all__ = [
     "build_query_plan",
     "build_search_policy",
     "is_generic_single_term",
+    "merge_generic_term_seed",
+    "resolve_generic_term_seed",
     "search_plan_to_meta",
 ]

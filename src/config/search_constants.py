@@ -100,6 +100,9 @@ GENERIC_SINGLE_TERM_SEED: tuple[str, ...] = (
     "sample",
     "demo",
 )
+# 045 v2a: 운영 추가 seed — ``SEARCH_GENERIC_TERM_SEED_EXTRA`` env(콤마 구분). 미설정 시 빈.
+# merge·dedup은 ``query_plan.merge_generic_term_seed`` · settings ``search_generic_term_seed``.
+SEARCH_GENERIC_TERM_SEED_EXTRA_ENV = "SEARCH_GENERIC_TERM_SEED_EXTRA"
 #
 # ── env 토글 기본값 (settings ``SEARCH_EVIDENCE_*`` 로 덮어씀) ───────────────
 SEARCH_EVIDENCE_DEBUG_DEFAULT: bool = False
@@ -122,6 +125,7 @@ __all__ = [
     "EVIDENCE_NORMAL_THRESHOLD",
     "EVIDENCE_RESTRICTED_STRONG_THRESHOLD",
     "GENERIC_SINGLE_TERM_SEED",
+    "SEARCH_GENERIC_TERM_SEED_EXTRA_ENV",
     "OS_BM25_OPERATOR_DEFAULT",
     "OS_CUTOFF_ENABLED_DEFAULT",
     "OS_CUTOFF_EPS_DEFAULT",

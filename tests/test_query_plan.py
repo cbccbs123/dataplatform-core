@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from src.search.query_plan import build_search_policy, is_generic_single_term
+from src.search.query_plan import (
+    build_search_policy,
+    is_generic_single_term,
+    merge_generic_term_seed,
+)
 
 
 class BuildSearchPolicyTest(unittest.TestCase):
@@ -47,6 +51,18 @@ class QueryPlanSuggestionsTest(unittest.TestCase):
 
         plan = build_query_plan("무선충전기")
         self.assertEqual(plan.suggestions, ())
+
+
+class MergeGenericTermSeedTest(unittest.TestCase):
+    def test_dedup_casefold(self) -> None:
+        merged = merge_generic_term_seed(("test",), ("TEST", "foo"))
+        self.assertEqual(merged, ("test", "foo"))
+
+    def test_extra_seed_is_generic(self) -> None:
+        seed = merge_generic_term_seed((), ("foo", "bar"))
+        self.assertTrue(is_generic_single_term("foo", seed=seed))
+        self.assertTrue(is_generic_single_term("bar", seed=seed))
+        self.assertFalse(is_generic_single_term("foobar", seed=seed))
 
 
 if __name__ == "__main__":

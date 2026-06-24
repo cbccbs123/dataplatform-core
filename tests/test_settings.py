@@ -70,6 +70,7 @@ _BACKEND_KEYS = (
     # 또한 정합 가드(backend=opensearch ∧ ¬sync → ValueError)가 _build_settings 를 부르는 모든 케이스에
     # 결정적으로 통과하도록(미설정 → 기본 True) 격리한다.
     "OPENSEARCH_SYNC_ENABLED",
+    "SEARCH_GENERIC_TERM_SEED_EXTRA",
 )
 
 
@@ -565,6 +566,47 @@ class TestOpenSearchSyncGuard(unittest.TestCase):
             settings = _build_settings("dev")
         self.assertIs(settings.opensearch_sync_enabled, True)
         self.assertEqual(settings.search_backend, "opensearch")
+
+
+class TestGenericTermSeedExtra(unittest.TestCase):
+    """045 v2a — ``SEARCH_GENERIC_TERM_SEED_EXTRA`` env merge."""
+
+    def test_default_is_core_seed_only(self) -> None:
+        with _env():
+            settings = _build_settings("dev")
+        self.assertEqual(
+            settings.search_generic_term_seed,
+            search_constants.GENERIC_SINGLE_TERM_SEED,
+        )
+
+    def test_extra_env_merges_and_dedups(self) -> None:
+        with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,bar,TEST"):
+            settings = _build_settings("dev")
+        seed = settings.search_generic_term_seed
+        self.assertIn("foo", seed)
+        self.assertIn("bar", seed)
+        self.assertIn("test", seed)
+        self.assertIn("테스트", seed)
+
+    def test_extra_seed_restricted_policy(self) -> None:
+        from src.search import query_plan
+        from src.search.query_plan import build_search_policy
+
+        with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,bar"):
+            settings = _build_settings("dev")
+        with mock.patch.object(
+            query_plan,
+            "resolve_generic_term_seed",
+            return_value=settings.search_generic_term_seed,
+        ):
+            p = build_search_policy("foo")
+        self.assertTrue(p.generic_single_term)
+        self.assertEqual(p.lexical_rescue, "restricted")
+
+    def test_blank_extra_entry_raises(self) -> None:
+        with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,,bar"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
 
 
 if __name__ == "__main__":

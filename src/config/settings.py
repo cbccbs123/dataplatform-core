@@ -116,6 +116,8 @@ class PipelineSettings:
     # env ``SEARCH_EVIDENCE_DEBUG``. True 시 검색 결과 각 hit 에 ``matched_queries``·
     # ``evidence_score``·``strong_evidence_score``·``gate_passed``·``keep_reason`` 부착(run_search·
     # search_hybrid 경로). 스모크·골든 원인 분석용 — 운영 기본 off.
+    # 045 v2a: ``SEARCH_GENERIC_TERM_SEED_EXTRA`` + core seed merge(NFKC dedup) — ``query_plan`` resolver.
+    search_generic_term_seed: tuple[str, ...]
     # 026: OS 색인 빌더 교정용 선택 설정(021/023 동형 — 미설정 시 기존 동작 불변). 모두 OS 색인 한정
     # (pg FTS 무접촉). opensearch_nori_user_words = 커스텀 nori analyzer 의 user_dictionary 외래어 목록
     # (build_index_body 기본과 동치). opensearch_filename_noise_patterns = 파일명 정제 추가 regex(기본 빈).
@@ -361,6 +363,29 @@ def resolve_opensearch_nori_user_words() -> tuple[str, ...]:
     return tuple(words)
 
 
+def resolve_search_generic_term_seed_extra() -> tuple[str, ...]:
+    """045 v2a — ``SEARCH_GENERIC_TERM_SEED_EXTRA`` CSV. 미설정 시 빈. 공백 항목은 fail-fast."""
+    raw = os.getenv(search_constants.SEARCH_GENERIC_TERM_SEED_EXTRA_ENV)
+    if raw is None or not raw.strip():
+        return ()
+    parts = [p.strip() for p in raw.split(",")]
+    if any(not p for p in parts):
+        raise ValueError(
+            f"generic seed 빈 항목: {search_constants.SEARCH_GENERIC_TERM_SEED_EXTRA_ENV}={raw!r}"
+        )
+    return tuple(parts)
+
+
+def resolve_search_generic_term_seed() -> tuple[str, ...]:
+    """core ``GENERIC_SINGLE_TERM_SEED`` + env extra merge(결정적 dedup)."""
+    from src.search.query_plan import merge_generic_term_seed
+
+    return merge_generic_term_seed(
+        search_constants.GENERIC_SINGLE_TERM_SEED,
+        resolve_search_generic_term_seed_extra(),
+    )
+
+
 def resolve_opensearch_filename_noise_patterns() -> tuple[str, ...]:
     """파일명 정제 추가 잡음 regex 목록(026 FR-003③). ``OPENSEARCH_FILENAME_NOISE_PATTERNS="re1,re2"``
     CSV, 미설정 시 **빈 목록**(기본 정제는 clean_file_name 의 ID스러움 판정). 공백 항목·컴파일 불가
@@ -486,6 +511,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_evidence_debug=_env_bool_default(
             "SEARCH_EVIDENCE_DEBUG", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
         ),
+        search_generic_term_seed=resolve_search_generic_term_seed(),
         # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.
         # 빈 항목·컴파일 불가 패턴은 resolver 가 _build_settings 시점에 즉시 ValueError(fail-fast).
         opensearch_nori_user_words=resolve_opensearch_nori_user_words(),
