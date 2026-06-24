@@ -23,12 +23,13 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+from src.search.filter_index_fields import build_filter_index_fields
 
 # ── 읽기전용 SELECT (FR-004, 헌법 6조) — 원본 PG 무수정 ──
 # registered 자산 + 메타(LEFT JOIN) + 활성 채널 청크 **평균 임베딩**(avg, 자산당 1행)을 한 행으로 모은다.
 # avg(embedding) 은 pgvector 집계(>=0.5.0). 임베딩 없는 자산은 INNER JOIN 으로 자연 제외(→ 색인 대상 아님).
 _ASSET_SELECT = """
-SELECT a.asset_id, a.modality, a.domain_label, a.status, a.fs_path,
+SELECT a.asset_id, a.modality, a.domain_label, a.status, a.fs_path, a.created_at,
        am.ext_meta, e.emb AS emb, e.n AS chunk_count
 FROM asset a
 LEFT JOIN asset_metadata am ON am.asset_id = a.asset_id
@@ -212,6 +213,17 @@ def build_index_body(
                 "labels": {"type": "keyword"},
                 "search_text": {"type": "text", "analyzer": "nori_user"},
                 "chunk_count": {"type": "integer"},
+                "filter_kw": {
+                    "properties": {
+                        "file_ext": {"type": "keyword"},
+                        "source_dataset": {"type": "keyword"},
+                    }
+                },
+                "filter_date": {
+                    "properties": {
+                        "created_at": {"type": "date"},
+                    }
+                },
                 "embedding": {
                     "type": "knn_vector",
                     "dimension": dim,
@@ -289,6 +301,12 @@ def asset_to_doc(
     vec = parse_vector(row["emb"])
     if any(x != 0.0 for x in vec):
         doc["embedding"] = vec
+    doc.update(
+        build_filter_index_fields(
+            fs_path=str(row.get("fs_path") or ""),
+            created_at=row.get("created_at"),
+        )
+    )
     return doc
 
 

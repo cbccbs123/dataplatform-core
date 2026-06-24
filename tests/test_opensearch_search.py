@@ -20,6 +20,7 @@ IO seam: ``search_assets_os``(질의 1회 임베딩 → 전 모달리티 [knn+bm
 from __future__ import annotations
 
 import unittest
+from datetime import date
 
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.opensearch_search import (
@@ -38,6 +39,7 @@ from src.search.opensearch_search import (
     rerank_reorder,
     search_assets_os,
 )
+from src.search.search_filters import SearchFilters
 
 # 044: named query should 절 — boost는 clause boost 로 계승.
 _BM25_FIELD_BOOSTS = {
@@ -435,6 +437,18 @@ class BuildBm25BodyTest(unittest.TestCase):
         body = build_bm25_body(self.query, modality_values=["audio"], k=10)
         self.assertIn({"terms": {"modality": ["audio"]}}, body["query"]["bool"]["filter"])
 
+    def test_search_filters_in_bool_filter(self) -> None:
+        filters = SearchFilters(file_exts=("txt",), source_datasets=("wikipedia",))
+        body = build_bm25_body(
+            self.query,
+            modality_values=["txt"],
+            k=10,
+            search_filters=filters,
+        )
+        flt = body["query"]["bool"]["filter"]
+        self.assertIn({"terms": {"filter_kw.file_ext": ["txt"]}}, flt)
+        self.assertIn({"terms": {"filter_kw.source_dataset": ["wikipedia"]}}, flt)
+
 
 class BuildKnnBodyTest(unittest.TestCase):
     """T003/FR-001: plain kNN 서브검색 본문(게이트 신호용) — native pre-filter·의료 must_not."""
@@ -467,6 +481,17 @@ class BuildKnnBodyTest(unittest.TestCase):
     def test_include_medical_when_disabled(self) -> None:
         body = build_knn_body(self.vector, modality_values=["text"], k=10, exclude_medical=False)
         self.assertNotIn("must_not", body["query"]["knn"]["embedding"]["filter"]["bool"])
+
+    def test_search_filters_in_knn_prefilter(self) -> None:
+        filters = SearchFilters(created_from=date(2026, 1, 1))
+        body = build_knn_body(
+            self.vector,
+            modality_values=["text"],
+            k=10,
+            search_filters=filters,
+        )
+        flt = body["query"]["knn"]["embedding"]["filter"]["bool"]["filter"]
+        self.assertIn({"range": {"filter_date.created_at": {"gte": "2026-01-01"}}}, flt)
 
 
 # ──────────────────────────────────────────────────────────────────────────

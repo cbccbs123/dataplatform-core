@@ -62,6 +62,7 @@ from src.portal.download import (
 from src.portal.search_group import group_ranked
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
+from src.search.search_filters import parse_search_filters
 from src.search.search_service import search_hybrid
 
 _ENV = os.getenv("PORTAL_API_ENV", "dev")
@@ -221,6 +222,12 @@ def search(
     ),
     size: int = Query(20, ge=1, le=100, description="모달리티별 최대 결과 수(top-N)"),
     mode: str = Query("auto", description="검색 모드: auto(기본) | keyword(단어 포함 문서)"),
+    file_ext: list[str] | None = Query(None, description="파일 확장자 필터(반복 가능, 예: txt,pdf)"),
+    source_dataset: list[str] | None = Query(
+        None, description="출처 데이터셋 필터(반복 가능: data1~3, wikipedia, youtube, unknown)"
+    ),
+    created_from: str | None = Query(None, description="생성일 하한(YYYY-MM-DD 또는 ISO datetime, UTC)"),
+    created_to: str | None = Query(None, description="생성일 상한(YYYY-MM-DD 또는 ISO datetime, UTC)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003).
@@ -233,6 +240,12 @@ def search(
     """
     mods = _parse_modalities(modalities)
     search_mode = _parse_search_mode(mode)
+    search_filters = parse_search_filters(
+        file_ext=file_ext,
+        source_dataset=source_dataset,
+        created_from=created_from,
+        created_to=created_to,
+    )
 
     # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
     # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
@@ -242,6 +255,7 @@ def search(
         limit_per_bucket=_SEARCH_LIMIT_PER_BUCKET,
         min_scores=_search_min_scores(),
         search_mode=search_mode,
+        search_filters=search_filters,
     )
 
     # FR-014: 버킷별 의료 배제 + 모달리티별 독립 랭킹·top-N. results 는 {modality: [rows]}.
@@ -262,6 +276,17 @@ def search(
     search_plan = (result.get("meta") or {}).get("search_plan")
     if search_plan is not None:
         meta["search_plan"] = search_plan
+    if search_filters is not None:
+        meta["filters"] = {
+            "file_ext": list(search_filters.file_exts),
+            "source_dataset": list(search_filters.source_datasets),
+            "created_from": search_filters.created_from.isoformat()
+            if search_filters.created_from is not None
+            else None,
+            "created_to": search_filters.created_to.isoformat()
+            if search_filters.created_to is not None
+            else None,
+        }
 
     return {
         "query": q,

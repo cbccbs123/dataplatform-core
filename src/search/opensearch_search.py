@@ -48,6 +48,7 @@ from src.config.search_constants import (
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.bucket_policy import apply_bucket_policy
 from src.search.query_plan import SearchPolicy, build_search_policy
+from src.search.search_filters import SearchFilters, filters_to_opensearch_bool
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
 # 주의: labels 는 매핑상 keyword 지만 plan §1 이 multi_match 대상에 포함한다 — multi_match 는 keyword
@@ -111,6 +112,7 @@ def build_bm25_body(
     k: int,
     operator: str = "or",
     exclude_medical: bool = True,
+    search_filters: SearchFilters | None = None,
 ) -> dict[str, Any]:
     """BM25 필드별 named query 서브검색 본문(순수·결정적, 027 FR-001 · 044 FR-101).
 
@@ -119,6 +121,7 @@ def build_bm25_body(
     전 토큰 매칭(025 FR-001). ``labels`` 는 keyword ``term``(+ casefold). ``size`` 는 ``k``.
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
+    filters.extend(filters_to_opensearch_bool(search_filters))
     label_term = query.strip().casefold()
 
     def _match(field: str, boost: float, _name: str) -> dict[str, Any]:
@@ -152,6 +155,7 @@ def build_knn_body(
     modality_values: Collection[str],
     k: int,
     exclude_medical: bool = True,
+    search_filters: SearchFilters | None = None,
 ) -> dict[str, Any]:
     """plain kNN 단독 서브검색 본문(순수·결정적, 027 FR-001 — 게이트 신호용 kNN 표본 통합).
 
@@ -163,6 +167,7 @@ def build_knn_body(
     실OS 발견)를 막고, 그 모달리티 안에서 k 최근접을 뽑는다. ``size`` 는 ``k``(게이트 표본 하한 적용은 호출부).
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
+    filters.extend(filters_to_opensearch_bool(search_filters))
     knn_filter: dict[str, Any] = {"bool": {"filter": filters}}
     if exclude_medical:
         knn_filter["bool"]["must_not"] = [{"term": {"domain_label": _MEDICAL_LABEL}}]
@@ -529,6 +534,7 @@ def search_assets_os(
     search_policy: SearchPolicy | None = None,
     evidence_rescue_enabled: bool = SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
     evidence_debug: bool = SEARCH_EVIDENCE_DEBUG_DEFAULT,
+    search_filters: SearchFilters | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
 
@@ -587,11 +593,13 @@ def search_assets_os(
         values = _MODALITY_VALUES.get(label, frozenset({label}))
         label_values.append(values)
         knn_body = build_knn_body(
-            query_vector, modality_values=values, k=sample_k, exclude_medical=exclude_medical
+            query_vector, modality_values=values, k=sample_k, exclude_medical=exclude_medical,
+            search_filters=search_filters,
         )
         bm25_body = build_bm25_body(
             query, modality_values=values, k=int(k),
             operator=bm25_operator, exclude_medical=exclude_medical,
+            search_filters=search_filters,
         )
         msearch_body.extend(({"index": index}, knn_body, {"index": index}, bm25_body))
 

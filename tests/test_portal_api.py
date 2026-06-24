@@ -205,6 +205,28 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         mock_search.assert_not_called()
 
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_passes_v1_filters(self, mock_search) -> None:
+        mock_search.return_value = _fake_search_result()
+        resp = self.client.get(
+            "/search",
+            params=[
+                ("q", "회식"),
+                ("file_ext", "txt"),
+                ("file_ext", "pdf"),
+                ("source_dataset", "wikipedia"),
+                ("created_from", "2026-01-01"),
+                ("created_to", "2026-06-30"),
+            ],
+        )
+        self.assertEqual(resp.status_code, 200)
+        sf = mock_search.call_args.kwargs["search_filters"]
+        self.assertEqual(sf.file_exts, ("pdf", "txt"))
+        self.assertEqual(sf.source_datasets, ("wikipedia",))
+        meta_filters = resp.json()["meta"]["filters"]
+        self.assertEqual(meta_filters["file_ext"], ["pdf", "txt"])
+        self.assertEqual(meta_filters["source_dataset"], ["wikipedia"])
+
 
 class TestAssetDetail(unittest.TestCase):
     """``/assets/{id}`` — 상세 200 / 노출 게이트 404."""

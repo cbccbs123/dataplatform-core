@@ -32,6 +32,7 @@ from src.config.settings import (
 from src.search.opensearch_search import get_client as os_get_client
 from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
+from src.search.search_filters import SearchFilters
 from src.search.query_plan import build_query_plan, search_plan_to_meta
 
 _LOG = logging.getLogger(__name__)
@@ -96,6 +97,7 @@ def _grouped_via_opensearch(
     os_client_fn: Callable[..., Any],
     query_norm_fn: Callable[[str], str] | None = None,
     search_mode: str = "auto",
+    search_filters: SearchFilters | None = None,
 ) -> dict[str, Any]:
     """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
 
@@ -201,6 +203,7 @@ def _grouped_via_opensearch(
         evidence_debug=getattr(
             cfg, "search_evidence_debug", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
         ),
+        search_filters=search_filters,
     )  # client.msearch 미도달 예외도 전파(FR-007)
     # meta 에 게이트 관측성(os_gate) + search_plan(044 FR-303) 합류.
     grouped: dict[str, Any] = {
@@ -245,6 +248,7 @@ def search_hybrid(
     _os_client_fn: Callable[..., Any] = os_get_client,
     _query_norm_fn: Callable[[str], str] | None = None,
     search_mode: str = "auto",
+    search_filters: SearchFilters | None = None,
 ) -> dict[str, Any]:
     """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
@@ -327,6 +331,7 @@ def search_hybrid(
         os_client_fn=_os_client_fn,
         query_norm_fn=_query_norm_fn,
         search_mode=search_mode,
+        search_filters=search_filters,
     )
     # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 수행하므로
     # 호출부 필터는 적용하지 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에

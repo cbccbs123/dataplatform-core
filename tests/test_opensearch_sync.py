@@ -151,6 +151,18 @@ class TestAssetToDoc(unittest.TestCase):
         doc = asset_to_doc(self._row(emb="[0.0,0.1,0.0]"), channel="st")
         self.assertEqual(doc["embedding"], [0.0, 0.1, 0.0])
 
+    def test_filter_index_fields_from_row(self) -> None:
+        row = self._row(
+            fs_path="/sample_data/data3/foo.stt.txt",
+            created_at="2026-01-20T08:00:00+00:00",
+        )
+        doc = asset_to_doc(row, channel="st")
+        self.assertEqual(
+            doc["filter_kw"],
+            {"file_ext": "txt", "source_dataset": "data3"},
+        )
+        self.assertEqual(doc["filter_date"], {"created_at": "2026-01-20"})
+
 
 class TestCleanFileName(unittest.TestCase):
     """T004(FR-003②): 파일명 정제 — ID스러움(유튜브 ID 등) 토큰만 보수적으로 제거.
@@ -216,6 +228,9 @@ class TestIndexBody(unittest.TestCase):
         # 메타 필터는 keyword.
         for k in ("asset_id", "modality", "domain_label", "status", "channel"):
             self.assertEqual(props[k]["type"], "keyword")
+        self.assertEqual(props["filter_kw"]["properties"]["file_ext"]["type"], "keyword")
+        self.assertEqual(props["filter_kw"]["properties"]["source_dataset"]["type"], "keyword")
+        self.assertEqual(props["filter_date"]["properties"]["created_at"]["type"], "date")
 
     def test_custom_nori_analyzer_with_user_dictionary(self) -> None:
         # T006(FR-004): settings.analysis 에 nori_tokenizer + user_dictionary_rules 기반 커스텀
