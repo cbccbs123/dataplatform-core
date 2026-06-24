@@ -227,6 +227,15 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(meta_filters["file_ext"], ["pdf", "txt"])
         self.assertEqual(meta_filters["source_dataset"], ["wikipedia"])
 
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_invalid_date_returns_422(self, mock_search) -> None:
+        resp = self.client.get(
+            "/search",
+            params=[("q", "테스트"), ("created_from", "not-a-date")],
+        )
+        self.assertEqual(resp.status_code, 422)
+        mock_search.assert_not_called()
+
 
 class TestAssetDetail(unittest.TestCase):
     """``/assets/{id}`` — 상세 200 / 노출 게이트 404."""

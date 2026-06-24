@@ -585,8 +585,7 @@ class TestGenericTermSeedExtra(unittest.TestCase):
         seed = settings.search_generic_term_seed
         self.assertIn("foo", seed)
         self.assertIn("bar", seed)
-        self.assertIn("test", seed)
-        self.assertIn("테스트", seed)
+        self.assertEqual(len(seed), len(search_constants.GENERIC_SINGLE_TERM_SEED) + 2)
 
     def test_extra_seed_restricted_policy(self) -> None:
         from src.search import query_plan

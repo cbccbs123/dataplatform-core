@@ -240,12 +240,15 @@ def search(
     """
     mods = _parse_modalities(modalities)
     search_mode = _parse_search_mode(mode)
-    search_filters = parse_search_filters(
-        file_ext=file_ext,
-        source_dataset=source_dataset,
-        created_from=created_from,
-        created_to=created_to,
-    )
+    try:
+        search_filters = parse_search_filters(
+            file_ext=file_ext,
+            source_dataset=source_dataset,
+            created_from=created_from,
+            created_to=created_to,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"필터 파라미터 형식 오류: {exc}") from exc
 
     # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
     # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
