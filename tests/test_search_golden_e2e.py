@@ -25,7 +25,7 @@ class GoldenFixtureSchemaTest(unittest.TestCase):
 
     def test_query_categories_and_fields(self) -> None:
         qs = self.golden["queries"]
-        self.assertGreaterEqual(len(qs), 58)
+        self.assertGreaterEqual(len(qs), 59)
         for q in qs:
             self.assertIn(q["category"], {"present", "absent", "edge"})
             if q["category"] == "absent":

@@ -170,6 +170,12 @@
    "note": "다이어트_식단 2"
   },
   {
+   "id": "P29",
+   "query": "낚시 준비물",
+   "category": "present",
+   "note": "045 gate_passed·준비물 교차토픽(캠핑/등산 노이즈) — 위키낚시+낚시_방법"
+  },
+  {
    "id": "A01",
    "query": "아이패드",
    "category": "absent",
