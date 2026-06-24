@@ -42,8 +42,12 @@ from src.config.search_constants import (
     OS_RERANK_TAU_DEFAULT,
     OS_RERANK_TOP_R_DEFAULT,
     OS_RESULT_FLOOR_DEFAULT,
+    SEARCH_EVIDENCE_DEBUG_DEFAULT,
+    SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
 )
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
+from src.search.query_evidence import evidence_score, lexical_rescue_keep, strong_evidence_score
+from src.search.query_plan import SearchPolicy, build_search_policy
 
 # 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
 # 주의: labels 는 매핑상 keyword 지만 plan §1 이 multi_match 대상에 포함한다 — multi_match 는 keyword
@@ -58,6 +62,15 @@ _TEXT_FIELDS: tuple[str, ...] = (
     "labels^1",
     "file_name^0.5",
     "search_text",
+)
+
+# 044 FR-101: named query _name 고정 집합(build_bm25_body bool.should).
+BM25_NAMED_QUERY_NAMES: tuple[str, ...] = (
+    "hit_keywords",
+    "hit_labels",
+    "hit_file_name",
+    "hit_summary",
+    "hit_search_text",
 )
 
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
@@ -99,24 +112,38 @@ def build_bm25_body(
     operator: str = "or",
     exclude_medical: bool = True,
 ) -> dict[str, Any]:
-    """BM25 multi_match 단독 서브검색 본문(순수·결정적, 027 FR-001).
+    """BM25 필드별 named query 서브검색 본문(순수·결정적, 027 FR-001 · 044 FR-101).
 
-    027 클라이언트 융합 전환: 종전 서버 hybrid 쿼리의 텍스트 서브쿼리를 **독립
-    검색 본문**으로 떼어낸다 — msearch 의 한 서브검색으로 보내 BM25 원시 ``_score`` 를 그대로 받아
-    클라이언트(fuse_hybrid)가 min-max 정규화·가중평균한다(파이프라인 소거). 구성은 026 계승:
-    boost 차등 ``_TEXT_FIELDS``(summary^3…file_name^0.5), modality terms 필터, 의료 ``must_not``.
-
-    operator='and' 면 전 nori 토큰 매칭 강제(025 FR-001 — 복합어 가짜매칭 차단). 기본 'or' 는
-    operator 키를 생략해 현행 본문과 바이트 동일(회귀 0). ``size`` 는 ``k``(요청 버킷 한도).
+    044: ``multi_match`` 대신 ``bool.should`` + ``_name`` 으로 ``matched_queries`` 관측.
+    boost 차등(summary^3…file_name^0.5)은 clause ``boost`` 로 계승. operator='and' 면 match 절에
+    전 토큰 매칭(025 FR-001). ``labels`` 는 keyword ``term``(+ casefold). ``size`` 는 ``k``.
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
-    mm: dict[str, Any] = {"query": query, "fields": list(_TEXT_FIELDS)}
-    if operator != "or":
-        mm["operator"] = operator
-    clause: dict[str, Any] = {"must": [{"multi_match": mm}], "filter": filters}
+    label_term = query.strip().casefold()
+
+    def _match(field: str, boost: float, _name: str) -> dict[str, Any]:
+        inner: dict[str, Any] = {"query": query, "_name": _name}
+        if boost != 1.0:
+            inner["boost"] = boost
+        if operator != "or":
+            inner["operator"] = operator
+        return {"match": {field: inner}}
+
+    should: list[dict[str, Any]] = [
+        _match("keywords", 2.0, "hit_keywords"),
+        {"term": {"labels": {"value": label_term, "_name": "hit_labels", "boost": 1.0}}},
+        _match("file_name", 0.5, "hit_file_name"),
+        _match("summary", 3.0, "hit_summary"),
+        _match("search_text", 1.0, "hit_search_text"),
+    ]
+    bool_clause: dict[str, Any] = {
+        "should": should,
+        "minimum_should_match": 1,
+        "filter": filters,
+    }
     if exclude_medical:
-        clause["must_not"] = [{"term": {"domain_label": _MEDICAL_LABEL}}]
-    return {"size": int(k), "query": {"bool": clause}}
+        bool_clause["must_not"] = [{"term": {"domain_label": _MEDICAL_LABEL}}]
+    return {"size": int(k), "query": {"bool": bool_clause}}
 
 
 def build_knn_body(
@@ -420,7 +447,7 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
     """
     src = hit.get("_source") or {}
     asset_id = src.get("asset_id") or hit.get("_id")
-    return {
+    row: dict[str, Any] = {
         "id": str(asset_id) if asset_id is not None else None,
         "file_uri": str(src.get("fs_uri") or ""),
         "modality": src.get("modality"),
@@ -428,6 +455,10 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
         "summary": str(src.get("summary") or ""),
         "similarity": _safe_float(hit.get("_score"), 0.0),
     }
+    mq = hit.get("matched_queries")
+    if mq is not None:
+        row["matched_queries"] = [str(x) for x in mq]
+    return row
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -494,6 +525,10 @@ def search_assets_os(
     rerank_fn: Callable[..., list[float]] | None = None,
     query_norm_enabled: bool = OS_QUERY_NORM_ENABLED_DEFAULT,
     query_norm_fn: Callable[[str], str] | None = None,
+    search_mode: str = "auto",
+    search_policy: SearchPolicy | None = None,
+    evidence_rescue_enabled: bool = SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
+    evidence_debug: bool = SEARCH_EVIDENCE_DEBUG_DEFAULT,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
 
@@ -538,6 +573,7 @@ def search_assets_os(
     if query_norm_enabled and norm_fn is None:
         from src.search.query_preprocess import noun_phrase_query as norm_fn
     query = normalize_query(query, enabled=query_norm_enabled, llm_fn=norm_fn)
+    policy = search_policy or build_search_policy(query, mode=search_mode)
     query_vector = embed_fn(query, channel=channel)
     sample_k = max(int(k), OS_KNN_SAMPLE_K)  # 게이트 표본 하한(robust baseline 안정용).
 
@@ -615,22 +651,43 @@ def search_assets_os(
                         "top": (max(scores) if scores else 0.0),
                     }
             elif has_lexical and bm25_operator == "and":
-                # 어휘 구제(027 정밀화·rerank 무관·불변): 코사인 게이트가 실패해도 BM25 증거 행은 살린다
-                # — 약한-있음 토픽(자산 수 적어 코사인 신호 약함·어휘는 정확)이 인접-없음보다 버킷
-                # 통계상 약해지는 역전을 행 단위 증거로 해소. 단 ① 구제 시엔 **어휘 증거 행만** 남기고
-                # (cos-only 배제), ② **operator='and'(전 토큰 매칭)일 때만** 적용한다 — 'or' 매칭은
-                # 단일 토큰 우연 일치도 _bm25=True 라 증거 강도가 없어 무관 결과가 구제를 타고 누수된다.
-                kept = [r for r in fused if r.get("_bm25")]
+                # 044 evidence rescue: env off → 027 legacy(어휘 BM25 행 전부 keep). env on →
+                # matched_queries·policy 로 행 단위 keep/drop(FR-202). gate_passed 경로는 불변.
+                kept = []
+                for row in fused:
+                    if not row.get("_bm25"):
+                        continue
+                    keep, reason = lexical_rescue_keep(
+                        row.get("matched_queries"),
+                        policy=policy,
+                        rescue_enabled=evidence_rescue_enabled,
+                    )
+                    if keep:
+                        tagged = dict(row)
+                        tagged["_keep_reason"] = reason
+                        kept.append(tagged)
                 cut_count = len(fused) - len(kept)
             else:
                 kept = []  # 어휘 증거도 없음 → 빈 버킷(no-match)
                 cut_count = len(fused) - len(kept)
 
-        # 내부키(_cos·_bm25·_rrtext) 제거 + 요청 k 상한(응답 동형·구 size=k 계약 보존).
-        clean = [
-            {key: val for key, val in row.items() if key not in ("_cos", "_bm25", "_rrtext")}
-            for row in kept[: int(k)]
-        ]
+        # 내부키(_cos·_bm25·_rrtext·_keep_reason) 제거 + debug meta(FR-405) + 요청 k 상한.
+        clean: list[dict[str, Any]] = []
+        for row in kept[: int(k)]:
+            out_row = {
+                key: val
+                for key, val in row.items()
+                if key not in ("_cos", "_bm25", "_rrtext", "_keep_reason")
+            }
+            if evidence_debug:
+                mq = out_row.get("matched_queries")
+                out_row["evidence_score"] = evidence_score(mq)
+                out_row["strong_evidence_score"] = strong_evidence_score(mq)
+                out_row["gate_passed"] = gate_passed
+                out_row["keep_reason"] = row.get("_keep_reason") or (
+                    "gate_passed" if gate_passed else "unknown"
+                )
+            clean.append(out_row)
         buckets[label] = clean
         gate_meta[label] = {
             "top": top, "baseline": baseline, "gate_passed": gate_passed,

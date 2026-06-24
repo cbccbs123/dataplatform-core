@@ -32,6 +32,7 @@ from src.config.settings import (
 from src.search.opensearch_search import get_client as os_get_client
 from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
+from src.search.query_plan import build_query_plan, search_plan_to_meta
 
 _LOG = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ def _grouped_via_opensearch(
     os_search_fn: Callable[..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]],
     os_client_fn: Callable[..., Any],
     query_norm_fn: Callable[[str], str] | None = None,
+    search_mode: str = "auto",
 ) -> dict[str, Any]:
     """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
 
@@ -134,7 +136,16 @@ def _grouped_via_opensearch(
 
     if not requested:
         # 빈 요청: OS 미접촉(불필요 IO 회피). os_gate 도 빈 dict(검색 안 함).
-        return {"meta": {"backend": "opensearch", "os_gate": {}}}
+        plan = build_query_plan(query, mode=search_mode)
+        return {
+            "meta": {
+                "backend": "opensearch",
+                "os_gate": {},
+                "search_plan": search_plan_to_meta(plan),
+            },
+        }
+
+    plan = build_query_plan(query, mode=search_mode)
 
     # disable_os_cutoff(디버그 우회)면 게이트·컷 모두 off. 아니면 cfg 의 enabled(미초기화 폴백=운영 기본).
     cutoff_enabled = (
@@ -182,9 +193,23 @@ def _grouped_via_opensearch(
         rerank_top_r=getattr(cfg, "search_os_rerank_top_r", search_constants.OS_RERANK_TOP_R_DEFAULT),
         rerank_tau=getattr(cfg, "search_os_rerank_tau", search_constants.OS_RERANK_TAU_DEFAULT),
         rerank_model=getattr(cfg, "search_os_rerank_model", search_constants.OS_RERANK_MODEL_DEFAULT),
+        search_mode=search_mode,
+        search_policy=plan.policy,
+        evidence_rescue_enabled=getattr(
+            cfg, "search_evidence_rescue_enabled", search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT
+        ),
+        evidence_debug=getattr(
+            cfg, "search_evidence_debug", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
+        ),
     )  # client.msearch 미도달 예외도 전파(FR-007)
-    # meta 에 게이트 관측성(os_gate) 합류 — 빈 버킷이 no-match 판정인지 즉시 확인(F4).
-    grouped: dict[str, Any] = {"meta": {"backend": "opensearch", "os_gate": gate_meta}}
+    # meta 에 게이트 관측성(os_gate) + search_plan(044 FR-303) 합류.
+    grouped: dict[str, Any] = {
+        "meta": {
+            "backend": "opensearch",
+            "os_gate": gate_meta,
+            "search_plan": search_plan_to_meta(plan),
+        },
+    }
     # 029 query-norm 관측성(FR-007): on 일 때만 top-level meta["query_norm"] 로 원문→정규화 매핑을 노출
     # 한다(os_gate 는 모달리티 키 dict 이라 오염 금지). off(기본)면 키 자체를 두지 않아 027 meta 와 바이트
     # 동일(SC-001 — 기존 meta 형태 봉인 테스트 무영향).
@@ -219,6 +244,7 @@ def search_hybrid(
     ] = os_search_assets,
     _os_client_fn: Callable[..., Any] = os_get_client,
     _query_norm_fn: Callable[[str], str] | None = None,
+    search_mode: str = "auto",
 ) -> dict[str, Any]:
     """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
@@ -300,6 +326,7 @@ def search_hybrid(
         os_search_fn=_os_search_fn,
         os_client_fn=_os_client_fn,
         query_norm_fn=_query_norm_fn,
+        search_mode=search_mode,
     )
     # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 수행하므로
     # 호출부 필터는 적용하지 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에

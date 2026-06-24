@@ -105,6 +105,17 @@ class PipelineSettings:
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
+    # 044: 필드 evidence 기반 lexical rescue — ``search_constants`` 와 쌍. 임계·가중·seed 는 상수
+    # 모듈 단일 출처; 여기는 **런타임 on/off·관측** 만.
+    search_evidence_rescue_enabled: bool
+    # env ``SEARCH_EVIDENCE_RESCUE_ENABLED``. 게이트 실패 버킷에서 BM25 구제 행을
+    # ``lexical_rescue_keep``(policy·strong/weak·임계)로 걸러낼지. False=027 legacy(어휘 hit 전부
+    # keep). True=044 live — 예: q=테스트 auto·restricted 시 summary weak-only(낚시) drop,
+    # keywords strong(반도체) keep. cosine 게이트 통과 행은 불변(invariant 1).
+    search_evidence_debug: bool
+    # env ``SEARCH_EVIDENCE_DEBUG``. True 시 검색 결과 각 hit 에 ``matched_queries``·
+    # ``evidence_score``·``strong_evidence_score``·``gate_passed``·``keep_reason`` 부착(run_search·
+    # search_hybrid 경로). 스모크·골든 원인 분석용 — 운영 기본 off.
     # 026: OS 색인 빌더 교정용 선택 설정(021/023 동형 — 미설정 시 기존 동작 불변). 모두 OS 색인 한정
     # (pg FTS 무접촉). opensearch_nori_user_words = 커스텀 nori analyzer 의 user_dictionary 외래어 목록
     # (build_index_body 기본과 동치). opensearch_filename_noise_patterns = 파일명 정제 추가 regex(기본 빈).
@@ -463,6 +474,18 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         ),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),
+        # 044: evidence rescue live 게이트. ``search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT``
+        # 가 코드 기본; .env ``SEARCH_EVIDENCE_RESCUE_ENABLED=0|1`` 로 덮어쓴다. False 이면
+        # ``opensearch_search.fuse_hybrid`` 가 legacy_lexical(전 keep) — plan meta 의 restricted 와
+        # 사용자 체감 불일치 가능(plan 만 바뀌고 drop 안 됨). _env_bool_default fail-fast 동형.
+        search_evidence_rescue_enabled=_env_bool_default(
+            "SEARCH_EVIDENCE_RESCUE_ENABLED", search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT
+        ),
+        # 044: per-hit debug meta opt-in. ``SEARCH_EVIDENCE_DEBUG=1`` — keep_reason·matched_queries
+        # 관측(q=테스트 스모크·G5). settings 미설정 시 search_constants 기본(False).
+        search_evidence_debug=_env_bool_default(
+            "SEARCH_EVIDENCE_DEBUG", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
+        ),
         # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.
         # 빈 항목·컴파일 불가 패턴은 resolver 가 _build_settings 시점에 즉시 ValueError(fail-fast).
         opensearch_nori_user_words=resolve_opensearch_nori_user_words(),

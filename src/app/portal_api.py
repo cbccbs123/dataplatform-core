@@ -185,6 +185,17 @@ def _search_min_scores() -> dict[str, float] | None:
         return None
 
 
+def _parse_search_mode(mode: str) -> str:
+    """검색 mode 파라미터 검증(044 — auto|keyword)."""
+    m = (mode or "auto").strip().lower()
+    if m not in ("auto", "keyword"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 mode: {mode!r} (허용: auto, keyword)",
+        )
+    return m
+
+
 def _parse_modalities(modalities: str | None) -> list[str] | None:
     """콤마 구분 모달리티 문자열을 검증된 리스트로 파싱한다(미지정=None=전체).
 
@@ -209,6 +220,7 @@ def search(
         None, description="콤마 구분: text,image,video,audio (미지정=전체)"
     ),
     size: int = Query(20, ge=1, le=100, description="모달리티별 최대 결과 수(top-N)"),
+    mode: str = Query("auto", description="검색 모드: auto(기본) | keyword(단어 포함 문서)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003).
@@ -220,6 +232,7 @@ def search(
     없음(전체 코퍼스 keyset 페이징은 006 재설계 후속).
     """
     mods = _parse_modalities(modalities)
+    search_mode = _parse_search_mode(mode)
 
     # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
     # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
@@ -228,6 +241,7 @@ def search(
         modalities=mods,
         limit_per_bucket=_SEARCH_LIMIT_PER_BUCKET,
         min_scores=_search_min_scores(),
+        search_mode=search_mode,
     )
 
     # FR-014: 버킷별 의료 배제 + 모달리티별 독립 랭킹·top-N. results 는 {modality: [rows]}.
@@ -239,10 +253,20 @@ def search(
     )
     counts = {modality: len(rows) for modality, rows in grouped.items()}
 
+    meta: dict[str, Any] = {
+        "query": q,
+        "modalities": mods,
+        "size": size,
+        "counts": counts,
+    }
+    search_plan = (result.get("meta") or {}).get("search_plan")
+    if search_plan is not None:
+        meta["search_plan"] = search_plan
+
     return {
         "query": q,
         "results": grouped,
-        "meta": {"query": q, "modalities": mods, "size": size, "counts": counts},
+        "meta": meta,
     }
 
 

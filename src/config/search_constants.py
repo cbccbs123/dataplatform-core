@@ -8,6 +8,7 @@
 순수 상수만 둔다(import 0·IO 0) — settings 미초기화 환경(순수 단위)에서도 안전하게 참조된다.
 임계는 **코사인 스케일**(클라이언트 융합 전환으로 정규화 스케일 임계 4종이 폐기됨, 027). 실측
 확정치(EPS·FLOOR·RESULT_FLOOR)는 G4 실OS 재보정 후 **여기 1곳만** 갱신한다.
+044 evidence 가중·rescue 임계·generic seed·``SEARCH_EVIDENCE_*`` 토글 기본값도 동일 원칙.
 """
 
 from __future__ import annotations
@@ -55,7 +56,72 @@ OS_RERANK_TAU_DEFAULT: float = 0.0  # augment 기본 = 재정렬만(드롭 0). �
 # 021 FR-004 정식 개정 동반). 단일 출처(F1)이므로 settings resolver·search_service 배선이 이 값을 공유한다.
 OS_QUERY_NORM_ENABLED_DEFAULT: bool = False
 
+# ── 044 evidence · lexical rescue (단일 출처 — G0) ───────────────────────────
+# OpenSearch BM25를 필드별 named query(`hit_keywords` 등 `_name`)로 쪼갠 뒤, 게이트 실패 버킷에서
+# ``matched_queries`` 로 **어느 필드에서 hit 됐는지** 관측한다. ``query_evidence.evidence_score`` 가
+# 아래 가중치로 1/0 합산하고, ``lexical_rescue_keep`` 가 policy·임계로 행 단위 keep/drop을 판단한다.
+# (코사인 게이트 **통과** 행은 invariant — 이 블록과 무관·순서·점수 불변.)
+# 정본: ``docs/search_query_filter_evidence_design.md`` · spec 044 · ADR 2026-06-24.
+#
+# ── 필드 evidence 가중치 (strong / weak tier) ─────────────────────────────────
+# ``build_bm25_body`` 의 named clause `_name` 과 1:1 대응. hit 된 clause 만 가산(연속 BM25 점수 아님).
+# strong: keywords·labels·file_name — 의도적 메타·식별자 필드. weak: summary·search_text — 본문·파생
+# 텍스트(우연 substring·"비거리 테스트" 류 과매칭의 주범). ``hit_search_text`` 는 strong hit 가
+# 이미 있으면 dedup 스킵(설계 §10.1 — summary 파생 중복 가산 금지).
+EVIDENCE_HIT_KEYWORDS_WEIGHT: float = 3.0   # strong — ingest keywords·BM25 `hit_keywords`
+EVIDENCE_HIT_LABELS_WEIGHT: float = 2.0     # strong — domain/tag labels·`hit_labels`
+EVIDENCE_HIT_FILE_NAME_WEIGHT: float = 1.5  # strong — 정제 file_name·`hit_file_name`
+EVIDENCE_HIT_SUMMARY_WEIGHT: float = 0.7    # weak — chunk summary·`hit_summary`
+EVIDENCE_HIT_SEARCH_TEXT_WEIGHT: float = 0.3  # weak — 색인 search_text·`hit_search_text`
+#
+# ── rescue 임계 (가설 — G5 골든·q=테스트 스모크 후 **이 세 줄만** 재보정) ─────
+# 적용 경로: 게이트 실패 ∧ BM25 행(`_bm25=True`) ∧ ``bm25_operator=and`` 일 때만(027 lexical rescue 잎).
+# ``SEARCH_EVIDENCE_RESCUE_ENABLED=0`` 이면 임계 **미사용** — legacy `has_lexical` 전부 keep.
+EVIDENCE_NORMAL_THRESHOLD: float = 1.5
+# ``lexical_rescue=normal``(일반 질의·또는 generic+keyword) — **전체** evidence_score 하한.
+# 예: keywords만 hit(3.0) → keep; summary+search_text 만(1.0) → drop.
+EVIDENCE_RESTRICTED_STRONG_THRESHOLD: float = 2.5
+# ``lexical_rescue=restricted``(generic single term + auto) — **strong tier 합** 만 본다(weak 무시).
+# 예: q=테스트 → 낚시(summary weak만) drop; 반도체(keywords strong≥2.5) keep.
+EVIDENCE_KEYWORD_THRESHOLD: float = 0.7
+# ``mode=keyword``(사용자 명시) — weak evidence 도 rescue 허용. 전체 evidence_score 하한(낮게 설정).
+# 포탈 ``GET /search?mode=keyword`` · suggestion "단어 포함 문서…" 와 쌍.
+#
+# ── generic single term seed (v1 · brainstorming YAGNI 6개) ─────────────────
+# ``query_plan.is_generic_single_term``: (1) 공백 없는 단일 토큰·len≤12 이고 (2) NFKC+casefold 가
+# seed 와 일치 → ``generic_single_term=True``. auto 모드에서 ``lexical_rescue=restricted`` 승격.
+# **자동 필터 승격 금지**(FR-302): `테스트`→`tags=test` 변환 없음 — policy 플래그·suggestion 만.
+# 추가 seed(`샘플`·`예시` 등)는 코퍼스 DF 측정 후 v2 — 무분별 확대 시 정상 단어까지 restricted.
+GENERIC_SINGLE_TERM_SEED: tuple[str, ...] = (
+    "테스트",
+    "검증",
+    "가이드",
+    "test",
+    "sample",
+    "demo",
+)
+#
+# ── env 토글 기본값 (settings ``SEARCH_EVIDENCE_*`` 로 덮어씀) ───────────────
+SEARCH_EVIDENCE_DEBUG_DEFAULT: bool = False
+# True → ``fuse_hybrid`` 결과 행에 debug 필드 부착(FR-405): ``matched_queries``,
+# ``evidence_score``, ``strong_evidence_score``, ``gate_passed``, ``keep_reason``.
+# 포탈·run_search JSON 관측용. 프로덕션 기본 off(응답 부풀림·내부 _name 노출 최소화).
+SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT: bool = True
+# lexical rescue **정책 집행** 스위치. False=027 호환(어휘 BM25 hit 이면 게이트 실패 후에도 전부 keep,
+# ``keep_reason=legacy_lexical``). True=``lexical_rescue_keep`` live(weak-only drop·restricted 등).
+# G2 merge 시 회귀 방지로 code default 는 한때 0 이었음 — dev 검증 후 1 로 올리거나 .env 에 명시.
+# flip 전후 025 골든(recall@20·p@3) 비교 권장: gate-on 시 weak-only precision ↑ · recall 소폭 ↓ 가능.
+
 __all__ = [
+    "EVIDENCE_HIT_FILE_NAME_WEIGHT",
+    "EVIDENCE_HIT_KEYWORDS_WEIGHT",
+    "EVIDENCE_HIT_LABELS_WEIGHT",
+    "EVIDENCE_HIT_SEARCH_TEXT_WEIGHT",
+    "EVIDENCE_HIT_SUMMARY_WEIGHT",
+    "EVIDENCE_KEYWORD_THRESHOLD",
+    "EVIDENCE_NORMAL_THRESHOLD",
+    "EVIDENCE_RESTRICTED_STRONG_THRESHOLD",
+    "GENERIC_SINGLE_TERM_SEED",
     "OS_BM25_OPERATOR_DEFAULT",
     "OS_CUTOFF_ENABLED_DEFAULT",
     "OS_CUTOFF_EPS_DEFAULT",
@@ -68,4 +134,6 @@ __all__ = [
     "OS_RERANK_MODEL_DEFAULT",
     "OS_RERANK_TOP_R_DEFAULT",
     "OS_RERANK_TAU_DEFAULT",
+    "SEARCH_EVIDENCE_DEBUG_DEFAULT",
+    "SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT",
 ]

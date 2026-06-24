@@ -178,6 +178,33 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(mock_search.call_args.kwargs["min_scores"])
 
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_passes_mode_and_exposes_search_plan(self, mock_search) -> None:
+        mock_search.return_value = {
+            **_fake_search_result(),
+            "meta": {
+                "search_plan": {
+                    "content_query": "테스트",
+                    "lexical_rescue": "restricted",
+                    "generic_single_term": True,
+                    "mode": "auto",
+                    "suggestions": ["hint"],
+                },
+            },
+        }
+        resp = self.client.get("/search", params={"q": "테스트", "mode": "auto"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_search.call_args.kwargs["search_mode"], "auto")
+        plan = resp.json()["meta"]["search_plan"]
+        self.assertEqual(plan["lexical_rescue"], "restricted")
+        self.assertTrue(plan["generic_single_term"])
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_invalid_mode_400(self, mock_search) -> None:
+        resp = self.client.get("/search", params={"q": "x", "mode": "invalid"})
+        self.assertEqual(resp.status_code, 400)
+        mock_search.assert_not_called()
+
 
 class TestAssetDetail(unittest.TestCase):
     """``/assets/{id}`` — 상세 200 / 노출 게이트 404."""

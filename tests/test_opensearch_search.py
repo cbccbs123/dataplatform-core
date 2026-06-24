@@ -24,6 +24,7 @@ import unittest
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.opensearch_search import (
     _MODALITY_VALUES,
+    BM25_NAMED_QUERY_NAMES,
     build_bm25_body,
     build_knn_body,
     cut_rows,
@@ -38,10 +39,34 @@ from src.search.opensearch_search import (
     search_assets_os,
 )
 
-# 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
-# 026 T008(FR-003①): boost 차등 표기 — summary^3·keywords^2·labels^1·file_name^0.5. search_text 는
-# boost 1(이제 file_name 비포함이라 안전). 파일명 노이즈가 토픽 신호를 압도하지 못하게 차등을 둔다.
-_NORI_TEXT_FIELDS = {"summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"}
+# 044: named query should 절 — boost는 clause boost 로 계승.
+_BM25_FIELD_BOOSTS = {
+    "summary": 3.0,
+    "keywords": 2.0,
+    "labels": 1.0,
+    "file_name": 0.5,
+    "search_text": 1.0,
+}
+
+
+def _bm25_named_names(body: dict) -> set[str]:
+    names: set[str] = set()
+    for clause in body["query"]["bool"]["should"]:
+        if "match" in clause:
+            for inner in clause["match"].values():
+                names.add(inner["_name"])
+        elif "term" in clause:
+            for inner in clause["term"].values():
+                names.add(inner["_name"])
+    return names
+
+
+def _bm25_first_match_query(body: dict) -> str:
+    for clause in body["query"]["bool"]["should"]:
+        if "match" in clause:
+            for inner in clause["match"].values():
+                return str(inner["query"])
+    raise AssertionError("match 절 없음")
 
 
 # 027 T006: hybrid 서브쿼리 헬퍼(_subqueries·_find_with_clause·_sub_bool)와 BuildSearchBodyTest 는
@@ -172,10 +197,9 @@ class ImageVideoSubqueryBodyTest(unittest.TestCase):
     def _check_modality(self, modality_value: str) -> None:
         bm25 = build_bm25_body(self.query, modality_values=[modality_value], k=30)
         knn = build_knn_body(self.vector, modality_values=[modality_value], k=30)
-        # (1) BM25 서브검색: nori multi_match(boost 차등) + terms 필터 + 의료 must_not + size.
-        mm = bm25["query"]["bool"]["must"][0]["multi_match"]
-        self.assertEqual(mm["query"], self.query)
-        self.assertEqual(set(mm["fields"]), _NORI_TEXT_FIELDS)
+        # (1) BM25 서브검색: named query should + terms 필터 + 의료 must_not + size.
+        self.assertEqual(_bm25_first_match_query(bm25), self.query)
+        self.assertEqual(_bm25_named_names(bm25), set(BM25_NAMED_QUERY_NAMES))
         self.assertIn({"terms": {"modality": [modality_value]}}, bm25["query"]["bool"]["filter"])
         self.assertIn(
             {"term": {"domain_label": "medical"}}, bm25["query"]["bool"]["must_not"]
@@ -355,20 +379,19 @@ class CutRowsTest(unittest.TestCase):
 
 
 class BuildBm25BodyTest(unittest.TestCase):
-    """T003/FR-001: BM25 multi_match 서브검색 본문 — boost 필드·operator·modality terms·의료 must_not."""
+    """T003/FR-001 · 044 FR-101: BM25 named query 서브검색 — boost·operator·filter."""
 
     def setUp(self) -> None:
         self.query = "한국어 검색 질의"
         self.body = build_bm25_body(self.query, modality_values=["txt"], k=20)
 
-    def test_multi_match_nori_boost_fields(self) -> None:
-        # nori 텍스트 multi_match — query 를 020 nori 필드 5개 대상으로(boost 차등 표기 그대로 계승).
-        mm = self.body["query"]["bool"]["must"][0]["multi_match"]
-        self.assertEqual(mm["query"], self.query)
-        self.assertEqual(
-            mm["fields"],
-            ["summary^3", "keywords^2", "labels^1", "file_name^0.5", "search_text"],
-        )
+    def test_named_query_clauses_and_boosts(self) -> None:
+        self.assertEqual(_bm25_named_names(self.body), set(BM25_NAMED_QUERY_NAMES))
+        for clause in self.body["query"]["bool"]["should"]:
+            if "match" in clause:
+                field, inner = next(iter(clause["match"].items()))
+                self.assertEqual(inner["query"], self.query)
+                self.assertAlmostEqual(inner.get("boost", 1.0), _BM25_FIELD_BOOSTS[field])
 
     def test_size_equals_k(self) -> None:
         self.assertEqual(self.body["size"], 20)
@@ -393,16 +416,20 @@ class BuildBm25BodyTest(unittest.TestCase):
         self.assertNotIn("must_not", body["query"]["bool"])
 
     def test_operator_and_requires_all_tokens(self) -> None:
-        # 025 FR-001 계승: operator='and' 면 전 nori 토큰 매칭 강제(F2 복합어 가짜매칭 차단).
         body = build_bm25_body(self.query, modality_values=["txt"], k=10, operator="and")
-        self.assertEqual(body["query"]["bool"]["must"][0]["multi_match"]["operator"], "and")
+        for clause in body["query"]["bool"]["should"]:
+            if "match" in clause:
+                for inner in clause["match"].values():
+                    self.assertEqual(inner.get("operator"), "and")
 
     def test_operator_default_or_omits_key(self) -> None:
-        # 회귀 0: 기본 'or' 는 operator 키 자체를 생략(현행 본문 바이트 보존).
         default_body = build_bm25_body(self.query, modality_values=["txt"], k=10)
         or_body = build_bm25_body(self.query, modality_values=["txt"], k=10, operator="or")
         self.assertEqual(default_body, or_body)
-        self.assertNotIn("operator", default_body["query"]["bool"]["must"][0]["multi_match"])
+        for clause in default_body["query"]["bool"]["should"]:
+            if "match" in clause:
+                for inner in clause["match"].values():
+                    self.assertNotIn("operator", inner)
 
     def test_audio_modality_filter(self) -> None:
         body = build_bm25_body(self.query, modality_values=["audio"], k=10)
@@ -966,9 +993,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertEqual(norm_calls, ["별 보는 방법"])               # 정규화 1회
         self.assertEqual(self.embed_calls, [("천체 관측", "st")])    # 임베딩이 정규화된 질의
         bm25_sub = self.client.msearch_calls[0][3]                    # [헤더,knn,헤더,bm25] → bm25
-        self.assertEqual(
-            bm25_sub["query"]["bool"]["must"][0]["multi_match"]["query"], "천체 관측"
-        )  # BM25 도 정규화된 질의
+        self.assertEqual(_bm25_first_match_query(bm25_sub), "천체 관측")
 
     def test_query_norm_off_is_original_passthrough(self) -> None:
         # off(기본): 원문 그대로 — query_norm_fn 미호출(바이트 동일·027 동치).
@@ -981,9 +1006,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         self.assertEqual(self.embed_calls, [("별 보는 방법", "st")])  # 원문 임베딩
         bm25_sub = self.client.msearch_calls[0][3]
-        self.assertEqual(
-            bm25_sub["query"]["bool"]["must"][0]["multi_match"]["query"], "별 보는 방법"
-        )
+        self.assertEqual(_bm25_first_match_query(bm25_sub), "별 보는 방법")
 
     def test_query_norm_default_is_off(self) -> None:
         # 기본값 off(OS_QUERY_NORM_ENABLED_DEFAULT) — query_norm 인자 미전달 시 원문 임베딩(회귀 0).
