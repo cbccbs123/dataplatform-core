@@ -130,7 +130,8 @@ def _reembed_image(conn: Any, asset_id: str, ext_meta: dict[str, Any], *, normal
 
 
 def _reprocess_video_stage2(
-    conn: Any, asset_id: str, fs_path: str, *, cfg: Any, dry_run: bool
+    conn: Any, asset_id: str, fs_path: str, *, cfg: Any, dry_run: bool,
+    prev_ext_meta: dict[str, Any] | None = None,
 ) -> dict[str, int] | None:
     """050 stage-2 — video 키프레임 v2 재캡션·재임베딩(in-place 교체).
 
@@ -147,17 +148,23 @@ def _reprocess_video_stage2(
     n_kf = len(keyframes) if isinstance(keyframes, list) else 0
     if dry_run:
         return {"keyframes": n_kf, "embeddings": len(items)}
+    # 기존 ext_meta 키 보존(수동 메모·커스텀 키)·재추출 키(keyframes/summary/keywords/labels)만 덮어쓴다
+    # (stage-1 _reextract_one 의 merge 패턴과 일치 — 전체 교체로 비가역 소멸 방지·리뷰 R2).
+    new_meta = rec.ext_meta if isinstance(rec.ext_meta, dict) else {}
+    merged = {**(prev_ext_meta or {}), **new_meta}
     with conn.cursor() as cur:
         cur.execute(_DEL_EMB_ALL, (asset_id,))  # 전 채널·청크 교체(dedup 으로 키프레임 수 변동)
         for it in items:
             literal = "[" + ",".join(repr(float(x)) for x in it.vector) + "]"
             cur.execute(_INS_EMB, (asset_id, it.channel, it.chunk_index, literal, it.model_name))
-        cur.execute(_UPDATE, (json.dumps(rec.ext_meta, ensure_ascii=False), asset_id))
+        cur.execute(_UPDATE, (json.dumps(merged, ensure_ascii=False), asset_id))
     return {"keyframes": n_kf, "embeddings": len(items)}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="요약·키워드 재추출 배치 1단계(026)")
+    parser = argparse.ArgumentParser(
+        description="요약·키워드 재추출(026 1단계 · 050 stage-2 video VLM 재캡션·재임베딩)"
+    )
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
     parser.add_argument("--dry-run", action="store_true", help="대상 집계만(쓰기 0)")
     parser.add_argument("--limit", type=int, default=None, help="처리 자산 수 상한")
@@ -203,6 +210,8 @@ def main() -> int:
         # (--modality 를 명시하지 않아도 다른 모달리티가 섞이지 않도록).
         mod_filter = set(args.modality) if args.modality else None
         if args.stage2:
+            if args.modality and set(args.modality) != {"video"}:
+                _LOG.warning("--stage2 는 video 전용 — --modality %s 무시", args.modality)
             mod_filter = {"video"}
         targets = [
             (str(aid), mod, fp, em or {})
@@ -246,9 +255,13 @@ def main() -> int:
             try:
                 if args.stage2:
                     # 050 stage-2: video 키프레임 v2 재캡션·재임베딩(자산별 in-place 교체).
-                    out = _reprocess_video_stage2(conn, asset_id, fs_path, cfg=cfg, dry_run=False)
+                    # dry-run 은 위에서 early-return 했으므로 여기는 항상 실 백필(dry_run=False).
+                    out = _reprocess_video_stage2(
+                        conn, asset_id, fs_path, cfg=cfg, dry_run=False, prev_ext_meta=ext_meta
+                    )
                     if out is None:
                         counts["skipped"] += 1
+                        _LOG.debug("stage-2 skip(fs_path 부재): %s", asset_id[:8])
                     else:
                         conn.commit()
                         counts["processed"] += 1

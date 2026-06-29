@@ -212,7 +212,7 @@ class ReprocessVideoStage2Test(unittest.TestCase):
     def _patches(self, exists: bool = True):
         items = _fake_embedding_items(mod_types)
         return (
-            mock.patch.object(_mod, "_extract_video_meta", return_value=self.rec) ,
+            mock.patch.object(_mod, "_extract_video_meta", return_value=self.rec),
             mock.patch.object(_mod, "_embed_video", return_value=items),
             mock.patch("pathlib.Path.is_file", return_value=exists),
             items,
