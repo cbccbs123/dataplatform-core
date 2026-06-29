@@ -112,8 +112,9 @@ SEARCH_EVIDENCE_DEBUG_DEFAULT: bool = False
 SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT: bool = True
 # lexical rescue **정책 집행** 스위치. False=027 호환(어휘 BM25 hit 이면 게이트 실패 후에도 전부 keep,
 # ``keep_reason=legacy_lexical``). True=``lexical_rescue_keep`` live(weak-only drop·restricted 등).
-# G2 merge 시 회귀 방지로 code default 는 한때 0 이었음 — dev 검증 후 1 로 올리거나 .env 에 명시.
-# flip 전후 025 골든(recall@20·p@3) 비교 권장: gate-on 시 weak-only precision ↑ · recall 소폭 ↓ 가능.
+# 044 G2 merge 시점엔 회귀 방지로 default=0(shadow)였고, 045 G2b 골든(RESCUE 0/1 동등·SC-A2)·
+# ``q=테스트`` 스모크로 검증한 뒤 045 stabilization 에서 default=True(live)로 채택했다(044 spec D8 갱신).
+# ``.env`` 로 0 강제 가능. flip 전후 025 골든(recall@20·p@3): gate-on 시 weak-only precision ↑·recall 소폭 ↓.
 
 __all__ = [
     "EVIDENCE_HIT_FILE_NAME_WEIGHT",

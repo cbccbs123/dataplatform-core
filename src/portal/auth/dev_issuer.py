@@ -23,4 +23,7 @@ def issue_dev_token(*, user_id: str) -> str:
         "exp": now + timedelta(seconds=cfg.jwt_ttl_seconds),
         # MVP: roles·clearance claim 없음 — 검증 후 코드가 authorized 부여(042 2-tier).
     }
+    if cfg.jwt_issuer:
+        # issuer 핀이 켜져 있으면 발급 토큰도 iss 를 박아 자체 검증을 통과시킨다.
+        payload["iss"] = cfg.jwt_issuer
     return jwt.encode(payload, cfg.jwt_secret, algorithm="HS256")

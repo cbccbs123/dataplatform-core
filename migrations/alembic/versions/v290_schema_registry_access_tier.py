@@ -19,4 +19,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # upgrade 가 INSERT 한 medical 시드를 먼저 지워야 v280 상태로 완전 복원된다(가역성).
+    # medical 도메인은 v290 이전에 없었으므로 도메인 단위 DELETE 로 v290 INSERT 만 제거(v220 general 관례와 동일).
+    op.execute("DELETE FROM schema_registry WHERE domain = 'medical'")
     op.execute("ALTER TABLE schema_registry DROP COLUMN IF EXISTS access_tier")

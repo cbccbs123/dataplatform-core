@@ -26,9 +26,24 @@ class LocalHs256Verifier:
 
     def __init__(self, config: PortalAuthConfig) -> None:
         self._secret = config.jwt_secret
+        self._issuer = config.jwt_issuer  # None 이면 iss 미검사(단일 secret MVP).
 
     def verify(self, token: str) -> dict[str, Any]:
-        return jwt.decode(token, self._secret, algorithms=["HS256"])
+        # exp·sub 필수 — exp 없는 영구 토큰·subject 없는 토큰을 거부한다.
+        # issuer 설정 시 iss 필수+핀으로 동일 secret 타 서비스 토큰 재사용을 차단한다.
+        # (audience 핀은 IdP aud 확정 후 후속 — 미설정 단계에서 aud 강제는 토큰 거부 footgun.)
+        required = ["exp", "sub"]
+        decode_kwargs: dict[str, Any] = {}
+        if self._issuer:
+            required.append("iss")
+            decode_kwargs["issuer"] = self._issuer
+        return jwt.decode(
+            token,
+            self._secret,
+            algorithms=["HS256"],
+            options={"require": required},
+            **decode_kwargs,
+        )
 
 
 _verifier: TokenVerifier | None = None  # 프로세스 내 싱글턴 — secret·backend 변경은 재기동 전제.

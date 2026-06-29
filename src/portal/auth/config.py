@@ -5,6 +5,7 @@
     PORTAL_AUTH_BACKEND    — 현재 ``local_hs256`` 만
     PORTAL_JWT_SECRET      — HS256 서명 키(dev bypass 시 기본값 허용·운영 전 교체)
     PORTAL_JWT_TTL_SECONDS — dev ``/auth/token`` 발급 수명(기본 3600)
+    PORTAL_JWT_ISSUER      — 설정 시 발급·검증에 ``iss`` 핀(미설정이면 단일 secret MVP — iss 미검사).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ class PortalAuthConfig:
     backend: str
     jwt_secret: str
     jwt_ttl_seconds: int
+    jwt_issuer: str | None = None  # 설정 시 iss 발급·검증 핀(cross-service 토큰 재사용 차단).
 
 
 def _env_bool(name: str, default: str = "0") -> bool:
@@ -57,9 +59,11 @@ def load_portal_auth_config() -> PortalAuthConfig:
         ttl = max(60, int(raw_ttl))
     except ValueError:
         ttl = 3600
+    issuer = os.getenv("PORTAL_JWT_ISSUER", "").strip() or None
     return PortalAuthConfig(
         auth_disabled=auth_disabled,
         backend=backend,
         jwt_secret=secret,
         jwt_ttl_seconds=ttl,
+        jwt_issuer=issuer,
     )

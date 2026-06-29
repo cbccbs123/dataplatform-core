@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS ext_meta_field_registry (
 );
 
 COMMENT ON TABLE ext_meta_field_registry IS '도메인별 ext_meta 필드 정의 카탈로그(OM 정본).';
-COMMENT ON COLUMN ext_meta_field_registry.field_id IS 'PK (UUIDv7).';
+-- field_id 는 아래 backfill 에서 schema_registry.schema_id 를 그대로 승계한다. schema_registry 는
+-- v100/v220 부터 gen_random_uuid()(UUIDv4)로 발급된 정적 시드(v170 관례)이므로 field_id 도 UUIDv4 다.
+-- 헌법 UUIDv7 불변식은 런타임 asset_* PK 대상 — 카탈로그 시드 테이블은 v170 관례를 따른다(주석-데이터 일치).
+COMMENT ON COLUMN ext_meta_field_registry.field_id IS 'PK — schema_registry.schema_id 승계(gen_random_uuid·v170 정적 시드 관례).';
 
 INSERT INTO ext_meta_field_registry (
     field_id, domain, meta_key, json_schema, description, status, access_tier, created_at
