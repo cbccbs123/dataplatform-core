@@ -123,6 +123,17 @@ class PipelineSettings:
     # (build_index_body 기본과 동치). opensearch_filename_noise_patterns = 파일명 정제 추가 regex(기본 빈).
     opensearch_nori_user_words: tuple[str, ...]
     opensearch_filename_noise_patterns: tuple[str, ...]
+    # 048: 영상 키프레임 near-dup 제거(VLM 전 결정적 2단계 dHash→SSIM/HSV). 임계·모드 단일 출처(FR-501).
+    # 모두 _env_*_default 선택 필드 — 미설정 시 spec 기본설정표 값. video_skill 배선(G3)·dedup 코어가
+    # 이 7필드로 KeyframeDedupConfig 를 만든다(하드코딩 분산 금지). enabled 기본 True(사용자 결정
+    # 2026-06-29) 이나 off 경로(FR-103)는 언제든 추출 바이트 동일이라 회귀 안전판이다.
+    video_keyframe_dedup_enabled: bool
+    video_keyframe_dedup_hash_max: int
+    video_keyframe_dedup_ssim_min: float
+    video_keyframe_dedup_ssim_gray_lo: float
+    video_keyframe_dedup_hist_min: float
+    video_keyframe_dedup_compare_mode: str
+    video_keyframe_dedup_recent_window: int
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -516,6 +527,16 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 빈 항목·컴파일 불가 패턴은 resolver 가 _build_settings 시점에 즉시 ValueError(fail-fast).
         opensearch_nori_user_words=resolve_opensearch_nori_user_words(),
         opensearch_filename_noise_patterns=resolve_opensearch_filename_noise_patterns(),
+        # 048: 영상 키프레임 near-dup 제거 7필드(FR-501 단일 출처). 모두 선택 env — 미설정 시 spec
+        # 기본설정표 값. enabled 기본 True(2026-06-29 결정). compare_mode 'global' 은 타임라인 손실
+        # 위험이 있어 비기본(SC-008) — 화이트리스트 검증은 dedup 코어가 수행한다(잘못된 모드 = keep 폴백).
+        video_keyframe_dedup_enabled=_env_bool_default("VIDEO_KEYFRAME_DEDUP_ENABLED", True),
+        video_keyframe_dedup_hash_max=_env_int_default("VIDEO_KEYFRAME_DEDUP_HASH_MAX", 7),
+        video_keyframe_dedup_ssim_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_MIN", 0.94),
+        video_keyframe_dedup_ssim_gray_lo=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO", 0.90),
+        video_keyframe_dedup_hist_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_HIST_MIN", 0.97),
+        video_keyframe_dedup_compare_mode=_env_str_default("VIDEO_KEYFRAME_DEDUP_COMPARE_MODE", "recent"),
+        video_keyframe_dedup_recent_window=_env_int_default("VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW", 4),
     )
     # 038: 단일 필드 fail-fast(_resolve_*)로 못 잡는 교차필드 불변식(OS read ⇒ OS write 필수)을
     # 빌드 완료 후 검증한다 — 오설정이 런타임까지 숨지 않게(init_settings=_build_settings 검증 지점).

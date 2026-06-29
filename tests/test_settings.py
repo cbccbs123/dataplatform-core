@@ -71,6 +71,14 @@ _BACKEND_KEYS = (
     # 결정적으로 통과하도록(미설정 → 기본 True) 격리한다.
     "OPENSEARCH_SYNC_ENABLED",
     "SEARCH_GENERIC_TERM_SEED_EXTRA",
+    # 048: 영상 키프레임 near-dup 제거 7종 선택 env. 실행 환경 잔존값이 기본값 단언을 오염시키지 않게 비운다.
+    "VIDEO_KEYFRAME_DEDUP_ENABLED",
+    "VIDEO_KEYFRAME_DEDUP_HASH_MAX",
+    "VIDEO_KEYFRAME_DEDUP_SSIM_MIN",
+    "VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO",
+    "VIDEO_KEYFRAME_DEDUP_HIST_MIN",
+    "VIDEO_KEYFRAME_DEDUP_COMPARE_MODE",
+    "VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW",
 )
 
 
@@ -604,6 +612,71 @@ class TestGenericTermSeedExtra(unittest.TestCase):
 
     def test_blank_extra_entry_raises(self) -> None:
         with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,,bar"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestVideoKeyframeDedupSettings(unittest.TestCase):
+    """048 G0(FR-501): 영상 키프레임 near-dup 제거 7필드 단일 출처.
+
+    기존 ``_env_*_default`` 선택 필드 패턴(021/023/038 동형) — 미설정 시 spec 기본설정표 값.
+      - ``video_keyframe_dedup_enabled``     : 기본 True(사용자 결정 2026-06-29 · master switch).
+      - ``video_keyframe_dedup_hash_max``    : 기본 7(64-bit Hamming 후보 상한).
+      - ``video_keyframe_dedup_ssim_min``    : 기본 0.94(중복 확정 SSIM 하한).
+      - ``video_keyframe_dedup_ssim_gray_lo``: 기본 0.90(히스토그램 보조 구간 하한).
+      - ``video_keyframe_dedup_hist_min``    : 기본 0.97(HSV correlation 하한·보조).
+      - ``video_keyframe_dedup_compare_mode``: 기본 'recent'('last'|'recent'|'global').
+      - ``video_keyframe_dedup_recent_window``: 기본 4('recent' 모드 N).
+
+    G2 까지 프로덕션 동작 무변경 — enabled=true 기본이라도 video_skill 배선(G3) 전이므로 검색·추출에
+    아직 영향이 없다. 순수 토글·수치라 별도 범위검증 헬퍼 없이 ``_env_*_default`` 가 형식 오류만 fail-fast.
+    """
+
+    def test_defaults_when_unset(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.video_keyframe_dedup_enabled, True)
+        self.assertEqual(s.video_keyframe_dedup_hash_max, 7)
+        self.assertEqual(s.video_keyframe_dedup_ssim_min, 0.94)
+        self.assertEqual(s.video_keyframe_dedup_ssim_gray_lo, 0.90)
+        self.assertEqual(s.video_keyframe_dedup_hist_min, 0.97)
+        self.assertEqual(s.video_keyframe_dedup_compare_mode, "recent")
+        self.assertEqual(s.video_keyframe_dedup_recent_window, 4)
+
+    def test_enabled_env_override_false(self) -> None:
+        with _env(VIDEO_KEYFRAME_DEDUP_ENABLED="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.video_keyframe_dedup_enabled, False)
+
+    def test_numeric_env_overrides(self) -> None:
+        with _env(
+            VIDEO_KEYFRAME_DEDUP_HASH_MAX="5",
+            VIDEO_KEYFRAME_DEDUP_SSIM_MIN="0.9",
+            VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO="0.85",
+            VIDEO_KEYFRAME_DEDUP_HIST_MIN="0.95",
+            VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW="2",
+        ):
+            s = _build_settings("dev")
+        self.assertEqual(s.video_keyframe_dedup_hash_max, 5)
+        self.assertEqual(s.video_keyframe_dedup_ssim_min, 0.9)
+        self.assertEqual(s.video_keyframe_dedup_ssim_gray_lo, 0.85)
+        self.assertEqual(s.video_keyframe_dedup_hist_min, 0.95)
+        self.assertEqual(s.video_keyframe_dedup_recent_window, 2)
+
+    def test_compare_mode_env_override(self) -> None:
+        with _env(VIDEO_KEYFRAME_DEDUP_COMPARE_MODE="global"):
+            s = _build_settings("dev")
+        self.assertEqual(s.video_keyframe_dedup_compare_mode, "global")
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 추출하지 않게).
+        with _env(VIDEO_KEYFRAME_DEDUP_ENABLED="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_invalid_int_fail_fast(self) -> None:
+        # 정수 형식 오류는 _env_int_default 가 즉시 ValueError.
+        with _env(VIDEO_KEYFRAME_DEDUP_HASH_MAX="abc"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
