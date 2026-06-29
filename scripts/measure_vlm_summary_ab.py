@@ -63,21 +63,34 @@ def _keyframe_jpegs(args: argparse.Namespace) -> list[tuple[str, list[bytes]]]:
 
 
 def _run_variant(env: str, v2: str, jpegs: list[bytes]) -> dict:
-    """toggle 을 env 로 켜고 settings 재초기화 후 캡션+reduce 1회. 반환 {summary, keywords}."""
+    """toggle 을 env 로 켜고 settings 재초기화 후 캡션+reduce 1회.
+
+    반환 ``{"video": VideoSummaryResult, "frames": [ImageSummaryResult, ...]}``.
+    env 는 try/finally 로 원복(예외·다중 호출 안전).
+    """
+    prev = os.environ.get("VLM_SUMMARY_PROMPT_V2")
     os.environ["VLM_SUMMARY_PROMPT_V2"] = v2
-    from src.config.settings import init_settings
-    init_settings(env)  # 전역 settings 를 toggle 반영본으로 재초기화
-    from src.llm.image_summarizer import summarize_image_caption_keywords_objects_from_jpeg_bytes
-    from src.llm.video_summarizer import summarize_video_from_scene_results
-    scene_results = []
-    for i, jb in enumerate(jpegs, start=1):
-        summ = summarize_image_caption_keywords_objects_from_jpeg_bytes(jb)
-        scene_results.append({
-            "scene_index": i, "start_sec": float(i), "end_sec": i + 1.0,
-            "frame_sec": i + 0.5, "summary": summ,
-        })
-    video = summarize_video_from_scene_results(scene_results)
-    return {"video": video, "frames": [s["summary"] for s in scene_results]}
+    try:
+        from src.config.settings import init_settings
+        init_settings(env)  # 전역 settings 를 toggle 반영본으로 재초기화
+        from src.llm.image_summarizer import (
+            summarize_image_caption_keywords_objects_from_jpeg_bytes,
+        )
+        from src.llm.video_summarizer import summarize_video_from_scene_results
+        scene_results = []
+        for i, jb in enumerate(jpegs, start=1):
+            summ = summarize_image_caption_keywords_objects_from_jpeg_bytes(jb)
+            scene_results.append({
+                "scene_index": i, "start_sec": float(i), "end_sec": i + 1.0,
+                "frame_sec": i + 0.5, "summary": summ,
+            })
+        video = summarize_video_from_scene_results(scene_results)
+        return {"video": video, "frames": [s["summary"] for s in scene_results]}
+    finally:
+        if prev is None:
+            os.environ.pop("VLM_SUMMARY_PROMPT_V2", None)
+        else:
+            os.environ["VLM_SUMMARY_PROMPT_V2"] = prev
 
 
 def main() -> int:
@@ -89,8 +102,9 @@ def main() -> int:
     args = ap.parse_args()
 
     # 키프레임 준비는 현재 toggle 무관(추출은 dedup 만). 먼저 한 번 init.
-    from src.config.settings import init_settings
+    from src.config.settings import get_current_settings, init_settings
     init_settings(args.env)
+    judge_on = args.judge or get_current_settings().vlm_summary_ab_judge
     items = _keyframe_jpegs(args)
     if not items:
         print("측정할 키프레임이 없습니다(--keyframe-dir 또는 영상 경로).", file=sys.stderr)
@@ -106,7 +120,7 @@ def main() -> int:
         print(f"[v2] summary: {v2['video'].get('summary','')}")
         print(f"[v1] keywords: {v1['video'].get('keywords',[])}")
         print(f"[v2] keywords: {v2['video'].get('keywords',[])}")
-        if args.judge or os.getenv("VLM_SUMMARY_AB_JUDGE", "0") in {"1", "true"}:
+        if judge_on:
             from src.llm.client import complete_json
             prompt = (
                 "두 영상 요약(A=v1, B=v2)을 검색 적합성 기준으로 비교해 JSON만 출력:\n"

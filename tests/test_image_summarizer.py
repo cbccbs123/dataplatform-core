@@ -103,6 +103,8 @@ class TestSummarizeImageToggleWiring(unittest.TestCase):
             promote_objects_to_keywords(["충전기", "영상"], ["케이블"], limit=10),
         )
         self.assertEqual(out["keywords"], ["충전기", "케이블"])  # "영상" 제거·케이블 승격
+        # objects 는 v2 에서도 보존(키워드 승격 입력일 뿐 objects 출력은 공통 코드·불변).
+        self.assertEqual(out["objects"], ["케이블"])
 
     def test_summarize_v1_keeps_inline_dedup(self) -> None:
         # v1: 현행 inline 루프 — dedup 만(케이블 미승격·"영상" 보존).

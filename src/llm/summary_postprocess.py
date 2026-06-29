@@ -14,11 +14,15 @@ from __future__ import annotations
 # 검색 신호 0인 일반어(키워드/objects 에서 제거). settings 아닌 코드 상수(결정적·도메인 불가지).
 # 토픽화 프롬프트(026)가 막아도 VLM 이 가끔 매체 일반어를 키워드로 흘리므로 후처리에서 한 번 더 거른다.
 _GENERIC_KEYWORDS: frozenset[str] = frozenset(
-    {"영상", "동영상", "비디오", "장면", "이미지", "사진", "그림", "화면", "영상입니다", "장면입니다"}
+    {
+        "영상", "동영상", "비디오", "장면", "이미지", "사진", "그림", "화면",
+        # 서술형 변형(VLM 이 "~입니다" 로 흘릴 때 2차 차단 — 토픽화 프롬프트가 1차).
+        "영상입니다", "장면입니다", "사진입니다", "이미지입니다", "동영상입니다", "화면입니다",
+    }
 )
 
 
-def normalize_keywords(keywords: list) -> list[str]:
+def normalize_keywords(keywords: list[object]) -> list[str]:
     """strip·casefold dedup·generic 제거·first-seen 순서 보존(결정적)."""
     seen: set[str] = set()
     out: list[str] = []
@@ -32,7 +36,7 @@ def normalize_keywords(keywords: list) -> list[str]:
     return out
 
 
-def promote_objects_to_keywords(keywords: list, objects: list, *, limit: int) -> list[str]:
+def promote_objects_to_keywords(keywords: list[object], objects: list[object], *, limit: int) -> list[str]:
     """normalize_keywords(keywords) 뒤에 objects 를 키워드 후보로 합쳐(중복·generic 제외) limit 까지."""
     out = normalize_keywords(keywords)
     seen = {k.casefold() for k in out}

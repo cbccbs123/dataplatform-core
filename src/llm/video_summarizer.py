@@ -41,11 +41,11 @@ _SUMMARY_TOPIC_INSTRUCTION = (
 
 # 049 FR-301/302: v2 reduce 추가 지시(종합). v1 본문 위에 **덧붙이기만** 하므로 v1 경로는 불변
 # (FR-102 바이트 동일·회귀 안전판). 장면 단순 나열 대신 영상 전체 주제 + 2~3개 하위 주제를 종합하고,
-# 각 장면의 distinctive 키워드를 누락 없이 통합(중복 제거)하도록 지시한다. 키워드 정규화·objects
+# 각 장면의 두드러진 키워드를 누락 없이 통합(중복 제거)하도록 지시한다. 키워드 정규화·objects
 # 승격은 summarize_video_from_scene_results 의 후처리(summary_postprocess)가 v2 일 때만 추가로 한다.
 _V2_REDUCE_EXTRA_INSTRUCTION = (
     "- 장면을 단순 나열하지 말고 영상 전체 주제 + 2~3개 하위 주제를 종합\n"
-    "- 각 장면의 distinctive 키워드를 누락 없이 통합(중복 제거)\n"
+    "- 각 장면의 두드러진(고유한) 키워드를 누락 없이 통합(중복 제거)\n"
 )
 
 
