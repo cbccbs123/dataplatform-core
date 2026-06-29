@@ -9,10 +9,13 @@ OpenCV 로 읽어 JPEG bytes 로 인코딩한다. 파일로 저장하지 않고 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import cv2
 from scenedetect import ContentDetector, detect
+
+if TYPE_CHECKING:
+    from src.preprocess.keyframe_dedup import KeyframeDedupConfig
 
 
 class KeyframeBytesResult(TypedDict):
@@ -90,6 +93,7 @@ def extract_video_representative_frame_bytes(
     min_scene_len: int = 15,
     jpeg_quality: int = 85,
     max_frames: int | None = None,
+    dedup: KeyframeDedupConfig | None = None,
 ) -> list[KeyframeBytesResult]:
     """
     영상에서 장면(Scene) 단위 대표 프레임(중앙 시점) JPEG bytes를 반환한다.
@@ -99,10 +103,19 @@ def extract_video_representative_frame_bytes(
     장면이 하나도 안 잡히면(단일 컷·아주 짧은 영상 등) 영상 중앙 1프레임만 ``scene_index=1`` 로
     돌려준다. ``max_frames`` 는 장면 수 상한(앞에서부터 자름). 프레임을 못 읽거나 JPEG 인코딩에
     실패한 장면은 건너뛴다(예외로 중단하지 않음).
+
+    048: ``dedup`` 가 주어지고 ``enabled`` 면 **VLM 직전 near-dup 제거**를 적용한다(FR-101). 이 경우
+    다중 장면 경로에서 ``max_frames`` pre-cap 을 **건너뛰고** 전 장면을 추출한 뒤 ``dedup_keyframes`` 로
+    중복을 제거하고, 그 결과를 앞에서부터 ``max_frames`` 로 trim 한다(순서 = dedup → cap·FR-104).
+    ``dedup`` 가 ``None`` 이거나 ``enabled=False`` 면 **현행 코드 경로 그대로**(pre-cap 유지)라 추출
+    결과가 기존과 바이트 동일하다(FR-103·완전 no-op). 단일 프레임(no-scene) 경로는 1장이라 무변경.
     """
     src = Path(video_path)
     if not src.is_file():
         raise FileNotFoundError(str(src))
+
+    # 048: dedup 활성 여부 — enabled 일 때만 "전 장면 추출 → dedup → cap" 경로를 탄다.
+    _dedup_on = dedup is not None and dedup.enabled
 
     scenes = detect(str(src), ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
     if not scenes:
@@ -138,7 +151,9 @@ def extract_video_representative_frame_bytes(
         finally:
             cap0.release()
 
-    if max_frames is not None and max_frames > 0:
+    # 048: dedup off 면 현행 pre-cap(앞에서부터 자름) 유지 → 바이트 동일(FR-103). dedup on 이면
+    # pre-cap 을 건너뛰고 전 장면을 추출한 뒤 아래에서 dedup → cap 순으로 trim 한다(FR-104).
+    if not _dedup_on and max_frames is not None and max_frames > 0:
         scenes = scenes[:max_frames]
 
     cap = cv2.VideoCapture(str(src))
@@ -174,5 +189,15 @@ def extract_video_representative_frame_bytes(
             )
     finally:
         cap.release()
+
+    # 048: dedup on 이면 전 장면 추출 결과에 near-dup 제거를 적용한 뒤(dedup) max_frames 로 trim(cap).
+    # 순서 = dedup → cap(FR-104). off 면 위에서 이미 pre-cap 했으므로 results 를 그대로 반환(FR-103).
+    if _dedup_on and dedup is not None:
+        from src.preprocess.keyframe_dedup import dedup_keyframes
+
+        kept, _skips = dedup_keyframes(results, dedup)
+        if max_frames is not None and max_frames > 0:
+            kept = kept[:max_frames]
+        return kept
 
     return results
