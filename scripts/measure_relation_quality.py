@@ -285,6 +285,12 @@ def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
     return report
 
 
+def _dump_report(report: dict, path: str) -> None:
+    """measure 리포트를 baseline 산출물로 동결한다 — 정렬·결정적(051 FR-301)."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def _load_golden(path: str) -> Golden:
     with open(path, encoding="utf-8") as f:
         return parse_golden(json.load(f))
@@ -315,6 +321,7 @@ def main() -> int:
     pm = sub.add_parser("measure", help="골든+스냅샷 → 리포트(LLM 0)")
     pm.add_argument("--golden", required=True)
     pm.add_argument("--snapshot", required=True)
+    pm.add_argument("--out", default=None, help="리포트를 baseline_report.json 로 동결(선택)")
 
     args = p.parse_args()
     dotenv_path = Path(__file__).resolve().parents[1] / f".env.{args.env}"
@@ -323,7 +330,10 @@ def main() -> int:
     init_settings(args.env)
 
     if args.cmd == "measure":  # DB/LLM 불요(스냅샷 기반)
-        print(json.dumps(cmd_measure(_load_golden(args.golden), args.snapshot), ensure_ascii=False, indent=2))
+        report = cmd_measure(_load_golden(args.golden), args.snapshot)
+        if args.out:
+            _dump_report(report, args.out)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
 
     db = PostgresUtil()

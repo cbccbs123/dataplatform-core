@@ -1,4 +1,9 @@
+import json
+import os
+import tempfile
 import unittest
+
+from scripts.measure_relation_quality import _dump_report
 
 from src.relations.quality.metrics import isolated_candidates
 
@@ -19,6 +24,21 @@ class IsolatedCandidatesTest(unittest.TestCase):
     def test_candidate_ids_outside_registered_ignored(self):
         # 후보에만 있고 registered 가 아닌 id(b9)는 결과에 영향 없음.
         self.assertEqual(isolated_candidates({"a1", "a2"}, {"a1", "b9"}), ["a2"])
+
+
+class DumpReportTest(unittest.TestCase):
+    def test_deterministic_sorted_bytes(self):
+        report = {"relation_metrics": {"recall": 0.83, "isolation_accuracy": 1.0},
+                  "candidate_recall": 0.83, "config": {"min_sim": 0.2}}
+        with tempfile.TemporaryDirectory() as d:
+            p1, p2 = os.path.join(d, "a.json"), os.path.join(d, "b.json")
+            _dump_report(report, p1)
+            _dump_report(report, p2)
+            b1, b2 = open(p1, encoding="utf-8").read(), open(p2, encoding="utf-8").read()
+        self.assertEqual(b1, b2)                       # 같은 입력 → byte 동일(결정적)
+        self.assertEqual(json.loads(b1)["relation_metrics"]["recall"], 0.83)
+        # sort_keys: 최상위 키가 정렬돼 있어야(candidate_recall < config < relation_metrics)
+        self.assertLess(b1.index('"candidate_recall"'), b1.index('"relation_metrics"'))
 
 
 if __name__ == "__main__":
