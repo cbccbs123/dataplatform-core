@@ -19,6 +19,7 @@ from PIL import Image
 
 from src.config.settings import get_current_settings
 from src.llm.client import complete_vision_json
+from src.llm.summary_postprocess import promote_objects_to_keywords
 
 
 class ImageSummaryResult(TypedDict):
@@ -40,12 +41,30 @@ _SUMMARY_TOPIC_INSTRUCTION = (
 )
 
 
-def _build_image_caption_prompt(*, summary_max_chars: int, top_k_keywords: int) -> str:
+# 049 FR-201/202: v2 캡션 추가 지시(검색지향). v1 토픽화 지시 위에 **덧붙이기만** 하므로 v1 경로는
+# 불변(FR-102 바이트 동일·회귀 안전판). 화면의 구체 개체·고유명사·화면 텍스트·인물 역할·배경을 명시
+# 지시하고, keywords 는 검색에 쓸 구체 명사 위주로 유도한다('영상/장면/이미지' 같은 일반어 금지).
+# 키워드 정규화·objects 승격은 summarize_* 의 후처리(summary_postprocess)가 v2 일 때만 추가로 한다.
+_V2_CAPTION_EXTRA_INSTRUCTION = (
+    "- 화면에 보이는 구체 개체·고유명사·화면 텍스트(슬라이드 제목·자막)·인물 역할·배경 장소를 명시\n"
+    "- keywords 는 검색에 쓰일 구체 명사(제품·주제·장소·행위) 위주 — "
+    "'영상'·'장면'·'이미지' 같은 일반어 금지\n"
+)
+
+
+def _build_image_caption_prompt(
+    *, summary_max_chars: int, top_k_keywords: int, v2: bool = False
+) -> str:
     """이미지 캡션·키워드·객체 추출용 비전 프롬프트를 만든다(순수 — LLM·settings 미접촉).
 
     함수 내 f-string 에 숨어 있던 프롬프트를 순수 빌더로 노출해 토픽화 지시(FR-001)를
     단위로 가드할 수 있게 한다(동작 불변 — 이 빌더 출력이 그대로 비전 LLM 입력).
+
+    049: ``v2=False``(기본) 면 현행 v1 프롬프트를 **바이트 동일**하게 반환한다(FR-102 회귀 안전판).
+    ``v2=True`` 면 통계 표현 금지 문장 직전에 검색지향 추가 지시(_V2_CAPTION_EXTRA_INSTRUCTION)를
+    끼워 넣는다 — v1 본문은 그대로 두고 덧붙이기만 한다.
     """
+    v2_extra = _V2_CAPTION_EXTRA_INSTRUCTION if v2 else ""
     return (
         "이 이미지를 분석해서 반드시 JSON만 출력해.\n"
         "형식:\n"
@@ -56,6 +75,7 @@ def _build_image_caption_prompt(*, summary_max_chars: int, top_k_keywords: int) 
         f"- keywords는 핵심 키워드 최대 {top_k_keywords}개 (한국어)\n"
         "- objects는 이미지에 보이는 모든 주요 객체를 일반 명사 형태의 한국어로 나열 (중복 제거)\n"
         + _SUMMARY_TOPIC_INSTRUCTION
+        + v2_extra
         + "개수/비율/합계 같은 통계 표현은 summary/keywords에는 쓰지 말 것."
     )
 
@@ -141,8 +161,12 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     """
     cfg = get_current_settings()
 
+    # 049: 토글(vlm_summary_prompt_v2)을 빌더에 v2= 로 전달한다. False(기본)면 v1 프롬프트·v1 키워드
+    # 루프가 그대로 돌아 출력이 현행과 바이트 동일하다(FR-102 회귀 안전판). 빌더 자체는 settings 를
+    # 모르는 순수 함수라, 토글 해소는 여기(summarize 함수)에서만 한다(plan P2).
+    v2 = cfg.vlm_summary_prompt_v2
     prompt = _build_image_caption_prompt(
-        summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords
+        summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords, v2=v2
     )
 
     data = complete_vision_json(text=prompt, image_data_url=image_data_url)
@@ -152,13 +176,6 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     keywords_raw = data.get("keywords", [])
     if not isinstance(keywords_raw, list):
         keywords_raw = []
-    keywords: list[str] = []
-    for kw in keywords_raw:
-        k = str(kw).strip()
-        if k and k not in keywords:
-            keywords.append(k)
-        if len(keywords) >= cfg.top_k_keywords:
-            break
 
     objects_raw = data.get("objects", [])
     if not isinstance(objects_raw, list):
@@ -168,6 +185,21 @@ def _summarize_image_caption_keywords_objects_from_data_url(
         o = str(obj).strip()
         if o and o not in objects:
             objects.append(o)
+
+    if v2:
+        # v2: 결정적 후처리 — 키워드 정규화(generic 제거) + objects 를 검색 키워드로 승격(top_k cap).
+        keywords = promote_objects_to_keywords(
+            keywords_raw, objects, limit=cfg.top_k_keywords
+        )
+    else:
+        # v1: 현행 inline 루프(dedup·top_k cap·objects 미승격) — 바이트 동일 보존.
+        keywords = []
+        for kw in keywords_raw:
+            k = str(kw).strip()
+            if k and k not in keywords:
+                keywords.append(k)
+            if len(keywords) >= cfg.top_k_keywords:
+                break
 
     return {
         "summary": summary,
