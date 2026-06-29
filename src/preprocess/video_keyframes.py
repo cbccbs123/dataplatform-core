@@ -8,6 +8,7 @@ OpenCV 로 읽어 JPEG bytes 로 인코딩한다. 파일로 저장하지 않고 
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
@@ -16,6 +17,8 @@ from scenedetect import ContentDetector, detect
 
 if TYPE_CHECKING:
     from src.preprocess.keyframe_dedup import KeyframeDedupConfig
+
+logger = logging.getLogger(__name__)
 
 
 class KeyframeBytesResult(TypedDict):
@@ -195,7 +198,16 @@ def extract_video_representative_frame_bytes(
     if _dedup_on and dedup is not None:
         from src.preprocess.keyframe_dedup import dedup_keyframes
 
-        kept, _skips = dedup_keyframes(results, dedup)
+        kept, skips = dedup_keyframes(results, dedup)
+        if skips:
+            # FR-405·US4: skip 관측성 — 사유·개수(비용 절감 측정 SC-006 추적용). 디버그 레벨.
+            logger.debug(
+                "키프레임 dedup: %d/%d skip (mode=%s) — %s",
+                len(skips),
+                len(results),
+                dedup.compare_mode,
+                [{"scene": s["scene_index"], "reason": s["reason"]} for s in skips],
+            )
         if max_frames is not None and max_frames > 0:
             kept = kept[:max_frames]
         return kept

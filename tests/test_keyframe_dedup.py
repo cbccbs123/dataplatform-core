@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import FrozenInstanceError
 
 import cv2
 import numpy as np
@@ -74,8 +75,32 @@ class TestModuleSkeleton(unittest.TestCase):
     def test_config_is_frozen(self) -> None:
         # 결정성(헌법 3조): 동일 설정 객체는 불변 — 런타임 변이 차단.
         cfg = KeyframeDedupConfig(enabled=True)
-        with self.assertRaises(Exception):
+        with self.assertRaises(FrozenInstanceError):
             cfg.enabled = False  # type: ignore[misc]
+
+
+class TestConfigValidation(unittest.TestCase):
+    """권고5/6: 오설정 fail-fast — ``__post_init__`` 가 잘못된 모드·범위를 ValueError 로 차단."""
+
+    def test_invalid_compare_mode_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            KeyframeDedupConfig(enabled=True, compare_mode="bogus")
+
+    def test_negative_hash_max_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            KeyframeDedupConfig(enabled=True, hash_max=-1)
+
+    def test_ssim_out_of_range_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            KeyframeDedupConfig(enabled=True, ssim_min=1.5)
+
+    def test_gray_lo_above_min_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            KeyframeDedupConfig(enabled=True, ssim_gray_lo=0.95, ssim_min=0.94)
+
+    def test_recent_window_below_one_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            KeyframeDedupConfig(enabled=True, recent_window=0)
 
 
 class TestHamming(unittest.TestCase):
@@ -216,6 +241,16 @@ class TestDedupKeyframes(unittest.TestCase):
         self.assertEqual(len(kept), 2)
         # hist 사유 단독 skip 이 없어야 한다.
         self.assertFalse(any(s.get("reason") == "hist" for s in skips))
+
+    def test_dhash_collision_ssim_keeps(self) -> None:
+        # FR-602·FR-301: 단색 두 장은 dHash 가 충돌(둘 다 0·hamming≤hash_max → 후보)하지만,
+        # 밝기가 크게 달라 SSIM < ssim_min → 2차 SSIM 이 dHash 오탐을 구제해 둘 다 keep(임계 밖 keep).
+        dark, bright = _jpeg((40, 40, 40)), _jpeg((210, 210, 210))
+        self.assertLessEqual(hamming(dhash(dark), dhash(bright)), 7)  # 전제: dHash 후보 성립
+        frames = [_frame(1, dark), _frame(2, bright)]
+        kept, skips = dedup_keyframes(frames, KeyframeDedupConfig(enabled=True))
+        self.assertEqual([k["scene_index"] for k in kept], [1, 2])
+        self.assertEqual(skips, [])
 
     def test_empty_input(self) -> None:
         kept, skips = dedup_keyframes([], KeyframeDedupConfig(enabled=True))

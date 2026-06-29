@@ -30,12 +30,17 @@ HASH_SIZE = 8
 # SSIM·HSV 비교용 정사각 규격(소형·CPU 절감, 결정성 고정값).
 SSIM_SIZE = 128
 
+# 지원 비교 모드(화이트리스트 — 오설정 fail-fast).
+_COMPARE_MODES = frozenset({"recent", "last", "global"})
+
 
 @dataclass(frozen=True)
 class KeyframeDedupConfig:
     """dedup 임계·모드 설정(frozen — 동일 설정 → 동일 결과 결정성 보장, 헌법 3조).
 
     settings(``VIDEO_KEYFRAME_DEDUP_*``)에서 video_skill 이 빌드해 주입한다(단일 출처·FR-501).
+    오설정(모드·범위)은 ``__post_init__`` 에서 즉시 ``ValueError`` 로 차단한다 — 잘못된 값이 조용히
+    dedup 을 무력화(예: hash_max<0)하거나 과대 적용하지 않도록(레포 fail-fast 관례).
     """
 
     enabled: bool
@@ -45,6 +50,24 @@ class KeyframeDedupConfig:
     hist_min: float = 0.97
     compare_mode: str = "recent"  # "recent" | "last" | "global"
     recent_window: int = 4
+
+    def __post_init__(self) -> None:
+        if self.compare_mode not in _COMPARE_MODES:
+            raise ValueError(
+                f"compare_mode 는 {sorted(_COMPARE_MODES)} 중 하나여야 함: {self.compare_mode!r}"
+            )
+        if self.hash_max < 0:
+            raise ValueError(f"hash_max 는 0 이상이어야 함: {self.hash_max}")
+        if self.recent_window < 1:
+            raise ValueError(f"recent_window 는 1 이상이어야 함: {self.recent_window}")
+        for _name in ("ssim_min", "ssim_gray_lo", "hist_min"):
+            _v = getattr(self, _name)
+            if not 0.0 <= _v <= 1.0:
+                raise ValueError(f"{_name} 는 0..1 범위여야 함: {_v}")
+        if self.ssim_gray_lo > self.ssim_min:
+            raise ValueError(
+                f"ssim_gray_lo({self.ssim_gray_lo}) 는 ssim_min({self.ssim_min}) 이하여야 함"
+            )
 
 
 def hamming(a: int, b: int) -> int:
@@ -124,7 +147,7 @@ def _compare_indices(keep_count: int, config: KeyframeDedupConfig) -> range:
         n = 1
     elif config.compare_mode == "recent":
         n = max(1, config.recent_window)
-    else:  # "global" 및 미지원 값 → 전체 비교
+    else:  # "global" → 전체 keep 비교(타임라인 손실 위험·비기본; 모드 검증은 config __post_init__).
         n = keep_count
     start = max(0, keep_count - n)
     return range(start, keep_count)
@@ -201,12 +224,10 @@ def dedup_keyframes(
         # 5: 후보들과 max SSIM(동일 resize 규격·FR-301).
         cur_gray = _decode_gray(jpeg)
         best_ssim = -1.0
-        best_ssim_idx = candidates[0]
         for i in candidates:
             sv = ssim(cur_gray, keep_gray[i])
             if sv > best_ssim:
                 best_ssim = sv
-                best_ssim_idx = i
 
         # 5a: max SSIM ≥ ssim_min → skip(ssim).
         if best_ssim >= config.ssim_min:
@@ -245,6 +266,8 @@ def dedup_keyframes(
         keep_jpeg.append(jpeg)
 
     # FR-404·C7: 전부 skip 되어 keep 0 이면 마지막 처리 프레임 강제 keep(영상당 ≥1).
+    # (FR-403 의 '첫 프레임 무조건 keep' 으로 keep≥1 이 이미 보장돼 현재는 도달하지 않는 안전망 —
+    #  향후 비교 로직 변경 대비 유지한다.)
     if not keep and last_processed is not None:
         keep.append(last_processed)
         # 강제 keep 한 프레임은 skip 로그에서 제거(목록에 남지 않게).

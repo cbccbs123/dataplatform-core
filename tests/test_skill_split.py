@@ -105,7 +105,16 @@ class TestVideoSplit(unittest.TestCase):
         # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
         ctx.settings = mock.Mock(video_max_keyframes=2, labels_score_min=0.0,
                                  video_keyframe_labels_meta_top_k=5, text_embedding_model="m",
-                                 text_embedding_normalize=True, active_embed_channel="st")
+                                 text_embedding_normalize=True, active_embed_channel="st",
+                                 # 048: video_skill 이 KeyframeDedupConfig 를 빌드하므로 유효 dedup 설정 필요
+                                 # (extract 는 mock 이라 enabled 무관 — __post_init__ 검증 통과용 유효값).
+                                 video_keyframe_dedup_enabled=False,
+                                 video_keyframe_dedup_hash_max=7,
+                                 video_keyframe_dedup_ssim_min=0.94,
+                                 video_keyframe_dedup_ssim_gray_lo=0.90,
+                                 video_keyframe_dedup_hist_min=0.97,
+                                 video_keyframe_dedup_compare_mode="recent",
+                                 video_keyframe_dedup_recent_window=4)
         frames = [{"scene_index": 0, "start_sec": 0, "end_sec": 1, "frame_sec": 0, "jpeg_bytes": b"x"}]
         clip_ve = {"keyframes": [{"clip_image_embedding": [0.7] * 4,
                                   "summary": {"summary": "s", "keywords": ["k"]},
