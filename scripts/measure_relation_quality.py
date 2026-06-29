@@ -24,6 +24,7 @@ from psycopg.rows import dict_row
 
 from src.database.postgres_util import PostgresUtil
 from src.relations.quality.golden import Golden, parse_golden, resolve_asset_keys
+from src.relations.quality.metrics import isolated_candidates
 from src.relations.quality.report import build_report
 from src.relations.quality.snapshot import (
     ProposedEdge,
@@ -171,15 +172,43 @@ def _asset_fs_path(conn: Connection[Any], ids: set[str]) -> dict[str, str]:
         return {str(a): str(p) for a, p in cur.fetchall()}
 
 
+def _registered_asset_ids(conn: Connection[Any]) -> list[str]:
+    """registered 자산 id 전체(정렬) — 고립 후보 모집단."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT asset_id FROM asset WHERE status = 'registered' ORDER BY asset_id")
+        return [str(r[0]) for r in cur.fetchall()]
+
+
+def _has_any_candidate(conn: Connection[Any], sid: str, *, cfg: Any, config: dict) -> bool:
+    """소스 sid 가 임베딩(≥min_sim) 또는 path-signal 후보를 1개라도 갖는가(C2 고립 판정)."""
+    from src.relations.asset_candidates import find_embedding_candidates
+    from src.relations.path_signal import find_path_signal_candidates
+
+    emb = find_embedding_candidates(
+        conn, source_asset_id=sid, top_k=config["top_k"],
+        embedding_kind=config["embedding_kind"], min_sim=config["min_sim"])
+    if emb:
+        return True
+    return bool(find_path_signal_candidates(conn, source_asset_id=sid, limit=cfg.relation_path_top_k))
+
+
 def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict:
     """검토 초안 골든을 만든다 — 후보 쌍을 fs_path 키로, `_review:true`·제안 kind 와 함께 출력.
 
     ★ 이 산출물은 **골든이 아니다** — 사람이 편집(잘못된 쌍 제거·kind 확정·`_review` 제거·고립 추가)해야 골든이 된다.
     """
+    cfg = _settings()
+    config = {"top_k": cfg.relation_top_k, "min_sim": cfg.relation_min_sim,
+              "embedding_kind": "both"}  # snapshot/measure 기본과 동일(--embedding-kind default="both")
     with db.transaction() as conn:
         raw_pairs = _bootstrap_candidate_pairs(conn, edge_conf_min=edge_conf_min)
         ids = {p["a"] for p in raw_pairs} | {p["b"] for p in raw_pairs}
-        id2path = _asset_fs_path(conn, ids)
+        # C2: registered 전체에서 임베딩(≥min_sim) ∨ path-signal 후보가 1개라도 있는 자산을 추림.
+        #     코사인·동일폴더 신호는 대칭이라 소스 측 유무 검사로 고립을 판정한다(FR-101).
+        reg_ids = _registered_asset_ids(conn)
+        cand_ids = {sid for sid in reg_ids if _has_any_candidate(conn, sid, cfg=cfg, config=config)}
+        iso_ids = isolated_candidates(set(reg_ids), cand_ids)
+        id2path = _asset_fs_path(conn, ids | set(iso_ids))
     draft_pairs = []
     for p in raw_pairs:
         a, b = id2path.get(p["a"]), id2path.get(p["b"])
@@ -187,11 +216,12 @@ def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict
             continue
         draft_pairs.append({"a": a, "b": b, "kind": p.get("_suggest_kind") or "REVIEW",
                             "note": f"{p['_source']}", "_review": True})
-    draft = {"version": 1, "key_type": "fs_path", "pairs": draft_pairs, "isolated": [],
-             "_NOTE": "검토 초안 — 사람이 잘못된 쌍 제거·kind 확정·_review/_NOTE 제거·고립 추가 후에야 골든."}
+    draft = {"version": 1, "key_type": "fs_path", "pairs": draft_pairs,
+             "isolated": sorted(id2path[i] for i in iso_ids if i in id2path),
+             "_NOTE": "검토 초안 — 사람이 잘못된 쌍 제거·kind 확정·_review/_NOTE 제거·고립 검증 후에야 골든."}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(draft, f, ensure_ascii=False, indent=2)
-    return {"draft_pairs": len(draft_pairs), "out": out_path}
+    return {"draft_pairs": len(draft_pairs), "isolated": len(draft["isolated"]), "out": out_path}
 
 
 # ── snapshot / measure ───────────────────────────────────────────────────────
