@@ -7,8 +7,9 @@ PG 는 **읽기 전용**(SELECT 만), OpenSearch 에만 색인을 쓴다(CQRS �
       한 벡터를 `knn_vector` 로 색인한다 — 019 측정에서 평균 집계가 MAX 보다 검색 품질이 좋았고,
       자산당 단일 벡터라 색인·질의가 단순하다(청크별 색인은 후속 선택지).
     - **하이브리드 한 인덱스**: 텍스트(summary·keywords·labels·file_name)는 한국어 형태소 분석기
-      `nori` 로 BM25, 임베딩은 `knn_vector`(코사인). 메타(modality·domain_label·status·channel)는
-      keyword 필터.
+      `nori` 로 BM25, 임베딩은 `knn_vector`(코사인). 메타(modality·domain_label·filter_kw 등)는
+      keyword/date 필터. ``status``·``channel``·``chunk_count`` 는 색인하지 않는다(047 — 동기화 SQL·
+      단일 active channel 전제).
 
 이 모듈의 **순수 함수**(`build_index_body`·`asset_to_doc`·`parse_vector`)는 DB·OS·opensearch-py
 없이 결정적으로 동작하며 단위 게이트에서 항상 검증된다. **IO 함수**(get_client·ensure_index·
@@ -29,12 +30,12 @@ from src.search.filter_index_fields import build_filter_index_fields
 # registered 자산 + 메타(LEFT JOIN) + 활성 채널 청크 **평균 임베딩**(avg, 자산당 1행)을 한 행으로 모은다.
 # avg(embedding) 은 pgvector 집계(>=0.5.0). 임베딩 없는 자산은 INNER JOIN 으로 자연 제외(→ 색인 대상 아님).
 _ASSET_SELECT = """
-SELECT a.asset_id, a.modality, a.domain_label, a.status, a.fs_path, a.created_at,
-       am.ext_meta, e.emb AS emb, e.n AS chunk_count
+SELECT a.asset_id, a.modality, a.domain_label, a.fs_path, a.created_at,
+       am.ext_meta, e.emb AS emb
 FROM asset a
 LEFT JOIN asset_metadata am ON am.asset_id = a.asset_id
 JOIN (
-    SELECT asset_id, avg(embedding) AS emb, count(*) AS n
+    SELECT asset_id, avg(embedding) AS emb
     FROM asset_embedding
     WHERE channel = %s AND embedding IS NOT NULL
     GROUP BY asset_id
@@ -200,8 +201,6 @@ def build_index_body(
                 "asset_id": {"type": "keyword"},
                 "modality": {"type": "keyword"},
                 "domain_label": {"type": "keyword"},
-                "status": {"type": "keyword"},
-                "channel": {"type": "keyword"},
                 "file_name": {
                     "type": "text",
                     "analyzer": "nori_user",
@@ -211,8 +210,6 @@ def build_index_body(
                 "summary": {"type": "text", "analyzer": "nori_user"},
                 "keywords": {"type": "text", "analyzer": "nori_user"},
                 "labels": {"type": "keyword"},
-                "search_text": {"type": "text", "analyzer": "nori_user"},
-                "chunk_count": {"type": "integer"},
                 "filter_kw": {
                     "properties": {
                         "file_ext": {"type": "keyword"},
@@ -258,16 +255,22 @@ def _flatten_labels(raw: Any) -> list[str]:
 
 
 def asset_to_doc(
-    row: dict[str, Any], channel: str, *, noise_patterns: Iterable[str] = ()
+    row: dict[str, Any],
+    channel: str,
+    *,
+    noise_patterns: Iterable[str] = (),
 ) -> dict[str, Any]:
     """PG 행(asset+metadata+평균임베딩) → OpenSearch 문서(순수·결정적).
 
-    ``search_text`` 는 summary·keywords·labels(평탄)만 합쳐 BM25 대상으로 둔다 — **file_name 은 제외**
-    (spec 026 FR-003① — boost 차등이 별도 ``file_name`` 필드로 흡수해 파일명 노이즈의 피해 반경을
-    제한). ``file_name`` 필드 자체는 ``clean_file_name`` 으로 ID스러운 잡음 토큰을 정제한 값이다.
+    BM25 교차 필드 AND(047)는 ``summary``·``keywords`` 필드로 쿼리 시 ``cross_fields`` 처리 —
+    합본 ``search_text`` 색인은 제거했다. ``file_name`` 은 별도 필드 + 낮은 boost(026 FR-003①).
+    ``channel`` 인자는 resync SQL 파라미터와 call-site 호환용 — **문서 필드로는 저장하지 않는다**
+    (단일 active channel 인덱스 전제). ``status``·``chunk_count`` 도 색인 제외(registered 만 sync).
+    ``file_name`` 필드 자체는 ``clean_file_name`` 으로 ID스러운 잡음 토큰을 정제한 값이다.
     ``labels`` 는 ``_flatten_labels`` 로 dict→label 문자열만 추출한다(P0·FR-002). ext_meta 가 None/
     비-리스트(스키마 위반)여도 빈 값으로 안전 처리한다. ``noise_patterns`` 는 settings 정제 패턴(IO 층 주입).
     """
+    _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
     ext = row.get("ext_meta") or {}
     file_name = clean_file_name(
         _basename(str(row.get("fs_path") or "")), noise_patterns=noise_patterns
@@ -276,25 +279,15 @@ def asset_to_doc(
     keywords = ext.get("keywords") if isinstance(ext.get("keywords"), list) else []
     labels = _flatten_labels(ext.get("labels"))
 
-    # file_name 제외(FR-003①) — summary+keywords+labels(평탄) 만 BM25 search_text 로.
-    parts = [summary]
-    parts += [str(k) for k in keywords]
-    parts += labels
-    search_text = " ".join(p for p in parts if p)
-
     doc = {
         "asset_id": str(row["asset_id"]),
         "modality": row.get("modality"),
         "domain_label": row.get("domain_label"),
-        "status": row.get("status"),
-        "channel": channel,
         "file_name": file_name,
         "fs_uri": str(row.get("fs_path") or ""),
         "summary": summary,
         "keywords": [str(k) for k in keywords],
         "labels": labels,
-        "search_text": search_text,
-        "chunk_count": int(row.get("chunk_count") or 0),
     }
     # 영벡터(퇴화 임베딩 — 빈 STT 등)는 cosinesimil knn 이 거부하므로 embedding 필드를 **생략**한다.
     # 해당 자산은 텍스트(BM25)로만 검색되고 벡터 검색 대상에서만 빠진다(색인 실패 대신 우아한 처리).

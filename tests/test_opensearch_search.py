@@ -41,14 +41,14 @@ from src.search.opensearch_search import (
 )
 from src.search.search_filters import SearchFilters
 
-# 044: named query should 절 — boost는 clause boost 로 계승.
+# 044: named query should 절 — boost는 clause boost 로 계승. 047: cross_meta 는 multi_match cross_fields.
 _BM25_FIELD_BOOSTS = {
     "summary": 3.0,
     "keywords": 2.0,
     "labels": 1.0,
     "file_name": 0.5,
-    "search_text": 1.0,
 }
+_CROSS_META_BOOST = 1.0
 
 
 def _bm25_named_names(body: dict) -> set[str]:
@@ -60,6 +60,8 @@ def _bm25_named_names(body: dict) -> set[str]:
         elif "term" in clause:
             for inner in clause["term"].values():
                 names.add(inner["_name"])
+        elif "multi_match" in clause:
+            names.add(clause["multi_match"]["_name"])
     return names
 
 
@@ -394,6 +396,12 @@ class BuildBm25BodyTest(unittest.TestCase):
                 field, inner = next(iter(clause["match"].items()))
                 self.assertEqual(inner["query"], self.query)
                 self.assertAlmostEqual(inner.get("boost", 1.0), _BM25_FIELD_BOOSTS[field])
+            elif "multi_match" in clause:
+                inner = clause["multi_match"]
+                self.assertEqual(inner["_name"], "hit_cross_meta")
+                self.assertEqual(inner["type"], "cross_fields")
+                self.assertEqual(inner["fields"], ["summary^3", "keywords^2"])
+                self.assertAlmostEqual(inner.get("boost", 1.0), _CROSS_META_BOOST)
 
     def test_size_equals_k(self) -> None:
         self.assertEqual(self.body["size"], 20)
@@ -423,6 +431,8 @@ class BuildBm25BodyTest(unittest.TestCase):
             if "match" in clause:
                 for inner in clause["match"].values():
                     self.assertEqual(inner.get("operator"), "and")
+            elif "multi_match" in clause:
+                self.assertEqual(clause["multi_match"].get("operator"), "and")
 
     def test_operator_default_or_omits_key(self) -> None:
         default_body = build_bm25_body(self.query, modality_values=["txt"], k=10)

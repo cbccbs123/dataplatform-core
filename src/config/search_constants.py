@@ -65,21 +65,21 @@ OS_QUERY_NORM_ENABLED_DEFAULT: bool = False
 #
 # ── 필드 evidence 가중치 (strong / weak tier) ─────────────────────────────────
 # ``build_bm25_body`` 의 named clause `_name` 과 1:1 대응. hit 된 clause 만 가산(연속 BM25 점수 아님).
-# strong: keywords·labels·file_name — 의도적 메타·식별자 필드. weak: summary·search_text — 본문·파생
-# 텍스트(우연 substring·"비거리 테스트" 류 과매칭의 주범). ``hit_search_text`` 는 strong hit 가
+# strong: keywords·labels·file_name — 의도적 메타·식별자 필드. weak: summary·cross_meta — 본문·교차
+# 필드(우연 substring·"비거리 테스트" 류 과매칭의 주범). ``hit_cross_meta`` 는 strong hit 가
 # 이미 있으면 dedup 스킵(설계 §10.1 — summary 파생 중복 가산 금지).
 EVIDENCE_HIT_KEYWORDS_WEIGHT: float = 3.0   # strong — ingest keywords·BM25 `hit_keywords`
 EVIDENCE_HIT_LABELS_WEIGHT: float = 2.0     # strong — domain/tag labels·`hit_labels`
 EVIDENCE_HIT_FILE_NAME_WEIGHT: float = 1.5  # strong — 정제 file_name·`hit_file_name`
 EVIDENCE_HIT_SUMMARY_WEIGHT: float = 0.7    # weak — chunk summary·`hit_summary`
-EVIDENCE_HIT_SEARCH_TEXT_WEIGHT: float = 0.3  # weak — 색인 search_text·`hit_search_text`
+EVIDENCE_HIT_CROSS_META_WEIGHT: float = 0.3  # weak — cross_fields summary+keywords·`hit_cross_meta`
 #
 # ── rescue 임계 (가설 — G5 골든·q=테스트 스모크 후 **이 세 줄만** 재보정) ─────
 # 적용 경로: 게이트 실패 ∧ BM25 행(`_bm25=True`) ∧ ``bm25_operator=and`` 일 때만(027 lexical rescue 잎).
 # ``SEARCH_EVIDENCE_RESCUE_ENABLED=0`` 이면 임계 **미사용** — legacy `has_lexical` 전부 keep.
 EVIDENCE_NORMAL_THRESHOLD: float = 1.5
 # ``lexical_rescue=normal``(일반 질의·또는 generic+keyword) — **전체** evidence_score 하한.
-# 예: keywords만 hit(3.0) → keep; summary+search_text 만(1.0) → drop.
+# 예: keywords만 hit(3.0) → keep; summary+cross_meta 만(1.0) → drop.
 EVIDENCE_RESTRICTED_STRONG_THRESHOLD: float = 2.5
 # ``lexical_rescue=restricted``(generic single term + auto) — **strong tier 합** 만 본다(weak 무시).
 # 예: q=테스트 → 낚시(summary weak만) drop; 반도체(keywords strong≥2.5) keep.
@@ -119,7 +119,7 @@ __all__ = [
     "EVIDENCE_HIT_FILE_NAME_WEIGHT",
     "EVIDENCE_HIT_KEYWORDS_WEIGHT",
     "EVIDENCE_HIT_LABELS_WEIGHT",
-    "EVIDENCE_HIT_SEARCH_TEXT_WEIGHT",
+    "EVIDENCE_HIT_CROSS_META_WEIGHT",
     "EVIDENCE_HIT_SUMMARY_WEIGHT",
     "EVIDENCE_KEYWORD_THRESHOLD",
     "EVIDENCE_NORMAL_THRESHOLD",

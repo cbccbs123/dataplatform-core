@@ -17,7 +17,7 @@ EVIDENCE_WEIGHTS: dict[str, float] = {
     "hit_labels": sc.EVIDENCE_HIT_LABELS_WEIGHT,
     "hit_file_name": sc.EVIDENCE_HIT_FILE_NAME_WEIGHT,
     "hit_summary": sc.EVIDENCE_HIT_SUMMARY_WEIGHT,
-    "hit_search_text": sc.EVIDENCE_HIT_SEARCH_TEXT_WEIGHT,
+    "hit_cross_meta": sc.EVIDENCE_HIT_CROSS_META_WEIGHT,
 }
 
 _STRONG_EVIDENCE_NAMES: frozenset[str] = frozenset(
@@ -32,7 +32,7 @@ def evidence_score(
 ) -> float:
     """matched_queries 1/0 × weight 합(순수·결정적).
 
-    unknown _name 은 무시. strong hit 가 있으면 ``hit_search_text`` 가중은 스킵(dedup).
+    unknown _name 은 무시. strong hit 가 있으면 ``hit_cross_meta`` 가중은 스킵(dedup).
     """
     w = weights or EVIDENCE_WEIGHTS
     names = list(matched_queries or [])
@@ -42,7 +42,7 @@ def evidence_score(
         weight = w.get(name)
         if weight is None:
             continue
-        if name == "hit_search_text" and has_strong:
+        if name == "hit_cross_meta" and has_strong:
             continue
         total += weight
     return total

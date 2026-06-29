@@ -122,7 +122,7 @@ class ApplyBucketPolicyTest(unittest.TestCase):
         weak = _row(
             "w1",
             bm25=True,
-            matched_queries=["hit_summary", "hit_search_text"],
+            matched_queries=["hit_summary", "hit_cross_meta"],
         )
         # RESCUE off → legacy keep
         out_off = self._call(
@@ -364,7 +364,7 @@ class BucketPolicyLegacyInlineParityTest(unittest.TestCase):
                 ],
             },
             {
-                "fused": [_row("w1", bm25=True, matched_queries=["hit_summary", "hit_search_text"])],
+                "fused": [_row("w1", bm25=True, matched_queries=["hit_summary", "hit_cross_meta"])],
                 "top": 0.40,
                 "baseline": 0.39,
                 "cutoff_eps": 0.9,

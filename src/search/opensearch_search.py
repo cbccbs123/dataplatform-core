@@ -17,7 +17,7 @@ kNN 0), ② 게이트(``gate_signal``)·per-result 컷(``cut_rows``)이 **코사
 ``src.config.search_constants`` 단일 출처(F1).
 
 필드명 정본 = 020 인덱스 매핑(`opensearch_sync.build_index_body`):
-    - nori 텍스트: ``summary``·``keywords``·``labels``·``file_name``·``search_text``
+    - nori 텍스트: ``summary``·``keywords``·``labels``·``file_name`` (+ 047 ``cross_fields``)
     - 벡터: ``embedding``(knn_vector·1536D)
     - keyword 필터: ``modality``·``domain_label``
 """
@@ -55,23 +55,16 @@ from src.search.search_filters import SearchFilters, filters_to_opensearch_bool
 # 필드를 정확매칭 절로 안전 수용한다(텍스트 필드와 혼합 무해). text/audio 버킷 한국어 BM25 재현율용.
 # 026 T008(FR-003①): boost 차등 표기('field^N') — 토픽 신호(summary^3·keywords^2·labels^1)를
 # 파일명(file_name^0.5)보다 강하게 둬서 파일명 노이즈가 랭킹을 압도하지 못하게 한다(F8 구조 방어).
-# search_text 는 boost 1(표기 생략) — 이제 file_name 을 합본하지 않으므로(026 T005) 안전하다.
-# multi_match 는 'field^N' 부스트 문법을 그대로 해석한다.
-_TEXT_FIELDS: tuple[str, ...] = (
-    "summary^3",
-    "keywords^2",
-    "labels^1",
-    "file_name^0.5",
-    "search_text",
-)
+# 047: 교차 필드 AND(recall) — ``multi_match`` ``cross_fields`` on summary+keywords(색인 search_text 제거).
+_CROSS_META_FIELDS: tuple[str, ...] = ("summary^3", "keywords^2")
 
-# 044 FR-101: named query _name 고정 집합(build_bm25_body bool.should).
+# 044 FR-101 · 047: named query _name 고정 집합(build_bm25_body bool.should).
 BM25_NAMED_QUERY_NAMES: tuple[str, ...] = (
     "hit_keywords",
     "hit_labels",
     "hit_file_name",
     "hit_summary",
-    "hit_search_text",
+    "hit_cross_meta",
 )
 
 # FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
@@ -132,12 +125,24 @@ def build_bm25_body(
             inner["operator"] = operator
         return {"match": {field: inner}}
 
+    def _cross_meta(*, boost: float, _name: str) -> dict[str, Any]:
+        inner: dict[str, Any] = {
+            "query": query,
+            "type": "cross_fields",
+            "fields": list(_CROSS_META_FIELDS),
+            "_name": _name,
+            "boost": boost,
+        }
+        if operator != "or":
+            inner["operator"] = operator
+        return {"multi_match": inner}
+
     should: list[dict[str, Any]] = [
         _match("keywords", 2.0, "hit_keywords"),
         {"term": {"labels": {"value": label_term, "_name": "hit_labels", "boost": 1.0}}},
         _match("file_name", 0.5, "hit_file_name"),
         _match("summary", 3.0, "hit_summary"),
-        _match("search_text", 1.0, "hit_search_text"),
+        _cross_meta(boost=1.0, _name="hit_cross_meta"),
     ]
     bool_clause: dict[str, Any] = {
         "should": should,

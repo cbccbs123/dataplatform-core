@@ -59,8 +59,10 @@ class TestAssetToDoc(unittest.TestCase):
         self.assertEqual(doc["asset_id"], "a1")
         self.assertEqual(doc["modality"], "video")
         self.assertEqual(doc["domain_label"], "general")
-        self.assertEqual(doc["status"], "registered")
-        self.assertEqual(doc["channel"], "st")
+        # 047: status·channel·chunk_count 는 OS 문서에 넣지 않음.
+        self.assertNotIn("status", doc)
+        self.assertNotIn("channel", doc)
+        self.assertNotIn("chunk_count", doc)
         # T004: file_name 은 clean_file_name 적용 값(확장자 제거·'_'→공백·ID 토큰 제거). 'xyz'(<8)
         # 는 보존된다.
         self.assertEqual(doc["file_name"], "무선 충전기 xyz")
@@ -68,39 +70,38 @@ class TestAssetToDoc(unittest.TestCase):
         self.assertEqual(doc["summary"], "무선 충전기 리뷰")
         self.assertEqual(doc["keywords"], ["충전기", "Qi2"])
         self.assertEqual(doc["labels"], ["전자제품"])
-        self.assertEqual(doc["chunk_count"], 7)
         self.assertEqual(doc["embedding"], [0.1, 0.2, 0.3])
 
     def test_all_expected_keys_present(self) -> None:
         # T001 이 명시한 문서 필드 집합을 전부 갖는지(누락 방지).
         doc = asset_to_doc(self._row(), channel="st")
         expected = {
-            "asset_id", "modality", "domain_label", "status", "channel",
+            "asset_id", "modality", "domain_label",
             "file_name", "fs_uri", "summary", "keywords", "labels",
-            "search_text", "chunk_count", "embedding",
+            "embedding",
         }
         self.assertTrue(expected.issubset(doc.keys()))
+        self.assertNotIn("search_text", doc)
+        for omitted in ("status", "channel", "chunk_count"):
+            self.assertNotIn(omitted, doc)
 
-    def test_search_text_concatenates(self) -> None:
-        # T005(FR-003①): search_text 는 summary+keywords+labels(평탄)로만 구성. file_name 은 **제외**
-        # (G3 boost 가 별도 file_name 필드로 흡수) — 파일명 노이즈가 search_text(boost 1) 를 오염시키지
-        # 않게 한다.
-        st = asset_to_doc(self._row(), channel="st")["search_text"]
-        for token in ("무선 충전기 리뷰", "충전기", "Qi2", "전자제품"):
-            self.assertIn(token, st)
-        # file_name 전용 토큰('xyz')·확장자('.mp4')는 search_text 에 들어오지 않는다.
-        self.assertNotIn("xyz", st)
-        self.assertNotIn(".mp4", st)
+    def test_summary_keywords_labels_separate_fields(self) -> None:
+        # 047: BM25 교차 필드는 summary·keywords 색인 필드로 쿼리 — 합본 search_text 제거.
+        doc = asset_to_doc(self._row(), channel="st")
+        self.assertEqual(doc["summary"], "무선 충전기 리뷰")
+        self.assertEqual(doc["keywords"], ["충전기", "Qi2"])
+        self.assertEqual(doc["labels"], ["전자제품"])
 
-    def test_search_text_excludes_file_name_field(self) -> None:
-        # T005: file_name 에만 있는 토큰은 search_text 에서 배제됨을 직접 봉인(파일명 노이즈 격리).
+    def test_file_name_not_merged_into_summary(self) -> None:
+        # file_name 은 별도 필드 — summary/keywords 와 합치지 않는다(026 FR-003①).
         row = self._row(
             fs_path="/data/NOISETOKEN12.mp4",
             ext_meta={"summary": "주제 요약", "keywords": ["키워드"], "labels": ["라벨"]},
         )
         doc = asset_to_doc(row, channel="st")
-        self.assertIn("주제 요약", doc["search_text"])
-        self.assertNotIn("NOISETOKEN12", doc["search_text"])
+        self.assertEqual(doc["summary"], "주제 요약")
+        self.assertNotIn("NOISETOKEN12", doc["summary"])
+        self.assertNotIn("NOISETOKEN12", " ".join(doc["keywords"]))
 
     def test_labels_dict_flattened_to_label_string(self) -> None:
         # T003(P0·FR-002): labels 가 {label,score} dict 면 label 문자열만 추출(str(dict) 직렬화 금지).
@@ -114,9 +115,9 @@ class TestAssetToDoc(unittest.TestCase):
         )
         doc = asset_to_doc(row, channel="st")
         self.assertEqual(doc["labels"], ["텍스트", "인물"])
-        # 색인 문자열에 dict-repr('score'·중괄호)가 새지 않는다(SC-006).
-        self.assertNotIn("score", doc["search_text"])
-        self.assertNotIn("{", doc["search_text"])
+        # labels 는 keyword 배열로만 저장(dict-repr 오염 없음).
+        self.assertNotIn("score", doc["labels"])
+        self.assertNotIn("{", str(doc["labels"]))
 
     def test_labels_mixed_dict_and_str(self) -> None:
         # dict·str 혼합 labels 도 모두 문자열로 평탄화. 빈 label/공백은 제외.
@@ -223,11 +224,13 @@ class TestIndexBody(unittest.TestCase):
         self.assertEqual(props["embedding"]["method"]["space_type"], "cosinesimil")
         # T006(FR-004): 한국어 텍스트 필드는 user_dictionary 를 받는 **커스텀** nori analyzer('nori_user').
         # 내장 'nori' 는 user_dictionary 를 못 받으므로 반드시 커스텀 정의를 쓴다.
-        for f in ("summary", "keywords", "search_text", "file_name"):
+        for f in ("summary", "keywords", "file_name"):
             self.assertEqual(props[f]["analyzer"], "nori_user")
         # 메타 필터는 keyword.
-        for k in ("asset_id", "modality", "domain_label", "status", "channel"):
+        for k in ("asset_id", "modality", "domain_label"):
             self.assertEqual(props[k]["type"], "keyword")
+        for omitted in ("status", "channel", "chunk_count"):
+            self.assertNotIn(omitted, props)
         self.assertEqual(props["filter_kw"]["properties"]["file_ext"]["type"], "keyword")
         self.assertEqual(props["filter_kw"]["properties"]["source_dataset"]["type"], "keyword")
         self.assertEqual(props["filter_date"]["properties"]["created_at"]["type"], "date")

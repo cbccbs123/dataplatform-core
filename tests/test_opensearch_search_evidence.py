@@ -23,6 +23,8 @@ def _collect_named_names(body: dict) -> set[str]:
         elif "term" in clause:
             for inner in clause["term"].values():
                 names.add(inner["_name"])
+        elif "multi_match" in clause:
+            names.add(clause["multi_match"]["_name"])
     return names
 
 
@@ -37,10 +39,17 @@ def _first_match_query(body: dict) -> str:
 class BuildBm25NamedQueryTest(unittest.TestCase):
     def test_build_bm25_body_named_queries(self) -> None:
         body = build_bm25_body("테스트", modality_values=["txt"], k=10, operator="and")
-        self.assertNotIn("multi_match", str(body))
         names = _collect_named_names(body)
         self.assertEqual(names, set(BM25_NAMED_QUERY_NAMES))
         self.assertEqual(body["query"]["bool"]["minimum_should_match"], 1)
+        cross = [
+            c["multi_match"]
+            for c in body["query"]["bool"]["should"]
+            if "multi_match" in c
+        ]
+        self.assertEqual(len(cross), 1)
+        self.assertEqual(cross[0]["_name"], "hit_cross_meta")
+        self.assertEqual(cross[0]["type"], "cross_fields")
 
     def test_operator_and_on_match_clauses(self) -> None:
         body = build_bm25_body("한국어 검색", modality_values=["txt"], k=10, operator="and")
@@ -48,6 +57,8 @@ class BuildBm25NamedQueryTest(unittest.TestCase):
             if "match" in clause:
                 for inner in clause["match"].values():
                     self.assertEqual(inner.get("operator"), "and")
+            elif "multi_match" in clause:
+                self.assertEqual(clause["multi_match"].get("operator"), "and")
 
     def test_operator_or_omits_key(self) -> None:
         body = build_bm25_body("q", modality_values=["txt"], k=10, operator="or")
@@ -62,11 +73,11 @@ class MatchedQueriesPreserveTest(unittest.TestCase):
         hit = {
             "_id": "a1",
             "_score": 1.0,
-            "matched_queries": ["hit_summary", "hit_search_text"],
+            "matched_queries": ["hit_summary", "hit_cross_meta"],
             "_source": {"asset_id": "a1", "summary": "충전 테스트"},
         }
         row = os_hit_to_row(hit)
-        self.assertEqual(row["matched_queries"], ["hit_summary", "hit_search_text"])
+        self.assertEqual(row["matched_queries"], ["hit_summary", "hit_cross_meta"])
 
     def test_fuse_hybrid_phase1_policy_unchanged(self) -> None:
         # gate_fail + bm25-only weak — Phase 1/G1: legacy lexical rescue 유지(전부 keep).
@@ -115,7 +126,7 @@ class EvidenceRescueIntegrationTest(unittest.TestCase):
 
     def test_restricted_weak_only_dropped_when_enabled(self) -> None:
         hit = _bm25_hit_os("w1", 3.0)
-        hit["matched_queries"] = ["hit_summary", "hit_search_text"]
+        hit["matched_queries"] = ["hit_summary", "hit_cross_meta"]
         client = self._gate_fail_client([hit])
         buckets, _ = search_assets_os(
             client,

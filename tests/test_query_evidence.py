@@ -22,18 +22,18 @@ class EvidenceScoreTest(unittest.TestCase):
         self.assertEqual(evidence_score(["hit_unknown", "not_a_field"]), 0.0)
 
     def test_weak_only_table(self) -> None:
-        # 설계 §11.2 예: summary + search_text = 0.7 + 0.3
+        # 설계 §11.2 예: summary + cross_meta = 0.7 + 0.3
         self.assertAlmostEqual(
-            evidence_score(["hit_summary", "hit_search_text"]),
+            evidence_score(["hit_summary", "hit_cross_meta"]),
             1.0,
         )
 
     def test_keywords_only(self) -> None:
         self.assertAlmostEqual(evidence_score(["hit_keywords"]), 3.0)
 
-    def test_dedup_search_text_when_strong(self) -> None:
-        # keywords hit 시 search_text 중복 가산 금지
-        score = evidence_score(["hit_keywords", "hit_search_text"])
+    def test_dedup_cross_meta_when_strong(self) -> None:
+        # keywords hit 시 cross_meta 중복 가산 금지
+        score = evidence_score(["hit_keywords", "hit_cross_meta"])
         self.assertAlmostEqual(score, 3.0)
 
     def test_strong_evidence_score(self) -> None:
@@ -55,7 +55,7 @@ class LexicalRescueKeepTest(unittest.TestCase):
 
     def test_weak_only_restricted_drop(self) -> None:
         keep, reason = lexical_rescue_keep(
-            ["hit_summary", "hit_search_text"],
+            ["hit_summary", "hit_cross_meta"],
             policy=self.restricted,
             rescue_enabled=True,
         )
@@ -82,7 +82,7 @@ class LexicalRescueKeepTest(unittest.TestCase):
     def test_keyword_mode_weak_keep(self) -> None:
         policy = build_search_policy("테스트", mode="keyword")
         keep, reason = lexical_rescue_keep(
-            ["hit_summary", "hit_search_text"],
+            ["hit_summary", "hit_cross_meta"],
             policy=policy,
             rescue_enabled=True,
         )
