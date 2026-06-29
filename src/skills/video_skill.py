@@ -28,6 +28,7 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     from src.embedders.video_embedder import embed_video_keyframes_clip
     from src.llm.image_summarizer import summarize_image_caption_keywords_objects_from_jpeg_bytes
     from src.llm.video_summarizer import summarize_video_from_scene_results
+    from src.preprocess.keyframe_dedup import KeyframeDedupConfig
     from src.preprocess.video_keyframes import (
         extract_video_basic_meta,
         extract_video_representative_frame_bytes,
@@ -36,8 +37,19 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     cfg = ctx.settings or get_current_settings()
     file = ctx.file_path
 
+    # 048: 키프레임 추출 직후·VLM 루프 이전 near-dup 제거(설정 단일 출처 주입).
+    # enabled=False 면 extract 가 현행 경로 그대로 → 결과 바이트 동일(FR-103).
+    dedup_config = KeyframeDedupConfig(
+        enabled=cfg.video_keyframe_dedup_enabled,
+        hash_max=cfg.video_keyframe_dedup_hash_max,
+        ssim_min=cfg.video_keyframe_dedup_ssim_min,
+        ssim_gray_lo=cfg.video_keyframe_dedup_ssim_gray_lo,
+        hist_min=cfg.video_keyframe_dedup_hist_min,
+        compare_mode=cfg.video_keyframe_dedup_compare_mode,
+        recent_window=cfg.video_keyframe_dedup_recent_window,
+    )
     frame_items = extract_video_representative_frame_bytes(
-        video_path=file, max_frames=cfg.video_max_keyframes
+        video_path=file, max_frames=cfg.video_max_keyframes, dedup=dedup_config
     )
     korean_labels_per_frame: list[list[str]] = []
     result: list[dict] = []
