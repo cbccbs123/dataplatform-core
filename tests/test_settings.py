@@ -79,6 +79,10 @@ _BACKEND_KEYS = (
     "VIDEO_KEYFRAME_DEDUP_HIST_MIN",
     "VIDEO_KEYFRAME_DEDUP_COMPARE_MODE",
     "VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW",
+    # 049: VLM 요약 프롬프트 v2 토글 2종. 기본 False(v1 바이트 동일) 단언을 실행 환경 잔존값이
+    # 오염시키지 않게 비운다(048 키와 동형 격리).
+    "VLM_SUMMARY_PROMPT_V2",
+    "VLM_SUMMARY_AB_JUDGE",
 )
 
 
@@ -677,6 +681,46 @@ class TestVideoKeyframeDedupSettings(unittest.TestCase):
     def test_invalid_int_fail_fast(self) -> None:
         # 정수 형식 오류는 _env_int_default 가 즉시 ValueError.
         with _env(VIDEO_KEYFRAME_DEDUP_HASH_MAX="abc"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestVlmSummaryPromptV2Settings(unittest.TestCase):
+    """049 G0(FR-601): VLM 요약 프롬프트 v2 토글 2종 단일 출처.
+
+    기존 ``_env_bool_default`` 선택 필드 패턴(029/038/048 동형) — 미설정 시 기본 False.
+      - ``vlm_summary_prompt_v2``: 기본 False(v1 바이트 동일·회귀 안전판·FR-102). True 면 캡션·reduce
+        v2 프롬프트 + 키워드 후처리(objects 승격) 활성.
+      - ``vlm_summary_ab_judge`` : 기본 False(A/B 하니스 LLM-judge 옵션).
+
+    순수 토글이라 별도 범위검증 헬퍼 없이 ``_env_bool_default`` 가 불리언 형식 오류만 fail-fast.
+    """
+
+    def test_defaults_when_unset(self) -> None:
+        # 미설정 → 둘 다 기본 False(v1 바이트 동일·회귀 안전판). _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.vlm_summary_prompt_v2, False)
+        self.assertIs(s.vlm_summary_ab_judge, False)
+
+    def test_prompt_v2_env_override_true(self) -> None:
+        with _env(VLM_SUMMARY_PROMPT_V2="true"):
+            s = _build_settings("dev")
+        self.assertIs(s.vlm_summary_prompt_v2, True)
+
+    def test_ab_judge_env_override_true(self) -> None:
+        with _env(VLM_SUMMARY_AB_JUDGE="1"):
+            s = _build_settings("dev")
+        self.assertIs(s.vlm_summary_ab_judge, True)
+
+    def test_prompt_v2_env_override_false_explicit(self) -> None:
+        with _env(VLM_SUMMARY_PROMPT_V2="off"):
+            s = _build_settings("dev")
+        self.assertIs(s.vlm_summary_prompt_v2, False)
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 추출하지 않게).
+        with _env(VLM_SUMMARY_PROMPT_V2="maybe"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 

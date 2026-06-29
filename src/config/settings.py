@@ -134,6 +134,13 @@ class PipelineSettings:
     video_keyframe_dedup_hist_min: float
     video_keyframe_dedup_compare_mode: str
     video_keyframe_dedup_recent_window: int
+    # 049: VLM 요약 프롬프트 v2 토글(FR-101·FR-601). 캡션(image_summarizer)·reduce(video_summarizer)
+    # 의 v1/v2 프롬프트와 키워드 후처리(objects 승격)를 고르는 단일 출처. 모두 _env_bool_default 선택
+    # 필드 — 미설정 시 기본 False. vlm_summary_prompt_v2=False(기본) 면 summarize_* 가 빌더에 v2=False
+    # 를 넘기고 v1 inline 키워드 루프를 그대로 써, 추출 결과가 현행과 **바이트 동일**하다(FR-102 회귀
+    # 안전판). vlm_summary_ab_judge 는 A/B 측정 하니스(G4)의 LLM-judge 옵션 — 평가용·추출 무영향.
+    vlm_summary_prompt_v2: bool
+    vlm_summary_ab_judge: bool
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -537,6 +544,11 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         video_keyframe_dedup_hist_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_HIST_MIN", 0.97),
         video_keyframe_dedup_compare_mode=_env_str_default("VIDEO_KEYFRAME_DEDUP_COMPARE_MODE", "recent"),
         video_keyframe_dedup_recent_window=_env_int_default("VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW", 4),
+        # 049: VLM 요약 프롬프트 v2 토글(기본 False — v1 바이트 동일·회귀 안전판·FR-102). 순수 토글이라
+        # _env_bool_default 가 불리언 형식 오류만 fail-fast(029/048 동형). False 면 summarize_* 가 v1
+        # 경로(현행 inline 키워드 루프)를 그대로 써 추출 결과가 바이트 동일하다.
+        vlm_summary_prompt_v2=_env_bool_default("VLM_SUMMARY_PROMPT_V2", False),
+        vlm_summary_ab_judge=_env_bool_default("VLM_SUMMARY_AB_JUDGE", False),
     )
     # 038: 단일 필드 fail-fast(_resolve_*)로 못 잡는 교차필드 불변식(OS read ⇒ OS write 필수)을
     # 빌드 완료 후 검증한다 — 오설정이 런타임까지 숨지 않게(init_settings=_build_settings 검증 지점).
