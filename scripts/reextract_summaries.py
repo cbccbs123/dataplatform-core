@@ -129,6 +129,17 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="처리 자산 수 상한")
     parser.add_argument("--modality", action="append", default=None, help="대상 모달리티 필터(반복 지정)")
     parser.add_argument("--backup-dir", default="backups", help="ext_meta 백업 디렉터리")
+    # 050: stage-2 video 키프레임 VLM 재캡션·재임베딩 모드. v2 토글(049) 전제(FR-101).
+    parser.add_argument(
+        "--stage2",
+        action="store_true",
+        help="video 키프레임 VLM 재캡션·재임베딩(049 v2)·DELETE+INSERT 교체",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="--stage2 에서 VLM_SUMMARY_PROMPT_V2=off 게이트를 무시하고 강행(비권장)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -139,6 +150,13 @@ def main() -> int:
 
     init_settings(args.env)
     cfg = get_current_settings()
+
+    # 050 FR-101: stage-2(video v2 재캡션)는 049 v2 토글 on 전제. off 면 v1 재캡션 = 무의미라
+    # DB 연결 전에 중단한다(--force 로만 강행 가능). 게이트가 가장 먼저라 mock 단위로 검증 가능.
+    if args.stage2 and not cfg.vlm_summary_prompt_v2 and not args.force:
+        _LOG.error("VLM_SUMMARY_PROMPT_V2=off — v1 재캡션은 무의미. --force 로만 강행.")
+        return 2
+
     from src.database.postgres_util import PostgresUtil
 
     db = PostgresUtil()
@@ -147,15 +165,29 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(_SELECT)
             rows = cur.fetchall()
+        # 050: stage-2 는 video 키프레임 재캡션 전용이라 대상을 video 로 강제 한정한다
+        # (--modality 를 명시하지 않아도 다른 모달리티가 섞이지 않도록).
+        mod_filter = set(args.modality) if args.modality else None
+        if args.stage2:
+            mod_filter = {"video"}
         targets = [
             (str(aid), mod, fp, em or {})
             for aid, mod, fp, em in rows
-            if (args.modality is None or mod in set(args.modality))
+            if (mod_filter is None or mod in mod_filter)
         ]
         if args.limit:
             targets = targets[: args.limit]
         _LOG.info("대상 자산: %d건 (dry_run=%s)", len(targets), args.dry_run)
         if args.dry_run:
+            if args.stage2:
+                # stage-2 dry-run: video 대상 수·fs_path 부재 건만 집계(쓰기 0).
+                missing = sum(1 for _a, _m, fp, _e in targets if not Path(fp or "").is_file())
+                _LOG.info(
+                    "stage-2 dry-run: video 대상 %d건 · fs_path 부재 %d건(쓰기 0)",
+                    len(targets),
+                    missing,
+                )
+                return 0
             by_mod: dict[str, int] = {}
             for _a, mod, _f, _e in targets:
                 by_mod[mod] = by_mod.get(mod, 0) + 1
