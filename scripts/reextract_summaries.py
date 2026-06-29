@@ -31,6 +31,11 @@ if str(_REPO_ROOT) not in sys.path:
 
 _LOG = logging.getLogger("meta_extract.reextract")
 
+# 050 stage-2: video 키프레임 v2 재캡션·재임베딩에 video_skill extract+embed 를 재사용한다(재구현 금지·P1).
+# 모듈 레벨 import — 단위 테스트가 _extract_video_meta/_embed_video 를 patch 할 수 있게 한다(sys.path 설정 후).
+from src.dispatch.types import ExtractContext  # noqa: E402
+from src.skills.video_skill import _embed_video, _extract_video_meta  # noqa: E402
+
 _DOC_KINDS = {"txt", "json", "pdf", "word", "excel", "powerpoint"}
 
 _SELECT = """SELECT a.asset_id, a.modality, a.fs_path, am.ext_meta
@@ -42,6 +47,8 @@ _UPDATE = "UPDATE asset_metadata SET ext_meta = %s::jsonb WHERE asset_id = %s"
 
 # image 재임베딩 교체용(요약 변경 → 임베딩 입력 변경). PK (asset_id, channel, chunk_index).
 _DEL_EMB = "DELETE FROM asset_embedding WHERE asset_id = %s AND channel = %s"
+# 050 stage-2: 자산 전 채널·청크 임베딩 교체(dedup 으로 키프레임 수·청크가 바뀔 수 있어 channel 한정 X).
+_DEL_EMB_ALL = "DELETE FROM asset_embedding WHERE asset_id = %s"
 _INS_EMB = (
     "INSERT INTO asset_embedding (asset_id, channel, chunk_index, embedding, model_name, model_version) "
     "VALUES (%s, %s, %s, %s::vector, %s, NULL)"
@@ -120,6 +127,33 @@ def _reembed_image(conn: Any, asset_id: str, ext_meta: dict[str, Any], *, normal
             cur.execute(_INS_EMB, (asset_id, channel, 0, literal, model))
         n += 1
     return n
+
+
+def _reprocess_video_stage2(
+    conn: Any, asset_id: str, fs_path: str, *, cfg: Any, dry_run: bool
+) -> dict[str, int] | None:
+    """050 stage-2 — video 키프레임 v2 재캡션·재임베딩(in-place 교체).
+
+    `video_skill` 재사용(`_extract_video_meta`→`_embed_video`; cfg 의 v2 toggle·dedup 048 반영)으로
+    새 키프레임 메타·임베딩을 만들고, 자산 임베딩을 **전 채널 DELETE+INSERT**·ext_meta UPDATE 한다.
+    fs_path 부재면 ``None``(skip). dry_run 이면 extract/embed 만 하고 영속 0. temp=0 → 재실행 멱등(SC-005).
+    """
+    if not Path(fs_path).is_file():
+        return None
+    ctx = ExtractContext(file_path=fs_path, modality="video", settings=cfg)
+    rec = _extract_video_meta(ctx)
+    items = _embed_video(ctx, rec)
+    keyframes = rec.ext_meta.get("keyframes") if isinstance(rec.ext_meta, dict) else None
+    n_kf = len(keyframes) if isinstance(keyframes, list) else 0
+    if dry_run:
+        return {"keyframes": n_kf, "embeddings": len(items)}
+    with conn.cursor() as cur:
+        cur.execute(_DEL_EMB_ALL, (asset_id,))  # 전 채널·청크 교체(dedup 으로 키프레임 수 변동)
+        for it in items:
+            literal = "[" + ",".join(repr(float(x)) for x in it.vector) + "]"
+            cur.execute(_INS_EMB, (asset_id, it.channel, it.chunk_index, literal, it.model_name))
+        cur.execute(_UPDATE, (json.dumps(rec.ext_meta, ensure_ascii=False), asset_id))
+    return {"keyframes": n_kf, "embeddings": len(items)}
 
 
 def main() -> int:
@@ -210,6 +244,17 @@ def main() -> int:
 
         for asset_id, modality, fs_path, ext_meta in targets:
             try:
+                if args.stage2:
+                    # 050 stage-2: video 키프레임 v2 재캡션·재임베딩(자산별 in-place 교체).
+                    out = _reprocess_video_stage2(conn, asset_id, fs_path, cfg=cfg, dry_run=False)
+                    if out is None:
+                        counts["skipped"] += 1
+                    else:
+                        conn.commit()
+                        counts["processed"] += 1
+                        if counts["processed"] % 20 == 0:
+                            _LOG.info("진행(stage-2): %s", counts)
+                    continue
                 new_meta = _reextract_one(modality, fs_path, ext_meta)
                 if not new_meta:
                     counts["skipped"] += 1
