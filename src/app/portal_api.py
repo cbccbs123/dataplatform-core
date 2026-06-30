@@ -19,7 +19,9 @@
       서비스 계층(``fetch_asset_detail``/``resolve_download_target``)의 노출 게이트로 의료를 배제한다.
     - **결정성(헌법 3조)**: 응답 순서는 ``group_ranked``(버킷 내 -round(sim,6)·asset_id)/
       ``graph_query`` 결정성에 위임한다(라우터는 추가 정렬을 하지 않는다).
-    - **읽기 전용(헌법 6조)**: 스키마·쓰기 0. DB 접근은 조회 트랜잭션(idempotent)만.
+    - **읽기 전용 + append-only 감사(헌법 6·12조)**: 자산 데이터·스키마는 쓰기 0. 단 접근 이력
+      (``access_log``)은 미들웨어가 append-only 로 적재한다(``_run_in_db_write``·best-effort).
+      계보·검색·상세·다운로드 조회는 idempotent 트랜잭션이며, 신규 LLM 호출 0(SQL 만).
 
 인증·ext_meta 키 omit(spec 042 · 010 US4 흡수)
     JWT Bearer ``Depends(require_principal)`` — 검색·상세·다운로드·묶음.
@@ -32,10 +34,13 @@ ext_meta read 집행(042)
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import mimetypes
 import os
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -43,13 +48,20 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from src.config.settings import get_current_settings
 
 # 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
+from src.portal.access_log import (
+    access_log_stats,
+    derive_access_action,
+    query_access_logs,
+    record_access,
+)
 from src.portal.asset_detail import fetch_asset_detail
-from src.portal.auth import Principal, require_principal
+from src.portal.auth import Principal, authenticate_token, require_principal
 from src.portal.auth.config import load_portal_auth_config
 from src.portal.auth.dev_issuer import issue_dev_token
 from src.portal.auth.schemas import DevTokenRequest
@@ -59,6 +71,7 @@ from src.portal.download import (
     parse_range_header,
     resolve_download_target,
 )
+from src.portal.lineage_query import query_asset_lineage
 from src.portal.search_group import group_ranked
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
@@ -79,6 +92,9 @@ _SEARCH_LIMIT_PER_BUCKET = 200
 # 다운로드 스트리밍 청크 크기(64KiB) — 대용량 멀티모달 자산을 메모리에 다 올리지 않는다.
 _STREAM_CHUNK = 64 * 1024
 
+# access_log 적재 실패(best-effort)·미들웨어 진단용 모듈 로거(서비스 응답엔 영향 없음).
+_LOG = logging.getLogger("meta_extract.portal_api")
+
 
 def _run_in_db(callback: Callable[[Any], Any]) -> Any:
     """PostgresUtil 조회 트랜잭션에서 ``callback(conn)`` 을 실행하는 단일 seam.
@@ -92,6 +108,33 @@ def _run_in_db(callback: Callable[[Any], Any]) -> Any:
     db = PostgresUtil()
     with db:
         return db.execute_in_transaction(callback, idempotent=True)
+
+
+def _run_in_db_write(callback: Callable[[Any], Any]) -> Any:
+    """access_log append-only 감사 write 용 트랜잭션(``idempotent=False``·commit).
+
+    조회 seam(``_run_in_db``)과 분리한 별도 write seam — 자산 데이터·스키마는 무변경,
+    오직 ``access_log`` 한 행 INSERT 만 한다(헌법 12조·append-only). 미들웨어가 best-effort
+    로만 호출하며(테스트는 이 함수를 patch), PostgresUtil 은 함수 안에서 지연 import 한다.
+    """
+    from src.database.postgres_util import PostgresUtil
+
+    db = PostgresUtil()
+    with db:
+        return db.execute_in_transaction(callback, idempotent=False)
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    """``YYYY-MM-DD`` 또는 ISO datetime 문자열을 ``datetime`` 으로 파싱한다.
+
+    빈 값은 ``None``(필터 비활성). 형식 오류는 ``HTTPException(422)`` 로 거부한다.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"날짜 형식 오류: {value!r}") from exc
 
 
 @asynccontextmanager
@@ -108,6 +151,72 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
+
+
+def _user_id_from_request(request: Request) -> str:
+    """best-effort: ``Authorization: Bearer <token>`` → user_id. 없거나 검증 실패면 ``anonymous``.
+
+    기록(감사) 용 식별이라 인증 실패가 응답을 막아선 안 된다 — 어떤 예외든 삼키고 anonymous 로.
+    실제 접근 인가는 라우트의 ``require_principal`` 이 이미 책임진다(여기선 기록 라벨링만).
+    """
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        try:
+            return authenticate_token(auth[7:].strip()).user_id
+        except Exception:  # noqa: BLE001 — 기록용 best-effort, 인증 실패가 응답을 막지 않음
+            return "anonymous"
+    return "anonymous"
+
+
+def _record_access_safe(method: str, path: str, status_code: int, user_id: str) -> None:
+    """데이터 접근(성공 응답)을 ``access_log`` 에 1행 적재. 비대상·오류 응답은 무시(best-effort).
+
+    4xx/5xx 응답은 기록하지 않고, ``derive_access_action`` 이 데이터 라우트로 판정한 GET 만
+    append-only 로 적재한다(검색·상세·다운로드·묶음). 그 외(감사 뷰·health 등)는 None → skip.
+    """
+    if status_code >= 400:
+        return
+    derived = derive_access_action(method, path)
+    if derived is None:
+        return
+    action, asset_id = derived
+    _run_in_db_write(
+        lambda conn: record_access(conn, action=action, user_id=user_id, asset_id=asset_id)
+    )
+
+
+# fire-and-forget 기록 태스크 강참조 보관(GC 로 중도 소멸 방지). 완료 시 자동 제거.
+_PENDING_TASKS: set[asyncio.Task] = set()
+
+
+async def _record_access_bg(method: str, path: str, status_code: int, user_id: str) -> None:
+    """동기 DB write 를 스레드풀에서 수행하는 비차단 기록 태스크. 어떤 예외도 삼킨다(best-effort)."""
+    try:
+        await run_in_threadpool(_record_access_safe, method, path, status_code, user_id)
+    except Exception:  # noqa: BLE001 — 감사 기록 실패가 서비스에 전파되면 안 됨(best-effort·D2)
+        _LOG.warning("access_log 기록 실패(무시): %s %s", method, path)
+
+
+@app.middleware("http")
+async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
+    """데이터 접근 이력을 append-only 로 적재한다(013 US3·FR-008).
+
+    기록을 **응답 critical path 에서 분리**(fire-and-forget)한다 — 응답을 먼저 반환하고 기록은
+    ``create_task`` 로 뒤에서 수행한다. 동기 DB write 를 await 하면 DB 지연/풀 고갈 시 모든 데이터
+    응답이 지연되므로(best-effort 감사가 서비스 지연을 유발), await 하지 않는다(D2). 기록 실패·지연은
+    응답 상태·지연 어디에도 영향이 없다. 응답 객체는 변경 없이 그대로 반환.
+    """
+    response = await call_next(request)
+    try:
+        user_id = _user_id_from_request(request)
+        task = asyncio.create_task(
+            _record_access_bg(request.method, request.url.path, response.status_code, user_id)
+        )
+        _PENDING_TASKS.add(task)
+        task.add_done_callback(_PENDING_TASKS.discard)
+    except Exception:  # noqa: BLE001 — 기록 스케줄 실패조차 응답을 깨면 안 됨(best-effort)
+        _LOG.warning("access_log 기록 스케줄 실패(무시): %s %s", request.method, request.url.path)
+    return response
 
 
 @app.get("/health")
@@ -134,6 +243,51 @@ def auth_token(body: DevTokenRequest) -> dict[str, str]:
 def me(principal: Annotated[Principal, Depends(require_principal)]) -> dict[str, str]:
     """현재 principal(user_id·clearance)."""
     return {"user_id": principal.user_id, "clearance": principal.clearance}
+
+
+@app.get("/assets/{asset_id}/lineage")
+def asset_lineage(
+    asset_id: str,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """자산 처리 이력(계보)을 발생 시각순으로 반환한다(013 US2·FR-004).
+
+    조회 전용(``_run_in_db`` idempotent) — ``query_asset_lineage`` 가 ``asset_lineage`` 를
+    시간순으로 끌어온다. 자산 데이터·스키마 쓰기 0·신규 LLM 0.
+    """
+    activities = _run_in_db(lambda conn: query_asset_lineage(conn, asset_id))
+    return {"asset_id": asset_id, "activities": activities}
+
+
+@app.get("/access-logs")
+def access_logs(
+    user: str | None = Query(None, description="사용자 id 필터"),
+    action: str | None = Query(None, description="동작 필터(search/asset_view/download/bundle)"),
+    from_: str | None = Query(None, alias="from", description="기간 하한(YYYY-MM-DD 또는 ISO)"),
+    to: str | None = Query(None, alias="to", description="기간 상한"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """API 접근 이력 조회(필터·페이징·013 US3·FR-009). 조회 전용·결정적·LLM 0."""
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: query_access_logs(
+            conn, user_id=user, action=action, since=since, until=until,
+            limit=limit, offset=offset,
+        )
+    )
+
+
+@app.get("/access-logs/stats")
+def access_logs_stats(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """접근 이력 기본 집계(총계·action별·user별·013 FR-009a). 조회 전용·결정적·LLM 0."""
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(lambda conn: access_log_stats(conn, since=since, until=until))
 
 
 def _project_grouped_search(
