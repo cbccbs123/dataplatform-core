@@ -402,14 +402,18 @@ def lineage_timeline_endpoint(
 
 @app.get("/admin/asset-stats")
 def asset_stats_endpoint(
+    from_: str | None = Query(None, alias="from", description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
+    to: str | None = Query(None, alias="to", description="생성일 상한(exclusive)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """전체 자산 집계(FSM status·modality·domain·file_ext·date별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
 
     관리자 API(`/admin/*`) — 계보·접근이력·대시보드는 전부 `/admin` 프리픽스(D12). 사용자용
-    검색·상세·다운로드는 루트 유지.
+    검색·상세·다운로드는 루트 유지. ``from``/``to``(생성일·to exclusive·보완 v6) 지정 시
+    by_file_ext 포함 6개 집계가 그 기간으로 스코프(기간별 파일 포맷 통계).
     """
-    return _run_in_db(asset_stats)
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(lambda conn: asset_stats(conn, since=since, until=until))
 
 
 @app.get("/admin/assets")
@@ -440,14 +444,18 @@ def assets_list(
 @app.get("/admin/assets/modality/{modality}")
 def modality_detail_endpoint(
     modality: str,
+    from_: str | None = Query(None, alias="from", description="생성일 하한"),
+    to: str | None = Query(None, alias="to", description="생성일 상한(exclusive)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """모달리티 드릴다운 집계(보완 v6) — 해당 모달리티의 확장자·상태·일자별 분포 + 총계. 의료 제외·결정적·LLM 0.
 
     개요(`/admin/asset-stats`)의 한 모달리티를 파고들 때(예: video 안 mp4/mov 분포·일자 추이).
-    콘텐츠 목록은 `GET /admin/assets?modality=...&with_content=true` 로 합성.
+    ``from``/``to`` 로 개요 기간 필터와 일관 스코프. 콘텐츠 목록은
+    `GET /admin/assets?modality=...&with_content=true` 로 합성.
     """
-    return _run_in_db(lambda conn: modality_detail(conn, modality))
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(lambda conn: modality_detail(conn, modality, since=since, until=until))
 
 
 @app.get("/admin/asset-timeline")
@@ -455,17 +463,20 @@ def asset_timeline_endpoint(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
     interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
-    group_by: str | None = Query(None, description="멀티시리즈 분할: modality | status | domain(미지정=단일)"),
+    group_by: str | None = Query(
+        None, description="멀티시리즈 분할: modality | status | domain | file_ext(미지정=단일)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """자산 생성 일자 추이(보완 v6·계보 timeline 과 대칭). 의료 제외·결정적·LLM 0.
 
-    ``group_by``(modality/status/domain) 주면 멀티시리즈(어느 날 어떤 모달리티가 몇 개 생성), 미지정이면 단일.
+    ``group_by``(modality/status/domain/file_ext) 주면 멀티시리즈(예: 어느 날 어떤 포맷이 몇 개 생성),
+    미지정이면 단일.
     """
     if interval not in ("day", "hour"):
         raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
-    if group_by is not None and group_by not in ("modality", "status", "domain"):
-        raise HTTPException(status_code=422, detail=f"group_by 는 modality|status|domain 만: {group_by!r}")
+    if group_by is not None and group_by not in ("modality", "status", "domain", "file_ext"):
+        raise HTTPException(status_code=422,
+                            detail=f"group_by 는 modality|status|domain|file_ext 만: {group_by!r}")
     since, until = _parse_dt(from_), _parse_dt(to)
     return _run_in_db(
         lambda conn: asset_timeline(

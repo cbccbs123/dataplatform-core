@@ -67,6 +67,18 @@ class AssetStatsShapeTest(unittest.TestCase):
         self.assertIn("ORDER BY COUNT(*) DESC, ext ASC NULLS LAST", conn._cur.calls[4][0])  # file_ext
         self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[5][0])  # date 시간순
 
+    def test_period_filter_in_all_queries(self):
+        # from/to(생성일 기준·to exclusive) — 6개 집계 모두 기간 반영(프론트 ② 기간별 by_file_ext)
+        dt = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        conn = _Conn([(0,), [], [], [], [], []])
+        asset_stats(conn, since=dt, until=dt)
+        self.assertEqual(len(conn._cur.calls), 6)
+        for sql, params in conn._cur.calls:
+            self.assertIn("created_at >= %s", sql)
+            self.assertIn("created_at < %s", sql)
+            self.assertIn("domain_label <> 'medical'", sql)
+            self.assertEqual(params, [dt, dt])
+
 
 class QueryAssetsShapeTest(unittest.TestCase):
     def test_rows_shape_and_basename(self):
@@ -183,6 +195,20 @@ class QueryAssetsContentTest(unittest.TestCase):
         for sql, _p in conn._cur.calls:
             self.assertIn("domain_label <> 'medical'", sql)
 
+    def test_with_content_with_date_qualifies_created_at(self):
+        # 🔴 회귀 가드: with_content JOIN + 날짜 필터 시 created_at 모호성(asset·asset_metadata 양쪽 보유)
+        # → content SELECT 는 a. 한정해야 PG 오류 없음. COUNT(단일 테이블)은 비한정 유지.
+        dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        conn = _Conn([(0,), []])
+        query_assets(conn, with_content=True, created_from=dt, created_to=dt)
+        count_sql, select_sql = conn._cur.calls[0][0], conn._cur.calls[1][0]
+        self.assertIn("LEFT JOIN asset_metadata", select_sql)
+        self.assertIn("a.created_at >= %s", select_sql)  # JOIN 경로 한정
+        self.assertIn("a.created_at < %s", select_sql)
+        self.assertIn("a.domain_label <> 'medical'", select_sql)
+        self.assertNotIn("LEFT JOIN", count_sql)  # COUNT 은 단일 테이블·비한정(모호성 없음)
+        self.assertIn("WHERE domain_label <> 'medical'", count_sql)
+
 
 class ModalityDetailTest(unittest.TestCase):
     """단일 모달리티 스코프 집계(보완 v6) — 확장자·상태·일자 + 총계, 의료 제외."""
@@ -215,6 +241,16 @@ class ModalityDetailTest(unittest.TestCase):
         self.assertIn("ORDER BY COUNT(*) DESC, status ASC", conn._cur.calls[2][0])
         self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[3][0])
 
+    def test_period_filter(self):
+        # 모달리티 드릴다운도 기간 필터(개요 from/to 와 일관·프론트 ② "모달리티 기간 조회")
+        dt = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        conn = _Conn([(0,), [], [], []])
+        modality_detail(conn, "video", since=dt, until=dt)
+        for sql, params in conn._cur.calls:
+            self.assertIn("created_at >= %s", sql)
+            self.assertIn("created_at < %s", sql)
+            self.assertEqual(params, ["video", dt, dt])  # modality 먼저, 기간 뒤
+
 
 class AssetTimelineTest(unittest.TestCase):
     """자산 생성 일자 추이(보완 v6) — group_by 멀티시리즈(계보 timeline 과 동일 패턴)."""
@@ -243,6 +279,17 @@ class AssetTimelineTest(unittest.TestCase):
         out = asset_timeline(conn, group_by="evil; DROP TABLE")
         self.assertIn("buckets", out)
         self.assertNotIn("series", out)
+
+    def test_group_by_file_ext_uses_ext_expr(self):
+        # 프론트 ③ 일별 파일 포맷 추이 — group_by=file_ext 면 확장자식이 시리즈 key
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([[("pdf", ts, 3), ("txt", ts, 1)]])
+        out = asset_timeline(conn, group_by="file_ext")
+        self.assertEqual(out["group_by"], "file_ext")
+        self.assertEqual([s["key"] for s in out["series"]], ["pdf", "txt"])
+        sql = conn._cur.calls[0][0]
+        self.assertIn("substring(fs_path from", sql)  # 화이트리스트 매핑=확장자 정규식
+        self.assertIn("ORDER BY key ASC, bkt ASC", sql)  # 결정적
 
     def test_bad_interval_falls_back_to_day(self):
         conn = _Conn([[]])

@@ -141,6 +141,13 @@ class HistoryE2ETest(unittest.TestCase):
             lst = db.execute_in_transaction(
                 lambda c: query_assets(c, modality=m0, with_content=True, limit=3), idempotent=True)
             self.assertTrue(all("summary" in r and "keywords" in r for r in lst["rows"]))
+            # 🔴 회귀가드(실 PG): with_content + 날짜필터 동시 — created_at 모호성으로 죽지 않아야 함
+            from datetime import datetime, timezone
+            wide = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            dated = db.execute_in_transaction(
+                lambda c: query_assets(c, with_content=True, created_from=wide, limit=3),
+                idempotent=True)
+            self.assertIn("rows", dated)  # 쿼리 성공(모호성 오류 없음)
 
 
 def _first_registered_asset(conn):

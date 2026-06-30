@@ -123,6 +123,21 @@ class HistoryEndpointsTest(unittest.TestCase):
         self.assertIn("by_file_ext", body)
         self.assertIn("by_date", body)
 
+    def test_asset_stats_from_to_passthrough(self):
+        # 기간별 파일 포맷 통계(프론트 ②) — from/to 가 asset_stats 로 전달되는지 배선 검증
+        with mock.patch.object(portal_api, "asset_stats",
+                               return_value={"total": 0, "by_status": [], "by_modality": [],
+                                             "by_domain": [], "by_file_ext": [], "by_date": []}) as st, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/asset-stats?from=2026-06-01&to=2026-06-30")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNotNone(st.call_args.kwargs["since"])
+        self.assertIsNotNone(st.call_args.kwargs["until"])
+
+    def test_asset_stats_bad_date_422(self):
+        r = self.client.get("/admin/asset-stats?from=not-a-date")
+        self.assertEqual(r.status_code, 422)
+
     def test_assets_list_endpoint(self):
         with mock.patch.object(portal_api, "query_assets",
                                return_value={"rows": [{"asset_id": "a1", "status": "registered",
@@ -156,6 +171,16 @@ class HistoryEndpointsTest(unittest.TestCase):
         self.assertEqual(r.json()["by_file_ext"][0]["file_ext"], "mp4")
         self.assertEqual(md.call_args.args[1], "video")  # path param 전달
 
+    def test_modality_detail_from_to_passthrough(self):
+        with mock.patch.object(portal_api, "modality_detail",
+                               return_value={"modality": "video", "total": 0, "by_file_ext": [],
+                                             "by_status": [], "by_date": []}) as md, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/modality/video?from=2026-06-01&to=2026-06-30")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNotNone(md.call_args.kwargs["since"])
+        self.assertIsNotNone(md.call_args.kwargs["until"])
+
     def test_modality_detail_distinct_from_lineage_route(self):
         # /admin/assets/modality/{m} 가 /admin/assets/{id}/lineage 와 충돌하지 않음(구체 경로 우선)
         with mock.patch.object(portal_api, "modality_detail",
@@ -177,6 +202,17 @@ class HistoryEndpointsTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["series"][0]["key"], "video")
         self.assertEqual(tl.call_args.kwargs["group_by"], "modality")
+
+    def test_asset_timeline_group_by_file_ext(self):
+        # 프론트 ③ 일별 파일 포맷 추이 — group_by=file_ext 허용(422 아님)·전달
+        with mock.patch.object(portal_api, "asset_timeline",
+                               return_value={"interval": "day", "group_by": "file_ext",
+                                             "series": [{"key": "pdf", "buckets": []}]}) as tl, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/asset-timeline?group_by=file_ext")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["series"][0]["key"], "pdf")
+        self.assertEqual(tl.call_args.kwargs["group_by"], "file_ext")
 
     def test_asset_timeline_bad_interval_422(self):
         r = self.client.get("/admin/asset-timeline?interval=year")
