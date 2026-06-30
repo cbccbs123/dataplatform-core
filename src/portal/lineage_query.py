@@ -75,3 +75,86 @@ def query_lineage_feed(
              "occurred_at": ts.isoformat() if ts is not None else None}
             for lid, aid, act, ag, ts in cur.fetchall()]
     return {"rows": rows, "total": total}
+
+
+_INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
+# 멀티시리즈 group_by 화이트리스트 → 컬럼식(고정 매핑·사용자 입력은 키로만 조회·인젝션 안전).
+_GROUP_COLS = {"activity": "al.activity", "modality": "a.modality", "status": "a.status"}
+
+
+def _lineage_filter(since: Any, until: Any, activity: str | None) -> tuple[str, list[Any]]:
+    """계보 공통 필터 절(기간·활동) + 파라미터. _NONMEDICAL 뒤에 AND 로 붙인다."""
+    conds: list[str] = []
+    params: list[Any] = []
+    if since is not None:
+        conds.append("al.occurred_at >= %s")
+        params.append(since)
+    if until is not None:
+        conds.append("al.occurred_at < %s")
+        params.append(until)
+    if activity:
+        conds.append("al.activity = %s")
+        params.append(activity)
+    return ((" AND " + " AND ".join(conds)) if conds else ""), params
+
+
+def lineage_stats(conn: Any, *, since: Any = None, until: Any = None,
+                  activity: str | None = None) -> dict[str, Any]:
+    """계보 집계(차트·KPI용·FR-009g 보완) — 총계 + 활동별·일별·modality·status·file_ext별. 의료 제외·결정적."""
+    extra, params = _lineage_filter(since, until, activity)
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) " + _NONMEDICAL + extra, params)
+        total = int(cur.fetchone()[0])
+        cur.execute("SELECT al.activity, COUNT(*) " + _NONMEDICAL + extra
+                    + " GROUP BY al.activity ORDER BY COUNT(*) DESC, al.activity ASC", params)
+        by_activity = [{"activity": a, "count": int(c)} for a, c in cur.fetchall()]
+        cur.execute("SELECT al.occurred_at::date AS d, COUNT(*) " + _NONMEDICAL + extra
+                    + " GROUP BY d ORDER BY d ASC", params)
+        by_day = [{"day": d.isoformat() if d is not None else None, "count": int(c)}
+                  for d, c in cur.fetchall()]
+        cur.execute("SELECT a.modality, COUNT(*) " + _NONMEDICAL + extra
+                    + " GROUP BY a.modality ORDER BY COUNT(*) DESC, a.modality ASC", params)
+        by_modality = [{"modality": m, "count": int(c)} for m, c in cur.fetchall()]
+        cur.execute("SELECT a.status, COUNT(*) " + _NONMEDICAL + extra
+                    + " GROUP BY a.status ORDER BY COUNT(*) DESC, a.status ASC", params)
+        by_status = [{"status": s, "count": int(c)} for s, c in cur.fetchall()]
+        cur.execute(f"SELECT {_EXT_EXPR} AS ext, COUNT(*) " + _NONMEDICAL + extra
+                    + " GROUP BY ext ORDER BY COUNT(*) DESC, ext ASC NULLS LAST", params)
+        by_file_ext = [{"file_ext": e, "count": int(c)} for e, c in cur.fetchall()]
+    return {"total": total, "by_activity": by_activity, "by_day": by_day,
+            "by_modality": by_modality, "by_status": by_status, "by_file_ext": by_file_ext}
+
+
+def lineage_timeline(conn: Any, *, since: Any = None, until: Any = None, activity: str | None = None,
+                     interval: str = "day", group_by: str | None = None) -> dict[str, Any]:
+    """계보 시계열(차트용·access timeline 과 대칭). group_by(activity/modality/status) 주면 멀티시리즈.
+
+    의료 제외·결정적(시리즈 key ASC·버킷 ASC). group_by 미지정이면 단일 시리즈({interval, buckets}).
+    """
+    trunc = interval if interval in _INTERVALS else "day"
+    extra, params = _lineage_filter(since, until, activity)
+    with conn.cursor() as cur:
+        if group_by in _GROUP_COLS:
+            gcol = _GROUP_COLS[group_by]
+            cur.execute(
+                f"SELECT {gcol} AS key, date_trunc('{trunc}', al.occurred_at) AS bkt, COUNT(*) "
+                + _NONMEDICAL + extra + " GROUP BY key, bkt ORDER BY key ASC, bkt ASC", params)
+            return {"interval": trunc, "group_by": group_by, "series": _pivot_series(cur.fetchall())}
+        cur.execute(f"SELECT date_trunc('{trunc}', al.occurred_at) AS bkt, COUNT(*) "
+                    + _NONMEDICAL + extra + " GROUP BY bkt ORDER BY bkt ASC", params)
+        buckets = [{"bucket": b.isoformat() if b is not None else None, "count": int(c)}
+                   for b, c in cur.fetchall()]
+        return {"interval": trunc, "buckets": buckets}
+
+
+def _pivot_series(grouped_rows: list) -> list[dict]:
+    """(key, bucket, count) 행(key ASC·bucket ASC 정렬 가정)을 멀티시리즈로 피벗(순서 보존·결정적)."""
+    series_map: dict[Any, list] = {}
+    order: list = []
+    for key, bkt, count in grouped_rows:
+        if key not in series_map:
+            series_map[key] = []
+            order.append(key)
+        series_map[key].append(
+            {"bucket": bkt.isoformat() if bkt is not None else None, "count": int(count)})
+    return [{"key": k, "buckets": series_map[k]} for k in order]

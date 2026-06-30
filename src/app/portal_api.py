@@ -73,7 +73,12 @@ from src.portal.download import (
     parse_range_header,
     resolve_download_target,
 )
-from src.portal.lineage_query import query_asset_lineage, query_lineage_feed
+from src.portal.lineage_query import (
+    lineage_stats,
+    lineage_timeline,
+    query_asset_lineage,
+    query_lineage_feed,
+)
 from src.portal.search_group import group_ranked
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
@@ -309,15 +314,22 @@ def access_logs_timeline(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
     interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
-    action: str | None = Query(None, description="api별 필터(search/asset_view/download/bundle)"),
+    action: str | None = Query(None, description="단일 api 필터(search/asset_view/download/bundle)"),
+    group_by: str | None = Query(None, description="멀티시리즈 분할: action | user_id(미지정=단일)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """접근 이력 시계열 타임라인(버킷별 호출 수·그래프용·013 FR-009c). 조회 전용·결정적·LLM 0."""
+    """접근 이력 시계열(버킷별 호출 수·그래프용·013 FR-009c). 조회 전용·결정적·LLM 0.
+
+    ``group_by=action``(또는 user_id)이면 멀티시리즈 1회 응답(시리즈별 막대). 미지정이면 단일 시리즈.
+    """
     if interval not in ("day", "hour"):
         raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    if group_by is not None and group_by not in ("action", "user_id"):
+        raise HTTPException(status_code=422, detail=f"group_by 는 action|user_id 만 허용: {group_by!r}")
     since, until = _parse_dt(from_), _parse_dt(to)
     return _run_in_db(
-        lambda conn: access_log_timeline(conn, since=since, until=until, action=action, interval=interval))
+        lambda conn: access_log_timeline(
+            conn, since=since, until=until, action=action, interval=interval, group_by=group_by))
 
 
 @app.get("/admin/lineage")
@@ -342,6 +354,44 @@ def lineage_feed(
         lambda conn: query_lineage_feed(
             conn, since=since, until=until, activity=activity, modality=modality,
             status=status, file_ext=file_ext, limit=limit, offset=offset))
+
+
+@app.get("/admin/lineage/stats")
+def lineage_stats_endpoint(
+    from_: str | None = Query(None, alias="from", description="기간 하한"),
+    to: str | None = Query(None, alias="to", description="기간 상한"),
+    activity: str | None = Query(None, description="활동명 필터"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """계보 집계(차트·KPI 1회 — 활동별·일별·modality·status·file_ext별). 의료 제외·결정적·LLM 0.
+
+    전체 피드를 받아 클라이언트 집계할 필요 없이 서버 집계로 도넛/KPI 구성(관리자 대시보드).
+    """
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(lambda conn: lineage_stats(conn, since=since, until=until, activity=activity))
+
+
+@app.get("/admin/lineage/timeline")
+def lineage_timeline_endpoint(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    activity: str | None = Query(None, description="활동명 필터"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
+    group_by: str | None = Query("activity", description="멀티시리즈 분할: activity | modality | status"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """계보 시계열(누적 막대 차트 1회·access timeline 과 대칭). 의료 제외·결정적·LLM 0.
+
+    ``group_by``(activity/modality/status) 멀티시리즈, 미지정이면 단일 시리즈.
+    """
+    if interval not in ("day", "hour"):
+        raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    if group_by is not None and group_by not in ("activity", "modality", "status"):
+        raise HTTPException(status_code=422, detail=f"group_by 는 activity|modality|status 만: {group_by!r}")
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: lineage_timeline(
+            conn, since=since, until=until, activity=activity, interval=interval, group_by=group_by))
 
 
 @app.get("/admin/asset-stats")

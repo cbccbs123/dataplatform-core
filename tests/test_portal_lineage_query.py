@@ -1,7 +1,12 @@
 import unittest
 from datetime import datetime, timezone
 
-from src.portal.lineage_query import query_asset_lineage, query_lineage_feed
+from src.portal.lineage_query import (
+    lineage_stats,
+    lineage_timeline,
+    query_asset_lineage,
+    query_lineage_feed,
+)
 
 
 class _Cur:
@@ -93,6 +98,58 @@ class QueryLineageFeedTest(unittest.TestCase):
         self.assertIn("a.domain_label <> 'medical'", count_sql)  # 의료 제외 유지
         for v in ("video", "registered", "mp4"):
             self.assertIn(v, count_params)
+
+
+class LineageStatsTest(unittest.TestCase):
+    def test_shape_and_medical_excluded(self):
+        d = datetime(2026, 6, 30, tzinfo=timezone.utc).date()
+        # COUNT → by_activity → by_day → by_modality → by_status → by_file_ext (6 쿼리)
+        conn = _SeqConn([
+            (12,),
+            [("ingest.registered.v1", 8), ("relations.proposed.v1", 4)],
+            [(d, 12)],
+            [("text", 7), ("video", 5)],
+            [("registered", 10), ("failed", 2)],
+            [("txt", 6), ("mp4", 5), (None, 1)],
+        ])
+        out = lineage_stats(conn)
+        self.assertEqual(out["total"], 12)
+        self.assertEqual(out["by_activity"][0], {"activity": "ingest.registered.v1", "count": 8})
+        self.assertEqual(out["by_day"][0], {"day": d.isoformat(), "count": 12})
+        self.assertEqual(out["by_modality"][0]["modality"], "text")
+        self.assertEqual(out["by_status"][0]["status"], "registered")
+        self.assertEqual(out["by_file_ext"][0]["file_ext"], "txt")
+        # 6개 SQL 모두 의료 제외 조인 포함
+        self.assertEqual(len(conn._cur.calls), 6)
+        for sql, _p in conn._cur.calls:
+            self.assertIn("a.domain_label <> 'medical'", sql)
+
+
+class LineageTimelineTest(unittest.TestCase):
+    def test_single_series_no_group_by(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        out = lineage_timeline(_Conn([(ts, 5)]), interval="day", group_by=None)
+        self.assertEqual(out["interval"], "day")
+        self.assertEqual(out["buckets"][0]["count"], 5)
+        self.assertNotIn("series", out)
+
+    def test_multi_series_group_by_activity(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        # 그룹 행: (key, bucket, count) — key ASC·bucket ASC 정렬 가정
+        conn = _Conn([
+            ("ingest.received.v1", ts, 3),
+            ("ingest.received.v1", ts, 2),
+            ("ingest.registered.v1", ts, 4),
+        ])
+        out = lineage_timeline(conn, group_by="activity")
+        self.assertEqual(out["group_by"], "activity")
+        self.assertEqual(len(out["series"]), 2)  # 2개 활동 시리즈로 피벗
+        self.assertEqual(out["series"][0]["key"], "ingest.received.v1")
+        self.assertEqual(len(out["series"][0]["buckets"]), 2)
+        self.assertEqual(out["series"][1]["key"], "ingest.registered.v1")
+        # group_by 컬럼은 화이트리스트 매핑이라 SQL 에 al.activity 로 들어감(인젝션 안전)
+        self.assertIn("al.activity AS key", conn._cur.calls[0][0])
+        self.assertIn("a.domain_label <> 'medical'", conn._cur.calls[0][0])
 
 
 if __name__ == "__main__":

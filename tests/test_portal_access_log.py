@@ -105,6 +105,25 @@ class TimelineShapeTest(unittest.TestCase):
         self.assertIn("action = %s", sql)
         self.assertIn("search", params)
 
+    def test_group_by_action_multi_series(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        # group_by 시 (key, bucket, count) 행 → 멀티시리즈 피벗
+        conn = _Conn([[("search", ts, 5), ("download", ts, 2)]])
+        out = access_log_timeline(conn, group_by="action")
+        self.assertEqual(out["group_by"], "action")
+        keys = [s["key"] for s in out["series"]]
+        self.assertEqual(keys, ["search", "download"])
+        self.assertEqual(out["series"][0]["buckets"][0]["count"], 5)
+        # group_by 컬럼은 화이트리스트 매핑(action)이라 SQL 에 안전 삽입
+        self.assertIn("action AS key", conn._cur.calls[0][0])
+
+    def test_group_by_unknown_falls_back_to_single_series(self):
+        # 화이트리스트 밖 group_by 는 단일 시리즈로 폴백(인젝션 방지·API 레이어는 422 선처리)
+        conn = _Conn([[]])
+        out = access_log_timeline(conn, group_by="evil; DROP TABLE")
+        self.assertIn("buckets", out)
+        self.assertNotIn("series", out)
+
 
 if __name__ == "__main__":
     unittest.main()

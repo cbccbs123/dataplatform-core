@@ -111,13 +111,18 @@ def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict
 
 
 _TIMELINE_INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
+# group_by 멀티시리즈 화이트리스트 → 컬럼식(고정 매핑·인젝션 안전). action/user_id 만 허용.
+_TIMELINE_GROUP_COLS = {"action": "action", "user_id": "user_id"}
 
 
-def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None,
-                        action: str | None = None, interval: str = "day") -> dict[str, Any]:
-    """시계열 타임라인: 버킷(day/hour)별 호출 수(bucket ASC·결정적·FR-009c). action 필터=api별."""
-    # trunc 은 화이트리스트라 f-string 안전, 그 외(since/until/action) 값은 모두 %s 바인딩.
-    # 폴백("day")은 서비스 함수 직접 호출 시 방어 — API 레이어(portal_api)는 day|hour 아니면 422 선처리.
+def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None, action: str | None = None,
+                        interval: str = "day", group_by: str | None = None) -> dict[str, Any]:
+    """시계열 타임라인: 버킷(day/hour)별 호출 수(bucket ASC·결정적·FR-009c).
+
+    ``group_by``(action/user_id) 주면 **멀티시리즈**({interval, group_by, series:[{key, buckets}]}),
+    미지정이면 단일 시리즈({interval, buckets})·``action`` 필터=단일 api. trunc 화이트리스트(f-string 안전)·
+    그 외 값은 %s 바인딩.
+    """
     trunc = interval if interval in _TIMELINE_INTERVALS else "day"
     conds: list[str] = []
     params: list[Any] = []
@@ -132,6 +137,21 @@ def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None,
         params.append(action)
     clause = (" WHERE " + " AND ".join(conds)) if conds else ""
     with conn.cursor() as cur:
+        if group_by in _TIMELINE_GROUP_COLS:
+            gcol = _TIMELINE_GROUP_COLS[group_by]
+            cur.execute(
+                f"SELECT {gcol} AS key, date_trunc('{trunc}', occurred_at) AS bkt, COUNT(*) "
+                f"FROM access_log{clause} GROUP BY key, bkt ORDER BY key ASC, bkt ASC", params)
+            series_map: dict[Any, list] = {}
+            order: list = []
+            for key, bkt, count in cur.fetchall():
+                if key not in series_map:
+                    series_map[key] = []
+                    order.append(key)
+                series_map[key].append(
+                    {"bucket": bkt.isoformat() if bkt is not None else None, "count": int(count)})
+            series = [{"key": k, "buckets": series_map[k]} for k in order]
+            return {"interval": trunc, "group_by": group_by, "series": series}
         cur.execute(
             f"SELECT date_trunc('{trunc}', occurred_at) AS bkt, COUNT(*) FROM access_log{clause} "
             "GROUP BY bkt ORDER BY bkt ASC", params)

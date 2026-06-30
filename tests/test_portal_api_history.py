@@ -69,6 +69,45 @@ class HistoryEndpointsTest(unittest.TestCase):
         r = self.client.get("/admin/access-logs/timeline?interval=year")
         self.assertEqual(r.status_code, 422)
 
+    def test_timeline_group_by_action_multiseries(self):
+        with mock.patch.object(portal_api, "access_log_timeline",
+                               return_value={"interval": "day", "group_by": "action",
+                                             "series": [{"key": "search", "buckets": []}]}) as tl, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/access-logs/timeline?group_by=action")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["series"][0]["key"], "search")
+        self.assertEqual(tl.call_args.kwargs["group_by"], "action")
+
+    def test_timeline_bad_group_by_422(self):
+        r = self.client.get("/admin/access-logs/timeline?group_by=evil")
+        self.assertEqual(r.status_code, 422)
+
+    def test_lineage_stats_endpoint(self):
+        with mock.patch.object(portal_api, "lineage_stats",
+                               return_value={"total": 5, "by_activity": [{"activity": "x", "count": 5}],
+                                             "by_day": [], "by_modality": [], "by_status": [],
+                                             "by_file_ext": []}), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/lineage/stats")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["by_activity"][0]["activity"], "x")
+        self.assertIn("by_day", r.json())
+
+    def test_lineage_timeline_endpoint(self):
+        with mock.patch.object(portal_api, "lineage_timeline",
+                               return_value={"interval": "day", "group_by": "activity",
+                                             "series": [{"key": "ingest.registered.v1", "buckets": []}]}) as tl, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/lineage/timeline?group_by=activity")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["series"][0]["key"], "ingest.registered.v1")
+        self.assertEqual(tl.call_args.kwargs["group_by"], "activity")
+
+    def test_lineage_timeline_bad_group_by_422(self):
+        r = self.client.get("/admin/lineage/timeline?group_by=evil")
+        self.assertEqual(r.status_code, 422)
+
     def test_asset_stats_endpoint(self):
         with mock.patch.object(portal_api, "asset_stats",
                                return_value={"total": 3, "by_status": [{"status": "registered", "count": 3}],

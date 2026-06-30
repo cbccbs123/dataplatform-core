@@ -71,6 +71,28 @@ class HistoryE2ETest(unittest.TestCase):
             self.assertEqual(tl["interval"], "day")
             self.assertTrue(all("bucket" in b and "count" in b for b in tl["buckets"]))
 
+    def test_lineage_stats_and_timeline_multiseries(self):
+        from src.database.postgres_util import PostgresUtil
+        from src.portal.access_log import access_log_timeline
+        from src.portal.lineage_query import lineage_stats, lineage_timeline
+
+        db = PostgresUtil()
+        with db:
+            st = db.execute_in_transaction(lineage_stats, idempotent=True)
+            for k in ("total", "by_activity", "by_day", "by_modality", "by_status", "by_file_ext"):
+                self.assertIn(k, st)
+            self.assertEqual(sum(a["count"] for a in st["by_activity"]), st["total"])  # 활동 합=총계
+            # 계보 타임라인 멀티시리즈(group_by=activity)
+            tl = db.execute_in_transaction(
+                lambda c: lineage_timeline(c, group_by="activity"), idempotent=True)
+            self.assertEqual(tl["group_by"], "activity")
+            self.assertTrue(all("key" in s and "buckets" in s for s in tl["series"]))
+            # access 타임라인 멀티시리즈(group_by=action)
+            at = db.execute_in_transaction(
+                lambda c: access_log_timeline(c, group_by="action"), idempotent=True)
+            self.assertEqual(at["group_by"], "action")
+            self.assertTrue(all("key" in s for s in at["series"]))
+
     def test_asset_stats_and_list(self):
         from src.database.postgres_util import PostgresUtil
         from src.portal.asset_stats import asset_stats, query_assets
