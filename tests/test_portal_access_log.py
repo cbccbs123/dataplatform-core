@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from src.portal.access_log import (
     access_log_stats,
+    access_log_timeline,
     derive_access_action,
     query_access_logs,
     record_access,
@@ -67,6 +68,41 @@ class QueryStatsShapeTest(unittest.TestCase):
         self.assertEqual(out["total"], 3)
         self.assertEqual(out["by_action"][0], {"action": "search", "count": 2})
         self.assertEqual(out["by_user"][0], {"user_id": "u1", "count": 3})
+
+
+class TimelineShapeTest(unittest.TestCase):
+    def test_bucket_shape(self):
+        b0 = datetime(2026, 6, 29, tzinfo=timezone.utc)
+        b1 = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        # timeline 은 GROUP BY 단일 execute → fetchall 1회
+        conn = _Conn([[(b0, 2), (b1, 5)]])
+        out = access_log_timeline(conn)
+        self.assertEqual(out["interval"], "day")
+        self.assertEqual(out["buckets"][0], {"bucket": b0.isoformat(), "count": 2})
+        self.assertEqual(out["buckets"][1], {"bucket": b1.isoformat(), "count": 5})
+
+    def test_interval_whitelist_fallback(self):
+        # 화이트리스트 밖 interval("year")은 day 로 폴백(인젝션 방지)
+        conn = _Conn([[]])
+        out = access_log_timeline(conn, interval="year")
+        self.assertEqual(out["interval"], "day")
+        sql = conn._cur.calls[0][0]
+        self.assertIn("date_trunc('day'", sql)
+        self.assertNotIn("year", sql)
+
+    def test_interval_hour_passthrough(self):
+        # 화이트리스트 안 interval("hour")은 그대로 사용
+        conn = _Conn([[]])
+        out = access_log_timeline(conn, interval="hour")
+        self.assertEqual(out["interval"], "hour")
+        self.assertIn("date_trunc('hour'", conn._cur.calls[0][0])
+
+    def test_action_filter_in_where(self):
+        conn = _Conn([[]])
+        access_log_timeline(conn, action="search")
+        sql, params = conn._cur.calls[0]
+        self.assertIn("action = %s", sql)
+        self.assertIn("search", params)
 
 
 if __name__ == "__main__":

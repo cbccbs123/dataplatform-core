@@ -108,3 +108,33 @@ def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict
                     "GROUP BY user_id ORDER BY COUNT(*) DESC, user_id ASC", params)
         by_user = [{"user_id": u, "count": int(c)} for u, c in cur.fetchall()]
     return {"total": total, "by_action": by_action, "by_user": by_user}
+
+
+_TIMELINE_INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
+
+
+def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None,
+                        action: str | None = None, interval: str = "day") -> dict[str, Any]:
+    """시계열 타임라인: 버킷(day/hour)별 호출 수(bucket ASC·결정적·FR-009c). action 필터=api별."""
+    # trunc 은 화이트리스트라 f-string 안전, 그 외(since/until/action) 값은 모두 %s 바인딩
+    trunc = interval if interval in _TIMELINE_INTERVALS else "day"
+    conds: list[str] = []
+    params: list[Any] = []
+    if since is not None:
+        conds.append("occurred_at >= %s")
+        params.append(since)
+    if until is not None:
+        conds.append("occurred_at < %s")
+        params.append(until)
+    if action:
+        conds.append("action = %s")
+        params.append(action)
+    clause = (" WHERE " + " AND ".join(conds)) if conds else ""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT date_trunc('{trunc}', occurred_at) AS bkt, COUNT(*) FROM access_log{clause} "
+            "GROUP BY bkt ORDER BY bkt ASC", params)
+        buckets = [
+            {"bucket": b.isoformat() if b is not None else None, "count": int(c)}
+            for b, c in cur.fetchall()]
+    return {"interval": trunc, "buckets": buckets}
