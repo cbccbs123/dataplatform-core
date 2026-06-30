@@ -27,7 +27,7 @@ class _Conn:
 class AssetStatsShapeTest(unittest.TestCase):
     def test_stats_shape(self):
         ts = datetime(2026, 6, 30, tzinfo=timezone.utc).date()
-        # COUNT → by_status → by_modality → by_domain → by_file_type → by_date 순으로 소비(6 쿼리)
+        # COUNT → by_status → by_modality → by_domain → by_file_ext → by_date 순으로 소비(6 쿼리)
         conn = _Conn([
             (10,),
             [("registered", 7), ("failed", 3)],
@@ -41,14 +41,14 @@ class AssetStatsShapeTest(unittest.TestCase):
         self.assertEqual(out["by_status"][0], {"status": "registered", "count": 7})
         self.assertEqual(out["by_modality"][0], {"modality": "text", "count": 6})
         self.assertEqual(out["by_domain"][0], {"domain": "general", "count": 9})
-        self.assertEqual(out["by_file_type"][0], {"file_type": "pdf", "count": 5})
-        self.assertIsNone(out["by_file_type"][2]["file_type"])  # 확장자 없음(NULL)
+        self.assertEqual(out["by_file_ext"][0], {"file_ext": "pdf", "count": 5})
+        self.assertIsNone(out["by_file_ext"][2]["file_ext"])  # 확장자 없음(NULL)
         self.assertEqual(out["by_date"][0], {"date": ts.isoformat(), "count": 10})
 
     def test_excludes_medical_in_all_queries(self):
         conn = _Conn([(0,), [], [], [], [], []])
         asset_stats(conn)
-        # 6개 SQL 모두 의료 제외 WHERE 절을 포함해야 함(total·status·modality·domain·file_type·date)
+        # 6개 SQL 모두 의료 제외 WHERE 절을 포함해야 함(total·status·modality·domain·file_ext·date)
         self.assertEqual(len(conn._cur.calls), 6)
         for sql, _params in conn._cur.calls:
             self.assertIn("domain_label <> 'medical'", sql)
@@ -59,7 +59,7 @@ class AssetStatsShapeTest(unittest.TestCase):
         self.assertIn("ORDER BY COUNT(*) DESC, status ASC", conn._cur.calls[1][0])
         self.assertIn("ORDER BY COUNT(*) DESC, modality ASC", conn._cur.calls[2][0])
         self.assertIn("ORDER BY COUNT(*) DESC, domain_label ASC", conn._cur.calls[3][0])
-        self.assertIn("ORDER BY COUNT(*) DESC, ext ASC NULLS LAST", conn._cur.calls[4][0])  # file_type
+        self.assertIn("ORDER BY COUNT(*) DESC, ext ASC NULLS LAST", conn._cur.calls[4][0])  # file_ext
         self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[5][0])  # date 시간순
 
 
@@ -110,12 +110,12 @@ class QueryAssetsShapeTest(unittest.TestCase):
         # SELECT 도 동일 필터 + limit/offset 바인딩
         self.assertEqual(select_params, ["registered", "text", "general", 50, 0])
 
-    def test_file_type_and_date_filters(self):
+    def test_file_ext_and_date_filters(self):
         dt = datetime(2026, 6, 1, tzinfo=timezone.utc)
         conn = _Conn([(0,), []])
-        query_assets(conn, file_type="pdf", created_from=dt)
+        query_assets(conn, file_ext="pdf", created_from=dt)
         count_sql, count_params = conn._cur.calls[0]
-        # file_type 은 fs_path 확장자 식 = %s, 날짜는 created_at >= %s, 의료 제외 항상 포함
+        # file_ext 은 fs_path 확장자 식 = %s, 날짜는 created_at >= %s, 의료 제외 항상 포함
         self.assertIn("substring(fs_path from", count_sql)
         self.assertIn("created_at >= %s", count_sql)
         self.assertIn("domain_label <> 'medical'", count_sql)

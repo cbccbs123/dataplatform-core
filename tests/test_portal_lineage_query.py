@@ -83,13 +83,13 @@ class QueryLineageFeedTest(unittest.TestCase):
         self.assertIn("ingest.received.v1", count_params)
 
     def test_asset_dimension_filters(self):
-        # 자산 차원 필터(modality·status·file_type)는 asset 조인(a)으로 WHERE 에 들어간다(대시보드 슬라이스).
+        # 자산 차원 필터(modality·status·file_ext)는 asset 조인(a)으로 WHERE 에 들어간다(대시보드 슬라이스).
         conn = _SeqConn([(0,), []])
-        query_lineage_feed(conn, modality="video", status="registered", file_type="mp4")
+        query_lineage_feed(conn, modality="video", status="registered", file_ext="mp4")
         count_sql, count_params = conn._cur.calls[0]
         self.assertIn("a.modality = %s", count_sql)
         self.assertIn("a.status = %s", count_sql)
-        self.assertIn("substring(a.fs_path from", count_sql)  # file_type=확장자
+        self.assertIn("substring(a.fs_path from", count_sql)  # file_ext=확장자
         self.assertIn("a.domain_label <> 'medical'", count_sql)  # 의료 제외 유지
         for v in ("video", "registered", "mp4"):
             self.assertIn(v, count_params)

@@ -327,28 +327,28 @@ def lineage_feed(
     activity: str | None = Query(None, description="활동명 필터(예: ingest.registered.v1)"),
     modality: str | None = Query(None, description="자산 모달리티 필터(text/image/video/audio 등)"),
     status: str | None = Query(None, description="자산 FSM 단계 필터(registered/failed 등)"),
-    file_type: str | None = Query(None, description="자산 파일 확장자 필터(예: txt, pdf, mp4)"),
+    file_ext: str | None = Query(None, description="자산 파일 확장자 필터(예: txt, pdf, mp4)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """기간 내 전 자산 계보 피드(시간역순·페이징·013 FR-009b). 조회 전용·결정적·LLM 0·의료 제외.
 
-    대시보드 슬라이스: 기간(from/to)·활동(activity)·자산 차원(modality·status·file_type) 필터.
+    대시보드 슬라이스: 기간(from/to)·활동(activity)·자산 차원(modality·status·file_ext) 필터.
     드릴다운은 ``GET /admin/assets/{id}/lineage``·자산 상세는 ``GET /assets/{id}`` 합성.
     """
     since, until = _parse_dt(from_), _parse_dt(to)
     return _run_in_db(
         lambda conn: query_lineage_feed(
             conn, since=since, until=until, activity=activity, modality=modality,
-            status=status, file_type=file_type, limit=limit, offset=offset))
+            status=status, file_ext=file_ext, limit=limit, offset=offset))
 
 
 @app.get("/admin/asset-stats")
 def asset_stats_endpoint(
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """전체 자산 집계(FSM status·modality·domain·file_type·date별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
+    """전체 자산 집계(FSM status·modality·domain·file_ext·date별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
 
     관리자 API(`/admin/*`) — 계보·접근이력·대시보드는 전부 `/admin` 프리픽스(D12). 사용자용
     검색·상세·다운로드는 루트 유지.
@@ -361,18 +361,18 @@ def assets_list(
     status: str | None = Query(None, description="FSM 단계 필터(received/registered/failed 등)"),
     modality: str | None = Query(None, description="모달리티 필터(text/image/video/audio 등)"),
     domain: str | None = Query(None, description="도메인 필터(general/review; medical 은 제외됨)"),
-    file_type: str | None = Query(None, description="파일 확장자 필터(예: txt, pdf, mp4)"),
+    file_ext: str | None = Query(None, description="파일 확장자 필터(예: txt, pdf, mp4)"),
     created_from: str | None = Query(None, description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
     created_to: str | None = Query(None, description="생성일 상한"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """자산 목록(FSM·modality·domain·file_type·날짜 필터·페이징·013 FR-009f). 의료 제외·created_at 역순·LLM 0."""
+    """자산 목록(FSM·modality·domain·file_ext·날짜 필터·페이징·013 FR-009f). 의료 제외·created_at 역순·LLM 0."""
     cfrom, cto = _parse_dt(created_from), _parse_dt(created_to)
     return _run_in_db(
         lambda conn: query_assets(
-            conn, status=status, modality=modality, domain=domain, file_type=file_type,
+            conn, status=status, modality=modality, domain=domain, file_ext=file_ext,
             created_from=cfrom, created_to=cto, limit=limit, offset=offset))
 
 
