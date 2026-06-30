@@ -134,6 +134,58 @@ class HistoryEndpointsTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["rows"][0]["status"], "registered")
 
+    def test_assets_list_with_content_passthrough(self):
+        # with_content=true 가 서비스로 전달되는지 배선 검증(보완 v6)
+        with mock.patch.object(portal_api, "query_assets",
+                               return_value={"rows": [], "total": 0}) as qa, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets?modality=video&with_content=true")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(qa.call_args.kwargs["with_content"])
+        self.assertEqual(qa.call_args.kwargs["modality"], "video")
+
+    def test_modality_detail_endpoint(self):
+        with mock.patch.object(portal_api, "modality_detail",
+                               return_value={"modality": "video", "total": 9,
+                                             "by_file_ext": [{"file_ext": "mp4", "count": 7}],
+                                             "by_status": [], "by_date": []}) as md, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/modality/video")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["modality"], "video")
+        self.assertEqual(r.json()["by_file_ext"][0]["file_ext"], "mp4")
+        self.assertEqual(md.call_args.args[1], "video")  # path param 전달
+
+    def test_modality_detail_distinct_from_lineage_route(self):
+        # /admin/assets/modality/{m} 가 /admin/assets/{id}/lineage 와 충돌하지 않음(구체 경로 우선)
+        with mock.patch.object(portal_api, "modality_detail",
+                               return_value={"modality": "image", "total": 0, "by_file_ext": [],
+                                             "by_status": [], "by_date": []}) as md, \
+             mock.patch.object(portal_api, "query_asset_lineage", return_value=[]) as ln, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/modality/image")
+        self.assertEqual(r.status_code, 200)
+        md.assert_called_once()
+        ln.assert_not_called()  # 계보 핸들러로 새지 않음
+
+    def test_asset_timeline_group_by_modality(self):
+        with mock.patch.object(portal_api, "asset_timeline",
+                               return_value={"interval": "day", "group_by": "modality",
+                                             "series": [{"key": "video", "buckets": []}]}) as tl, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/asset-timeline?group_by=modality")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["series"][0]["key"], "video")
+        self.assertEqual(tl.call_args.kwargs["group_by"], "modality")
+
+    def test_asset_timeline_bad_interval_422(self):
+        r = self.client.get("/admin/asset-timeline?interval=year")
+        self.assertEqual(r.status_code, 422)
+
+    def test_asset_timeline_bad_group_by_422(self):
+        r = self.client.get("/admin/asset-timeline?group_by=evil")
+        self.assertEqual(r.status_code, 422)
+
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.
@@ -155,6 +207,9 @@ class HistoryEndpointsTest(unittest.TestCase):
             portal_api._record_access_safe("GET", "/admin/access-logs/timeline", 200, "u1")
             portal_api._record_access_safe("GET", "/admin/asset-stats", 200, "u1")
             portal_api._record_access_safe("GET", "/admin/assets", 200, "u1")
+            # 보완 v6 신규 관리자 뷰도 자기 기록 안 함(/admin/* 는 데이터 라우트 아님)
+            portal_api._record_access_safe("GET", "/admin/assets/modality/video", 200, "u1")
+            portal_api._record_access_safe("GET", "/admin/asset-timeline", 200, "u1")
         rec.assert_not_called()
 
     def test_middleware_schedules_recording_non_blocking(self):

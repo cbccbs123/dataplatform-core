@@ -1,7 +1,12 @@
 import unittest
 from datetime import datetime, timezone
 
-from src.portal.asset_stats import asset_stats, query_assets
+from src.portal.asset_stats import (
+    asset_stats,
+    asset_timeline,
+    modality_detail,
+    query_assets,
+)
 
 
 class _Cur:
@@ -141,6 +146,108 @@ class QueryAssetsShapeTest(unittest.TestCase):
         query_assets(conn, limit=10, offset=20)
         _select_sql, select_params = conn._cur.calls[1]
         self.assertEqual(select_params, [10, 20])
+
+
+class QueryAssetsContentTest(unittest.TestCase):
+    """with_content=True — 모달리티 상세 목록에 요약·키워드·제목(파일명) 동반(보완 v6)."""
+    def test_with_content_joins_metadata_and_adds_fields(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([
+            (1,),
+            [("a1", "registered", "video", "general", "/data/raw/뉴스.mp4", ts,
+              "서울시장 선거 여론조사 보도", ["선거", "여론조사"])],
+        ])
+        out = query_assets(conn, modality="video", with_content=True)
+        row = out["rows"][0]
+        self.assertEqual(row["file_name"], "뉴스.mp4")  # 제목=파일명
+        self.assertEqual(row["summary"], "서울시장 선거 여론조사 보도")
+        self.assertEqual(row["keywords"], ["선거", "여론조사"])
+        # content SELECT 는 asset_metadata LEFT JOIN + ext_meta 요약/키워드
+        select_sql = conn._cur.calls[1][0]
+        self.assertIn("LEFT JOIN asset_metadata", select_sql)
+        self.assertIn("ext_meta", select_sql)
+        # JOIN 시 asset_id 는 a. 한정(모호성 방지)
+        self.assertIn("ORDER BY a.created_at DESC, a.asset_id DESC", select_sql)
+
+    def test_without_content_keeps_lean_shape(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([(1,), [("a1", "registered", "text", "general", "/d/x.txt", ts)]])
+        out = query_assets(conn)  # 기본 with_content=False — 하위호환(요약/키워드 없음)
+        self.assertNotIn("summary", out["rows"][0])
+        self.assertNotIn("keywords", out["rows"][0])
+        self.assertNotIn("LEFT JOIN asset_metadata", conn._cur.calls[1][0])
+
+    def test_with_content_still_excludes_medical(self):
+        conn = _Conn([(0,), []])
+        query_assets(conn, with_content=True)
+        for sql, _p in conn._cur.calls:
+            self.assertIn("domain_label <> 'medical'", sql)
+
+
+class ModalityDetailTest(unittest.TestCase):
+    """단일 모달리티 스코프 집계(보완 v6) — 확장자·상태·일자 + 총계, 의료 제외."""
+    def test_shape_and_modality_bound(self):
+        d = datetime(2026, 6, 30, tzinfo=timezone.utc).date()
+        # COUNT → by_file_ext → by_status → by_date 순(4 쿼리)
+        conn = _Conn([
+            (9,),
+            [("mp4", 7), ("mov", 2)],
+            [("registered", 8), ("failed", 1)],
+            [(d, 9)],
+        ])
+        out = modality_detail(conn, "video")
+        self.assertEqual(out["modality"], "video")
+        self.assertEqual(out["total"], 9)
+        self.assertEqual(out["by_file_ext"][0], {"file_ext": "mp4", "count": 7})
+        self.assertEqual(out["by_status"][0], {"status": "registered", "count": 8})
+        self.assertEqual(out["by_date"][0], {"date": d.isoformat(), "count": 9})
+        # modality 는 %s 바인딩(인젝션 안전)·4 쿼리 모두 의료 제외
+        self.assertEqual(len(conn._cur.calls), 4)
+        for sql, params in conn._cur.calls:
+            self.assertIn("domain_label <> 'medical'", sql)
+            self.assertIn("modality = %s", sql)
+            self.assertEqual(params, ["video"])
+
+    def test_deterministic_order(self):
+        conn = _Conn([(0,), [], [], []])
+        modality_detail(conn, "image")
+        self.assertIn("ORDER BY COUNT(*) DESC, ext ASC NULLS LAST", conn._cur.calls[1][0])
+        self.assertIn("ORDER BY COUNT(*) DESC, status ASC", conn._cur.calls[2][0])
+        self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[3][0])
+
+
+class AssetTimelineTest(unittest.TestCase):
+    """자산 생성 일자 추이(보완 v6) — group_by 멀티시리즈(계보 timeline 과 동일 패턴)."""
+    def test_single_series_default(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([[(ts, 5)]])
+        out = asset_timeline(conn, interval="day")
+        self.assertEqual(out["interval"], "day")
+        self.assertEqual(out["buckets"][0]["count"], 5)
+        self.assertNotIn("series", out)
+        self.assertIn("domain_label <> 'medical'", conn._cur.calls[0][0])
+
+    def test_group_by_modality_multiseries(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([[("image", ts, 4), ("video", ts, 2)]])
+        out = asset_timeline(conn, group_by="modality")
+        self.assertEqual(out["group_by"], "modality")
+        self.assertEqual([s["key"] for s in out["series"]], ["image", "video"])
+        self.assertEqual(out["series"][0]["buckets"][0]["count"], 4)
+        sql = conn._cur.calls[0][0]
+        self.assertIn("modality AS key", sql)  # 화이트리스트 매핑 컬럼
+        self.assertIn("ORDER BY key ASC, bkt ASC", sql)  # 결정적
+
+    def test_group_by_unknown_falls_back_single(self):
+        conn = _Conn([[]])
+        out = asset_timeline(conn, group_by="evil; DROP TABLE")
+        self.assertIn("buckets", out)
+        self.assertNotIn("series", out)
+
+    def test_bad_interval_falls_back_to_day(self):
+        conn = _Conn([[]])
+        out = asset_timeline(conn, interval="year")
+        self.assertEqual(out["interval"], "day")  # 화이트리스트 폴백(API 는 422 선처리)
 
 
 if __name__ == "__main__":

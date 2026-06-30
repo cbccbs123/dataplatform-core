@@ -109,6 +109,39 @@ class HistoryE2ETest(unittest.TestCase):
             self.assertLessEqual(len(lst["rows"]), 5)
             self.assertTrue(all("status" in r and "file_name" in r for r in lst["rows"]))
 
+    def test_modality_detail_timeline_and_content(self):
+        # 보완 v6 — 모달리티 드릴다운·생성 추이·콘텐츠 목록(실 DB)
+        from src.database.postgres_util import PostgresUtil
+        from src.portal.asset_stats import (
+            asset_stats,
+            asset_timeline,
+            modality_detail,
+            query_assets,
+        )
+
+        db = PostgresUtil()
+        with db:
+            stats = db.execute_in_transaction(asset_stats, idempotent=True)
+            mods = [m["modality"] for m in stats["by_modality"]]
+            if not mods:
+                self.skipTest("자산 없음")
+            m0 = mods[0]
+            det = db.execute_in_transaction(lambda c: modality_detail(c, m0), idempotent=True)
+            self.assertEqual(det["modality"], m0)
+            for k in ("total", "by_file_ext", "by_status", "by_date"):
+                self.assertIn(k, det)
+            # 모달리티 상세 총계 == 전체 by_modality 의 해당 값(의료 제외 일관)
+            self.assertEqual(det["total"], next(m["count"] for m in stats["by_modality"] if m["modality"] == m0))
+            # 생성 추이 멀티시리즈(group_by=modality)
+            tl = db.execute_in_transaction(
+                lambda c: asset_timeline(c, group_by="modality"), idempotent=True)
+            self.assertEqual(tl["group_by"], "modality")
+            self.assertTrue(all("key" in s and "buckets" in s for s in tl["series"]))
+            # 콘텐츠 목록 — summary·keywords 키 동반
+            lst = db.execute_in_transaction(
+                lambda c: query_assets(c, modality=m0, with_content=True, limit=3), idempotent=True)
+            self.assertTrue(all("summary" in r and "keywords" in r for r in lst["rows"]))
+
 
 def _first_registered_asset(conn):
     with conn.cursor() as cur:

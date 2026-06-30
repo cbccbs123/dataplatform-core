@@ -62,7 +62,12 @@ from src.portal.access_log import (
     record_access,
 )
 from src.portal.asset_detail import fetch_asset_detail
-from src.portal.asset_stats import asset_stats, query_assets
+from src.portal.asset_stats import (
+    asset_stats,
+    asset_timeline,
+    modality_detail,
+    query_assets,
+)
 from src.portal.auth import Principal, authenticate_token, require_principal
 from src.portal.auth.config import load_portal_auth_config
 from src.portal.auth.dev_issuer import issue_dev_token
@@ -415,16 +420,56 @@ def assets_list(
     file_ext: str | None = Query(None, description="파일 확장자 필터(예: txt, pdf, mp4)"),
     created_from: str | None = Query(None, description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
     created_to: str | None = Query(None, description="생성일 상한"),
+    with_content: bool = Query(False, description="행마다 요약·키워드 동반(모달리티 상세·보완 v6)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """자산 목록(FSM·modality·domain·file_ext·날짜 필터·페이징·013 FR-009f). 의료 제외·created_at 역순·LLM 0."""
+    """자산 목록(FSM·modality·domain·file_ext·날짜 필터·페이징·013 FR-009f). 의료 제외·created_at 역순·LLM 0.
+
+    ``with_content=true`` 면 행마다 요약(summary)·키워드(keywords) 동반(자산을 안 열고 내용 파악·v6).
+    """
     cfrom, cto = _parse_dt(created_from), _parse_dt(created_to)
     return _run_in_db(
         lambda conn: query_assets(
             conn, status=status, modality=modality, domain=domain, file_ext=file_ext,
-            created_from=cfrom, created_to=cto, limit=limit, offset=offset))
+            created_from=cfrom, created_to=cto, limit=limit, offset=offset,
+            with_content=with_content))
+
+
+@app.get("/admin/assets/modality/{modality}")
+def modality_detail_endpoint(
+    modality: str,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """모달리티 드릴다운 집계(보완 v6) — 해당 모달리티의 확장자·상태·일자별 분포 + 총계. 의료 제외·결정적·LLM 0.
+
+    개요(`/admin/asset-stats`)의 한 모달리티를 파고들 때(예: video 안 mp4/mov 분포·일자 추이).
+    콘텐츠 목록은 `GET /admin/assets?modality=...&with_content=true` 로 합성.
+    """
+    return _run_in_db(lambda conn: modality_detail(conn, modality))
+
+
+@app.get("/admin/asset-timeline")
+def asset_timeline_endpoint(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
+    group_by: str | None = Query(None, description="멀티시리즈 분할: modality | status | domain(미지정=단일)"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """자산 생성 일자 추이(보완 v6·계보 timeline 과 대칭). 의료 제외·결정적·LLM 0.
+
+    ``group_by``(modality/status/domain) 주면 멀티시리즈(어느 날 어떤 모달리티가 몇 개 생성), 미지정이면 단일.
+    """
+    if interval not in ("day", "hour"):
+        raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    if group_by is not None and group_by not in ("modality", "status", "domain"):
+        raise HTTPException(status_code=422, detail=f"group_by 는 modality|status|domain 만: {group_by!r}")
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: asset_timeline(
+            conn, since=since, until=until, interval=interval, group_by=group_by))
 
 
 def _project_grouped_search(
