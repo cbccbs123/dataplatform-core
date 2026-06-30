@@ -108,8 +108,13 @@ def sync_graph_edges(
     auto_approve_min: float = 1.01,
     target_emb_scores: dict[str, float] | None = None,
     auto_approve_emb_min: float = 0.0,
+    collect: list[dict[str, Any]] | None = None,
 ) -> tuple[int, int]:
     """후보 집합 안 타깃·active kind 만 graph_edge 에 upsert. Returns (upserted, skipped).
+
+    ``collect`` 리스트를 주면 upsert 된 엣지마다 ``{target_asset_id, kind_code, confidence, status}``
+    를 append 한다(skip 제외). 계보(asset_lineage)에 "어떤 자산과 어떤 관계로 생성됐는지" 쌍을
+    남기기 위한 단일 출처(013) — 반환 튜플 계약은 불변(미전달 시 기존 동작 그대로).
 
     신규 엣지 status: LLM conf AND emb_score 두 게이트를 모두 통과하면 'active'(자동승인),
     아니면 'proposed'(검토 대기). conf>=auto_approve_min 이고 (emb_min>0 일 때) 타깃 emb_score>=emb_min.
@@ -190,4 +195,7 @@ def sync_graph_edges(
                 (uuid7_str(), a_node, b_node, kind_id, conf_f, reason, topic_json, status_val),
             )
         upserted += 1
+        if collect is not None:  # 계보 관계쌍 기록용(013) — upsert 된 것만, skip 제외
+            collect.append({"target_asset_id": tid, "kind_code": kind_code,
+                            "confidence": conf_f, "status": status_val})
     return upserted, skipped

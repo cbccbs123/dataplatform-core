@@ -79,6 +79,30 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
         sql = " ".join(str(c.args[0]) for c in self.cur.execute.call_args_list)
         self.assertIn("INSERT INTO graph_edge", sql)
 
+    def test_collect_captures_upserted_pairs_only(self) -> None:
+        # collect 전달 시 upsert 된 쌍만 수집(skip 제외) — 계보 관계쌍 기록용(013).
+        from src.relations import graph_persist
+        collected: list = []
+        with mock.patch.object(graph_persist, "ensure_asset_node", side_effect=lambda conn, aid: "n_" + aid), \
+             mock.patch.object(graph_persist, "fetch_relation_kind",
+                               return_value={"relation_kind_id": "k1", "is_symmetric": True}):
+            up, sk = graph_persist.sync_graph_edges(
+                self.conn, source_asset_id=_SRC,
+                edges=[self._edge(target_media_item_id=_T1, confidence=0.95),
+                       self._edge(target_media_item_id=_T2, confidence=0.6)],
+                allowed_target_ids=frozenset({_T1}),  # _T2 는 미허용 → skip
+                auto_approve_min=0.9, collect=collected)
+        self.assertEqual((up, sk), (1, 1))
+        self.assertEqual([c["target_asset_id"] for c in collected], [_T1])  # skip 제외
+        self.assertEqual(collected[0]["kind_code"], "same_domain")
+        self.assertEqual(collected[0]["confidence"], 0.95)
+        self.assertEqual(collected[0]["status"], "active")  # 0.95 >= 0.9
+
+    def test_collect_none_is_noop(self) -> None:
+        # collect 미전달(기본 None)이면 기존 (upserted, skipped) 계약·동작 그대로(하위호환).
+        up, sk = self._run([self._edge()])
+        self.assertEqual((up, sk), (1, 0))
+
     def _insert_params(self, edges, kind=("k1", True), **kwargs):
         """단일 엣지 upsert 의 INSERT 바인딩 파라미터(ensure_asset_node mock — INSERT 만 self.cur 사용)."""
         from src.relations import graph_persist

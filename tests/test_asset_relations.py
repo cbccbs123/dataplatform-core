@@ -12,6 +12,7 @@ import math
 import os
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest import mock
 
 from src.relations.asset_candidates import _channels_param, find_embedding_candidates
@@ -592,7 +593,8 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         captured: dict = {}
 
         def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min,
-                       target_emb_scores=None, auto_approve_emb_min=0.0):  # 033 FR-003 신규 kwargs
+                       target_emb_scores=None, auto_approve_emb_min=0.0,
+                       collect=None):  # 033 FR-003 + 013 collect(계보 관계쌍) 신규 kwargs
             captured["allowed"] = allowed_target_ids
             captured["emb_scores"] = target_emb_scores
             return 1, 0
@@ -732,6 +734,63 @@ class TestZeroNormGuardDB(unittest.TestCase):
                         with conn.cursor() as cur:
                             cur.execute("DELETE FROM asset_embedding WHERE asset_id=%s", (aid,))
                             cur.execute("DELETE FROM asset WHERE asset_id=%s", (aid,))
+
+
+class TestLineageRecordsEdgePairs(unittest.TestCase):
+    """013: relations.proposed.v1 계보 generated 에 **관계 쌍**(상대자산·관계유형)을 기록(건수만 → 쌍 포함).
+
+    DB·LLM 불필요 — propose_relations_for_asset 의 내부 seam 을 모두 주입한다.
+    """
+
+    def test_generated_includes_sorted_edge_pairs(self) -> None:
+        from src.relations import asset_entry
+
+        captured: dict = {}
+
+        def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min,
+                       target_emb_scores, auto_approve_emb_min, collect=None):
+            # sync_graph_edges 가 upsert 된 쌍을 collect 에 적재(정렬 안 된 순서로) + (upserted, skipped) 반환
+            if collect is not None:
+                collect.append({"target_asset_id": "t-bbb", "kind_code": "same_domain",
+                                "confidence": 0.7, "status": "proposed"})
+                collect.append({"target_asset_id": "t-aaa", "kind_code": "duplicate_near",
+                                "confidence": 0.95, "status": "active"})
+            return 2, 1
+
+        def _fake_record(conn, aid, *, activity, agent, generated, payload):
+            captured["activity"] = activity
+            captured["generated"] = generated
+
+        class _DB:
+            def execute_in_transaction(self, fn, *, idempotent):
+                return fn(object())  # fake conn — seam 들이 전부 mock 이라 미사용
+
+        cfg = SimpleNamespace(relation_top_k=10, relation_min_sim=0.2, relation_path_top_k=5,
+                              relation_auto_approve_min=0.9, relation_auto_approve_emb_min=0.0)
+        with mock.patch.object(asset_entry, "get_current_settings", return_value=cfg), \
+             mock.patch.object(asset_entry, "_fetch_source_row",
+                               return_value={"summary": "s", "modality": "text"}), \
+             mock.patch.object(asset_entry, "find_embedding_candidates", return_value=[]), \
+             mock.patch.object(asset_entry, "find_path_signal_candidates", return_value=[]), \
+             mock.patch.object(asset_entry, "union_candidates", return_value=[]), \
+             mock.patch.object(asset_entry, "target_emb_score_map", return_value={}), \
+             mock.patch.object(asset_entry, "fetch_active_relation_kinds", return_value=[]), \
+             mock.patch.object(asset_entry, "build_relation_proposal_prompt", return_value="p"), \
+             mock.patch.object(asset_entry, "parse_and_normalize_edges", return_value=[]), \
+             mock.patch.object(asset_entry, "register_new_relation_kinds", return_value=(0, 0)), \
+             mock.patch.object(asset_entry, "sync_graph_edges", side_effect=_fake_sync), \
+             mock.patch.object(asset_entry, "record_lineage", side_effect=_fake_record):
+            asset_entry.propose_relations_for_asset(_DB(), _SRC, llm_fn=lambda p: {})
+
+        self.assertEqual(captured["activity"], "relations.proposed.v1")
+        gen = captured["generated"]
+        # 카운트는 그대로(하위호환)
+        self.assertEqual(gen["edges_upserted"], 2)
+        self.assertEqual(gen["edges_skipped"], 1)
+        # 신규: 관계 쌍 — target_asset_id ASC 로 결정적 정렬(헌법 3조)
+        self.assertEqual([e["target_asset_id"] for e in gen["edges"]], ["t-aaa", "t-bbb"])
+        self.assertEqual(gen["edges"][0]["kind_code"], "duplicate_near")
+        self.assertEqual(gen["edges"][0]["status"], "active")
 
 
 if __name__ == "__main__":

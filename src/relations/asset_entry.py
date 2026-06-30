@@ -152,21 +152,27 @@ def propose_relations_for_asset(
             conn, edges=edges, active_kind_codes=active_codes)
         # 033 FR-003: 후보 emb_score 맵 + emb 하한을 persist 로 전달 → 자동승인 AND 게이트.
         # 기본 auto_approve_emb_min=0.0 이면 emb 변이 무력 → 현행과 동일(SC-001).
+        # collect: upsert 된 관계 쌍(상대자산·관계유형·신뢰도·status)을 계보에 남기기 위해 모은다(013).
+        upserted_pairs: list[dict[str, Any]] = []
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
             allowed_target_ids=candidate_ids, auto_approve_min=cfg.relation_auto_approve_min,
             target_emb_scores=target_emb_score_map(candidates),
-            auto_approve_emb_min=cfg.relation_auto_approve_emb_min)
+            auto_approve_emb_min=cfg.relation_auto_approve_emb_min,
+            collect=upserted_pairs)
         # 계보 기록: 이 자산에 대해 관계 제안이 실행되었음을 asset_lineage에 남긴다.
         # run_relations.py 가 재실행될 때 이중 기록이 생길 수 있으나, idempotent=False로
         # 트랜잭션 실패 시 롤백되어 반쪽 기록은 남지 않는다.
+        # generated.edges: 생성된 관계 쌍을 target_asset_id ASC(동점 kind_code ASC)로 결정적 정렬(헌법 3조).
         record_lineage(
             conn,
             uuid.UUID(source_asset_id),
             activity="relations.proposed.v1",
             agent="llm_propose",
             generated={"edges_upserted": edges_upserted, "edges_skipped": edges_skipped,
-                       "kinds_registered": kinds_registered},
+                       "kinds_registered": kinds_registered,
+                       "edges": sorted(upserted_pairs,
+                                       key=lambda e: (e["target_asset_id"], e["kind_code"]))},
             payload={"top_k": k, "embedding_kind": embedding_kind},
         )
         return kinds_registered, kinds_skipped, edges_upserted, edges_skipped
