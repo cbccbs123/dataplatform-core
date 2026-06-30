@@ -261,9 +261,9 @@ def asset_lineage(
     조회 전용(``_run_in_db`` idempotent) — ``query_asset_lineage`` 가 ``asset_lineage`` 를
     시간순으로 끌어온다. 자산 데이터·스키마 쓰기 0·신규 LLM 0.
 
-    상태 무관(운영상 ``failed``/``deferred`` 자산의 계보가 디버깅에 필요) — 미존재/이력 없음은
-    빈 ``activities`` 로 200 반환(의도). **의료(PHI) 노출 게이트는 후속**(현재 medical 자산 부재라
-    실효 없음 — ``bundle`` 이웃 필터와 동일 선례, 013/RBAC 에서 status-무관·medical-exclude 게이트 추가).
+    상태 무관(운영상 ``failed``/``deferred`` 자산의 계보가 디버깅에 필요)이되 **의료(PHI)는 제외**
+    — ``query_asset_lineage`` 가 asset 조인으로 medical 도메인 계보를 노출하지 않는다(헌법 10조·FR-014).
+    미존재/의료/이력 없음은 빈 ``activities`` 로 200 반환(의도).
     """
     activities = _run_in_db(lambda conn: query_asset_lineage(conn, asset_id))
     return {"asset_id": asset_id, "activities": activities}

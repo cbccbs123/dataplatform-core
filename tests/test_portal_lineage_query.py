@@ -47,7 +47,9 @@ class QueryLineageTest(unittest.TestCase):
         # 시간순 정렬 SQL 사용 확인
         conn = _Conn(rows)
         query_asset_lineage(conn, "a1")
-        self.assertIn("ORDER BY occurred_at ASC", conn._cur.calls[0][0])
+        sql = conn._cur.calls[0][0]
+        self.assertIn("ORDER BY al.occurred_at ASC", sql)
+        self.assertIn("a.domain_label <> 'medical'", sql)  # 의료 제외 조인(헌법 10조)
 
 
 class QueryLineageFeedTest(unittest.TestCase):
@@ -69,14 +71,15 @@ class QueryLineageFeedTest(unittest.TestCase):
         query_lineage_feed(conn)
         # 두 번째 execute(rows 조회)에 시간역순·tiebreak 정렬 SQL 사용 확인
         rows_sql = conn._cur.calls[1][0]
-        self.assertIn("ORDER BY occurred_at DESC, lineage_id DESC", rows_sql)
+        self.assertIn("ORDER BY al.occurred_at DESC, al.lineage_id DESC", rows_sql)
+        self.assertIn("a.domain_label <> 'medical'", rows_sql)  # 의료 제외(헌법 10조)
 
     def test_activity_filter_in_where(self):
         conn = _SeqConn([(0,), []])
         query_lineage_feed(conn, activity="ingest.received.v1")
         # COUNT·rows 두 execute 모두 WHERE 에 activity 조건 + 바인딩 파라미터
         count_sql, count_params = conn._cur.calls[0]
-        self.assertIn("activity = %s", count_sql)
+        self.assertIn("al.activity = %s", count_sql)
         self.assertIn("ingest.received.v1", count_params)
 
 

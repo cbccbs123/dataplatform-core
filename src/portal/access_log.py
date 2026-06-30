@@ -116,7 +116,8 @@ _TIMELINE_INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 
 def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None,
                         action: str | None = None, interval: str = "day") -> dict[str, Any]:
     """시계열 타임라인: 버킷(day/hour)별 호출 수(bucket ASC·결정적·FR-009c). action 필터=api별."""
-    # trunc 은 화이트리스트라 f-string 안전, 그 외(since/until/action) 값은 모두 %s 바인딩
+    # trunc 은 화이트리스트라 f-string 안전, 그 외(since/until/action) 값은 모두 %s 바인딩.
+    # 폴백("day")은 서비스 함수 직접 호출 시 방어 — API 레이어(portal_api)는 day|hour 아니면 422 선처리.
     trunc = interval if interval in _TIMELINE_INTERVALS else "day"
     conds: list[str] = []
     params: list[Any] = []

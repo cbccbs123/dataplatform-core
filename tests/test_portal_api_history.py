@@ -102,6 +102,11 @@ class HistoryEndpointsTest(unittest.TestCase):
             portal_api._record_access_safe("GET", "/health", 200, "u1")     # 비대상 라우트
             portal_api._record_access_safe("GET", "/assets/a1", 404, "u1")  # 4xx
             portal_api._record_access_safe("GET", "/access-logs", 200, "u1")  # 감사 뷰(자기 기록 안 함)
+            # 신규 운영/대시보드 뷰도 자기 기록 안 함(노이즈 방지·통합 경로 검증).
+            portal_api._record_access_safe("GET", "/lineage", 200, "u1")
+            portal_api._record_access_safe("GET", "/access-logs/timeline", 200, "u1")
+            portal_api._record_access_safe("GET", "/asset-stats", 200, "u1")
+            portal_api._record_access_safe("GET", "/assets", 200, "u1")
         rec.assert_not_called()
 
     def test_middleware_schedules_recording_non_blocking(self):
