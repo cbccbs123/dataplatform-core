@@ -30,9 +30,13 @@ class RelationGoldenRegressionTest(unittest.TestCase):
     def _measure(self) -> dict:
         # baseline 이 동결될 때 쓴 confidence_min(프로덕션 자동승인 임계)을 재사용해야
         # accepted 판정이 일치한다(0.0 으로 재면 isolation 이 항상 0 이라 baseline 과 어긋남).
+        # confidence_min 키가 없으면 구형 baseline — 0.0 fallback 은 isolation 회귀를 조용히
+        # 놓치므로 명시 skip(051 --out 으로 baseline 재생성 필요).
         from scripts.measure_relation_quality import cmd_measure
-        cmin = float(self.baseline.get("confidence_min", 0.0))
-        return cmd_measure(self.golden, str(_SNAPSHOT), confidence_min=cmin)
+        cmin = self.baseline.get("confidence_min")
+        if cmin is None:
+            self.skipTest("baseline 에 confidence_min 없음 — 051 이후 measure --out 으로 재생성 필요")
+        return cmd_measure(self.golden, str(_SNAPSHOT), confidence_min=float(cmin))
 
     def test_candidate_recall_non_regression(self):
         cur = self._measure()["candidate_recall"]

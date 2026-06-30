@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.measure_relation_quality import _dump_report
 
@@ -34,7 +35,8 @@ class DumpReportTest(unittest.TestCase):
             p1, p2 = os.path.join(d, "a.json"), os.path.join(d, "b.json")
             _dump_report(report, p1)
             _dump_report(report, p2)
-            b1, b2 = open(p1, encoding="utf-8").read(), open(p2, encoding="utf-8").read()
+            b1 = Path(p1).read_text(encoding="utf-8")
+            b2 = Path(p2).read_text(encoding="utf-8")
         self.assertEqual(b1, b2)                       # 같은 입력 → byte 동일(결정적)
         self.assertEqual(json.loads(b1)["relation_metrics"]["recall"], 0.83)
         # sort_keys: 최상위 키가 정렬돼 있어야(candidate_recall < config < relation_metrics)
