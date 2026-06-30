@@ -65,8 +65,11 @@ def build_report(
             isolated.add(aid)
 
     # 스냅샷(asset_id 공간)에서 메트릭 입력 추출.
+    # ss.candidates 는 (target_id, emb_score) 튜플들 — candidate_recall 은 id 집합을 기대하므로
+    # id 만 추출한다(033 이 candidates 를 (id,score)로 바꾼 뒤 set(candidates)가 튜플 집합이 돼
+    # candidate_recall 이 항상 0 이던 잠복 버그 수정 — 051).
     source_candidates = {
-        sid: set(ss.candidates) for sid, ss in snapshot.sources.items()}
+        sid: {tid for tid, _ in ss.candidates} for sid, ss in snapshot.sources.items()}
     proposed = {sid: list(ss.proposed) for sid, ss in snapshot.sources.items()}
 
     rm = relation_metrics(

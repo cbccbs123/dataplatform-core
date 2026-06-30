@@ -10,6 +10,19 @@ from __future__ import annotations
 from src.relations.quality.snapshot import ProposedEdge
 
 
+def isolated_candidates(
+    registered_ids: set[str],
+    candidate_ids: set[str],
+) -> list[str]:
+    """후보(`candidate_ids`)에 한 번도 등장하지 않은 registered 자산 = 고립 후보(051 FR-101).
+
+    순수 집합 차 — `candidate_ids` 의 **의미는 호출자가 정한다**. 051 curate 는 부트스트랩 쌍
+    (고conf graph_edge + path_signal)에 등장한 자산을 candidate 로 보아 "관계 0 ∧ path 0" 을
+    고립으로 정의(035 isolation 의미·관계 단계). 정렬 반환 — 결정적(헌법 3조). 학습 0.
+    """
+    return sorted(registered_ids - candidate_ids)
+
+
 def candidate_recall(
     pairs: list[tuple[str, str]],
     source_candidates: dict[str, set[str]],

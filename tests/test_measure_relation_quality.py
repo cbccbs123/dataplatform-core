@@ -164,12 +164,15 @@ class TestCmdMeasureSweeps(unittest.TestCase):
         self.assertAlmostEqual(by_sim[0.5]["recall"], 0.0)
 
     def test_measure_is_read_only_no_db(self) -> None:
-        # cmd_measure 는 snapshot 파일만 읽는다 — DB/LLM 인자 없음(읽기 전용 시그니처 보존).
+        # cmd_measure 는 snapshot 파일만 읽는다 — DB conn/LLM 인자 없음(읽기 전용 시그니처 보존).
+        # confidence_min 은 스칼라 임계(051 — 프로덕션 자동승인 임계 측정용)로 DB/LLM 비의존.
         import inspect
 
         from scripts.measure_relation_quality import cmd_measure
         params = list(inspect.signature(cmd_measure).parameters)
-        self.assertEqual(params, ["golden", "snapshot_path"])
+        self.assertEqual(params, ["golden", "snapshot_path", "confidence_min"])
+        # read-only 보장: conn/db/llm 류 인자가 없어야 한다.
+        self.assertFalse({"conn", "db", "llm_fn", "llm"} & set(params))
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from psycopg.rows import dict_row
 
 from src.database.postgres_util import PostgresUtil
 from src.relations.quality.golden import Golden, parse_golden, resolve_asset_keys
+from src.relations.quality.metrics import isolated_candidates
 from src.relations.quality.report import build_report
 from src.relations.quality.snapshot import (
     ProposedEdge,
@@ -171,15 +172,28 @@ def _asset_fs_path(conn: Connection[Any], ids: set[str]) -> dict[str, str]:
         return {str(a): str(p) for a, p in cur.fetchall()}
 
 
+def _registered_asset_ids(conn: Connection[Any]) -> list[str]:
+    """registered 자산 id 전체(정렬) — 고립 후보 모집단."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT asset_id FROM asset WHERE status = 'registered' ORDER BY asset_id")
+        return [str(r[0]) for r in cur.fetchall()]
+
+
 def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict:
     """검토 초안 골든을 만든다 — 후보 쌍을 fs_path 키로, `_review:true`·제안 kind 와 함께 출력.
 
-    ★ 이 산출물은 **골든이 아니다** — 사람이 편집(잘못된 쌍 제거·kind 확정·`_review` 제거·고립 추가)해야 골든이 된다.
+    ★ 이 산출물은 **골든이 아니다** — 사람이 편집(잘못된 쌍 제거·kind 확정·`_review` 제거·고립 검증)해야 골든이 된다.
     """
     with db.transaction() as conn:
         raw_pairs = _bootstrap_candidate_pairs(conn, edge_conf_min=edge_conf_min)
+        # 부트스트랩 쌍(고conf graph_edge + path_signal)에 등장한 자산 = 관계/경로 후보 보유.
         ids = {p["a"] for p in raw_pairs} | {p["b"] for p in raw_pairs}
-        id2path = _asset_fs_path(conn, ids)
+        # C2(051): registered 중 그 집합에 없는 자산 = 관계 0 ∧ path 0 = 고립 후보(관계 단계·FR-101).
+        #   035 isolation 의미(평가완료·엣지 0)와 일치. min_sim 이 낮아 임베딩 후보는 거의 모두 존재하므로
+        #   "임베딩 후보 0" 대신 "관계/경로 후보 0"으로 고립을 정의한다(임베딩 전수 스캔 불요·결정적).
+        reg_ids = _registered_asset_ids(conn)
+        iso_ids = isolated_candidates(set(reg_ids), ids)
+        id2path = _asset_fs_path(conn, ids | set(iso_ids))
     draft_pairs = []
     for p in raw_pairs:
         a, b = id2path.get(p["a"]), id2path.get(p["b"])
@@ -187,11 +201,12 @@ def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict
             continue
         draft_pairs.append({"a": a, "b": b, "kind": p.get("_suggest_kind") or "REVIEW",
                             "note": f"{p['_source']}", "_review": True})
-    draft = {"version": 1, "key_type": "fs_path", "pairs": draft_pairs, "isolated": [],
-             "_NOTE": "검토 초안 — 사람이 잘못된 쌍 제거·kind 확정·_review/_NOTE 제거·고립 추가 후에야 골든."}
+    draft = {"version": 1, "key_type": "fs_path", "pairs": draft_pairs,
+             "isolated": sorted(id2path[i] for i in iso_ids if i in id2path),
+             "_NOTE": "검토 초안 — 사람이 잘못된 쌍 제거·kind 확정·_review/_NOTE 제거·고립 검증 후에야 골든."}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(draft, f, ensure_ascii=False, indent=2)
-    return {"draft_pairs": len(draft_pairs), "out": out_path}
+    return {"draft_pairs": len(draft_pairs), "isolated": len(draft["isolated"]), "out": out_path}
 
 
 # ── snapshot / measure ───────────────────────────────────────────────────────
@@ -226,8 +241,12 @@ def _resolve_golden_pairs(golden: Golden, key_to_id: dict[str, str]) -> list[tup
     return pairs
 
 
-def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
+def cmd_measure(golden: Golden, snapshot_path: str, *, confidence_min: float = 0.0) -> dict:
     """골든+스냅샷 → 리포트. LLM 0·DB 0(스냅샷에 key_to_id 포함 — 결정적·SC-002).
+
+    ``confidence_min``: 제안 엣지 accepted 판정 임계. **프로덕션 자동승인(RELATION_AUTO_APPROVE_MIN=0.9)
+    으로 측정해야 precision/recall/isolation 이 실제 동작을 반영**한다(051 — 0.0 이면 저신뢰 제안까지
+    accepted 로 세어 isolation_accuracy 가 항상 0). 비회귀 게이트는 baseline 의 confidence_min 을 재사용한다.
 
     033 FR-004·005: 동결 스냅샷 위에서 min_sim 스윕(N1)·2D 자동승인 스윕(#3) 표를 더해 출력한다.
     **읽기 전용** — graph_edge/relation_kind 미기록(measure 의 측정 전용 성질 보존·SC-004).
@@ -240,7 +259,7 @@ def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
         payload = json.load(f)
     snap = load_snapshot(payload["snapshot"])
     key_to_id = {str(k): str(v) for k, v in payload.get("key_to_id", {}).items()}
-    report = build_report(golden, snap, key_to_id)
+    report = build_report(golden, snap, key_to_id, confidence_min=confidence_min)
 
     # 033 스윕 — 동결 스냅샷(asset_id 공간) 위 결정적 재측정. 골든은 key_to_id 로 정합.
     from src.relations.quality.metrics import auto_approve_sweep, min_sim_sweep
@@ -253,6 +272,12 @@ def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
     report["auto_approve_sweep"] = auto_approve_sweep(
         gpairs, proposed, conf_thresholds=_AA_CONF_GRID, emb_thresholds=_AA_EMB_GRID)
     return report
+
+
+def _dump_report(report: dict, path: str) -> None:
+    """measure 리포트를 baseline 산출물로 동결한다 — 정렬·결정적(051 FR-301)."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _load_golden(path: str) -> Golden:
@@ -285,6 +310,9 @@ def main() -> int:
     pm = sub.add_parser("measure", help="골든+스냅샷 → 리포트(LLM 0)")
     pm.add_argument("--golden", required=True)
     pm.add_argument("--snapshot", required=True)
+    pm.add_argument("--out", default=None, help="리포트를 baseline_report.json 로 동결(선택)")
+    pm.add_argument("--confidence-min", dest="confidence_min", type=float, default=None,
+                    help="accepted 판정 임계(미지정 시 RELATION_AUTO_APPROVE_MIN — 프로덕션 자동승인)")
 
     args = p.parse_args()
     dotenv_path = Path(__file__).resolve().parents[1] / f".env.{args.env}"
@@ -293,7 +321,12 @@ def main() -> int:
     init_settings(args.env)
 
     if args.cmd == "measure":  # DB/LLM 불요(스냅샷 기반)
-        print(json.dumps(cmd_measure(_load_golden(args.golden), args.snapshot), ensure_ascii=False, indent=2))
+        # confidence_min 미지정이면 프로덕션 자동승인 임계(RELATION_AUTO_APPROVE_MIN)로 측정.
+        cmin = args.confidence_min if args.confidence_min is not None else _settings().relation_auto_approve_min
+        report = cmd_measure(_load_golden(args.golden), args.snapshot, confidence_min=cmin)
+        if args.out:
+            _dump_report(report, args.out)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
 
     db = PostgresUtil()
