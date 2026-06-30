@@ -28,8 +28,11 @@ class RelationGoldenRegressionTest(unittest.TestCase):
         self.golden = _load_golden(str(_GOLDEN))
 
     def _measure(self) -> dict:
+        # baseline 이 동결될 때 쓴 confidence_min(프로덕션 자동승인 임계)을 재사용해야
+        # accepted 판정이 일치한다(0.0 으로 재면 isolation 이 항상 0 이라 baseline 과 어긋남).
         from scripts.measure_relation_quality import cmd_measure
-        return cmd_measure(self.golden, str(_SNAPSHOT))
+        cmin = float(self.baseline.get("confidence_min", 0.0))
+        return cmd_measure(self.golden, str(_SNAPSHOT), confidence_min=cmin)
 
     def test_candidate_recall_non_regression(self):
         cur = self._measure()["candidate_recall"]

@@ -23,10 +23,11 @@ class TestBuildReport(unittest.TestCase):
         return Snapshot(
             config={"top_k": 10, "min_sim": 0.2, "embedding_kind": "both"},
             sources={
+                # candidates 는 정본상 (target_id, emb_score) 튜플(snapshot.py·033 FR-004).
                 "id1": SourceSnapshot(
-                    candidates=("id2",),
+                    candidates=(("id2", 0.8),),
                     proposed=(ProposedEdge("id2", "same_series", 0.9, "강의"),)),
-                "id3": SourceSnapshot(candidates=("id1",), proposed=()),
+                "id3": SourceSnapshot(candidates=(("id1", 0.7),), proposed=()),
             })
 
     def _key_to_id(self):

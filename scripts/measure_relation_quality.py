@@ -241,8 +241,12 @@ def _resolve_golden_pairs(golden: Golden, key_to_id: dict[str, str]) -> list[tup
     return pairs
 
 
-def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
+def cmd_measure(golden: Golden, snapshot_path: str, *, confidence_min: float = 0.0) -> dict:
     """골든+스냅샷 → 리포트. LLM 0·DB 0(스냅샷에 key_to_id 포함 — 결정적·SC-002).
+
+    ``confidence_min``: 제안 엣지 accepted 판정 임계. **프로덕션 자동승인(RELATION_AUTO_APPROVE_MIN=0.9)
+    으로 측정해야 precision/recall/isolation 이 실제 동작을 반영**한다(051 — 0.0 이면 저신뢰 제안까지
+    accepted 로 세어 isolation_accuracy 가 항상 0). 비회귀 게이트는 baseline 의 confidence_min 을 재사용한다.
 
     033 FR-004·005: 동결 스냅샷 위에서 min_sim 스윕(N1)·2D 자동승인 스윕(#3) 표를 더해 출력한다.
     **읽기 전용** — graph_edge/relation_kind 미기록(measure 의 측정 전용 성질 보존·SC-004).
@@ -255,7 +259,7 @@ def cmd_measure(golden: Golden, snapshot_path: str) -> dict:
         payload = json.load(f)
     snap = load_snapshot(payload["snapshot"])
     key_to_id = {str(k): str(v) for k, v in payload.get("key_to_id", {}).items()}
-    report = build_report(golden, snap, key_to_id)
+    report = build_report(golden, snap, key_to_id, confidence_min=confidence_min)
 
     # 033 스윕 — 동결 스냅샷(asset_id 공간) 위 결정적 재측정. 골든은 key_to_id 로 정합.
     from src.relations.quality.metrics import auto_approve_sweep, min_sim_sweep
@@ -307,6 +311,8 @@ def main() -> int:
     pm.add_argument("--golden", required=True)
     pm.add_argument("--snapshot", required=True)
     pm.add_argument("--out", default=None, help="리포트를 baseline_report.json 로 동결(선택)")
+    pm.add_argument("--confidence-min", dest="confidence_min", type=float, default=None,
+                    help="accepted 판정 임계(미지정 시 RELATION_AUTO_APPROVE_MIN — 프로덕션 자동승인)")
 
     args = p.parse_args()
     dotenv_path = Path(__file__).resolve().parents[1] / f".env.{args.env}"
@@ -315,7 +321,9 @@ def main() -> int:
     init_settings(args.env)
 
     if args.cmd == "measure":  # DB/LLM 불요(스냅샷 기반)
-        report = cmd_measure(_load_golden(args.golden), args.snapshot)
+        # confidence_min 미지정이면 프로덕션 자동승인 임계(RELATION_AUTO_APPROVE_MIN)로 측정.
+        cmin = args.confidence_min if args.confidence_min is not None else _settings().relation_auto_approve_min
+        report = cmd_measure(_load_golden(args.golden), args.snapshot, confidence_min=cmin)
         if args.out:
             _dump_report(report, args.out)
         print(json.dumps(report, ensure_ascii=False, indent=2))
