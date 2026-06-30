@@ -251,7 +251,7 @@ def me(principal: Annotated[Principal, Depends(require_principal)]) -> dict[str,
     return {"user_id": principal.user_id, "clearance": principal.clearance}
 
 
-@app.get("/assets/{asset_id}/lineage")
+@app.get("/admin/assets/{asset_id}/lineage")
 def asset_lineage(
     asset_id: str,
     principal: Annotated[Principal, Depends(require_principal)] = ...,
@@ -269,7 +269,7 @@ def asset_lineage(
     return {"asset_id": asset_id, "activities": activities}
 
 
-@app.get("/access-logs")
+@app.get("/admin/access-logs")
 def access_logs(
     user: str | None = Query(None, description="사용자 id 필터"),
     action: str | None = Query(None, description="동작 필터(search/asset_view/download/bundle)"),
@@ -293,7 +293,7 @@ def access_logs(
     )
 
 
-@app.get("/access-logs/stats")
+@app.get("/admin/access-logs/stats")
 def access_logs_stats(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
@@ -304,7 +304,7 @@ def access_logs_stats(
     return _run_in_db(lambda conn: access_log_stats(conn, since=since, until=until))
 
 
-@app.get("/access-logs/timeline")
+@app.get("/admin/access-logs/timeline")
 def access_logs_timeline(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
@@ -320,49 +320,60 @@ def access_logs_timeline(
         lambda conn: access_log_timeline(conn, since=since, until=until, action=action, interval=interval))
 
 
-@app.get("/lineage")
+@app.get("/admin/lineage")
 def lineage_feed(
     from_: str | None = Query(None, alias="from", description="기간 하한(YYYY-MM-DD 또는 ISO)"),
     to: str | None = Query(None, alias="to", description="기간 상한"),
     activity: str | None = Query(None, description="활동명 필터(예: ingest.registered.v1)"),
+    modality: str | None = Query(None, description="자산 모달리티 필터(text/image/video/audio 등)"),
+    status: str | None = Query(None, description="자산 FSM 단계 필터(registered/failed 등)"),
+    file_type: str | None = Query(None, description="자산 파일 확장자 필터(예: txt, pdf, mp4)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """기간 내 전 자산 계보 피드(시간역순·페이징·013 FR-009b). 조회 전용·결정적·LLM 0.
+    """기간 내 전 자산 계보 피드(시간역순·페이징·013 FR-009b). 조회 전용·결정적·LLM 0·의료 제외.
 
-    기본 뷰(기간 전체)·드릴다운은 ``GET /assets/{id}/lineage``·자산 상세는 ``GET /assets/{id}`` 합성.
+    대시보드 슬라이스: 기간(from/to)·활동(activity)·자산 차원(modality·status·file_type) 필터.
+    드릴다운은 ``GET /admin/assets/{id}/lineage``·자산 상세는 ``GET /assets/{id}`` 합성.
     """
     since, until = _parse_dt(from_), _parse_dt(to)
     return _run_in_db(
         lambda conn: query_lineage_feed(
-            conn, since=since, until=until, activity=activity, limit=limit, offset=offset))
+            conn, since=since, until=until, activity=activity, modality=modality,
+            status=status, file_type=file_type, limit=limit, offset=offset))
 
 
-@app.get("/asset-stats")
+@app.get("/admin/asset-stats")
 def asset_stats_endpoint(
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """전체 자산 집계(FSM status·modality·domain별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
+    """전체 자산 집계(FSM status·modality·domain·file_type·date별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
 
-    라우트는 ``/asset-stats``(하이픈) — ``/assets/{id}`` 와 충돌(id="stats") 회피.
+    관리자 API(`/admin/*`) — 계보·접근이력·대시보드는 전부 `/admin` 프리픽스(D12). 사용자용
+    검색·상세·다운로드는 루트 유지.
     """
     return _run_in_db(asset_stats)
 
 
-@app.get("/assets")
+@app.get("/admin/assets")
 def assets_list(
     status: str | None = Query(None, description="FSM 단계 필터(received/registered/failed 등)"),
     modality: str | None = Query(None, description="모달리티 필터(text/image/video/audio 등)"),
     domain: str | None = Query(None, description="도메인 필터(general/review; medical 은 제외됨)"),
+    file_type: str | None = Query(None, description="파일 확장자 필터(예: txt, pdf, mp4)"),
+    created_from: str | None = Query(None, description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
+    created_to: str | None = Query(None, description="생성일 상한"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """자산 목록(FSM 단계·필터·페이징·013 FR-009f). 의료 제외·created_at 역순·결정적·LLM 0."""
+    """자산 목록(FSM·modality·domain·file_type·날짜 필터·페이징·013 FR-009f). 의료 제외·created_at 역순·LLM 0."""
+    cfrom, cto = _parse_dt(created_from), _parse_dt(created_to)
     return _run_in_db(
         lambda conn: query_assets(
-            conn, status=status, modality=modality, domain=domain, limit=limit, offset=offset))
+            conn, status=status, modality=modality, domain=domain, file_type=file_type,
+            created_from=cfrom, created_to=cto, limit=limit, offset=offset))
 
 
 def _project_grouped_search(

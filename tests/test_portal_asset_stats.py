@@ -26,38 +26,41 @@ class _Conn:
 
 class AssetStatsShapeTest(unittest.TestCase):
     def test_stats_shape(self):
-        # COUNT → by_status → by_modality → by_domain 순으로 결과 소비
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc).date()
+        # COUNT → by_status → by_modality → by_domain → by_file_type → by_date 순으로 소비(6 쿼리)
         conn = _Conn([
             (10,),
             [("registered", 7), ("failed", 3)],
             [("text", 6), ("image", 4)],
             [("general", 9), ("unknown", 1)],
+            [("pdf", 5), ("txt", 4), (None, 1)],
+            [(ts, 10)],
         ])
         out = asset_stats(conn)
         self.assertEqual(out["total"], 10)
         self.assertEqual(out["by_status"][0], {"status": "registered", "count": 7})
-        self.assertEqual(out["by_status"][1], {"status": "failed", "count": 3})
         self.assertEqual(out["by_modality"][0], {"modality": "text", "count": 6})
         self.assertEqual(out["by_domain"][0], {"domain": "general", "count": 9})
+        self.assertEqual(out["by_file_type"][0], {"file_type": "pdf", "count": 5})
+        self.assertIsNone(out["by_file_type"][2]["file_type"])  # 확장자 없음(NULL)
+        self.assertEqual(out["by_date"][0], {"date": ts.isoformat(), "count": 10})
 
     def test_excludes_medical_in_all_queries(self):
-        conn = _Conn([(0,), [], [], []])
+        conn = _Conn([(0,), [], [], [], [], []])
         asset_stats(conn)
-        # 4개 SQL 모두 의료 제외 WHERE 절을 포함해야 함
-        self.assertEqual(len(conn._cur.calls), 4)
+        # 6개 SQL 모두 의료 제외 WHERE 절을 포함해야 함(total·status·modality·domain·file_type·date)
+        self.assertEqual(len(conn._cur.calls), 6)
         for sql, _params in conn._cur.calls:
             self.assertIn("domain_label <> 'medical'", sql)
 
     def test_deterministic_order_sql(self):
-        conn = _Conn([(0,), [], [], []])
+        conn = _Conn([(0,), [], [], [], [], []])
         asset_stats(conn)
-        # GROUP BY 3종은 COUNT(*) DESC + key ASC tiebreak(결정적)
-        status_sql = conn._cur.calls[1][0]
-        modality_sql = conn._cur.calls[2][0]
-        domain_sql = conn._cur.calls[3][0]
-        self.assertIn("ORDER BY COUNT(*) DESC, status ASC", status_sql)
-        self.assertIn("ORDER BY COUNT(*) DESC, modality ASC", modality_sql)
-        self.assertIn("ORDER BY COUNT(*) DESC, domain_label ASC", domain_sql)
+        self.assertIn("ORDER BY COUNT(*) DESC, status ASC", conn._cur.calls[1][0])
+        self.assertIn("ORDER BY COUNT(*) DESC, modality ASC", conn._cur.calls[2][0])
+        self.assertIn("ORDER BY COUNT(*) DESC, domain_label ASC", conn._cur.calls[3][0])
+        self.assertIn("ORDER BY COUNT(*) DESC, ext ASC NULLS LAST", conn._cur.calls[4][0])  # file_type
+        self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[5][0])  # date 시간순
 
 
 class QueryAssetsShapeTest(unittest.TestCase):
@@ -106,6 +109,25 @@ class QueryAssetsShapeTest(unittest.TestCase):
         self.assertEqual(count_params, ["registered", "text", "general"])
         # SELECT 도 동일 필터 + limit/offset 바인딩
         self.assertEqual(select_params, ["registered", "text", "general", 50, 0])
+
+    def test_file_type_and_date_filters(self):
+        dt = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        conn = _Conn([(0,), []])
+        query_assets(conn, file_type="pdf", created_from=dt)
+        count_sql, count_params = conn._cur.calls[0]
+        # file_type 은 fs_path 확장자 식 = %s, 날짜는 created_at >= %s, 의료 제외 항상 포함
+        self.assertIn("substring(fs_path from", count_sql)
+        self.assertIn("created_at >= %s", count_sql)
+        self.assertIn("domain_label <> 'medical'", count_sql)
+        self.assertEqual(count_params, ["pdf", dt])
+
+    def test_domain_medical_filter_contradiction_safe(self):
+        # domain='medical' 요청 시 'domain_label<>medical' AND 'domain_label=medical' → 0행(PHI 안전)
+        conn = _Conn([(0,), []])
+        query_assets(conn, domain="medical")
+        count_sql, _ = conn._cur.calls[0]
+        self.assertIn("domain_label <> 'medical'", count_sql)
+        self.assertIn("domain_label = %s", count_sql)
 
     def test_deterministic_order_sql(self):
         conn = _Conn([(0,), []])

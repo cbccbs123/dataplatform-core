@@ -9,10 +9,12 @@ import os
 from typing import Any
 
 _EXCLUDE_MEDICAL = "domain_label <> 'medical'"  # 고정 SQL(사용자 입력 아님)·검색/상세와 일관
+# 파일 확장자(file_type) = fs_path 마지막 .세그먼트(소문자·없으면 NULL). 고정 SQL·raw 정규식(인젝션 안전).
+_EXT_EXPR = r"lower(substring(fs_path from '\.([^./]+)$'))"
 
 
 def asset_stats(conn: Any) -> dict[str, Any]:
-    """전체 자산 집계(FSM status·modality·domain별·총계·의료 제외·결정적·FR-009e)."""
+    """전체 자산 집계(status·modality·domain·file_type·date별·총계·의료 제외·결정적·FR-009e)."""
     with conn.cursor() as cur:
         cur.execute(f"SELECT COUNT(*) FROM asset WHERE {_EXCLUDE_MEDICAL}")
         total = int(cur.fetchone()[0])
@@ -25,13 +27,22 @@ def asset_stats(conn: Any) -> dict[str, Any]:
         cur.execute(f"SELECT domain_label, COUNT(*) FROM asset WHERE {_EXCLUDE_MEDICAL} "
                     "GROUP BY domain_label ORDER BY COUNT(*) DESC, domain_label ASC")
         by_domain = [{"domain": d, "count": int(c)} for d, c in cur.fetchall()]
-    return {"total": total, "by_status": by_status,
-            "by_modality": by_modality, "by_domain": by_domain}
+        cur.execute(f"SELECT {_EXT_EXPR} AS ext, COUNT(*) FROM asset WHERE {_EXCLUDE_MEDICAL} "
+                    "GROUP BY ext ORDER BY COUNT(*) DESC, ext ASC NULLS LAST")
+        by_file_type = [{"file_type": e, "count": int(c)} for e, c in cur.fetchall()]
+        cur.execute(f"SELECT created_at::date AS d, COUNT(*) FROM asset WHERE {_EXCLUDE_MEDICAL} "
+                    "GROUP BY d ORDER BY d ASC")
+        by_date = [{"date": d.isoformat() if d is not None else None, "count": int(c)}
+                   for d, c in cur.fetchall()]
+    return {"total": total, "by_status": by_status, "by_modality": by_modality,
+            "by_domain": by_domain, "by_file_type": by_file_type, "by_date": by_date}
 
 
 def query_assets(conn: Any, *, status: str | None = None, modality: str | None = None,
-                 domain: str | None = None, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    """자산 목록(FSM 단계·필터·페이징·의료 제외·created_at DESC·결정적·FR-009f)."""
+                 domain: str | None = None, file_type: str | None = None,
+                 created_from: Any = None, created_to: Any = None,
+                 limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """자산 목록(FSM 단계·modality·domain·file_type·날짜 필터·페이징·의료 제외·created_at DESC·FR-009f)."""
     conds = [_EXCLUDE_MEDICAL]
     params: list[Any] = []
     if status:
@@ -43,6 +54,15 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
     if domain:
         conds.append("domain_label = %s")
         params.append(domain)
+    if file_type:
+        conds.append(f"{_EXT_EXPR} = %s")
+        params.append(file_type)
+    if created_from is not None:
+        conds.append("created_at >= %s")
+        params.append(created_from)
+    if created_to is not None:
+        conds.append("created_at < %s")
+        params.append(created_to)
     clause = " WHERE " + " AND ".join(conds)
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM asset" + clause, params)

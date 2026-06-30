@@ -35,9 +35,9 @@ class DeriveActionTest(unittest.TestCase):
         self.assertEqual(derive_access_action("GET", "/assets/abc/bundle"), ("bundle", "abc"))
 
     def test_non_data_routes_none(self):
-        for p in ("/health", "/me", "/auth/token", "/access-logs", "/access-logs/stats",
-                  "/access-logs/timeline", "/lineage", "/asset-stats", "/assets",
-                  "/assets/abc/lineage", "/assets/"):
+        for p in ("/health", "/me", "/auth/token", "/admin/access-logs", "/admin/access-logs/stats",
+                  "/admin/access-logs/timeline", "/admin/lineage", "/admin/asset-stats", "/admin/assets",
+                  "/admin/assets/abc/lineage", "/assets/"):
             self.assertIsNone(derive_access_action("GET", p), p)
         self.assertIsNone(derive_access_action("POST", "/search"))  # 비 GET
 

@@ -13,6 +13,8 @@ _NONMEDICAL = (
     "FROM asset_lineage al JOIN asset a ON a.asset_id = al.asset_id "
     "WHERE a.domain_label <> 'medical'"
 )
+# 파일 확장자(file_type) = a.fs_path 마지막 .세그먼트(소문자). 고정 SQL·raw 정규식(인젝션 안전).
+_EXT_EXPR = r"lower(substring(a.fs_path from '\.([^./]+)$'))"
 
 
 def query_asset_lineage(conn: Any, asset_id: str, *, limit: int = 500) -> list[dict]:
@@ -30,10 +32,14 @@ def query_asset_lineage(conn: Any, asset_id: str, *, limit: int = 500) -> list[d
 
 
 def query_lineage_feed(
-    conn: Any, *, since: Any = None, until: Any = None,
-    activity: str | None = None, limit: int = 50, offset: int = 0,
+    conn: Any, *, since: Any = None, until: Any = None, activity: str | None = None,
+    modality: str | None = None, status: str | None = None, file_type: str | None = None,
+    limit: int = 50, offset: int = 0,
 ) -> dict[str, Any]:
-    """기간 내 전 자산 계보 피드(의료 제외·occurred_at DESC, lineage_id DESC·페이징·FR-009b)."""
+    """기간 내 전 자산 계보 피드(의료 제외·occurred_at DESC, lineage_id DESC·페이징·FR-009b).
+
+    필터: 기간(since/until)·활동(activity)·**자산 차원**(modality·status·file_type — asset 조인). 대시보드 슬라이스용.
+    """
     conds: list[str] = []
     params: list[Any] = []
     if since is not None:
@@ -45,6 +51,15 @@ def query_lineage_feed(
     if activity:
         conds.append("al.activity = %s")
         params.append(activity)
+    if modality:
+        conds.append("a.modality = %s")
+        params.append(modality)
+    if status:
+        conds.append("a.status = %s")
+        params.append(status)
+    if file_type:
+        conds.append(f"{_EXT_EXPR} = %s")
+        params.append(file_type)
     extra = (" AND " + " AND ".join(conds)) if conds else ""
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) " + _NONMEDICAL + extra, params)
