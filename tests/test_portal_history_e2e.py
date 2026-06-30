@@ -53,6 +53,40 @@ class HistoryE2ETest(unittest.TestCase):
             self.assertTrue(acts)  # 수집 활동 타임라인 존재
             self.assertTrue(all("activity" in a and "occurred_at" in a for a in acts))
 
+    def test_lineage_feed_and_access_timeline(self):
+        from src.database.postgres_util import PostgresUtil
+        from src.portal.access_log import access_log_timeline
+        from src.portal.lineage_query import query_lineage_feed
+
+        db = PostgresUtil()
+        with db:
+            feed = db.execute_in_transaction(
+                lambda c: query_lineage_feed(c, limit=5), idempotent=True)
+            self.assertIn("rows", feed)
+            self.assertIn("total", feed)
+            self.assertLessEqual(len(feed["rows"]), 5)  # 페이징 limit 준수
+            self.assertTrue(all("asset_id" in r for r in feed["rows"]))
+            tl = db.execute_in_transaction(
+                lambda c: access_log_timeline(c, interval="day"), idempotent=True)
+            self.assertEqual(tl["interval"], "day")
+            self.assertTrue(all("bucket" in b and "count" in b for b in tl["buckets"]))
+
+    def test_asset_stats_and_list(self):
+        from src.database.postgres_util import PostgresUtil
+        from src.portal.asset_stats import asset_stats, query_assets
+
+        db = PostgresUtil()
+        with db:
+            stats = db.execute_in_transaction(asset_stats, idempotent=True)
+            self.assertIn("by_status", stats)
+            self.assertGreaterEqual(stats["total"], 0)
+            # FSM 단계 분포 합 == 총계(의료 제외 일관)
+            self.assertEqual(sum(s["count"] for s in stats["by_status"]), stats["total"])
+            lst = db.execute_in_transaction(
+                lambda c: query_assets(c, limit=5), idempotent=True)
+            self.assertLessEqual(len(lst["rows"]), 5)
+            self.assertTrue(all("status" in r and "file_name" in r for r in lst["rows"]))
+
 
 def _first_registered_asset(conn):
     with conn.cursor() as cur:
