@@ -36,6 +36,7 @@ class DeriveActionTest(unittest.TestCase):
 
     def test_non_data_routes_none(self):
         for p in ("/health", "/me", "/auth/token", "/access-logs", "/access-logs/stats",
+                  "/access-logs/timeline", "/lineage", "/asset-stats", "/assets",
                   "/assets/abc/lineage", "/assets/"):
             self.assertIsNone(derive_access_action("GET", p), p)
         self.assertIsNone(derive_access_action("POST", "/search"))  # 비 GET

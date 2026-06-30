@@ -66,6 +66,26 @@ class HistoryEndpointsTest(unittest.TestCase):
         r = self.client.get("/access-logs/timeline?interval=year")
         self.assertEqual(r.status_code, 422)
 
+    def test_asset_stats_endpoint(self):
+        with mock.patch.object(portal_api, "asset_stats",
+                               return_value={"total": 3, "by_status": [{"status": "registered", "count": 3}],
+                                             "by_modality": [], "by_domain": []}), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/asset-stats")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["by_status"][0]["status"], "registered")
+
+    def test_assets_list_endpoint(self):
+        with mock.patch.object(portal_api, "query_assets",
+                               return_value={"rows": [{"asset_id": "a1", "status": "registered",
+                                                       "modality": "text", "domain_label": "general",
+                                                       "file_name": "x.txt", "created_at": "2026-06-30T00:00:00+00:00"}],
+                                             "total": 1}), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/assets?status=registered&limit=10")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["rows"][0]["status"], "registered")
+
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.

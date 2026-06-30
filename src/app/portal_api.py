@@ -62,6 +62,7 @@ from src.portal.access_log import (
     record_access,
 )
 from src.portal.asset_detail import fetch_asset_detail
+from src.portal.asset_stats import asset_stats, query_assets
 from src.portal.auth import Principal, authenticate_token, require_principal
 from src.portal.auth.config import load_portal_auth_config
 from src.portal.auth.dev_issuer import issue_dev_token
@@ -336,6 +337,32 @@ def lineage_feed(
     return _run_in_db(
         lambda conn: query_lineage_feed(
             conn, since=since, until=until, activity=activity, limit=limit, offset=offset))
+
+
+@app.get("/asset-stats")
+def asset_stats_endpoint(
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """전체 자산 집계(FSM status·modality·domain별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
+
+    라우트는 ``/asset-stats``(하이픈) — ``/assets/{id}`` 와 충돌(id="stats") 회피.
+    """
+    return _run_in_db(asset_stats)
+
+
+@app.get("/assets")
+def assets_list(
+    status: str | None = Query(None, description="FSM 단계 필터(received/registered/failed 등)"),
+    modality: str | None = Query(None, description="모달리티 필터(text/image/video/audio 등)"),
+    domain: str | None = Query(None, description="도메인 필터(general/review; medical 은 제외됨)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """자산 목록(FSM 단계·필터·페이징·013 FR-009f). 의료 제외·created_at 역순·결정적·LLM 0."""
+    return _run_in_db(
+        lambda conn: query_assets(
+            conn, status=status, modality=modality, domain=domain, limit=limit, offset=offset))
 
 
 def _project_grouped_search(
