@@ -32,8 +32,8 @@ from src.config.settings import (
 from src.search.opensearch_search import get_client as os_get_client
 from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
-from src.search.search_filters import SearchFilters
 from src.search.query_plan import build_query_plan, search_plan_to_meta
+from src.search.search_filters import SearchFilters
 
 _LOG = logging.getLogger(__name__)
 

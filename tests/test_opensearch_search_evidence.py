@@ -11,7 +11,7 @@ from src.search.opensearch_search import (
     os_hit_to_row,
     search_assets_os,
 )
-from tests.test_opensearch_search import _FakeMsearchClient, _bm25_hit_os, _knn_hit_os
+from tests.test_opensearch_search import _bm25_hit_os, _FakeMsearchClient, _knn_hit_os
 
 
 def _collect_named_names(body: dict) -> set[str]:

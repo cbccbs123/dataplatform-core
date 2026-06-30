@@ -5,7 +5,11 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
-from src.search.search_filters import SearchFilters, filters_to_opensearch_bool, parse_search_filters
+from src.search.search_filters import (
+    SearchFilters,
+    filters_to_opensearch_bool,
+    parse_search_filters,
+)
 
 
 class FiltersToOpensearchBoolTest(unittest.TestCase):

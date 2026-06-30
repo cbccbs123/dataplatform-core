@@ -39,8 +39,8 @@ from src.pipeline.policy import validate as policy_validate
 from src.pipeline.registry import DEFAULT_REGISTRY
 from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
 from src.registry.classification_persist import record_classification
-from src.registry.lineage_persist import record_lineage
 from src.registry.ext_meta_field_registry import validate_ext_meta
+from src.registry.lineage_persist import record_lineage
 
 REASON_DUPLICATE = "duplicate"
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
-import unicodedata
 
 # v1 allowlist — ADR 2026-06-24-search-filter-v1-decisions.md
 FILTERABLE_FILE_EXT = "file_ext"
