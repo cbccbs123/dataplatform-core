@@ -68,16 +68,18 @@ class AssetStatsShapeTest(unittest.TestCase):
         self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[5][0])  # date 시간순
 
     def test_period_filter_in_all_queries(self):
-        # from/to(생성일 기준·to exclusive) — 6개 집계 모두 기간 반영(프론트 ② 기간별 by_file_ext)
-        dt = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        # from/to(생성일 기준·to exclusive) — 6개 집계 모두 기간 반영(프론트 ② 기간별 by_file_ext).
+        # dt1<dt2 구간으로 호출(공집합 경계 dt==dt 회피)·파라미터 순서는 [since, until].
+        dt1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dt2 = datetime(2026, 6, 30, tzinfo=timezone.utc)
         conn = _Conn([(0,), [], [], [], [], []])
-        asset_stats(conn, since=dt, until=dt)
+        asset_stats(conn, since=dt1, until=dt2)
         self.assertEqual(len(conn._cur.calls), 6)
         for sql, params in conn._cur.calls:
             self.assertIn("created_at >= %s", sql)
             self.assertIn("created_at < %s", sql)
             self.assertIn("domain_label <> 'medical'", sql)
-            self.assertEqual(params, [dt, dt])
+            self.assertEqual(params, [dt1, dt2])
 
 
 class QueryAssetsShapeTest(unittest.TestCase):
@@ -242,14 +244,15 @@ class ModalityDetailTest(unittest.TestCase):
         self.assertIn("GROUP BY d ORDER BY d ASC", conn._cur.calls[3][0])
 
     def test_period_filter(self):
-        # 모달리티 드릴다운도 기간 필터(개요 from/to 와 일관·프론트 ② "모달리티 기간 조회")
-        dt = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        # 모달리티 드릴다운도 기간 필터(개요 from/to 와 일관·프론트 ② "모달리티 기간 조회").
+        dt1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dt2 = datetime(2026, 6, 30, tzinfo=timezone.utc)
         conn = _Conn([(0,), [], [], []])
-        modality_detail(conn, "video", since=dt, until=dt)
+        modality_detail(conn, "video", since=dt1, until=dt2)
         for sql, params in conn._cur.calls:
             self.assertIn("created_at >= %s", sql)
             self.assertIn("created_at < %s", sql)
-            self.assertEqual(params, ["video", dt, dt])  # modality 먼저, 기간 뒤
+            self.assertEqual(params, ["video", dt1, dt2])  # modality 먼저, 기간 뒤
 
 
 class AssetTimelineTest(unittest.TestCase):

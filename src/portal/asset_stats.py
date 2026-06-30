@@ -11,6 +11,7 @@ from typing import Any
 from src.portal._timeline_util import pivot_series
 
 _EXCLUDE_MEDICAL = "domain_label <> 'medical'"  # 고정 SQL(사용자 입력 아님)·검색/상세와 일관
+_NOPARAM = object()  # query_assets specs 에서 "파라미터 없는 조건"(의료 제외) 표식 — params 에서 제외
 # 파일 확장자(file_ext) = fs_path 마지막 .세그먼트(소문자·없으면 NULL). 고정 SQL·raw 정규식(인젝션 안전).
 _EXT_EXPR = r"lower(substring(fs_path from '\.([^./]+)$'))"
 _INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
@@ -78,48 +79,39 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
 
     **모호성 주의**: ``asset`` 과 ``asset_metadata`` 둘 다 ``asset_id``·``created_at`` 컬럼을 가져,
     content 경로의 JOIN 에서 비한정 컬럼은 PG 오류가 난다. 그래서 content WHERE/SELECT/ORDER BY 는
-    ``a.`` 한정 절을 따로 쓴다(COUNT·비콘텐츠 SELECT 는 단일 테이블이라 비한정 유지).
+    ``a.`` 한정(``_where("a.")``), COUNT·비콘텐츠 SELECT 는 단일 테이블이라 비한정(``_where("")``)으로 쓴다.
+    조건·파라미터는 ``specs`` 한 곳에서 (템플릿, 값) 쌍으로 누적해 순서 불변식을 구조적으로 보장한다.
     """
-    def _conds(pfx: str) -> str:
-        # 접두사(pfx)만 다른 동일 조건 — 파라미터는 pfx 무관(아래 params 와 동일 순서).
-        ext = rf"lower(substring({pfx}fs_path from '\.([^./]+)$'))"
-        c = [f"{pfx}{_EXCLUDE_MEDICAL}"]
-        if status:
-            c.append(f"{pfx}status = %s")
-        if modality:
-            c.append(f"{pfx}modality = %s")
-        if domain:
-            c.append(f"{pfx}domain_label = %s")
-        if file_ext:
-            c.append(f"{ext} = %s")
-        if created_from is not None:
-            c.append(f"{pfx}created_at >= %s")
-        if created_to is not None:
-            c.append(f"{pfx}created_at < %s")
-        return " WHERE " + " AND ".join(c)
-
-    params: list[Any] = []  # _conds 의 조건 추가 순서와 1:1 (medical 은 파라미터 없음)
+    # (조건템플릿, 파라미터)를 한 곳에서 누적 → 조건 순서와 파라미터 순서가 구조적으로 일치(불변식 내재화).
+    # 템플릿의 ``{a}`` = 테이블 접두사 자리("" 단일테이블 / "a." asset_metadata JOIN 모호성 방지).
+    # 파라미터 없는 조건(의료 제외)은 _NOPARAM 으로 표시해 params 에서 제외한다.
+    specs: list[tuple[str, Any]] = [("{a}" + _EXCLUDE_MEDICAL, _NOPARAM)]
     if status:
-        params.append(status)
+        specs.append(("{a}status = %s", status))
     if modality:
-        params.append(modality)
+        specs.append(("{a}modality = %s", modality))
     if domain:
-        params.append(domain)
+        specs.append(("{a}domain_label = %s", domain))
     if file_ext:
-        params.append(file_ext)
+        specs.append((r"lower(substring({a}fs_path from '\.([^./]+)$')) = %s", file_ext))
     if created_from is not None:
-        params.append(created_from)
+        specs.append(("{a}created_at >= %s", created_from))
     if created_to is not None:
-        params.append(created_to)
+        specs.append(("{a}created_at < %s", created_to))
+    params = [v for _t, v in specs if v is not _NOPARAM]
+
+    def _where(pfx: str) -> str:  # 같은 조건을 접두사만 바꿔 — content 경로는 "a." 로 모호성 차단
+        return " WHERE " + " AND ".join(t.format(a=pfx) for t, _v in specs)
+
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM asset" + _conds(""), params)  # COUNT 은 JOIN 불요(경량·비한정)
+        cur.execute("SELECT COUNT(*) FROM asset" + _where(""), params)  # COUNT 은 JOIN 불요(경량·비한정)
         total = int(cur.fetchone()[0])
         if with_content:
             cur.execute(
                 "SELECT a.asset_id, a.status, a.modality, a.domain_label, a.fs_path, a.created_at, "
                 "m.ext_meta->>'summary' AS summary, m.ext_meta->'keywords' AS keywords "
                 "FROM asset a LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id"
-                + _conds("a.") + " ORDER BY a.created_at DESC, a.asset_id DESC LIMIT %s OFFSET %s",
+                + _where("a.") + " ORDER BY a.created_at DESC, a.asset_id DESC LIMIT %s OFFSET %s",
                 [*params, limit, offset])
             rows = [
                 {"asset_id": str(aid), "status": st, "modality": mod, "domain_label": dl,
@@ -130,7 +122,7 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
         else:
             cur.execute(
                 "SELECT asset_id, status, modality, domain_label, fs_path, created_at FROM asset"
-                + _conds("") + " ORDER BY created_at DESC, asset_id DESC LIMIT %s OFFSET %s",
+                + _where("") + " ORDER BY created_at DESC, asset_id DESC LIMIT %s OFFSET %s",
                 [*params, limit, offset])
             rows = [
                 {"asset_id": str(aid), "status": st, "modality": mod, "domain_label": dl,
