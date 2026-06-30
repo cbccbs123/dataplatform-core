@@ -19,7 +19,7 @@
       서비스 계층(``fetch_asset_detail``/``resolve_download_target``)의 노출 게이트로 의료를 배제한다.
     - **결정성(헌법 3조)**: 응답 순서는 ``group_ranked``(버킷 내 -round(sim,6)·asset_id)/
       ``graph_query`` 결정성에 위임한다(라우터는 추가 정렬을 하지 않는다).
-    - **읽기 전용 + append-only 감사(헌법 6·12조)**: 자산 데이터·스키마는 쓰기 0. 단 접근 이력
+    - **읽기 전용(헌법 6조) + append-only 감사(013 FR-012)**: 자산 데이터·스키마는 쓰기 0. 단 접근 이력
       (``access_log``)은 미들웨어가 append-only 로 적재한다(``_run_in_db_write``·best-effort).
       계보·검색·상세·다운로드 조회는 idempotent 트랜잭션이며, 신규 LLM 호출 0(SQL 만).
 
@@ -114,7 +114,7 @@ def _run_in_db_write(callback: Callable[[Any], Any]) -> Any:
     """access_log append-only 감사 write 용 트랜잭션(``idempotent=False``·commit).
 
     조회 seam(``_run_in_db``)과 분리한 별도 write seam — 자산 데이터·스키마는 무변경,
-    오직 ``access_log`` 한 행 INSERT 만 한다(헌법 12조·append-only). 미들웨어가 best-effort
+    오직 ``access_log`` 한 행 INSERT 만 한다(append-only·013 FR-012 감사 무결성). 미들웨어가 best-effort
     로만 호출하며(테스트는 이 함수를 patch), PostgresUtil 은 함수 안에서 지연 import 한다.
     """
     from src.database.postgres_util import PostgresUtil
@@ -148,6 +148,10 @@ async def _lifespan(_app: FastAPI):
         load_dotenv(dotenv_path=dotenv_path, override=False)
     init_settings(_ENV)
     yield
+    # graceful shutdown: 남은 fire-and-forget 감사 기록 태스크를 드레인한다(best-effort·013 FR-012).
+    # _PENDING_TASKS 는 모듈 하단(app 정의 후)에 선언 — 종료 시점엔 모듈 로드 완료라 참조 가능.
+    if _PENDING_TASKS:
+        await asyncio.gather(*_PENDING_TASKS, return_exceptions=True)
 
 
 app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
@@ -254,6 +258,10 @@ def asset_lineage(
 
     조회 전용(``_run_in_db`` idempotent) — ``query_asset_lineage`` 가 ``asset_lineage`` 를
     시간순으로 끌어온다. 자산 데이터·스키마 쓰기 0·신규 LLM 0.
+
+    상태 무관(운영상 ``failed``/``deferred`` 자산의 계보가 디버깅에 필요) — 미존재/이력 없음은
+    빈 ``activities`` 로 200 반환(의도). **의료(PHI) 노출 게이트는 후속**(현재 medical 자산 부재라
+    실효 없음 — ``bundle`` 이웃 필터와 동일 선례, 013/RBAC 에서 status-무관·medical-exclude 게이트 추가).
     """
     activities = _run_in_db(lambda conn: query_asset_lineage(conn, asset_id))
     return {"asset_id": asset_id, "activities": activities}
@@ -269,7 +277,11 @@ def access_logs(
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """API 접근 이력 조회(필터·페이징·013 US3·FR-009). 조회 전용·결정적·LLM 0."""
+    """API 접근 이력 조회(필터·페이징·013 US3·FR-009). 조회 전용·결정적·LLM 0.
+
+    접근 정책(013 D4): **인증된 사용자 누구나**(``require_principal``·현 2-tier MVP). 감사 데이터는
+    clearance 별 마스킹 없이 전사 노출 — admin/operator 한정은 RBAC 도입 시(향후 포탈) 조인다(의도적 개방).
+    """
     since, until = _parse_dt(from_), _parse_dt(to)
     return _run_in_db(
         lambda conn: query_access_logs(

@@ -38,6 +38,11 @@ class HistoryEndpointsTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("by_action", r.json())
 
+    def test_access_logs_bad_date_returns_422(self):
+        # _parse_dt: 잘못된 날짜 형식 → HTTPException(422)(헌법 8조·오류 경로 검증).
+        r = self.client.get("/access-logs?from=not-a-date")
+        self.assertEqual(r.status_code, 422)
+
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.

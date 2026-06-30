@@ -1,6 +1,7 @@
 """013 US3 — API 접근 이력(access_log) 기록·조회·집계 + 접근 action 도출.
 
-기록은 append-only 감사 write(헌법 12조). 조회·집계는 읽기 전용·결정적(헌법 3조)·LLM 0.
+기록은 append-only 감사 write(013 FR-012 감사 무결성). 조회·집계는 읽기 전용·결정적(헌법 3조)·LLM 0.
+자산 데이터/스키마는 무변경(헌법 6조) — access_log 만 append-only 로 적재한다.
 portal_api 미들웨어가 derive_access_action 으로 (action, asset_id)를 정해 record_access 로 적재한다.
 """
 from __future__ import annotations
@@ -54,7 +55,7 @@ def _filter_clause(conds: list[str]) -> str:
 
 def query_access_logs(conn: Any, *, user_id: str | None = None, action: str | None = None,
                       since: Any = None, until: Any = None,
-                      limit: int = 50, offset: int = 0) -> dict:
+                      limit: int = 50, offset: int = 0) -> dict[str, Any]:
     """필터(사용자·action·기간)·페이징 조회. occurred_at DESC, access_id DESC tiebreak(결정적)."""
     conds: list[str] = []
     params: list[Any] = []
@@ -86,7 +87,7 @@ def query_access_logs(conn: Any, *, user_id: str | None = None, action: str | No
     return {"rows": rows, "total": total}
 
 
-def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict:
+def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict[str, Any]:
     """기본 집계: 총계·action별·user별 호출 수(count DESC, key ASC tiebreak·결정적·FR-009a)."""
     conds: list[str] = []
     params: list[Any] = []
