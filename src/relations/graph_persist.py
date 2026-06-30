@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -151,8 +152,7 @@ def sync_graph_edges(
         # topic은 C+ 슬림화 설계에 따라 graph_edge.topic jsonb에 비정규화 저장.
         # relation_type / relation_subtopic / relation_topic_parent 3테이블은 v210에서 드랍됨.
         topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
-        import json as _json
-        topic_json = _json.dumps(
+        topic_json = json.dumps(
             {"topic_ko": topic_ko, "subtopic_ko": subtopic_ko,
              "topic_en": topic_en, "subtopic_en": subtopic_en},
             ensure_ascii=False,

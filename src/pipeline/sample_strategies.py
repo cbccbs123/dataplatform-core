@@ -181,6 +181,8 @@ def sample_persist_edges(conn: Connection[Any], decisions: list[Decision]) -> No
         }
         for d in matches
     ]
+    # 013: 샘플 팩은 슬롯 조합 데모 전용 — 계보(asset_lineage) 기록 대상 외라 collect 미전달.
+    # 프로덕션 관계 제안(asset_entry.propose_relations_for_asset)만 generated.edges 로 쌍을 남긴다.
     sync_graph_edges(
         conn,
         source_asset_id=source_id,

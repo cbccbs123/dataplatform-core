@@ -748,8 +748,9 @@ class TestLineageRecordsEdgePairs(unittest.TestCase):
         captured: dict = {}
 
         def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min,
-                       target_emb_scores, auto_approve_emb_min, collect=None):
-            # sync_graph_edges 가 upsert 된 쌍을 collect 에 적재(정렬 안 된 순서로) + (upserted, skipped) 반환
+                       target_emb_scores=None, auto_approve_emb_min=0.0, collect=None):
+            # sync_graph_edges 가 upsert 된 쌍을 collect 에 적재(정렬 안 된 순서로) + (upserted, skipped) 반환.
+            # 실제 함수 시그니처와 동일한 기본값을 둬, 향후 호출부 변경 시 fake 불일치를 드러낸다.
             if collect is not None:
                 collect.append({"target_asset_id": "t-bbb", "kind_code": "same_domain",
                                 "confidence": 0.7, "status": "proposed"})
@@ -784,7 +785,8 @@ class TestLineageRecordsEdgePairs(unittest.TestCase):
 
         self.assertEqual(captured["activity"], "relations.proposed.v1")
         gen = captured["generated"]
-        # 카운트는 그대로(하위호환)
+        # 카운트는 그대로(하위호환). 이 값들은 _fake_sync 고정 반환(2,1)이며,
+        # 실제 upsert/skip 필터 로직 검증은 test_graph_persist.test_collect_captures_upserted_pairs_only 에 위임.
         self.assertEqual(gen["edges_upserted"], 2)
         self.assertEqual(gen["edges_skipped"], 1)
         # 신규: 관계 쌍 — target_asset_id ASC 로 결정적 정렬(헌법 3조)
