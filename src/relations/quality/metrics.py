@@ -14,11 +14,11 @@ def isolated_candidates(
     registered_ids: set[str],
     candidate_ids: set[str],
 ) -> list[str]:
-    """후보(임베딩·경로)에 한 번도 등장하지 않은 registered 자산 = 고립 후보(051 FR-101).
+    """후보(`candidate_ids`)에 한 번도 등장하지 않은 registered 자산 = 고립 후보(051 FR-101).
 
-    `candidate_ids`(임베딩 후보≥min_sim ∨ path-signal 후보가 ≥1 인 자산)에 없는
-    registered 자산만 남긴다. 코사인·동일폴더 신호 모두 대칭이라 소스 측 유무 검사로 충분.
-    정렬 반환 — 결정적(헌법 3조). 학습 0(집합 차).
+    순수 집합 차 — `candidate_ids` 의 **의미는 호출자가 정한다**. 051 curate 는 부트스트랩 쌍
+    (고conf graph_edge + path_signal)에 등장한 자산을 candidate 로 보아 "관계 0 ∧ path 0" 을
+    고립으로 정의(035 isolation 의미·관계 단계). 정렬 반환 — 결정적(헌법 3조). 학습 0.
     """
     return sorted(registered_ids - candidate_ids)
 
