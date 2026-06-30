@@ -56,6 +56,7 @@ from src.config.settings import get_current_settings
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
 from src.portal.access_log import (
     access_log_stats,
+    access_log_timeline,
     derive_access_action,
     query_access_logs,
     record_access,
@@ -71,7 +72,7 @@ from src.portal.download import (
     parse_range_header,
     resolve_download_target,
 )
-from src.portal.lineage_query import query_asset_lineage
+from src.portal.lineage_query import query_asset_lineage, query_lineage_feed
 from src.portal.search_group import group_ranked
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
@@ -300,6 +301,41 @@ def access_logs_stats(
     """접근 이력 기본 집계(총계·action별·user별·013 FR-009a). 조회 전용·결정적·LLM 0."""
     since, until = _parse_dt(from_), _parse_dt(to)
     return _run_in_db(lambda conn: access_log_stats(conn, since=since, until=until))
+
+
+@app.get("/access-logs/timeline")
+def access_logs_timeline(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
+    action: str | None = Query(None, description="api별 필터(search/asset_view/download/bundle)"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """접근 이력 시계열 타임라인(버킷별 호출 수·그래프용·013 FR-009c). 조회 전용·결정적·LLM 0."""
+    if interval not in ("day", "hour"):
+        raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: access_log_timeline(conn, since=since, until=until, action=action, interval=interval))
+
+
+@app.get("/lineage")
+def lineage_feed(
+    from_: str | None = Query(None, alias="from", description="기간 하한(YYYY-MM-DD 또는 ISO)"),
+    to: str | None = Query(None, alias="to", description="기간 상한"),
+    activity: str | None = Query(None, description="활동명 필터(예: ingest.registered.v1)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """기간 내 전 자산 계보 피드(시간역순·페이징·013 FR-009b). 조회 전용·결정적·LLM 0.
+
+    기본 뷰(기간 전체)·드릴다운은 ``GET /assets/{id}/lineage``·자산 상세는 ``GET /assets/{id}`` 합성.
+    """
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: query_lineage_feed(
+            conn, since=since, until=until, activity=activity, limit=limit, offset=offset))
 
 
 def _project_grouped_search(

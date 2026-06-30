@@ -43,6 +43,29 @@ class HistoryEndpointsTest(unittest.TestCase):
         r = self.client.get("/access-logs?from=not-a-date")
         self.assertEqual(r.status_code, 422)
 
+    def test_lineage_feed_endpoint(self):
+        with mock.patch.object(portal_api, "query_lineage_feed",
+                               return_value={"rows": [{"lineage_id": "l1", "asset_id": "a1",
+                                                       "activity": "ingest.registered.v1", "agent": "run_ingest",
+                                                       "occurred_at": "2026-06-30T00:00:00+00:00"}], "total": 1}), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/lineage?limit=10")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["total"], 1)
+        self.assertEqual(r.json()["rows"][0]["asset_id"], "a1")
+
+    def test_timeline_endpoint(self):
+        with mock.patch.object(portal_api, "access_log_timeline",
+                               return_value={"interval": "day", "buckets": [{"bucket": "2026-06-30T00:00:00+00:00", "count": 5}]}), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/access-logs/timeline?interval=day&action=search")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["buckets"][0]["count"], 5)
+
+    def test_timeline_bad_interval_422(self):
+        r = self.client.get("/access-logs/timeline?interval=year")
+        self.assertEqual(r.status_code, 422)
+
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.
