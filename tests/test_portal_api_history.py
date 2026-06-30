@@ -47,12 +47,15 @@ class HistoryEndpointsTest(unittest.TestCase):
         with mock.patch.object(portal_api, "query_lineage_feed",
                                return_value={"rows": [{"lineage_id": "l1", "asset_id": "a1",
                                                        "activity": "ingest.registered.v1", "agent": "run_ingest",
-                                                       "occurred_at": "2026-06-30T00:00:00+00:00"}], "total": 1}), \
+                                                       "occurred_at": "2026-06-30T00:00:00+00:00"}], "total": 1}) as feed, \
              mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
-            r = self.client.get("/admin/lineage?limit=10")
+            r = self.client.get("/admin/lineage?limit=10&modality=video&status=registered&file_type=mp4")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["total"], 1)
         self.assertEqual(r.json()["rows"][0]["asset_id"], "a1")
+        # 라우터→서비스 자산차원 필터 배선 검증(modality·status·file_type 전달).
+        kw = feed.call_args.kwargs
+        self.assertEqual((kw["modality"], kw["status"], kw["file_type"]), ("video", "registered", "mp4"))
 
     def test_timeline_endpoint(self):
         with mock.patch.object(portal_api, "access_log_timeline",
@@ -69,11 +72,17 @@ class HistoryEndpointsTest(unittest.TestCase):
     def test_asset_stats_endpoint(self):
         with mock.patch.object(portal_api, "asset_stats",
                                return_value={"total": 3, "by_status": [{"status": "registered", "count": 3}],
-                                             "by_modality": [], "by_domain": []}), \
+                                             "by_modality": [], "by_domain": [],
+                                             "by_file_type": [{"file_type": "pdf", "count": 3}],
+                                             "by_date": [{"date": "2026-06-30", "count": 3}]}), \
              mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
             r = self.client.get("/admin/asset-stats")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["by_status"][0]["status"], "registered")
+        body = r.json()
+        self.assertEqual(body["by_status"][0]["status"], "registered")
+        # 신규 차원(file_type·date)도 응답에 그대로 실린다(API 레벨).
+        self.assertIn("by_file_type", body)
+        self.assertIn("by_date", body)
 
     def test_assets_list_endpoint(self):
         with mock.patch.object(portal_api, "query_assets",

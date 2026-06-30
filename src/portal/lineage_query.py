@@ -38,7 +38,8 @@ def query_lineage_feed(
 ) -> dict[str, Any]:
     """기간 내 전 자산 계보 피드(의료 제외·occurred_at DESC, lineage_id DESC·페이징·FR-009b).
 
-    필터: 기간(since/until)·활동(activity)·**자산 차원**(modality·status·file_type — asset 조인). 대시보드 슬라이스용.
+    필터: 기간(since/until)·활동(activity)·**자산 차원**(modality·status·file_type — asset 조인).
+    대시보드 슬라이스용.
     """
     conds: list[str] = []
     params: list[Any] = []
