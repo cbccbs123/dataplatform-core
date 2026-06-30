@@ -43,7 +43,7 @@ FROM asset a JOIN asset_metadata am ON am.asset_id = a.asset_id
 WHERE a.status = 'registered'
 ORDER BY a.asset_id"""
 
-_UPDATE = "UPDATE asset_metadata SET ext_meta = %s::jsonb WHERE asset_id = %s"
+_UPDATE = "UPDATE asset_metadata SET ext_meta = %s::jsonb, updated_at = now() WHERE asset_id = %s"
 
 # image 재임베딩 교체용(요약 변경 → 임베딩 입력 변경). PK (asset_id, channel, chunk_index).
 _DEL_EMB = "DELETE FROM asset_embedding WHERE asset_id = %s AND channel = %s"

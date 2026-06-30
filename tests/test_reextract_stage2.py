@@ -236,6 +236,9 @@ class ReprocessVideoStage2Test(unittest.TestCase):
         del_sql = next(s for k, s, _p in conn.log if k == "DELETE")
         self.assertIn("asset_id", del_sql)
         self.assertNotIn("channel", del_sql.lower())
+        # ext_meta UPDATE 는 updated_at 도 갱신해야 한다(앱-SET 규약·여타 write 경로와 일관).
+        upd_sql = next(s for k, s, _p in conn.log if k == "UPDATE")
+        self.assertIn("updated_at", upd_sql.lower())
 
     def test_dry_run_no_writes(self) -> None:
         # T102 — dry_run=True: extract/embed 는 호출하되 영속(write) 0.
