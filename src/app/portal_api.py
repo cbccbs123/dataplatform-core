@@ -377,12 +377,13 @@ def lineage_timeline_endpoint(
     to: str | None = Query(None, alias="to"),
     activity: str | None = Query(None, description="활동명 필터"),
     interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
-    group_by: str | None = Query("activity", description="멀티시리즈 분할: activity | modality | status"),
+    group_by: str | None = Query(None, description="멀티시리즈 분할: activity | modality | status(미지정=단일)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """계보 시계열(누적 막대 차트 1회·access timeline 과 대칭). 의료 제외·결정적·LLM 0.
 
-    ``group_by``(activity/modality/status) 멀티시리즈, 미지정이면 단일 시리즈.
+    ``group_by``(activity/modality/status) 주면 멀티시리즈, 미지정이면 단일 시리즈
+    (access-logs/timeline 과 기본값 일관). 차트는 group_by=activity 를 명시해 호출.
     """
     if interval not in ("day", "hour"):
         raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")

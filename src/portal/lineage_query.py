@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.portal._timeline_util import pivot_series
+
 # 의료 제외 고정 절(사용자 입력 아님·인젝션 안전). al=asset_lineage, a=asset.
 _NONMEDICAL = (
     "FROM asset_lineage al JOIN asset a ON a.asset_id = al.asset_id "
@@ -139,22 +141,9 @@ def lineage_timeline(conn: Any, *, since: Any = None, until: Any = None, activit
             cur.execute(
                 f"SELECT {gcol} AS key, date_trunc('{trunc}', al.occurred_at) AS bkt, COUNT(*) "
                 + _NONMEDICAL + extra + " GROUP BY key, bkt ORDER BY key ASC, bkt ASC", params)
-            return {"interval": trunc, "group_by": group_by, "series": _pivot_series(cur.fetchall())}
+            return {"interval": trunc, "group_by": group_by, "series": pivot_series(cur.fetchall())}
         cur.execute(f"SELECT date_trunc('{trunc}', al.occurred_at) AS bkt, COUNT(*) "
                     + _NONMEDICAL + extra + " GROUP BY bkt ORDER BY bkt ASC", params)
         buckets = [{"bucket": b.isoformat() if b is not None else None, "count": int(c)}
                    for b, c in cur.fetchall()]
         return {"interval": trunc, "buckets": buckets}
-
-
-def _pivot_series(grouped_rows: list) -> list[dict]:
-    """(key, bucket, count) 행(key ASC·bucket ASC 정렬 가정)을 멀티시리즈로 피벗(순서 보존·결정적)."""
-    series_map: dict[Any, list] = {}
-    order: list = []
-    for key, bkt, count in grouped_rows:
-        if key not in series_map:
-            series_map[key] = []
-            order.append(key)
-        series_map[key].append(
-            {"bucket": bkt.isoformat() if bkt is not None else None, "count": int(count)})
-    return [{"key": k, "buckets": series_map[k]} for k in order]

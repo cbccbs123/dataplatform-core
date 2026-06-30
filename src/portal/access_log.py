@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from src.database.ids import uuid7
+from src.portal._timeline_util import pivot_series
 
 _INSERT = (
     "INSERT INTO access_log (access_id, asset_id, user_id, action, detail) "
@@ -142,16 +143,7 @@ def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None, acti
             cur.execute(
                 f"SELECT {gcol} AS key, date_trunc('{trunc}', occurred_at) AS bkt, COUNT(*) "
                 f"FROM access_log{clause} GROUP BY key, bkt ORDER BY key ASC, bkt ASC", params)
-            series_map: dict[Any, list] = {}
-            order: list = []
-            for key, bkt, count in cur.fetchall():
-                if key not in series_map:
-                    series_map[key] = []
-                    order.append(key)
-                series_map[key].append(
-                    {"bucket": bkt.isoformat() if bkt is not None else None, "count": int(count)})
-            series = [{"key": k, "buckets": series_map[k]} for k in order]
-            return {"interval": trunc, "group_by": group_by, "series": series}
+            return {"interval": trunc, "group_by": group_by, "series": pivot_series(cur.fetchall())}
         cur.execute(
             f"SELECT date_trunc('{trunc}', occurred_at) AS bkt, COUNT(*) FROM access_log{clause} "
             "GROUP BY bkt ORDER BY bkt ASC", params)
