@@ -74,15 +74,15 @@ _MEDICAL_LABEL = "medical"
 # 기본값의 단일 출처는 src.config.search_constants(F1). 값은 코사인 스케일로 통일됐다(클라이언트
 # 융합 전환으로 서버 출력 스케일 보정이 불필요해짐, 027).
 
-# OS 검색 버킷 라벨 → 저장된 modality 값 집합(PG media_search 와 동일 분류). 요청 라벨('text')과
-# 저장 modality 값('txt')의 불일치를 흡수한다 — text 버킷은 ALLOWED_TEXT_META_FILE_KINDS(txt·json·
-# pdf·office), audio 는 'audio'. 단일 term 이 아니라 terms(집합) 필터를 써야 실데이터가 회수된다.
-# 022 G1: image·video 추가. image/video 는 020 assets 인덱스에 한국어 VLM 캡션(nori) + KoSimCSE 캡션
-# 임베딩(embedding)으로 이미 색인돼 있어 text/audio 와 **동일 OS 하이브리드**로 검색한다(CLIP 아님 —
-# 시각-내용 매칭은 후속 spec). 저장값이 라벨과 동일('image'/'video')이라 search_assets_os 의 fallback
-# frozenset({label}) 로도 동작하나, 지원 모달리티를 명시·문서화하려 여기 등재한다(행동은 동일).
+# OS 검색 버킷 라벨 → 저장된 modality 값 집합. 요청 라벨('text')을 저장 modality 값으로 매핑한다.
+# 053 canonical 전환: 저장 modality 는 이제 canonical('text'). 다만 재색인 완료 전까지 구 OS 문서엔
+# file_kind 값(txt·json·pdf·office)이 남아 있을 수 있어, text 버킷을 **합집합**
+# ({text} ∪ ALLOWED_TEXT_META_FILE_KINDS)으로 두어 구·신 문서를 동시 매칭한다(무중단·C5).
+# 재색인 안정 후 frozenset({"text"})로 정리(FR-403). 단일 term 이 아니라 terms(집합) 필터를 써야 회수된다.
+# 022 G1: image·video 는 020 assets 인덱스에 한국어 VLM 캡션(nori) + KoSimCSE 캡션 임베딩으로 이미
+# 색인돼 text/audio 와 동일 OS 하이브리드로 검색한다(CLIP 아님). 저장값=라벨이라 단일값·문서화용 명시.
 _MODALITY_VALUES: dict[str, frozenset[str]] = {
-    "text": frozenset(ALLOWED_TEXT_META_FILE_KINDS),
+    "text": frozenset({"text", *ALLOWED_TEXT_META_FILE_KINDS}),
     "audio": frozenset({MediaKind.AUDIO.value}),
     MediaKind.IMAGE.value: frozenset({MediaKind.IMAGE.value}),
     MediaKind.VIDEO.value: frozenset({MediaKind.VIDEO.value}),

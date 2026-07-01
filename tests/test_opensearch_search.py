@@ -178,11 +178,15 @@ class ModalityValuesMappingTest(unittest.TestCase):
         self.assertEqual(_MODALITY_VALUES[MediaKind.IMAGE.value], frozenset({"image"}))
         self.assertEqual(_MODALITY_VALUES[MediaKind.VIDEO.value], frozenset({"video"}))
 
-    def test_text_audio_mapping_unchanged(self) -> None:
-        # 021 매핑 무손상(회귀 0): text=ALLOWED_TEXT_META_FILE_KINDS, audio={'audio'}.
+    def test_text_mapping_union_for_canonical_transition(self) -> None:
+        # 053 canonical 전환: 저장 modality 는 canonical 'text'. 재색인 전 구 OS 문서엔 file_kind
+        # 값(txt/json/pdf/office)이 남아 있어 합집합({text}∪ALLOWED_TEXT_META_FILE_KINDS)으로
+        # 구·신 문서를 동시 매칭한다(무중단·C5). 재색인 안정 후 {"text"}로 정리(FR-403).
         self.assertEqual(
-            _MODALITY_VALUES["text"], frozenset(ALLOWED_TEXT_META_FILE_KINDS)
+            _MODALITY_VALUES["text"], frozenset({"text", *ALLOWED_TEXT_META_FILE_KINDS})
         )
+        self.assertIn("text", _MODALITY_VALUES["text"])  # canonical 저장값 회수
+        self.assertIn("txt", _MODALITY_VALUES["text"])   # 재색인 전 구값 회수
         self.assertEqual(_MODALITY_VALUES[MediaKind.AUDIO.value], frozenset({"audio"}))
 
 
