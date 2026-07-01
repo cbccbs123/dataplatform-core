@@ -15,10 +15,92 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
+
+# 조회·정정 status 화이트리스트(포탈 API 검증과 공유). 검토 큐 = proposed,
+# 승인 내역 = active, 비승인 내역 = rejected 세 상태만 노출·전이 대상이다.
+_REVIEW_STATUSES = ("proposed", "active", "rejected")
+
+# 검토 목록 조회 SQL(FR-102) — node→asset 양끝 조인으로 식별 보강.
+# C6: 검토 화면은 "원본 엣지 행" 단위라 graph_query seam 의 대칭 정규화(dst 접힘 복원)를
+#     쓰지 않는다. 노출용 대칭 정규화는 그 seam 의 책임이고 검토(원본 행)와 무관하다.
+# 의료(PHI) 제외: 양끝 asset 의 domain_label 이 'medical' 이 아닌 엣지만(헌법 10조·FR-102).
+#   NULL 도메인도 노출되도록 IS DISTINCT FROM 사용(= 'medical' 은 NULL 을 놓친다).
+# 결정성(FR-103): confidence DESC NULLS LAST 동점 시 edge_id 2차 키로 안정 정렬(헌법 3조).
+_REVIEW_FROM_WHERE = """
+FROM graph_edge e
+JOIN relation_kind rk ON rk.relation_kind_id = e.relation_kind_id
+JOIN node sn ON sn.node_id = e.src_node AND sn.node_kind = 'asset'
+JOIN node dn ON dn.node_id = e.dst_node AND dn.node_kind = 'asset'
+JOIN asset sa ON sa.asset_id = sn.asset_id
+JOIN asset da ON da.asset_id = dn.asset_id
+WHERE e.status = %s
+  AND sa.domain_label IS DISTINCT FROM 'medical'
+  AND da.domain_label IS DISTINCT FROM 'medical'
+"""
+
+
+def list_edges_for_review(
+    conn: Connection[Any], *, status: str = "proposed", limit: int = 50, offset: int = 0
+) -> dict[str, Any]:
+    """status별 엣지를 식별 보강해 페이징 조회한다(FR-101/102/103).
+
+    각 행에 양끝 자산(asset_id·file_name·modality)·kind_code·confidence·reason·topic·
+    status·reviewed_by·reviewed_at 를 담아 UI 가 "무엇을 승인하는지" 알 수 있게 한다
+    (CR-11/CR-18 최소 해소). ``file_name`` 은 asset 에 컬럼이 없어 ``fs_path`` basename
+    으로 파생한다(``src/portal/download.py`` 관례 일치).
+
+    status 검증은 호출자(포탈 API·``_REVIEW_STATUSES``) 책임 — 이 함수는 받은 status 를
+    %s 로 바인딩만 한다(f-string 인젝션 없음). total 은 같은 WHERE 로 COUNT 해 페이징 UI
+    (proposed 4.7k 큐)를 받친다. 반환 ``{rows, total, status, limit, offset}``.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS count" + _REVIEW_FROM_WHERE, (status,))
+        total = int(cur.fetchone()["count"])
+        cur.execute(
+            """
+            SELECT e.edge_id, rk.kind_code, e.confidence, e.reason, e.topic, e.status,
+                   e.reviewed_by, e.reviewed_at,
+                   sn.asset_id AS src_asset_id, sa.fs_path AS src_fs_path, sa.modality AS src_modality,
+                   dn.asset_id AS dst_asset_id, da.fs_path AS dst_fs_path, da.modality AS dst_modality
+            """
+            + _REVIEW_FROM_WHERE
+            + """
+            ORDER BY e.confidence DESC NULLS LAST, e.edge_id
+            LIMIT %s OFFSET %s
+            """,
+            (status, limit, offset),
+        )
+        rows = [_review_row(r) for r in cur.fetchall()]
+    return {"rows": rows, "total": total, "status": status, "limit": limit, "offset": offset}
+
+
+def _review_row(r: dict[str, Any]) -> dict[str, Any]:
+    """조회 행 → 검토 목록 shape(src/dst 각 {asset_id, file_name, modality})."""
+    return {
+        "edge_id": r["edge_id"],
+        "kind_code": r["kind_code"],
+        "confidence": r["confidence"],
+        "reason": r["reason"],
+        "topic": r["topic"],
+        "status": r["status"],
+        "reviewed_by": r["reviewed_by"],
+        "reviewed_at": r["reviewed_at"],
+        "src": {
+            "asset_id": r["src_asset_id"],
+            "file_name": os.path.basename(r["src_fs_path"] or ""),
+            "modality": r["src_modality"],
+        },
+        "dst": {
+            "asset_id": r["dst_asset_id"],
+            "file_name": os.path.basename(r["dst_fs_path"] or ""),
+            "modality": r["dst_modality"],
+        },
+    }
 
 
 def list_proposed_edges(conn: Connection[Any], *, limit: int = 100) -> list[dict[str, Any]]:
