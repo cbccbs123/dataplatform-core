@@ -69,7 +69,7 @@ def build_corpus(
         # 노이즈 인덱스는 1536D 안쪽이면서 쿼리(0~9)·배경(500~899) 방향과 겹치지 않게 1000~1499.
         noise_idx = 1000 + rng.randrange(500)
         vec = _vec(strong_idx, noise_idx, 0.05)
-        assets.append((aid, "txt", f"{CORPUS_FS_PREFIX}{aid}.txt", aid.hex))
+        assets.append((aid, "text", f"{CORPUS_FS_PREFIX}{aid}.txt", aid.hex))  # 053: canonical modality
         # 037: search_vector(PG FTS) 제거(v270) — fts 평문은 더 이상 적재하지 않는다(OS 색인이 풀텍스트 담당).
         metas.append((aid, json.dumps({"summary": summary}, ensure_ascii=False)))
         embs.append((aid, "st", 0, vec))
@@ -173,7 +173,7 @@ def build_disagreement_corpus(
 
     def _add(vec: list[float], fts: str, summary: str) -> str:
         aid = uuid7()
-        assets.append((aid, "txt", f"{DISAGREE_FS_PREFIX}{aid}.txt", aid.hex))
+        assets.append((aid, "text", f"{DISAGREE_FS_PREFIX}{aid}.txt", aid.hex))  # 053: canonical modality
         # 037: search_vector(PG FTS) 제거(v270) — fts 평문은 더 이상 적재하지 않는다(OS 색인이 풀텍스트 담당).
         metas.append((aid, json.dumps({"summary": summary}, ensure_ascii=False)))
         embs.append((aid, "st", 0, vec))

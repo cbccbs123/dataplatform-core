@@ -116,19 +116,19 @@ def _os_reachable() -> bool:
 # 'video', 한국어 캡션·KoSimCSE 캡션 임베딩 — CLIP 아님). image/video 검색이 020 동일 하이브리드로
 # 회수되는지(FR-001)와 작은 k 비우세 모달리티 가드(knn pre-filter 회귀)를 검증한다.
 _CORPUS: tuple[tuple[str, str, str | None, str, list[str], list[str]], ...] = (
-    (_ID_FIN, "txt", "general", "2024년 분기 재무 보고서 매출 영업이익 분석 자료", ["재무", "매출", "영업이익"], ["보고서"]),
-    (_ID_COOK, "txt", "general", "김치찌개 끓이는 요리법 재료 손질 방법 정리", ["요리", "김치찌개", "레시피"], ["가이드"]),
-    (_ID_TRIP, "txt", "general", "제주도 여행 일정 관광 명소 추천 코스 안내", ["여행", "제주도", "관광"], ["여행기"]),
+    (_ID_FIN, "text", "general", "2024년 분기 재무 보고서 매출 영업이익 분석 자료", ["재무", "매출", "영업이익"], ["보고서"]),
+    (_ID_COOK, "text", "general", "김치찌개 끓이는 요리법 재료 손질 방법 정리", ["요리", "김치찌개", "레시피"], ["가이드"]),
+    (_ID_TRIP, "text", "general", "제주도 여행 일정 관광 명소 추천 코스 안내", ["여행", "제주도", "관광"], ["여행기"]),
     (_ID_MEET, "audio", "general", "프로젝트 주간 회의 녹취록 일정 공유 결정사항", ["회의", "녹취", "일정"], ["회의록"]),
     (_ID_MUSIC, "audio", "general", "인디 음악 팟캐스트 인터뷰 방송 에피소드", ["음악", "팟캐스트", "방송"], ["방송"]),
-    (_ID_MED, "txt", "medical", "환자 진료 기록 처방 내역 병원 검사 결과 소견", ["환자", "진료", "처방"], ["의무기록"]),
-    (_ID_TWIN_A, "txt", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
-    (_ID_TWIN_B, "txt", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
+    (_ID_MED, "text", "medical", "환자 진료 기록 처방 내역 병원 검사 결과 소견", ["환자", "진료", "처방"], ["의무기록"]),
+    (_ID_TWIN_A, "text", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
+    (_ID_TWIN_B, "text", "general", "오늘의 날씨 기상 예보 강수 확률 안내", ["날씨", "기상", "예보"], ["기상"]),
     # 022 — 강아지 다수 text(전역 top-k 점유) : 작은 k 가드의 'text 다수' 측. 질의 '강아지 키우기 사료'에
     # 어휘·의미로 강하게 매칭돼 전역 knn 최근접을 채운다(사후필터 회귀 시 image 를 전역에서 밀어냄).
-    (_ID_PET1, "txt", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
-    (_ID_PET2, "txt", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
-    (_ID_PET3, "txt", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
+    (_ID_PET1, "text", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
+    (_ID_PET2, "text", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
+    (_ID_PET3, "text", "general", "강아지 키우기 사료 추천 정보 글 모음", ["강아지", "사료", "키우기"], ["반려"]),
     # 022 — 소수 image(general). 캡션은 '반려견'/'고양이'로 질의 '강아지'와 **어휘 무겹침**(BM25 미회수)
     # 이나 의미 인접 → knn pre-filter 만이 회수한다(작은 k 가드가 잡는 정확한 시나리오).
     (_ID_IMG_DOG, "image", "general", "반려견 공원 야외 풍경 잔디밭 산책", ["반려견", "공원", "풍경"], ["사진"]),
@@ -229,7 +229,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         text = self._search("재무 매출 보고서", ["text"])["text"]
         self.assertTrue(text, "text 버킷에 결과가 있어야 한다")
         self.assertEqual(text[0]["id"], _ID_FIN, "재무 질의의 top1 은 재무 문서여야 한다")
-        self.assertEqual(text[0]["modality"], "txt")  # 저장 modality 값(라벨 'text' → 값 'txt')
+        self.assertEqual(text[0]["modality"], "text")  # 053: 저장 modality = canonical 'text'
 
         audio = self._search("회의 녹취 일정", ["audio"])["audio"]
         self.assertTrue(audio, "audio 버킷에 결과가 있어야 한다")

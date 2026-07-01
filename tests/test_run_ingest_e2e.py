@@ -134,7 +134,7 @@ class TestRunIngestE2E(unittest.TestCase):
             "SELECT status, modality, domain_label FROM asset WHERE asset_id=%s", (aid,)
         )
         self.assertEqual(status, "registered")
-        self.assertEqual(modality, "txt")
+        self.assertEqual(modality, "text")  # 053: .txt 수집 → 저장은 canonical 'text'(추출은 file_kind)
         self.assertEqual(domain, "general")
 
         # 037: search_vector(PG FTS) 컬럼은 v270 에서 제거 — 적재 라운드트립은 core/ext/tags 만 검증.

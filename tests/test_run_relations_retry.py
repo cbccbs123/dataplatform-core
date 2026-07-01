@@ -224,7 +224,7 @@ class TestResolutionPersistDB(unittest.TestCase):
             cur.execute(
                 """
                 INSERT INTO asset (asset_id, fs_path, modality, status, file_hash, created_at)
-                VALUES (%s, %s, 'txt', 'registered', %s,
+                VALUES (%s, %s, 'text', 'registered', %s,
                         now() - make_interval(secs => %s))
                 """,
                 (aid, f"/tmp/relret_{aid}.txt", f"hash_{aid}", created_at_offset_sec),

@@ -694,7 +694,7 @@ class TestZeroNormGuardDB(unittest.TestCase):
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO asset (asset_id, fs_path, modality, status, file_hash, created_at) "
-                "VALUES (%s, %s, 'txt', 'registered', %s, now())",
+                "VALUES (%s, %s, 'text', 'registered', %s, now())",  # 053: canonical modality
                 (aid, f"/tmp/zn_{aid}.txt", f"hash_{aid}"),
             )
             cur.execute(

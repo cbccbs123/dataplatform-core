@@ -365,7 +365,7 @@ class TestPathSignalDB(unittest.TestCase):
             for aid, path in rows:
                 cur.execute(
                     "INSERT INTO asset (asset_id, modality, fs_path, file_hash, domain_label, status) "
-                    "VALUES (%s, 'txt', %s, %s, 'general', 'registered')",
+                    "VALUES (%s, 'text', %s, %s, 'general', 'registered')",  # 053: canonical modality
                     (aid, path, aid.hex),
                 )
                 cur.execute(
