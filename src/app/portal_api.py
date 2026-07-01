@@ -95,6 +95,7 @@ from src.relations.review import (
     _REVIEW_STATUSES,
     bulk_review,
     list_edges_for_review,
+    list_relation_kinds,
     promote_relation_kind,
     revise_edge,
 )
@@ -534,21 +535,71 @@ def relations_list(
     status: str = Query("proposed", description="검토 상태: proposed(큐) | active(승인) | rejected(비승인)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    q: str | None = Query(None, description="통합 텍스트 검색(edge_id·asset_id·파일명·reason·topic)"),
+    asset_id: str | None = Query(None, description="양끝 중 하나 정확 일치"),
+    kind_code: str | None = Query(None, description="관계종류 코드 정확 일치"),
+    modality: str | None = Query(None, description="양끝 중 하나 모달리티"),
+    min_confidence: float | None = Query(None, description="신뢰도 하한(≥·0~1)"),
+    max_confidence: float | None = Query(None, description="신뢰도 상한(≤·0~1)"),
+    reviewed_by: str | None = Query(None, description="검토자 정확 일치"),
+    from_: str | None = Query(None, alias="from", description="기간 시작(inclusive·ISO)"),
+    to: str | None = Query(None, description="기간 끝(exclusive·ISO)"),
+    date_on: str | None = Query(None, description="기간 대상 컬럼: created | reviewed"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """관계 검토 큐/내역을 status별 페이징 조회한다(FR-101/102/103·US1/US3). 조회 전용·LLM 0.
+    """관계 검토 큐/내역을 status별 페이징 조회한다(FR-101/102/103 + G7 검색·필터·기간). 조회 전용·LLM 0.
 
     ``status`` 화이트리스트(``_REVIEW_STATUSES``) 위반은 400. 각 항목은 양끝 자산(asset_id·
-    파일명·모달리티)·kind_code·confidence·reason·topic·reviewed_by/at 를 담아 "무엇을
-    승인하는지" 식별 가능하게 한다. 의료(PHI) 자산 엣지는 제외(헌법 10조·review.py SQL).
+    파일명·모달리티)·kind_code·confidence·reason·topic·reviewed_by/at·created_at 를 담아
+    "무엇을 승인하는지" 식별 가능하게 한다. 의료(PHI) 자산 엣지는 제외(헌법 10조·review.py SQL).
+
+    G7 선택 필터(전부 생략 시 현행 동작·하위 호환·SC-011):
+    - ``min>max`` 또는 conf∉[0,1] → **400**(FR-704) · ``date_on∉{created,reviewed}`` → **400**(FR-752)
+    - ``from``/``to`` 는 ``_parse_dt``(형식 오류 422·013 관례) · 파싱 후 ``from>to`` → **400**(FR-751)
+    - 빈/공백 ``q`` 는 무시(None·팀 결정·FR-702)
+    - ``date_col`` 결정: date_on 명시 시 매핑, 생략 시 status별 자동
+      (proposed→created_at·active/rejected→reviewed_at·FR-752)
     """
     if status not in _REVIEW_STATUSES:
         raise HTTPException(
             status_code=400,
             detail=f"알 수 없는 status: {status!r} (허용: {list(_REVIEW_STATUSES)})",
         )
+    # confidence 범위 검증(FR-704) — 0~1 밖·min>max 는 400(의미 없는 요청).
+    for name, val in (("min_confidence", min_confidence), ("max_confidence", max_confidence)):
+        if val is not None and not (0.0 <= val <= 1.0):
+            raise HTTPException(status_code=400, detail=f"{name} 는 0~1 범위여야 함: {val}")
+    if min_confidence is not None and max_confidence is not None and min_confidence > max_confidence:
+        raise HTTPException(
+            status_code=400,
+            detail=f"min_confidence({min_confidence}) > max_confidence({max_confidence})")
+
+    # date_on → date_col 매핑(FR-752). 생략 시 status별 자동(proposed=제안일·검토됨=검토일).
+    _DATE_ON_MAP = {"created": "created_at", "reviewed": "reviewed_at"}
+    if date_on is not None:
+        if date_on not in _DATE_ON_MAP:
+            raise HTTPException(
+                status_code=400,
+                detail=f"알 수 없는 date_on: {date_on!r} (허용: {list(_DATE_ON_MAP)})")
+        date_col = _DATE_ON_MAP[date_on]
+    else:
+        date_col = "created_at" if status == "proposed" else "reviewed_at"
+
+    # 기간 파싱(형식 오류 422·013 _parse_dt) 후 from>to 는 400(FR-751).
+    since, until = _parse_dt(from_), _parse_dt(to)
+    if since is not None and until is not None and since > until:
+        raise HTTPException(status_code=400, detail=f"from({from_}) > to({to})")
+
+    # 빈/공백 q 는 무시(FR-702·필터 비활성).
+    q_clean = q.strip() if q else None
+    q_clean = q_clean or None
+
     return _run_in_db(
-        lambda conn: list_edges_for_review(conn, status=status, limit=limit, offset=offset)
+        lambda conn: list_edges_for_review(
+            conn, status=status, limit=limit, offset=offset,
+            q=q_clean, asset_id=asset_id, kind_code=kind_code, modality=modality,
+            min_confidence=min_confidence, max_confidence=max_confidence,
+            reviewed_by=reviewed_by, since=since, until=until, date_col=date_col)
     )
 
 
@@ -649,6 +700,29 @@ def relation_kind_promote(
         return {"kind_code": kind_code, "ok": ok}
 
     return _run_in_db_write(_work)
+
+
+# relation_kind status 화이트리스트(필터 드롭다운 GET·FR-801). 관계 어휘 두 상태만 노출한다.
+_RELATION_KIND_STATUSES = ("active", "inactive")
+
+
+@app.get("/admin/relation-kinds")
+def relation_kinds_list(
+    status: str | None = Query(None, description="관계종류 상태: active | inactive(생략=전체)"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """관계종류 목록을 조회한다(FR-801·필터 드롭다운용·조회 전용·LLM 0).
+
+    ``{rows:[{kind_code, kind_name_ko, status}], total}`` 를 kind_code 오름차순(결정적)으로
+    반환한다. ``status`` 화이트리스트(``_RELATION_KIND_STATUSES``) 위반은 400. relation_kind
+    테이블 재사용(마이그레이션 0). RBAC = ``require_principal``(현 2-tier MVP·인증된 누구나).
+    """
+    if status is not None and status not in _RELATION_KIND_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 status: {status!r} (허용: {list(_RELATION_KIND_STATUSES)})",
+        )
+    return _run_in_db(lambda conn: list_relation_kinds(conn, status=status))
 
 
 def _project_grouped_search(

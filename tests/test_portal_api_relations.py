@@ -88,6 +88,160 @@ class TestRelationsList(unittest.TestCase):
         mock_list.assert_not_called()
 
 
+class TestRelationsListFilters(unittest.TestCase):
+    """G7 확장(FR-701~753) — relations_list Query 파라미터 파싱·검증·전달."""
+
+    def setUp(self) -> None:
+        _enable_bypass(self)
+        self.client = TestClient(app)
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_filters_passed_through(self, mock_list) -> None:
+        mock_list.return_value = {"rows": [], "total": 0, "status": "active",
+                                  "limit": 50, "offset": 0}
+        resp = self.client.get("/admin/relations", params={
+            "status": "active", "q": "게임", "asset_id": "as-1", "kind_code": "same_domain",
+            "modality": "text", "min_confidence": 0.3, "max_confidence": 0.9,
+            "reviewed_by": "bc", "date_on": "reviewed",
+            "from": "2026-06-01", "to": "2026-07-01",
+        })
+        self.assertEqual(resp.status_code, 200)
+        kw = mock_list.call_args[1]
+        self.assertEqual(kw["q"], "게임")
+        self.assertEqual(kw["asset_id"], "as-1")
+        self.assertEqual(kw["kind_code"], "same_domain")
+        self.assertEqual(kw["modality"], "text")
+        self.assertEqual(kw["min_confidence"], 0.3)
+        self.assertEqual(kw["max_confidence"], 0.9)
+        self.assertEqual(kw["reviewed_by"], "bc")
+        self.assertEqual(kw["date_col"], "reviewed_at")  # date_on=reviewed → reviewed_at
+        self.assertIsNotNone(kw["since"])
+        self.assertIsNotNone(kw["until"])
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_no_filters_backward_compatible(self, mock_list) -> None:
+        # SC-011 — 확장 파라미터 미지정 시 전부 None(현행 동작). date_col 은 status별 자동.
+        mock_list.return_value = {"rows": [], "total": 0, "status": "proposed",
+                                  "limit": 50, "offset": 0}
+        resp = self.client.get("/admin/relations", params={"status": "proposed"})
+        self.assertEqual(resp.status_code, 200)
+        kw = mock_list.call_args[1]
+        for key in ("q", "asset_id", "kind_code", "modality", "min_confidence",
+                    "max_confidence", "reviewed_by", "since", "until"):
+            self.assertIsNone(kw[key], key)
+        self.assertEqual(kw["date_col"], "created_at")  # proposed → created_at
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_date_col_auto_by_status(self, mock_list) -> None:
+        # FR-752 — date_on 생략 시 active/rejected → reviewed_at.
+        mock_list.return_value = {"rows": [], "total": 0, "status": "active",
+                                  "limit": 50, "offset": 0}
+        resp = self.client.get("/admin/relations", params={"status": "active"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_list.call_args[1]["date_col"], "reviewed_at")
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_blank_q_ignored(self, mock_list) -> None:
+        # 빈/공백 q → None(필터 비활성·팀 결정).
+        mock_list.return_value = {"rows": [], "total": 0, "status": "proposed",
+                                  "limit": 50, "offset": 0}
+        resp = self.client.get("/admin/relations", params={"status": "proposed", "q": "   "})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(mock_list.call_args[1]["q"])
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_min_greater_than_max_400(self, mock_list) -> None:
+        resp = self.client.get("/admin/relations", params={
+            "status": "proposed", "min_confidence": 0.9, "max_confidence": 0.1})
+        self.assertEqual(resp.status_code, 400)
+        mock_list.assert_not_called()
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_confidence_out_of_range_400(self, mock_list) -> None:
+        resp = self.client.get("/admin/relations", params={
+            "status": "proposed", "min_confidence": 1.5})
+        self.assertEqual(resp.status_code, 400)
+        resp2 = self.client.get("/admin/relations", params={
+            "status": "proposed", "max_confidence": -0.2})
+        self.assertEqual(resp2.status_code, 400)
+        mock_list.assert_not_called()
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_bogus_date_on_400(self, mock_list) -> None:
+        resp = self.client.get("/admin/relations", params={
+            "status": "proposed", "date_on": "bogus"})
+        self.assertEqual(resp.status_code, 400)
+        mock_list.assert_not_called()
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_bad_date_format_422(self, mock_list) -> None:
+        # 013 _parse_dt 관례 — 형식 오류는 422.
+        resp = self.client.get("/admin/relations", params={
+            "status": "proposed", "from": "not-a-date"})
+        self.assertEqual(resp.status_code, 422)
+        mock_list.assert_not_called()
+
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_from_after_to_400(self, mock_list) -> None:
+        resp = self.client.get("/admin/relations", params={
+            "status": "proposed", "from": "2026-07-01", "to": "2026-06-01"})
+        self.assertEqual(resp.status_code, 400)
+        mock_list.assert_not_called()
+
+
+class TestRelationKindsList(unittest.TestCase):
+    """G7 확장(FR-801) — GET /admin/relation-kinds 목록·status 화이트리스트·401."""
+
+    def setUp(self) -> None:
+        _enable_bypass(self)
+        self.client = TestClient(app)
+
+    @patch("src.app.portal_api.list_relation_kinds")
+    def test_list_all(self, mock_kinds) -> None:
+        mock_kinds.return_value = {"rows": [
+            {"kind_code": "same_domain", "kind_name_ko": "동일 도메인", "status": "active"}],
+            "total": 1}
+        resp = self.client.get("/admin/relation-kinds")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_kinds.call_args[1]["status"], None)
+        self.assertEqual(resp.json()["total"], 1)
+
+    @patch("src.app.portal_api.list_relation_kinds")
+    def test_list_status_active(self, mock_kinds) -> None:
+        mock_kinds.return_value = {"rows": [], "total": 0}
+        resp = self.client.get("/admin/relation-kinds", params={"status": "active"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_kinds.call_args[1]["status"], "active")
+
+    @patch("src.app.portal_api.list_relation_kinds")
+    def test_list_bogus_status_400(self, mock_kinds) -> None:
+        resp = self.client.get("/admin/relation-kinds", params={"status": "bogus"})
+        self.assertEqual(resp.status_code, 400)
+        mock_kinds.assert_not_called()
+
+
+class TestRelationKindsListAuth(unittest.TestCase):
+    """인증 없음 → 401."""
+
+    def setUp(self) -> None:
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+        _reset_verifier_for_tests()
+        self._env = patch.dict(
+            os.environ, {"PORTAL_AUTH_DISABLED": "0", "PORTAL_JWT_SECRET": "test-secret"},
+            clear=False)
+        self._env.start()
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+        self._env.stop()
+        _reset_verifier_for_tests()
+
+    def test_kinds_without_token_401(self) -> None:
+        resp = self.client.get("/admin/relation-kinds")
+        self.assertEqual(resp.status_code, 401)
+
+
 class TestRelationsListAuth(unittest.TestCase):
     """인증 없음(bypass off·토큰 없음) → 401."""
 

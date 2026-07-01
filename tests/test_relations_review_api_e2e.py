@@ -132,6 +132,21 @@ class TestRelationsReviewApiDB(unittest.TestCase):
             (n,) = cur.fetchone()
         return int(n)
 
+    def _find_edge_filtered(self, edge_id: str, status: str, **filters) -> dict | None:
+        """G7 확장 — 검색·필터·기간 인자를 그대로 list_edges_for_review 에 넘겨 시드 엣지 탐색.
+
+        시드 confidence=1.0 이라 confidence DESC 정렬 최상단(첫 페이지) 보장(실 DB 수천 건에도).
+        """
+        from src.relations.review import list_edges_for_review
+        result = self.db.execute_in_transaction(
+            lambda conn: list_edges_for_review(
+                conn, status=status, limit=200, offset=0, **filters),
+            idempotent=True)
+        for r in result["rows"]:
+            if r["edge_id"] == edge_id:
+                return r
+        return None
+
     def test_roundtrip_proposed_approve_revise_rejected(self):
         from src.portal.access_log import record_access
         from src.relations.review import bulk_review, revise_edge
@@ -174,3 +189,42 @@ class TestRelationsReviewApiDB(unittest.TestCase):
         self.assertIsNotNone(self._find_edge_in_list(edge_id, "rejected"))
         self.assertIsNone(self._find_edge_in_list(edge_id, "active"))
         self.assertEqual(self._count_audit("relation.revise"), 1)
+
+    def test_filter_by_q_kind_and_period(self):
+        """SC-016 — 시드 엣지가 q(파일명 조각)·kind_code·기간(created_at) 필터로 잡히고,
+        엉뚱한 필터(미지 kind_code·미래 기간)에는 안 잡힌다(0건).
+        """
+        import datetime as _dt
+
+        edge_id = self._seed_proposed_edge()
+
+        # proposed 엣지의 src/dst 파일명(basename) 조각을 얻어 q 검색에 쓴다.
+        base_row = self._find_edge_in_list(edge_id, "proposed")
+        self.assertIsNotNone(base_row)
+        file_name = base_row["src"]["file_name"]  # 예: <hex>.txt
+        q_frag = file_name.split(".")[0][:8]  # 파일명 일부(hex 앞자락)
+
+        # 1) q(파일명 조각) + kind_code(same_domain) → 잡힌다.
+        self.assertIsNotNone(
+            self._find_edge_filtered(edge_id, "proposed", q=q_frag, kind_code="same_domain"))
+
+        # 2) 미지 kind_code → 0건(검증 없이 total=0·FR-703).
+        self.assertIsNone(
+            self._find_edge_filtered(edge_id, "proposed", kind_code="__no_such_kind__"))
+
+        # 3) created_at 기간(넉넉한 과거~미래) → 잡힌다. date_col=created_at(proposed 기본).
+        wide_since = _dt.datetime(2000, 1, 1)
+        wide_until = _dt.datetime(2100, 1, 1)
+        self.assertIsNotNone(
+            self._find_edge_filtered(edge_id, "proposed",
+                                     since=wide_since, until=wide_until, date_col="created_at"))
+
+        # 4) 과거 종료(먼 과거로 until 컷) → 0건(엣지 created_at 이 그 뒤).
+        self.assertIsNone(
+            self._find_edge_filtered(edge_id, "proposed",
+                                     until=_dt.datetime(2001, 1, 1), date_col="created_at"))
+
+        # 5) confidence 범위(0.9~1.0) → 시드 conf=1.0 이라 잡힌다.
+        self.assertIsNotNone(
+            self._find_edge_filtered(edge_id, "proposed",
+                                     min_confidence=0.9, max_confidence=1.0))

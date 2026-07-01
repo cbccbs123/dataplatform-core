@@ -49,6 +49,7 @@ class TestListEdgesForReview(unittest.TestCase):
         return conn, cur
 
     def _sample_row(self):
+        import datetime as _dt
         return {
             "edge_id": "e1",
             "kind_code": "same_domain",
@@ -58,6 +59,7 @@ class TestListEdgesForReview(unittest.TestCase):
             "status": "proposed",
             "reviewed_by": None,
             "reviewed_at": None,
+            "created_at": _dt.datetime(2026, 6, 30, 12, 0, 0),
             "src_asset_id": "as1",
             "src_fs_path": "/data/문서A.txt",
             "src_modality": "text",
@@ -115,6 +117,17 @@ class TestListEdgesForReview(unittest.TestCase):
         self.assertEqual(row["src"], {"asset_id": "as1", "file_name": "문서A.txt", "modality": "text"})
         self.assertEqual(row["dst"], {"asset_id": "as2", "file_name": "영상B.mp4", "modality": "video"})
 
+    def test_created_at_included_in_row(self):
+        # FR-761 — 응답 행에 created_at 추가(additive·datetime 그대로). SELECT 에 e.created_at.
+        import datetime as _dt
+
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[self._sample_row()])
+        result = list_edges_for_review(conn, status="proposed", limit=50, offset=0)
+        rows_sql = str(cur.execute.call_args_list[-1].args[0])
+        self.assertIn("e.created_at", rows_sql)
+        self.assertEqual(result["rows"][0]["created_at"], _dt.datetime(2026, 6, 30, 12, 0, 0))
+
     def test_ids_normalized_to_str(self):
         # psycopg 는 UUID 컬럼을 uuid.UUID 로 반환 — edge_id/asset_id 는 str 로 정규화해야
         # 파이썬 소비자 문자열 비교·JSON 직렬화가 일관된다(graph_query seam 관례). 미변환 시
@@ -143,6 +156,195 @@ class TestListEdgesForReview(unittest.TestCase):
         self.assertIn("status = %s", count_sql)
         self.assertIn("IS DISTINCT FROM 'medical'", count_sql)
         self.assertEqual(cur.execute.call_args_list[0].args[1][0], "active")
+
+
+class TestListEdgesForReviewFilters(unittest.TestCase):
+    """G7 확장(FR-701~705) — 검색·필터 인자가 실행 SQL·params 에 %s 로 반영되고,
+    미지정 시 조건이 붙지 않는다(하위 호환·SC-011). COUNT·rows 는 동일 WHERE·params 공유.
+    """
+
+    def _conn(self, *, total=1, rows=None):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__.return_value = cur
+        cur.fetchone.return_value = {"count": total}
+        cur.fetchall.return_value = rows if rows is not None else []
+        conn.cursor.return_value = cur
+        return conn, cur
+
+    def _both_sql(self, cur):
+        """(count_sql, count_params, rows_sql, rows_params) — 두 execute 콜 캡처."""
+        count_call = cur.execute.call_args_list[0]
+        rows_call = cur.execute.call_args_list[-1]
+        return (
+            str(count_call.args[0]),
+            count_call.args[1],
+            str(rows_call.args[0]),
+            rows_call.args[1],
+        )
+
+    def test_no_filter_args_backward_compatible(self):
+        # SC-011 — 확장 인자 전부 생략 시 WHERE 는 status + 의료 제외 2개만(현행).
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=50, offset=0)
+        count_sql, count_params, rows_sql, rows_params = self._both_sql(cur)
+        for sql in (count_sql, rows_sql):
+            self.assertIn("e.status = %s", sql)
+            self.assertIn("IS DISTINCT FROM 'medical'", sql)
+            # 확장 필터 조건은 없어야 한다
+            self.assertNotIn("ILIKE", sql)
+            self.assertNotIn("rk.kind_code = %s", sql)
+            self.assertNotIn("e.confidence >=", sql)
+            self.assertNotIn("e.confidence <=", sql)
+        # COUNT params 는 status 하나(page 파라미터 없음)
+        self.assertEqual(count_params, ("proposed",))
+        # rows params 는 status + limit + offset
+        self.assertEqual(rows_params, ("proposed", 50, 0))
+
+    def test_q_generates_eight_or_ilike_bindings(self):
+        # FR-702 — q 통합 텍스트는 8개 OR ILIKE(edge_id/asset_id ::text·fs_path·reason·topic ko/en).
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=10, offset=0, q="게임")
+        count_sql, count_params, rows_sql, rows_params = self._both_sql(cur)
+        for sql in (count_sql, rows_sql):
+            self.assertIn("e.edge_id::text ILIKE %s", sql)
+            self.assertIn("sn.asset_id::text ILIKE %s", sql)
+            self.assertIn("dn.asset_id::text ILIKE %s", sql)
+            self.assertIn("sa.fs_path ILIKE %s", sql)
+            self.assertIn("da.fs_path ILIKE %s", sql)
+            self.assertIn("e.reason ILIKE %s", sql)
+            self.assertIn("e.topic->>'topic_ko' ILIKE %s", sql)
+            self.assertIn("e.topic->>'topic_en' ILIKE %s", sql)
+        # q_pat = %게임% 8회 바인딩(COUNT 는 status 뒤 8개)
+        self.assertEqual(count_params, ("proposed",) + ("%게임%",) * 8)
+        # rows 는 status + 8×q_pat + limit + offset
+        self.assertEqual(rows_params, ("proposed",) + ("%게임%",) * 8 + (10, 0))
+
+    def test_asset_id_reviewed_by_use_text_equals(self):
+        # FR-703 — asset_id/reviewed_by 는 ::text = (비-UUID 입력에 500 아닌 0건).
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="active", limit=5, offset=0,
+                              asset_id="not-a-uuid", reviewed_by="bc")
+        _c_sql, _c_p, rows_sql, rows_params = self._both_sql(cur)
+        self.assertIn("sn.asset_id::text = %s", rows_sql)
+        self.assertIn("dn.asset_id::text = %s", rows_sql)
+        self.assertIn("e.reviewed_by::text = %s", rows_sql)
+        self.assertIn("not-a-uuid", rows_params)
+        self.assertIn("bc", rows_params)
+
+    def test_kind_code_and_modality_filters(self):
+        # FR-703 — kind_code 정확 일치·modality 양끝 중 하나.
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=5, offset=0,
+                              kind_code="same_domain", modality="text")
+        _c_sql, _c_p, rows_sql, rows_params = self._both_sql(cur)
+        self.assertIn("rk.kind_code = %s", rows_sql)
+        self.assertIn("sa.modality = %s", rows_sql)
+        self.assertIn("da.modality = %s", rows_sql)
+        self.assertIn("same_domain", rows_params)
+        self.assertEqual(rows_params.count("text"), 2)  # 양끝 각각 바인딩
+
+    def test_confidence_range_filters(self):
+        # FR-704 — min/max_confidence 는 >= / <= (범위 검증은 호출자 책임).
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=5, offset=0,
+                              min_confidence=0.3, max_confidence=0.8)
+        _c_sql, _c_p, rows_sql, rows_params = self._both_sql(cur)
+        self.assertIn("e.confidence >= %s", rows_sql)
+        self.assertIn("e.confidence <= %s", rows_sql)
+        self.assertIn(0.3, rows_params)
+        self.assertIn(0.8, rows_params)
+
+    def test_count_and_rows_share_where_and_params(self):
+        # FR-705 — COUNT 와 rows 가 동일 WHERE·같은 필터 params(페이징 total 일치).
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=5, offset=0,
+                              q="a", kind_code="same_domain", min_confidence=0.5)
+        count_sql, count_params, rows_sql, rows_params = self._both_sql(cur)
+        # WHERE 절(FROM 이후, ORDER BY 전)이 동일해야 한다
+        count_where = count_sql.split("WHERE", 1)[1]
+        rows_where = rows_sql.split("WHERE", 1)[1].split("ORDER BY", 1)[0]
+        self.assertEqual(count_where.strip(), rows_where.strip())
+        # rows_params = count_params + (limit, offset)
+        self.assertEqual(rows_params, count_params + (5, 0))
+
+    def test_period_filter_uses_whitelisted_date_col(self):
+        # FR-751/752 — since/until 은 date_col(화이트리스트) 기준 >= / < 바인딩.
+        import datetime as _dt
+
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        since = _dt.datetime(2026, 6, 1)
+        until = _dt.datetime(2026, 7, 1)
+        list_edges_for_review(conn, status="active", limit=5, offset=0,
+                              since=since, until=until, date_col="reviewed_at")
+        _c_sql, _c_p, rows_sql, rows_params = self._both_sql(cur)
+        self.assertIn("e.reviewed_at >= %s", rows_sql)
+        self.assertIn("e.reviewed_at < %s", rows_sql)
+        self.assertIn(since, rows_params)
+        self.assertIn(until, rows_params)
+
+    def test_period_filter_created_at_col(self):
+        import datetime as _dt
+
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=1, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=5, offset=0,
+                              since=_dt.datetime(2026, 6, 1), date_col="created_at")
+        _c_sql, _c_p, rows_sql, _rows_params = self._both_sql(cur)
+        self.assertIn("e.created_at >= %s", rows_sql)
+        self.assertNotIn("e.created_at < %s", rows_sql)  # until 미지정
+
+    def test_invalid_date_col_raises_value_error(self):
+        # date_col 화이트리스트 위반 → ValueError(f-string 인젝션 방지·호출자 검증 전제).
+        from src.relations.review import list_edges_for_review
+        conn, _cur = self._conn(total=1, rows=[])
+        with self.assertRaises(ValueError):
+            list_edges_for_review(conn, status="proposed", limit=5, offset=0,
+                                  date_col="created_at; DROP TABLE graph_edge")
+
+
+class TestListRelationKinds(unittest.TestCase):
+    """G7 확장(FR-801) — relation_kind 목록(kind_code 정렬·status 필터·shape)."""
+
+    def _conn(self, *, rows=None):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__.return_value = cur
+        cur.fetchall.return_value = rows if rows is not None else []
+        conn.cursor.return_value = cur
+        return conn, cur
+
+    def test_all_kinds_ordered_by_kind_code(self):
+        from src.relations.review import list_relation_kinds
+        rows = [
+            {"kind_code": "a_kind", "kind_name_ko": "가", "status": "active"},
+            {"kind_code": "b_kind", "kind_name_ko": "나", "status": "inactive"},
+        ]
+        conn, cur = self._conn(rows=rows)
+        result = list_relation_kinds(conn)
+        sql = str(cur.execute.call_args.args[0])
+        self.assertIn("ORDER BY kind_code", sql)
+        self.assertNotIn("WHERE", sql)  # status 미지정 → 전체
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["rows"], rows)
+
+    def test_status_filter_binds_where(self):
+        from src.relations.review import list_relation_kinds
+        conn, cur = self._conn(rows=[
+            {"kind_code": "a_kind", "kind_name_ko": "가", "status": "active"}])
+        result = list_relation_kinds(conn, status="active")
+        sql = str(cur.execute.call_args.args[0])
+        params = cur.execute.call_args.args[1]
+        self.assertIn("WHERE status = %s", sql)
+        self.assertEqual(params, ("active",))
+        self.assertEqual(result["total"], 1)
 
 
 class TestBulkReview(unittest.TestCase):
