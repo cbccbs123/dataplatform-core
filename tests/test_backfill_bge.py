@@ -121,18 +121,22 @@ class TestBackfillAssetDocument(unittest.TestCase):
             {"chunk_index": 0, "embedding_vector": [0.1] * 1536},
             {"chunk_index": 1, "embedding_vector": [0.2] * 1536},
         ]
+        # 053: 저장 modality 가 canonical 'text'. _document_file_kind('text')=None 이므로
+        # detect_file_kind(fs_path) 로 세분류(txt)를 재도출해 문서 분기를 타야 한다(FR-505).
+        # detect_file_kind 는 실 파일 libmagic 판정이므로 seam 으로 mock(파일 부재여도 검증 가능).
         with mock.patch.object(self.backfill, "embedding_text_chunks", return_value=chunks) as m_doc, \
-             mock.patch.object(self.backfill, "embedding_plain_text_chunks") as m_plain:
+             mock.patch.object(self.backfill, "embedding_plain_text_chunks") as m_plain, \
+             mock.patch.object(self.backfill, "detect_file_kind", return_value="txt"):
             n = self._call(
                 conn,
-                {"asset_id": "a1", "fs_path": "/d/x.txt", "modality": "txt",
+                {"asset_id": "a1", "fs_path": "/d/x.txt", "modality": "text",
                  "core_meta": {}, "ext_meta": {}},
             )
 
         self.assertEqual(n, 2)
         m_doc.assert_called_once()
         m_plain.assert_not_called()  # 문서 분기는 plain 미사용
-        # 본문은 fs_path 에서 재로딩, file_kind=modality, BGE 모델로 임베딩.
+        # 본문은 fs_path 에서 재로딩, 재도출한 세분류 file_kind='txt', BGE 모델로 임베딩.
         self.assertEqual(m_doc.call_args.kwargs["file_kind"], "txt")
         self.assertEqual(m_doc.call_args.kwargs["embedding_model_name"], _BGE)
 
@@ -146,6 +150,22 @@ class TestBackfillAssetDocument(unittest.TestCase):
         self.assertEqual([r[1] for r in rows], ["st_bge", "st_bge"])
         self.assertEqual([r[2] for r in rows], [0, 1])
         self.assertEqual([r[4] for r in rows], [_BGE, _BGE])
+
+    def test_legacy_file_kind_modality_still_uses_document_branch(self) -> None:
+        # 053 하위호환: 마이그레이션 전 구 저장값('txt'/'json' 등)도 계속 문서 분기를 탄다.
+        # _document_file_kind('json')='json' 이라 detect_file_kind 재도출 없이 그대로 동작.
+        conn, cur = _mock_conn()
+        chunks = [{"chunk_index": 0, "embedding_vector": [0.1] * 1536}]
+        with mock.patch.object(self.backfill, "embedding_text_chunks", return_value=chunks) as m_doc, \
+             mock.patch.object(self.backfill, "detect_file_kind") as m_detect:
+            n = self._call(
+                conn,
+                {"asset_id": "a2", "fs_path": "/d/x.json", "modality": "json",
+                 "core_meta": {}, "ext_meta": {}},
+            )
+        self.assertEqual(n, 1)
+        m_detect.assert_not_called()  # 구값은 _document_file_kind 로 이미 해소 → 재도출 불필요
+        self.assertEqual(m_doc.call_args.kwargs["file_kind"], "json")
 
     def test_missing_document_body_skips_without_raising(self) -> None:
         conn, cur = _mock_conn()

@@ -34,6 +34,7 @@ _LOG = logging.getLogger("meta_extract.reextract")
 # 050 stage-2: video 키프레임 v2 재캡션·재임베딩에 video_skill extract+embed 를 재사용한다(재구현 금지·P1).
 # 모듈 레벨 import — 단위 테스트가 _extract_video_meta/_embed_video 를 patch 할 수 있게 한다(sys.path 설정 후).
 from src.dispatch.types import ExtractContext  # noqa: E402
+from src.file.file_type_detector import detect_file_kind  # noqa: E402 — 053 canonical 'text' 세분류 재도출
 from src.skills.video_skill import _embed_video, _extract_video_meta  # noqa: E402
 
 _DOC_KINDS = {"txt", "json", "pdf", "word", "excel", "powerpoint"}
@@ -72,12 +73,19 @@ def _audio_text(ext_meta: dict[str, Any], fs_path: str) -> str:
 
 def _reextract_one(modality: str, fs_path: str, ext_meta: dict[str, Any]) -> dict[str, Any] | None:
     """한 자산의 새 요약·키워드(이미지는 objects 포함)를 만든다. 입력 부재면 None(skip)."""
-    if modality in _DOC_KINDS:
+    # 053: 저장 modality 가 canonical 'text' 면 doc 분기를 못 타 조용히 skip(회귀) →
+    # fs_path 에서 세분류(txt/json/pdf/office)를 재도출한다. 구 저장값(txt/json/…)은 modality 그대로.
+    # 파일 부재면 재도출 없이 doc 분기 내 is_file 게이트로 None(skip). audio/video/image 는 modality 사용.
+    if modality == "text" and Path(fs_path).is_file():
+        file_kind = detect_file_kind(fs_path)
+    else:
+        file_kind = modality
+    if file_kind in _DOC_KINDS:
         from src.llm.text_summarizer import summarize_and_extract_keywords
 
         if not Path(fs_path).is_file():
             return None
-        out = summarize_and_extract_keywords(file_path=Path(fs_path), file_kind=modality)
+        out = summarize_and_extract_keywords(file_path=Path(fs_path), file_kind=file_kind)
         return {k: out[k] for k in ("summary", "keywords") if k in out}
     if modality == "audio":
         from src.llm.text_summarizer import summarize_and_extract_keywords_from_audio

@@ -11,6 +11,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "reextract_summaries.py"
 _spec = importlib.util.spec_from_file_location("reextract_summaries", _SCRIPT)
@@ -52,6 +53,41 @@ class ReextractDispatchSkipTest(unittest.TestCase):
 
     def test_audio_without_text_none(self) -> None:
         self.assertIsNone(_mod._reextract_one("audio", "/없는/경로.mp3", {}))
+
+
+class ReextractCanonicalTextDispatchTest(unittest.TestCase):
+    """053 FR-505 — canonical 저장 modality 'text' 가 doc 재요약 분기를 타야 한다.
+
+    저장 modality 가 canonical 'text' 인 텍스트 자산은 file_kind('text' not in _DOC_KINDS)
+    로는 분기를 못 타 조용히 skip 된다(거짓 안심). fs_path 에서 detect_file_kind 로 세분류를
+    재도출해 doc 분기를 타도록 고친다. LLM 실호출 금지 — summarize 는 patch 로 대체한다.
+    """
+
+    def test_canonical_text_takes_doc_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            txt = Path(d) / "note.txt"
+            txt.write_text("가나다라마바사 문서 본문입니다.", encoding="utf-8")
+            fake = {"summary": "요약", "keywords": ["가", "나"]}
+            with mock.patch("src.llm.text_summarizer.summarize_and_extract_keywords",
+                            return_value=fake) as m_sum:
+                out = _mod._reextract_one("text", str(txt), {})
+        self.assertIsNotNone(out)  # 현재는 'text' not in _DOC_KINDS → None(skip)로 실패(RED)
+        self.assertEqual(out, {"summary": "요약", "keywords": ["가", "나"]})
+        m_sum.assert_called_once()
+        # 재도출한 세분류(txt)를 file_kind 로 넘겨야 한다(modality 'text' 그대로가 아님).
+        self.assertEqual(m_sum.call_args.kwargs["file_kind"], "txt")
+
+    def test_legacy_txt_modality_still_takes_doc_branch(self) -> None:
+        # 하위호환: 마이그레이션 전 구 저장값 'txt' 도 계속 doc 분기·file_kind='txt'.
+        with tempfile.TemporaryDirectory() as d:
+            txt = Path(d) / "old.txt"
+            txt.write_text("구 저장값 본문", encoding="utf-8")
+            fake = {"summary": "요약2", "keywords": ["다"]}
+            with mock.patch("src.llm.text_summarizer.summarize_and_extract_keywords",
+                            return_value=fake) as m_sum:
+                out = _mod._reextract_one("txt", str(txt), {})
+        self.assertEqual(out, {"summary": "요약2", "keywords": ["다"]})
+        self.assertEqual(m_sum.call_args.kwargs["file_kind"], "txt")
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ from src.embedders.text_embedder import (  # noqa: E402
     pad_embedding_to_storage_dim,
 )
 from src.file.data_loader import normalize_file_kind  # noqa: E402
+from src.file.file_type_detector import detect_file_kind  # noqa: E402 — 053 canonical 'text' 세분류 재도출
 from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding  # noqa: E402
 
 _BGE_CHANNEL = "st_bge"
@@ -245,6 +246,10 @@ def _reload_chunks(
     """
     # 문서 file_kind → 파일에서 직접 청킹+임베딩(text_skill 동일).
     file_kind = _document_file_kind(modality)
+    if file_kind is None and modality == "text":
+        # 053: canonical 'text' 저장값은 _document_file_kind 로 해소 안 됨(None) → skip 회귀.
+        # fs_path 에서 세분류(txt/json/pdf/office)를 재도출해 문서 분기를 탄다(구값은 위에서 이미 해소).
+        file_kind = _document_file_kind(detect_file_kind(fs_path))
     if file_kind is not None:
         return embedding_text_chunks(
             fs_path,
