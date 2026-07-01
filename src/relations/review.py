@@ -163,6 +163,56 @@ def reject_edge(conn: Connection[Any], *, edge_id: str, reviewer: str) -> bool:
     return _decide_edge(conn, edge_id=edge_id, reviewer=reviewer, status="rejected")
 
 
+def bulk_review(
+    conn: Connection[Any], *, edge_ids: list[str], reviewer: str, action: str
+) -> list[dict[str, Any]]:
+    """일괄 승인/반려 — 건별 기존 단건 함수를 호출하고 per-id 결과를 모은다(FR-201/202/203).
+
+    ``action`` 은 "approve"|"reject" — 각각 검증된 ``approve_edge``/``reject_edge`` 로
+    디스패치한다(재구현 0·proposed 가드·멱등은 단건 함수 계약 그대로). 반환은
+    ``[{"edge_id", "ok"}]`` per-id 배열이다.
+
+    한 트랜잭션 = 호출자(포탈 ``_run_in_db_write``)가 커밋한다 — 여기서는 커밋/롤백하지
+    않는다. ``ok=False``(엣지 없음 또는 이미 결정됨=proposed 아님)는 **예외가 아니라 결과값**
+    이므로 나머지 엣지 처리를 멈추지 않는다. 성공(ok=True) 건은 같은 트랜잭션에서 원자적으로
+    함께 커밋된다(FR-203).
+    """
+    decide = approve_edge if action == "approve" else reject_edge
+    return [
+        {"edge_id": eid, "ok": decide(conn, edge_id=eid, reviewer=reviewer)}
+        for eid in edge_ids
+    ]
+
+
+def revise_edge(
+    conn: Connection[Any], *, edge_id: str, reviewer: str, to_status: str
+) -> bool:
+    """사람 전용 결정 정정 — proposed 가드 **없이** status 를 전이한다(FR-301·C4).
+
+    ``_decide_edge`` 의 ``AND status = 'proposed'`` 가드를 **우회하는 유일 경로**다. 운영에서
+    오결정(잘못 approve/reject)을 되돌리려면 active↔rejected·→proposed 전 방향 전이가 필요한데,
+    proposed 가드가 있으면 이미 결정된 엣지를 되돌릴 수 없다. 그래서 이 함수만 가드 없이
+    ``WHERE edge_id = %s`` 로 갱신하고 ``reviewed_by``/``reviewed_at``/``updated_at`` 을 새로 찍는다.
+
+    LLM 경로(``sync_graph_edges``)와 분리(FR-302): revise 가 status 를 바꿔도, LLM 재제안의
+    ON CONFLICT ``DO UPDATE SET`` 는 여전히 ``status`` 를 **미갱신**한다(graph_persist.py). 즉
+    사람의 정정이 LLM 재제안에 덮이지 않는다 — 사람↔LLM 경계는 그대로 보존된다.
+
+    to_status 화이트리스트 검증은 호출자(포탈 API·``_REVIEW_STATUSES``) 책임이다.
+    1행 갱신 시 True, 대상 엣지 없음(rowcount==0) 시 False.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE graph_edge
+            SET status = %s, reviewed_by = %s, reviewed_at = now(), updated_at = now()
+            WHERE edge_id = %s
+            """,
+            (to_status, reviewer, edge_id),
+        )
+        return cur.rowcount == 1
+
+
 def promote_relation_kind(conn: Connection[Any], *, kind_code: str, reviewer: str) -> bool:
     """LLM 제안으로 쌓인 inactive relation_kind 를 active 로 승격(어휘 거버넌스). reviewer 는 lineage 기록용.
 
