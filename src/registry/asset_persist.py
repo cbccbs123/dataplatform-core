@@ -24,6 +24,7 @@ from psycopg.rows import dict_row
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.database.ids import uuid7
 from src.dispatch.types import AssetRecord
+from src.file.file_type_defs import modality_of  # 저장 경계 canonical 매핑(053)
 from src.ingest.status import AssetStatus, set_status
 
 
@@ -63,15 +64,20 @@ def create_asset(
     """``asset`` 행을 ``received`` 상태로 INSERT 하고 asset_id(UUIDv7) 반환(모델 A 조기 INSERT).
 
     식별자는 앱에서 UUIDv7 로 생성해 명시적으로 INSERT 한다(PG17 네이티브 uuidv7() 부재).
+
+    인자 ``modality`` 는 file_kind(``route.modality``) 이지만 저장은 canonical(``modality_of``, 053 A안)
+    로 좁힌다 — 저장 chokepoint 단일화(우회 경로 없음). 추출은 이 컬럼을 안 읽고 ``route_file`` 로
+    file_kind 를 재판정하므로 저장값 정규화는 추출과 독립이다(내부 추출 무변경).
     """
     asset_id = uuid7()
+    canonical = modality_of(modality)   # file_kind → text/image/video/audio/unknown
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO asset (asset_id, modality, fs_path, file_hash, file_size, domain_label, status)
             VALUES (%s, %s, %s, %s, %s, %s, 'received')
             """,
-            (asset_id, modality, fs_path, file_hash, file_size, domain),
+            (asset_id, canonical, fs_path, file_hash, file_size, domain),
         )
     return asset_id
 

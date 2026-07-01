@@ -30,6 +30,7 @@ from src.classify.types import ClassificationResult
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.dispatch.types import AssetRecord, ExtractContext
+from src.file.file_type_defs import modality_of  # 저장·감사 canonical 매핑(053)
 from src.file.hashing import file_hash_and_size
 from src.ingest.router import REASON_MISSING, RouteResult, route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed, set_status
@@ -161,8 +162,9 @@ def collect_file(conn: Connection[Any], fs_path: str) -> CollectResult:
         file_hash=file_hash,
         file_size=file_size,
     )
+    # 053(FR-203): 감사도 canonical 일관. 원 file_kind 는 payload.fs_path 확장자로 재도출 가능.
     record_lineage(conn, asset_id, activity="ingest.received.v1", agent="run_ingest",
-                   generated={"modality": route.modality}, payload={"fs_path": fs_path})
+                   generated={"modality": modality_of(route.modality)}, payload={"fs_path": fs_path})
     return CollectResult(asset_id=asset_id, route=route, skip_reason=None)
 
 

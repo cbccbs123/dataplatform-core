@@ -30,16 +30,46 @@ def _executes(cur):
 
 
 class TestCreateAsset(unittest.TestCase):
+    def _create_and_capture_insert(self, cur):
+        """asset INSERT 실행 콜을 골라 반환(단일 INSERT 검증 포함)."""
+        ins = [c for c in _executes(cur) if "INSERT INTO asset " in c.args[0]]
+        self.assertEqual(len(ins), 1)
+        return ins[0]
+
     def test_generates_uuid7_and_inserts_received(self) -> None:
         conn, cur = _mock_conn(None)
         with mock.patch.object(asset_persist, "uuid7", return_value=_FIXED):
             aid = create_asset(conn, fs_path="/d/a.txt", modality="txt")
         self.assertEqual(aid, _FIXED)
-        ins = [c for c in _executes(cur) if "INSERT INTO asset " in c.args[0]]
-        self.assertEqual(len(ins), 1)
+        ins = self._create_and_capture_insert(cur)
+        # 053: 인자 modality 는 file_kind('txt'), 저장은 canonical('text').
         # params: (asset_id, modality, fs_path, file_hash, file_size, domain)
-        self.assertEqual(ins[0].args[1], (_FIXED, "txt", "/d/a.txt", None, None, "general"))
-        self.assertIn("'received'", ins[0].args[0])
+        self.assertEqual(ins.args[1], (_FIXED, "text", "/d/a.txt", None, None, "general"))
+        self.assertIn("'received'", ins.args[0])
+
+    def test_json_file_kind_stored_as_canonical_text(self) -> None:
+        # 053(FR-201): file_kind 'json' 저장 경계에서 canonical 'text' 로 매핑.
+        conn, cur = _mock_conn(None)
+        with mock.patch.object(asset_persist, "uuid7", return_value=_FIXED):
+            create_asset(conn, fs_path="/x/a.json", modality="json")
+        ins = self._create_and_capture_insert(cur)
+        self.assertEqual(ins.args[1][1], "text")
+
+    def test_image_file_kind_unchanged(self) -> None:
+        # image/video/audio 는 canonical 과 동일 — 저장값 무변경.
+        conn, cur = _mock_conn(None)
+        with mock.patch.object(asset_persist, "uuid7", return_value=_FIXED):
+            create_asset(conn, fs_path="/x/a.png", modality="image")
+        ins = self._create_and_capture_insert(cur)
+        self.assertEqual(ins.args[1][1], "image")
+
+    def test_unknown_modality_preserved(self) -> None:
+        # unknown 은 격리표식 — 매핑 불변.
+        conn, cur = _mock_conn(None)
+        with mock.patch.object(asset_persist, "uuid7", return_value=_FIXED):
+            create_asset(conn, fs_path="/x/scan.dcm", modality="unknown")
+        ins = self._create_and_capture_insert(cur)
+        self.assertEqual(ins.args[1][1], "unknown")
 
 
 class TestFinalizeAsset(unittest.TestCase):

@@ -70,6 +70,20 @@ class TestRunIngest(unittest.TestCase):
         m["mark_failed"].assert_not_called()
         self.assertEqual(m["set_status"].call_count, 3)  # routing→classifying→extracting
 
+    def test_received_lineage_generated_modality_canonical(self) -> None:
+        # 053(FR-203): received lineage 의 generated.modality 도 canonical('text') 로 일관.
+        # route.modality 는 file_kind('json') 이지만 감사 기록은 저장값과 같은 canonical.
+        res, m = self._ingest(
+            ["/x/a.json"], _route(modality="json"), extract_fn=lambda ctx: AssetRecord()
+        )
+        self.assertEqual(res["registered"], [1])
+        received = [
+            c for c in m["record_lineage"].call_args_list
+            if c.kwargs.get("activity") == "ingest.received.v1"
+        ]
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].kwargs["generated"], {"modality": "text"})
+
     def test_missing_file_skipped(self) -> None:
         res, m = self._ingest(
             ["/no/x.txt"], _route(routable=False, reason=ri.REASON_MISSING), extract_fn=lambda ctx: AssetRecord()
