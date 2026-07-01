@@ -535,7 +535,9 @@ def relations_list(
     status: str = Query("proposed", description="검토 상태: proposed(큐) | active(승인) | rejected(비승인)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    q: str | None = Query(None, description="통합 텍스트 검색(edge_id·asset_id·파일명·reason·topic)"),
+    q: str | None = Query(
+        None, max_length=200,
+        description="통합 텍스트 검색(edge_id·asset_id·파일명·reason·topic·최대 200자·FR-702)"),
     asset_id: str | None = Query(None, description="양끝 중 하나 정확 일치"),
     kind_code: str | None = Query(None, description="관계종류 코드 정확 일치"),
     modality: str | None = Query(None, description="양끝 중 하나 모달리티"),
@@ -569,7 +571,8 @@ def relations_list(
     for name, val in (("min_confidence", min_confidence), ("max_confidence", max_confidence)):
         if val is not None and not (0.0 <= val <= 1.0):
             raise HTTPException(status_code=400, detail=f"{name} 는 0~1 범위여야 함: {val}")
-    if min_confidence is not None and max_confidence is not None and min_confidence > max_confidence:
+    if (min_confidence is not None and max_confidence is not None
+            and min_confidence > max_confidence):
         raise HTTPException(
             status_code=400,
             detail=f"min_confidence({min_confidence}) > max_confidence({max_confidence})")

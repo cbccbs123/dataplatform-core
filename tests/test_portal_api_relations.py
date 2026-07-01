@@ -188,6 +188,14 @@ class TestRelationsListFilters(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         mock_list.assert_not_called()
 
+    @patch("src.app.portal_api.list_edges_for_review")
+    def test_q_over_max_length_422(self, mock_list) -> None:
+        # FR-702 — q 는 최대 200자. Query(max_length=200) 초과 시 FastAPI 검증 422.
+        resp = self.client.get("/admin/relations", params={
+            "status": "proposed", "q": "x" * 201})
+        self.assertEqual(resp.status_code, 422)
+        mock_list.assert_not_called()
+
 
 class TestRelationKindsList(unittest.TestCase):
     """G7 확장(FR-801) — GET /admin/relation-kinds 목록·status 화이트리스트·401."""
