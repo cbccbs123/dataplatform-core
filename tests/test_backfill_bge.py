@@ -544,8 +544,9 @@ class TestBackfillBgeE2E(unittest.TestCase):
                 )
             )
         ) or 1
-        aid = self._insert_asset("txt", txt, core_meta={}, ext_meta={}, n_chunks=n_chunks)
-        self._assert_coexist_idempotent(aid, "txt", txt, {}, {}, n_chunks)
+        # 053: 저장은 canonical 'text' — backfill 이 fs_path(doc.txt)에서 file_kind='txt' 재도출(G6).
+        aid = self._insert_asset("text", txt, core_meta={}, ext_meta={}, n_chunks=n_chunks)
+        self._assert_coexist_idempotent(aid, "text", txt, {}, {}, n_chunks)
 
     def test_image_backfill_coexist_idempotent(self) -> None:
         # image 의 'st' 는 ingest 가 ext_meta(summary+keywords+labels)로 만든 1청크.

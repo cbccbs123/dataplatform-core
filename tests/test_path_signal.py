@@ -393,7 +393,7 @@ class TestPathSignalDB(unittest.TestCase):
         # 매칭(manual_v2)만 — memo(stem 불일치)·sub/manual_v3(하위 폴더)·self 제외(C-1·C-2).
         self.assertEqual(ids, [str(self.match)])
         self.assertEqual(out[0]["emb_score"], 0.0)  # C-3 path-only sentinel
-        self.assertEqual(out[0]["media_type"], "txt")
+        self.assertEqual(out[0]["media_type"], "text")  # 053: 저장 modality = canonical 'text'
 
 
 if __name__ == "__main__":
