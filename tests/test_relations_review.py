@@ -160,6 +160,17 @@ class TestBulkReview(unittest.TestCase):
             out = review.bulk_review(conn, edge_ids=["e1", "e2"], reviewer="bc", action="approve")
         self.assertEqual(out, [{"edge_id": "e1", "ok": False}, {"edge_id": "e2", "ok": True}])
 
+    def test_unknown_action_raises_not_silent_reject(self):
+        # action 화이트리스트 가드 — 오타·미지 값이 조용히 reject 로 처리되면 안 된다(놀람 최소화).
+        from src.relations import review
+        conn = MagicMock()
+        with patch.object(review, "approve_edge") as m_ap, \
+             patch.object(review, "reject_edge") as m_rj:
+            with self.assertRaises(ValueError):
+                review.bulk_review(conn, edge_ids=["e1"], reviewer="bc", action="approv")
+        m_ap.assert_not_called()
+        m_rj.assert_not_called()
+
 
 class TestReviseEdge(unittest.TestCase):
     """FR-301 — 사람 전용 결정 정정(proposed 가드 우회·전 방향 전이)."""

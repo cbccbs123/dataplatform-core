@@ -65,8 +65,10 @@ def list_edges_for_review(
             """
             SELECT e.edge_id, rk.kind_code, e.confidence, e.reason, e.topic, e.status,
                    e.reviewed_by, e.reviewed_at,
-                   sn.asset_id AS src_asset_id, sa.fs_path AS src_fs_path, sa.modality AS src_modality,
-                   dn.asset_id AS dst_asset_id, da.fs_path AS dst_fs_path, da.modality AS dst_modality
+                   sn.asset_id AS src_asset_id, sa.fs_path AS src_fs_path,
+                   sa.modality AS src_modality,
+                   dn.asset_id AS dst_asset_id, da.fs_path AS dst_fs_path,
+                   da.modality AS dst_modality
             """
             + _REVIEW_FROM_WHERE
             + """
@@ -176,7 +178,12 @@ def bulk_review(
     않는다. ``ok=False``(엣지 없음 또는 이미 결정됨=proposed 아님)는 **예외가 아니라 결과값**
     이므로 나머지 엣지 처리를 멈추지 않는다. 성공(ok=True) 건은 같은 트랜잭션에서 원자적으로
     함께 커밋된다(FR-203).
+
+    ``action`` 화이트리스트 가드: 오타·미지 값이 조용히 reject 로 처리되는 사고를 막는다
+    (놀람 최소화 — approve/reject 외에는 즉시 ValueError).
     """
+    if action not in ("approve", "reject"):
+        raise ValueError(f"action 은 'approve'|'reject' 만 허용: {action!r}")
     decide = approve_edge if action == "approve" else reject_edge
     return [
         {"edge_id": eid, "ok": decide(conn, edge_id=eid, reviewer=reviewer)}
