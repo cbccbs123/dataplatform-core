@@ -82,9 +82,15 @@ def list_edges_for_review(
 
 
 def _review_row(r: dict[str, Any]) -> dict[str, Any]:
-    """조회 행 → 검토 목록 shape(src/dst 각 {asset_id, file_name, modality})."""
+    """조회 행 → 검토 목록 shape(src/dst 각 {asset_id, file_name, modality}).
+
+    edge_id·asset_id 는 ``str`` 로 정규화한다 — psycopg 는 UUID 컬럼을 ``uuid.UUID`` 객체로
+    반환하므로, ``graph_query`` seam 관례(edge_id/asset_id str화)와 맞춰 파이썬 소비자의 문자열
+    비교·JSON 직렬화 일관성을 보장한다(미변환 시 ``UUID(...) == "..."`` 가 False 가 되는 함정).
+    ``reviewed_by`` 는 NULL(미결정 엣지) 가능이라 str화하지 않는다(None → 'None' 방지).
+    """
     return {
-        "edge_id": r["edge_id"],
+        "edge_id": str(r["edge_id"]),
         "kind_code": r["kind_code"],
         "confidence": r["confidence"],
         "reason": r["reason"],
@@ -93,12 +99,12 @@ def _review_row(r: dict[str, Any]) -> dict[str, Any]:
         "reviewed_by": r["reviewed_by"],
         "reviewed_at": r["reviewed_at"],
         "src": {
-            "asset_id": r["src_asset_id"],
+            "asset_id": str(r["src_asset_id"]),
             "file_name": os.path.basename(r["src_fs_path"] or ""),
             "modality": r["src_modality"],
         },
         "dst": {
-            "asset_id": r["dst_asset_id"],
+            "asset_id": str(r["dst_asset_id"]),
             "file_name": os.path.basename(r["dst_fs_path"] or ""),
             "modality": r["dst_modality"],
         },

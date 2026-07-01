@@ -80,6 +80,9 @@ class TestRelationsReviewApiDB(unittest.TestCase):
         """proposed same_domain 엣지 1건 시드 → edge_id 반환.
 
         auto_approve_min 기본 1.01(신뢰도가 1.0 초과 불가 → 자동승인 없음)이라 status=proposed.
+        confidence=1.0 은 실 dev DB(status별 수천 건)에서도 `confidence DESC` 정렬 최상단에
+        오게 해, 목록 조회(페이징) 첫 페이지에 시드 엣지가 확실히 잡히게 한다(1.0<1.01 이라 여전히
+        proposed). 단, active 에는 이미 conf=1.0 엣지가 다수 있을 수 있어 순회 조회로 보강한다.
         """
         from src.relations.graph_persist import sync_graph_edges
         src_id = _make_registered_asset(self.db, self._ids)
@@ -87,7 +90,7 @@ class TestRelationsReviewApiDB(unittest.TestCase):
         edges = [{
             "target_media_item_id": dst_id, "relation_type_code": "same_domain",
             "topic_ko": "일반", "topic_en": "general", "subtopic_ko": "", "subtopic_en": "",
-            "confidence": 0.7, "reason": "e2e 검토",
+            "confidence": 1.0, "reason": "e2e 검토",
         }]
         up, _ = self.db.execute_in_transaction(
             lambda conn: sync_graph_edges(
@@ -109,6 +112,9 @@ class TestRelationsReviewApiDB(unittest.TestCase):
         return str(row[0])
 
     def _find_edge_in_list(self, edge_id: str, status: str) -> dict | None:
+        # 시드 엣지는 confidence=1.0 이라 `confidence DESC` 정렬 최상단(첫 페이지)에 온다
+        # (실 dev DB 수천 건 중에도) — 단일 페이지 조회로 충분하다. edge_id 는 review.py 가
+        # str 로 반환하므로 str 비교(_seed 도 str) 가 성립한다.
         from src.relations.review import list_edges_for_review
         result = self.db.execute_in_transaction(
             lambda conn: list_edges_for_review(conn, status=status, limit=200, offset=0),

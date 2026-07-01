@@ -115,6 +115,24 @@ class TestListEdgesForReview(unittest.TestCase):
         self.assertEqual(row["src"], {"asset_id": "as1", "file_name": "문서A.txt", "modality": "text"})
         self.assertEqual(row["dst"], {"asset_id": "as2", "file_name": "영상B.mp4", "modality": "video"})
 
+    def test_ids_normalized_to_str(self):
+        # psycopg 는 UUID 컬럼을 uuid.UUID 로 반환 — edge_id/asset_id 는 str 로 정규화해야
+        # 파이썬 소비자 문자열 비교·JSON 직렬화가 일관된다(graph_query seam 관례). 미변환 시
+        # UUID(...) == "..." 가 False 가 되는 함정을 이 가드로 고정(실DB e2e 회귀 유래).
+        import uuid as _uuid
+
+        from src.relations.review import list_edges_for_review
+        row = self._sample_row()
+        row["edge_id"] = _uuid.UUID("018f0000-0000-7000-8000-000000000263")
+        row["src_asset_id"] = _uuid.UUID("018f0000-0000-7000-8000-000000000261")
+        row["dst_asset_id"] = _uuid.UUID("018f0000-0000-7000-8000-000000000262")
+        conn, _cur = self._conn(total=1, rows=[row])
+        out = list_edges_for_review(conn, status="proposed", limit=50, offset=0)["rows"][0]
+        self.assertIsInstance(out["edge_id"], str)
+        self.assertEqual(out["edge_id"], "018f0000-0000-7000-8000-000000000263")
+        self.assertIsInstance(out["src"]["asset_id"], str)
+        self.assertIsInstance(out["dst"]["asset_id"], str)
+
     def test_count_uses_same_where(self):
         from src.relations.review import list_edges_for_review
         conn, cur = self._conn(total=42, rows=[])
