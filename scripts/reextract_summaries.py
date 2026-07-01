@@ -34,7 +34,7 @@ _LOG = logging.getLogger("meta_extract.reextract")
 # 050 stage-2: video 키프레임 v2 재캡션·재임베딩에 video_skill extract+embed 를 재사용한다(재구현 금지·P1).
 # 모듈 레벨 import — 단위 테스트가 _extract_video_meta/_embed_video 를 patch 할 수 있게 한다(sys.path 설정 후).
 from src.dispatch.types import ExtractContext  # noqa: E402
-from src.file.file_type_detector import detect_file_kind  # noqa: E402 — 053 canonical 'text' 세분류 재도출
+from src.file.file_type_detector import detect_file_kind  # noqa: E402
 from src.skills.video_skill import _embed_video, _extract_video_meta  # noqa: E402
 
 _DOC_KINDS = {"txt", "json", "pdf", "word", "excel", "powerpoint"}

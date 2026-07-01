@@ -59,7 +59,7 @@ from src.embedders.text_embedder import (  # noqa: E402
     pad_embedding_to_storage_dim,
 )
 from src.file.data_loader import normalize_file_kind  # noqa: E402
-from src.file.file_type_detector import detect_file_kind  # noqa: E402 — 053 canonical 'text' 세분류 재도출
+from src.file.file_type_detector import detect_file_kind  # noqa: E402
 from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding  # noqa: E402
 
 _BGE_CHANNEL = "st_bge"
