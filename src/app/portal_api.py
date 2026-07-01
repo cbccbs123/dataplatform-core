@@ -40,7 +40,7 @@ import mimetypes
 import os
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -73,6 +73,7 @@ from src.portal.auth import Principal, authenticate_token, require_principal
 from src.portal.auth.config import load_portal_auth_config
 from src.portal.auth.dev_issuer import issue_dev_token
 from src.portal.auth.schemas import DevTokenRequest
+from src.portal.dashboard import build_dashboard_summary
 from src.portal.download import (
     build_bundle_zip,
     collect_bundle_assets,
@@ -493,6 +494,23 @@ def asset_timeline_endpoint(
     return _run_in_db(
         lambda conn: asset_timeline(
             conn, since=since, until=until, interval=interval, group_by=group_by))
+
+
+@app.get("/admin/dashboard/summary")
+def dashboard_summary_endpoint(
+    months: int = Query(6, ge=1, le=24, description="월별 시계열 창(개월·기본 6·최대 24)"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """운영 대시보드 집계 1회 응답(013 운영 후속·052 번들) — access·lineage·asset 3도메인 ×
+    전체/오늘/월별(일별)/시간별. 조회 전용·의료 제외·결정적·LLM 0·마이그레이션 0.
+
+    프론트 대시보드가 상세 로더 조합으로 9~11회 호출하던 것을 **단일 응답**으로 대체한다(HTTP
+    왕복·커넥션 풀 churn·모달리티 월별의 자산 전수 스캔 N+1 제거). 검증된 순수 조회 함수 6종을
+    ``build_dashboard_summary`` 가 **한 트랜잭션**에서 조합한다(``src/portal/dashboard.py``).
+    오늘·최근 months개월 윈도우는 서버 ``now``(UTC) 기준 — 대시보드의 시각 상대 창이다(결정성 무관).
+    """
+    now = datetime.now(timezone.utc)
+    return _run_in_db(lambda conn: build_dashboard_summary(conn, now=now, months=months))
 
 
 # ── 052 HITL 관계 검토 API (CLI→HTTP thin 레이어) ──────────────────────────────
