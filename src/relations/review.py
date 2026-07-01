@@ -216,20 +216,22 @@ def list_relation_kinds(
 ) -> dict[str, Any]:
     """relation_kind 목록을 조회한다(FR-801·필터 드롭다운용·조회 전용·LLM 0).
 
-    ``{rows:[{kind_code, kind_name_ko, status}], total}`` 를 반환한다. ``ORDER BY kind_code``
-    로 결정적 정렬(헌법 3조). ``status`` 지정 시 ``WHERE status = %s``(active|inactive 화이트
+    ``{rows:[{kind_code, kind_name_ko, description, status}], total}`` 를 반환한다.
+    ``description`` 은 관계종류 설명(TEXT·nullable → None 가능)으로, UI 드롭다운/툴팁에서
+    "이 관계가 무슨 뜻인지" 보여주도록 DB 에서 함께 읽어 전달한다. ``ORDER BY kind_code`` 로
+    결정적 정렬(헌법 3조). ``status`` 지정 시 ``WHERE status = %s``(active|inactive 화이트
     리스트 검증은 호출자 책임), 미지정이면 전체. relation_kind 테이블 재사용(마이그레이션 0).
     """
     with conn.cursor(row_factory=dict_row) as cur:
         if status is not None:
             cur.execute(
-                "SELECT kind_code, kind_name_ko, status FROM relation_kind"
+                "SELECT kind_code, kind_name_ko, description, status FROM relation_kind"
                 " WHERE status = %s ORDER BY kind_code",
                 (status,),
             )
         else:
             cur.execute(
-                "SELECT kind_code, kind_name_ko, status FROM relation_kind"
+                "SELECT kind_code, kind_name_ko, description, status FROM relation_kind"
                 " ORDER BY kind_code"
             )
         rows = [dict(r) for r in cur.fetchall()]

@@ -324,16 +324,20 @@ class TestListRelationKinds(unittest.TestCase):
     def test_all_kinds_ordered_by_kind_code(self):
         from src.relations.review import list_relation_kinds
         rows = [
-            {"kind_code": "a_kind", "kind_name_ko": "가", "status": "active"},
-            {"kind_code": "b_kind", "kind_name_ko": "나", "status": "inactive"},
+            {"kind_code": "a_kind", "kind_name_ko": "가", "description": "가 설명",
+             "status": "active"},
+            {"kind_code": "b_kind", "kind_name_ko": "나", "description": None,
+             "status": "inactive"},  # description 은 nullable → None 가능
         ]
         conn, cur = self._conn(rows=rows)
         result = list_relation_kinds(conn)
         sql = str(cur.execute.call_args.args[0])
         self.assertIn("ORDER BY kind_code", sql)
         self.assertNotIn("WHERE", sql)  # status 미지정 → 전체
+        self.assertIn("description", sql)  # 관계 설명도 DB 에서 읽어 전달(FR-801)
         self.assertEqual(result["total"], 2)
         self.assertEqual(result["rows"], rows)
+        self.assertEqual(result["rows"][0]["description"], "가 설명")
 
     def test_status_filter_binds_where(self):
         from src.relations.review import list_relation_kinds
