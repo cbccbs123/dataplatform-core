@@ -46,6 +46,25 @@ MEDIA_TYPES_CLIP_CHUNK_SEARCH = frozenset(
 )
 
 
+# asset.modality 저장 허용값(canonical). v292 CHECK 와 일치. unknown 은 모달리티가 아닌 격리표식.
+CANONICAL_MODALITIES = ("text", "image", "video", "audio", "unknown")
+
+
+def modality_of(file_kind: str) -> str:
+    """file_kind(``detect_file_kind`` 판정값) → canonical modality. 결정적·순수(헌법 3·6조·053).
+
+    저장(asset.modality)만 canonical 5종으로 좁힌다 — 추출은 file_kind 를 그대로 쓰므로
+    (dispatcher·data_loader) 이 매핑은 오직 ``create_asset`` 저장 경계에서만 적용한다(A안).
+    세분류(txt vs json vs pdf…)는 fs_path 확장자로 재도출 가능(file_ext)이라 저장값 정규화가
+    추출 정확성을 해치지 않는다.
+    """
+    if file_kind in ALLOWED_TEXT_META_FILE_KINDS:      # txt,pdf,json,word,excel,powerpoint
+        return "text"
+    if file_kind in (MediaKind.IMAGE.value, MediaKind.VIDEO.value, MediaKind.AUDIO.value):
+        return file_kind
+    return MediaKind.UNKNOWN.value                      # 'unknown' (미지원·판별불가 격리)
+
+
 __all__ = [
     "MediaKind",
     "OfficeKind",
@@ -54,4 +73,6 @@ __all__ = [
     "ALLOWED_TEXT_META_FILE_KINDS",
     "MEDIA_TYPES_ST_CHUNK_SEARCH",
     "MEDIA_TYPES_CLIP_CHUNK_SEARCH",
+    "CANONICAL_MODALITIES",
+    "modality_of",
 ]
