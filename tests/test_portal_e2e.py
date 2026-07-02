@@ -194,8 +194,10 @@ class TestPortalE2E(unittest.TestCase):
             "큰 쪽(dst) 자산의 상세에 대칭 이웃이 누락 없이 포함돼야 한다(순진한 WHERE src=X 면 빠짐)",
         )
         sym = next(r for r in big_relations if r["asset_id"] == smaller_asset)
-        self.assertEqual(sym["direction"], "undirected", "대칭 kind 는 무방향이어야 한다")
-        self.assertEqual(sym["kind_code"], "same_series")
+        # FR-201(057): relations 는 이웃 자산 단위로 사전 병합 — kind_code·direction 은 edges 상세에.
+        self.assertIn("same_series", sym["kind_codes"], "대칭 kind 가 이웃 kind_codes 에 포함돼야 한다")
+        sym_edge = next(e for e in sym["edges"] if e["kind_code"] == "same_series")
+        self.assertEqual(sym_edge["direction"], "undirected", "대칭 kind 는 무방향이어야 한다")
 
         # 작은 쪽(src)으로도 동일 이웃 — 양방향 대칭 확인.
         with self.db.transaction() as conn:

@@ -49,7 +49,28 @@ _RELATIONS = [
         "asset_id": "B2", "kind_code": "duplicate_near", "is_symmetric": True,
         "direction": "undirected", "confidence": 0.9, "status": "active",
         "topic": {"topic_ko": "사진"}, "reason": "유사", "edge_id": "e1",
+        # FR-102(057·G1): 이웃 표시필드는 이미 엣지 dict 에 내려온다(재조회 0). 병합 시 이웃 레벨로 승격.
+        "file_name": "b2.jpg", "modality": "image",
     },
+]
+
+# FR-201(057·G2a) 병합 검증용 — 같은 이웃(B2)과 다중 엣지 + 다른 이웃(A0)이 섞인 이웃-엣지 목록.
+# graph_query.fetch_active_relations_for_asset 가 주는 엣지 단위 목록의 실제 모양을 흉내낸다.
+_RELATIONS_MULTI = [
+    # 이웃 B2 — 같은 이웃과 2개 엣지(다른 kind·다른 confidence·삽입순서 뒤섞음) → 1행으로 병합돼야.
+    {"asset_id": "B2", "kind_code": "same_topic", "is_symmetric": True,
+     "direction": "undirected", "confidence": 0.7, "status": "active",
+     "topic": {"topic_ko": "사진"}, "reason": "주제겹침", "edge_id": "e2",
+     "file_name": "b2.jpg", "modality": "image"},
+    {"asset_id": "B2", "kind_code": "duplicate_near", "is_symmetric": True,
+     "direction": "undirected", "confidence": 0.9, "status": "active",
+     "topic": {"topic_ko": "사진"}, "reason": "유사", "edge_id": "e1",
+     "file_name": "b2.jpg", "modality": "image"},
+    # 이웃 A0 — max_confidence 0.95(> B2 0.9) → 이웃 정렬상 앞에 와야.
+    {"asset_id": "A0", "kind_code": "derived_from", "is_symmetric": False,
+     "direction": "outbound", "confidence": 0.95, "status": "active",
+     "topic": None, "reason": "파생", "edge_id": "e3",
+     "file_name": "a0.pdf", "modality": "text"},
 ]
 
 
@@ -136,15 +157,82 @@ class TestFetchAssetDetail(unittest.TestCase):
         self.assertNotIn("SELECT embedding", agg)
 
     @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
-    def test_relations_from_graph_query_seam(self, mock_rel) -> None:
-        # FR-006: relations 는 graph_query 결과 그대로, asset_id 키워드로 호출.
+    def test_relations_merged_by_asset_from_graph_query_seam(self, mock_rel) -> None:
+        # FR-006/FR-201(057): 엣지 단위 seam(fetch_active_relations_for_asset) 은 그대로 asset_id
+        #   키워드로 1회 호출하되, 상세 응답의 relations 는 그 결과를 이웃 자산 단위로 사전 병합한다.
+        #   (프론트 mergeRelationsByAsset 재구현 제거 — 결정적 병합을 서버 단일 진실로.)
         mock_rel.return_value = list(_RELATIONS)
         conn, _ = _conn_for_detail(dict(_REGISTERED_ROW), [])
         from src.portal.asset_detail import fetch_asset_detail
 
         out = fetch_asset_detail(conn, asset_id="A1")
-        self.assertEqual(out["relations"], _RELATIONS)
         mock_rel.assert_called_once_with(conn, asset_id="A1")
+        # 엣지 1건 → 이웃 1행(병합). 표시필드는 이웃 레벨로 승격, 엣지 상세는 edges 에 보존.
+        self.assertEqual(len(out["relations"]), 1)
+        nb = out["relations"][0]
+        self.assertEqual(nb["asset_id"], "B2")
+        self.assertEqual(nb["file_name"], "b2.jpg")
+        self.assertEqual(nb["modality"], "image")
+        self.assertEqual(nb["kind_codes"], ["duplicate_near"])
+        self.assertEqual(nb["max_confidence"], 0.9)
+        self.assertEqual(
+            nb["edges"],
+            [{
+                "edge_id": "e1", "kind_code": "duplicate_near", "confidence": 0.9,
+                "direction": "undirected", "is_symmetric": True,
+                "topic": {"topic_ko": "사진"}, "reason": "유사",
+            }],
+        )
+
+    @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
+    def test_relations_merge_dedup_kinds_maxconf_edges_and_sort(self, mock_rel) -> None:
+        # FR-201: 같은 이웃(B2)과 다중 엣지 → 1행 병합. kind_codes distinct·오름차순, max_confidence=엣지 최대,
+        #   edges 상세 보존(confidence desc→edge_id asc). 이웃 정렬 max_confidence desc→asset_id asc.
+        mock_rel.return_value = list(_RELATIONS_MULTI)
+        conn, _ = _conn_for_detail(dict(_REGISTERED_ROW), [])
+        from src.portal.asset_detail import fetch_asset_detail
+
+        rels = fetch_asset_detail(conn, asset_id="A1")["relations"]
+        # 3 엣지 → 이웃 2행(B2 2엣지 병합). 정렬: A0(max 0.95) → B2(max 0.9).
+        self.assertEqual([n["asset_id"] for n in rels], ["A0", "B2"])
+        b2 = rels[1]
+        self.assertEqual(b2["kind_codes"], ["duplicate_near", "same_topic"])  # distinct·오름차순
+        self.assertEqual(b2["max_confidence"], 0.9)  # max(0.9, 0.7)
+        self.assertEqual([e["edge_id"] for e in b2["edges"]], ["e1", "e2"])  # confidence desc
+        self.assertEqual(b2["file_name"], "b2.jpg")
+        self.assertEqual(b2["modality"], "image")
+        # 엣지 dict 은 정확히 7개 상세 키 — asset_id/file_name/modality/status 는 이웃 레벨로 승격.
+        self.assertEqual(
+            set(b2["edges"][0].keys()),
+            {"edge_id", "kind_code", "confidence", "direction", "is_symmetric", "topic", "reason"},
+        )
+        # A0(비대칭·outbound) 도 동일 계약.
+        a0 = rels[0]
+        self.assertEqual(a0["kind_codes"], ["derived_from"])
+        self.assertEqual(a0["max_confidence"], 0.95)
+        self.assertEqual(a0["edges"][0]["direction"], "outbound")
+
+    @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
+    def test_relations_sort_tiebreak_asset_id_and_null_confidence_last(self, mock_rel) -> None:
+        # 결정성(헌법 3조): 동점 max_confidence → asset_id asc. confidence None 이웃은 NULLS LAST(맨 뒤).
+        mock_rel.return_value = [
+            {"asset_id": "Z9", "kind_code": "k", "is_symmetric": False, "direction": "outbound",
+             "confidence": 0.5, "status": "active", "topic": None, "reason": None, "edge_id": "e1",
+             "file_name": "z.txt", "modality": "text"},
+            {"asset_id": "M5", "kind_code": "k", "is_symmetric": False, "direction": "outbound",
+             "confidence": 0.5, "status": "active", "topic": None, "reason": None, "edge_id": "e2",
+             "file_name": "m.txt", "modality": "text"},
+            {"asset_id": "N0", "kind_code": "k", "is_symmetric": False, "direction": "outbound",
+             "confidence": None, "status": "active", "topic": None, "reason": None, "edge_id": "e3",
+             "file_name": "n.txt", "modality": "text"},
+        ]
+        conn, _ = _conn_for_detail(dict(_REGISTERED_ROW), [])
+        from src.portal.asset_detail import fetch_asset_detail
+
+        rels = fetch_asset_detail(conn, asset_id="A1")["relations"]
+        # 0.5 동점(M5,Z9)은 asset_id asc → M5,Z9. confidence None(N0)은 최후.
+        self.assertEqual([n["asset_id"] for n in rels], ["M5", "Z9", "N0"])
+        self.assertIsNone(rels[2]["max_confidence"])  # 모든 엣지 None → max_confidence None
 
     @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
     def test_row_not_found_returns_none(self, mock_rel) -> None:
