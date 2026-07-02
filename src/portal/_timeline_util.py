@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from typing import Any
 
+# 타임라인 date_trunc 버킷 단위 화이트리스트 — **단일 출처**(055).
+# asset/lineage/access timeline 서비스와 portal_api 엔드포인트가 모두 이것 하나만 참조한다.
+# f-string date_trunc 인젝션 방지(통과값만)·엔드포인트/서비스 이중정의 drift 근절(054 갭 근원).
+TIMELINE_INTERVALS: tuple[str, ...] = ("day", "hour", "month")
+
 
 def pivot_series(grouped_rows: list[tuple]) -> list[dict]:
     """(key, bucket, count) 행(key ASC·bucket ASC 정렬 가정)을 멀티시리즈로 피벗(순서 보존·결정적).

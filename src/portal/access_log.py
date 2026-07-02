@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from src.database.ids import uuid7
-from src.portal._timeline_util import pivot_series
+from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
 _INSERT = (
     "INSERT INTO access_log (access_id, asset_id, user_id, action, detail) "
@@ -112,7 +112,6 @@ def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict
     return {"total": total, "by_action": by_action, "by_user": by_user}
 
 
-_TIMELINE_INTERVALS = {"day", "hour", "month"}  # date_trunc 화이트리스트(f-string 인젝션 방지·054 month 추가)
 # group_by 멀티시리즈 화이트리스트 → 컬럼식(고정 매핑·인젝션 안전). action/user_id 만 허용.
 _TIMELINE_GROUP_COLS = {"action": "action", "user_id": "user_id"}
 
@@ -125,7 +124,7 @@ def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None, acti
     미지정이면 단일 시리즈({interval, buckets})·``action`` 필터=단일 api. trunc 화이트리스트(f-string 안전)·
     그 외 값은 %s 바인딩.
     """
-    trunc = interval if interval in _TIMELINE_INTERVALS else "day"
+    trunc = interval if interval in TIMELINE_INTERVALS else "day"
     conds: list[str] = []
     params: list[Any] = []
     if since is not None:

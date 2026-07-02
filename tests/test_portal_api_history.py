@@ -99,16 +99,16 @@ class HistoryEndpointsTest(unittest.TestCase):
         r = self.client.get("/admin/access-logs/timeline?group_by=evil")
         self.assertEqual(r.status_code, 422)
 
-    def test_lineage_stats_endpoint(self):
-        with mock.patch.object(portal_api, "lineage_stats",
-                               return_value={"total": 5, "by_activity": [{"activity": "x", "count": 5}],
-                                             "by_day": [], "by_modality": [], "by_status": [],
-                                             "by_file_ext": []}), \
-             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
-            r = self.client.get("/admin/lineage/stats")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["by_activity"][0]["activity"], "x")
-        self.assertIn("by_day", r.json())
+    def test_lineage_stats_endpoint_removed_404(self):
+        # 055: GET /admin/lineage/stats 엔드포인트 제거(양쪽 프론트 미사용·함수는 dashboard 유지)
+        r = self.client.get("/admin/lineage/stats")
+        self.assertEqual(r.status_code, 404)
+        # 우연한 404 아님을 보장 — 라우트 자체가 OpenAPI 에서 제거됐는지 확인
+        paths = self.client.get("/openapi.json").json()["paths"]
+        self.assertNotIn("/admin/lineage/stats", paths)
+        # 회귀: 다른 stats 엔드포인트(대칭)는 유지
+        self.assertIn("/admin/asset-stats", paths)
+        self.assertIn("/admin/access-logs/stats", paths)
 
     def test_lineage_timeline_endpoint(self):
         with mock.patch.object(portal_api, "lineage_timeline",

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.portal._timeline_util import pivot_series
+from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
 # 의료 제외 고정 절(사용자 입력 아님·인젝션 안전). al=asset_lineage, a=asset.
 _NONMEDICAL = (
@@ -80,7 +80,6 @@ def query_lineage_feed(
     return {"rows": rows, "total": total, "limit": limit, "offset": offset}
 
 
-_INTERVALS = {"day", "hour", "month"}  # date_trunc 화이트리스트(f-string 인젝션 방지·054 month 추가)
 # 멀티시리즈 group_by 화이트리스트 → 컬럼식(고정 매핑·사용자 입력은 키로만 조회·인젝션 안전).
 _GROUP_COLS = {"activity": "al.activity", "modality": "a.modality", "status": "a.status"}
 
@@ -134,7 +133,7 @@ def lineage_timeline(conn: Any, *, since: Any = None, until: Any = None, activit
 
     의료 제외·결정적(시리즈 key ASC·버킷 ASC). group_by 미지정이면 단일 시리즈({interval, buckets}).
     """
-    trunc = interval if interval in _INTERVALS else "day"
+    trunc = interval if interval in TIMELINE_INTERVALS else "day"
     extra, params = _lineage_filter(since, until, activity)
     with conn.cursor() as cur:
         if group_by in _GROUP_COLS:

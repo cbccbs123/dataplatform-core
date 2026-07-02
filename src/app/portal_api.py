@@ -52,6 +52,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from src.config.settings import get_current_settings
+from src.portal._timeline_util import TIMELINE_INTERVALS
 
 # 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
@@ -83,7 +84,6 @@ from src.portal.download import (
     resolve_download_target,
 )
 from src.portal.lineage_query import (
-    lineage_stats,
     lineage_timeline,
     query_asset_lineage,
     query_lineage_feed,
@@ -342,8 +342,9 @@ def access_logs_timeline(
 
     ``group_by=action``(또는 user_id)이면 멀티시리즈 1회 응답(시리즈별 막대). 미지정이면 단일 시리즈.
     """
-    if interval not in ("day", "hour", "month"):
-        raise HTTPException(status_code=422, detail=f"interval 은 day|hour|month 만 허용: {interval!r}")
+    if interval not in TIMELINE_INTERVALS:
+        raise HTTPException(status_code=422,
+                            detail=f"interval 은 {'|'.join(TIMELINE_INTERVALS)} 만 허용: {interval!r}")
     if group_by is not None and group_by not in ("action", "user_id"):
         raise HTTPException(status_code=422, detail=f"group_by 는 action|user_id 만 허용: {group_by!r}")
     since, until = _parse_dt(from_), _parse_dt(to)
@@ -375,20 +376,8 @@ def lineage_feed(
             conn, since=since, until=until, activity=activity, modality=modality,
             status=status, file_ext=file_ext, limit=limit, offset=offset))
 
-
-@app.get("/admin/lineage/stats")
-def lineage_stats_endpoint(
-    from_: str | None = Query(None, alias="from", description="기간 하한"),
-    to: str | None = Query(None, alias="to", description="기간 상한"),
-    activity: str | None = Query(None, description="활동명 필터"),
-    principal: Annotated[Principal, Depends(require_principal)] = ...,
-) -> dict[str, Any]:
-    """계보 집계(차트·KPI 1회 — 활동별·일별·modality·status·file_ext별). 의료 제외·결정적·LLM 0.
-
-    전체 피드를 받아 클라이언트 집계할 필요 없이 서버 집계로 도넛/KPI 구성(관리자 대시보드).
-    """
-    since, until = _parse_dt(from_), _parse_dt(to)
-    return _run_in_db(lambda conn: lineage_stats(conn, since=since, until=until, activity=activity))
+# 055: GET /admin/lineage/stats 엔드포인트 제거(양쪽 프론트 미사용). lineage_stats 함수는
+# /admin/dashboard/summary(dashboard.py)가 사용하므로 유지 — 엔드포인트만 잉여였다.
 
 
 @app.get("/admin/lineage/timeline")
@@ -405,8 +394,9 @@ def lineage_timeline_endpoint(
     ``group_by``(activity/modality/status) 주면 멀티시리즈, 미지정이면 단일 시리즈
     (access-logs/timeline 과 기본값 일관). 차트는 group_by=activity 를 명시해 호출.
     """
-    if interval not in ("day", "hour", "month"):
-        raise HTTPException(status_code=422, detail=f"interval 은 day|hour|month 만 허용: {interval!r}")
+    if interval not in TIMELINE_INTERVALS:
+        raise HTTPException(status_code=422,
+                            detail=f"interval 은 {'|'.join(TIMELINE_INTERVALS)} 만 허용: {interval!r}")
     if group_by is not None and group_by not in ("activity", "modality", "status"):
         raise HTTPException(status_code=422, detail=f"group_by 는 activity|modality|status 만: {group_by!r}")
     since, until = _parse_dt(from_), _parse_dt(to)
@@ -514,8 +504,9 @@ def asset_timeline_endpoint(
     ``group_by``(modality/status/domain/file_ext) 주면 멀티시리즈(예: 어느 날 어떤 포맷이 몇 개 생성),
     미지정이면 단일.
     """
-    if interval not in ("day", "hour", "month"):
-        raise HTTPException(status_code=422, detail=f"interval 은 day|hour|month 만 허용: {interval!r}")
+    if interval not in TIMELINE_INTERVALS:
+        raise HTTPException(status_code=422,
+                            detail=f"interval 은 {'|'.join(TIMELINE_INTERVALS)} 만 허용: {interval!r}")
     if group_by is not None and group_by not in ("modality", "status", "domain", "file_ext"):
         raise HTTPException(status_code=422,
                             detail=f"group_by 는 modality|status|domain|file_ext 만: {group_by!r}")
@@ -744,7 +735,8 @@ def relations_revise(
             _record_relation_audit(
                 conn, action="relation.revise", reviewer=reviewer,
                 detail={"edge_id": body.edge_id, "to_status": body.to_status})
-        return {"edge_id": body.edge_id, "ok": ok}
+        # 055 FR-201: approve/reject 와 동일 봉투 {results:[{edge_id,ok}]} 로 통일(단건도 배열).
+        return {"results": [{"edge_id": body.edge_id, "ok": ok}]}
 
     return _run_in_db_write(_work)
 

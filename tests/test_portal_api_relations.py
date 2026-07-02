@@ -335,7 +335,8 @@ class TestRelationsRevise(unittest.TestCase):
         resp = self.client.post("/admin/relations/revise",
                                 json={"edge_id": "e1", "to_status": "rejected"})
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"edge_id": "e1", "ok": True})
+        # 055 FR-201: approve/reject 와 동일 봉투 {results:[{edge_id,ok}]} 로 통일
+        self.assertEqual(resp.json(), {"results": [{"edge_id": "e1", "ok": True}]})
         self.assertEqual(mock_revise.call_args[1]["edge_id"], "e1")
         self.assertEqual(mock_revise.call_args[1]["to_status"], "rejected")
         self.assertEqual(mock_revise.call_args[1]["reviewer"], "anonymous")
@@ -352,7 +353,7 @@ class TestRelationsRevise(unittest.TestCase):
         resp = self.client.post("/admin/relations/revise",
                                 json={"edge_id": "missing", "to_status": "active"})
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"edge_id": "missing", "ok": False})
+        self.assertEqual(resp.json(), {"results": [{"edge_id": "missing", "ok": False}]})
         revise_calls = [c for c in mock_audit.call_args_list
                         if c.kwargs.get("action") == "relation.revise"]
         self.assertEqual(len(revise_calls), 0)

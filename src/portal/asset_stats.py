@@ -8,12 +8,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from src.portal._timeline_util import pivot_series
+from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
 _EXCLUDE_MEDICAL = "domain_label <> 'medical'"  # 고정 SQL(사용자 입력 아님)·검색/상세와 일관
 # 파일 확장자(file_ext) = fs_path 마지막 .세그먼트(소문자·없으면 NULL). 고정 SQL·raw 정규식(인젝션 안전).
 _EXT_EXPR = r"lower(substring(fs_path from '\.([^./]+)$'))"
-_INTERVALS = {"day", "hour", "month"}  # date_trunc 화이트리스트(f-string 인젝션 방지·054 month 추가)
 
 # 054 관리자 스냅샷 버킷(계보 현황 화면) — FSM status 를 운영 관점 5버킷으로 롤업.
 # 버킷 순서 = 응답/집계 열거 순서(결정적). relation_proposed 는 registered 중 관계 제안이 있는 하위집합.
@@ -279,7 +278,7 @@ def asset_timeline(conn: Any, *, since: Any = None, until: Any = None,
     ``group_by``(modality/status/domain) 주면 멀티시리즈(시리즈 key ASC·버킷 ASC), 미지정이면 단일
     시리즈({interval, buckets}). trunc 화이트리스트(f-string 안전)·기간(since/until)은 %s 바인딩.
     """
-    trunc = interval if interval in _INTERVALS else "day"
+    trunc = interval if interval in TIMELINE_INTERVALS else "day"
     conds = [_EXCLUDE_MEDICAL]
     params: list[Any] = []
     if since is not None:
