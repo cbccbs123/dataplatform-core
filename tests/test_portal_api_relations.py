@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import unittest
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -410,3 +411,123 @@ class TestRelationAuditBestEffort(unittest.TestCase):
         # 예외를 전파하지 않으면 성공(결정 트랜잭션 보존).
         _record_relation_audit(conn, action="relation.approve", reviewer="bc",
                                detail={"edge_id": "e1"})
+
+
+class TestReviewTopicReindexHook(unittest.TestCase):
+    """056 FR-301~304 — 검토 결정(승인/반려/정정) 커밋 후 OS topics 재색인 훅.
+
+    검증 의도
+        - ``ok=True`` 엣지만 양끝 자산으로 해소해 ``reindex_asset_topics`` 를 호출한다(트랜잭션 밖).
+        - **best-effort(FR-304)**: 재색인이 raise 해도 핸들러는 정상 응답을 그대로 돌려준다.
+        - ``ok=True`` 가 없거나 OS 동기화 off 면 재색인을 호출하지 않는다.
+    ``reindex_asset_topics``·엣지 양끝 해소·설정·PostgresUtil 을 patch 해 실 DB·OS 없이 단위 검증.
+    """
+
+    def setUp(self) -> None:
+        _enable_bypass(self)
+        self.client = TestClient(app)
+
+    # 승인 — ok=True 엣지(e1)만 양끝 해소 → reindex 호출, 응답은 재색인과 무관하게 동일.
+    @patch("src.database.postgres_util.PostgresUtil", return_value=MagicMock())
+    @patch("src.app.portal_api.get_current_settings",
+           return_value=SimpleNamespace(opensearch_sync_enabled=True))
+    @patch("src.app.portal_api.reindex_asset_topics")
+    @patch("src.app.portal_api._resolve_edge_endpoint_assets", return_value=["A", "B"])
+    @patch("src.app.portal_api.record_access")
+    @patch("src.app.portal_api.bulk_review")
+    def test_approve_reindexes_ok_edge_endpoints(
+        self, m_bulk, m_audit, m_resolve, m_reindex, m_settings, m_pgutil
+    ) -> None:
+        m_bulk.return_value = [{"edge_id": "e1", "ok": True}, {"edge_id": "e2", "ok": False}]
+        resp = self.client.post("/admin/relations/approve", json={"edge_ids": ["e1", "e2"]})
+        self.assertEqual(resp.status_code, 200)
+        # 응답 봉투는 종전과 동일(재색인은 응답에 영향 없음).
+        self.assertEqual(resp.json(),
+                         {"results": [{"edge_id": "e1", "ok": True},
+                                      {"edge_id": "e2", "ok": False}]})
+        # ok=True(e1)만 양끝 해소 대상. ok=False(e2) 제외.
+        self.assertEqual(m_resolve.call_args.args[0], ["e1"])
+        # 해소된 양끝 자산(A,B)으로 재색인 1회.
+        m_reindex.assert_called_once()
+        self.assertEqual(m_reindex.call_args.kwargs["asset_ids"], ["A", "B"])
+
+    # best-effort(FR-304): 재색인이 raise 해도 승인 응답은 정상.
+    @patch("src.database.postgres_util.PostgresUtil", return_value=MagicMock())
+    @patch("src.app.portal_api.get_current_settings",
+           return_value=SimpleNamespace(opensearch_sync_enabled=True))
+    @patch("src.app.portal_api.reindex_asset_topics", side_effect=RuntimeError("OS down"))
+    @patch("src.app.portal_api._resolve_edge_endpoint_assets", return_value=["A"])
+    @patch("src.app.portal_api.record_access")
+    @patch("src.app.portal_api.bulk_review")
+    def test_approve_reindex_failure_does_not_break_response(
+        self, m_bulk, m_audit, m_resolve, m_reindex, m_settings, m_pgutil
+    ) -> None:
+        m_bulk.return_value = [{"edge_id": "e1", "ok": True}]
+        resp = self.client.post("/admin/relations/approve", json={"edge_ids": ["e1"]})
+        self.assertEqual(resp.status_code, 200)  # 재색인 예외에도 승인 성공
+        self.assertEqual(resp.json(), {"results": [{"edge_id": "e1", "ok": True}]})
+
+    # ok=True 가 없으면 재색인·해소 모두 미호출(변경 없음).
+    @patch("src.app.portal_api.reindex_asset_topics")
+    @patch("src.app.portal_api._resolve_edge_endpoint_assets")
+    @patch("src.app.portal_api.record_access")
+    @patch("src.app.portal_api.bulk_review")
+    def test_approve_all_ok_false_no_reindex(
+        self, m_bulk, m_audit, m_resolve, m_reindex
+    ) -> None:
+        m_bulk.return_value = [{"edge_id": "e1", "ok": False}]
+        resp = self.client.post("/admin/relations/approve", json={"edge_ids": ["e1"]})
+        self.assertEqual(resp.status_code, 200)
+        m_resolve.assert_not_called()
+        m_reindex.assert_not_called()
+
+    # OS 동기화 off → 재색인 스킵(020/038 게이트). 응답은 정상.
+    @patch("src.app.portal_api.get_current_settings",
+           return_value=SimpleNamespace(opensearch_sync_enabled=False))
+    @patch("src.app.portal_api.reindex_asset_topics")
+    @patch("src.app.portal_api._resolve_edge_endpoint_assets")
+    @patch("src.app.portal_api.record_access")
+    @patch("src.app.portal_api.bulk_review")
+    def test_approve_sync_disabled_skips_reindex(
+        self, m_bulk, m_audit, m_resolve, m_reindex, m_settings
+    ) -> None:
+        m_bulk.return_value = [{"edge_id": "e1", "ok": True}]
+        resp = self.client.post("/admin/relations/approve", json={"edge_ids": ["e1"]})
+        self.assertEqual(resp.status_code, 200)
+        m_resolve.assert_not_called()
+        m_reindex.assert_not_called()
+
+    # 정정(revise) 성공(ok=True) → 그 엣지 양끝 재색인. 응답 봉투 동일.
+    @patch("src.database.postgres_util.PostgresUtil", return_value=MagicMock())
+    @patch("src.app.portal_api.get_current_settings",
+           return_value=SimpleNamespace(opensearch_sync_enabled=True))
+    @patch("src.app.portal_api.reindex_asset_topics")
+    @patch("src.app.portal_api._resolve_edge_endpoint_assets", return_value=["A", "B"])
+    @patch("src.app.portal_api.record_access")
+    @patch("src.app.portal_api.revise_edge")
+    def test_revise_reindexes_when_changed(
+        self, m_revise, m_audit, m_resolve, m_reindex, m_settings, m_pgutil
+    ) -> None:
+        m_revise.return_value = True
+        resp = self.client.post("/admin/relations/revise",
+                                json={"edge_id": "e1", "to_status": "rejected"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"results": [{"edge_id": "e1", "ok": True}]})
+        self.assertEqual(m_resolve.call_args.args[0], ["e1"])
+        m_reindex.assert_called_once()
+        self.assertEqual(m_reindex.call_args.kwargs["asset_ids"], ["A", "B"])
+
+    # 정정 실패(ok=False·변경 없음) → 재색인 미호출.
+    @patch("src.app.portal_api.reindex_asset_topics")
+    @patch("src.app.portal_api._resolve_edge_endpoint_assets")
+    @patch("src.app.portal_api.record_access")
+    @patch("src.app.portal_api.revise_edge")
+    def test_revise_ok_false_no_reindex(
+        self, m_revise, m_audit, m_resolve, m_reindex
+    ) -> None:
+        m_revise.return_value = False
+        resp = self.client.post("/admin/relations/revise",
+                                json={"edge_id": "missing", "to_status": "active"})
+        self.assertEqual(resp.status_code, 200)
+        m_resolve.assert_not_called()
+        m_reindex.assert_not_called()
