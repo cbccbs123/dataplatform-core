@@ -11,14 +11,63 @@ from typing import Any
 from src.portal._timeline_util import pivot_series
 
 _EXCLUDE_MEDICAL = "domain_label <> 'medical'"  # 고정 SQL(사용자 입력 아님)·검색/상세와 일관
-_NOPARAM = object()  # query_assets specs 에서 "파라미터 없는 조건"(의료 제외) 표식 — params 에서 제외
 # 파일 확장자(file_ext) = fs_path 마지막 .세그먼트(소문자·없으면 NULL). 고정 SQL·raw 정규식(인젝션 안전).
 _EXT_EXPR = r"lower(substring(fs_path from '\.([^./]+)$'))"
 _INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
+
+# 054 관리자 스냅샷 버킷(계보 현황 화면) — FSM status 를 운영 관점 5버킷으로 롤업.
+# 버킷 순서 = 응답/집계 열거 순서(결정적). relation_proposed 는 registered 중 관계 제안이 있는 하위집합.
+_SNAPSHOT_BUCKETS = ("processing", "deferred", "registered", "failed", "relation_proposed")
+# processing = "진행 중" FSM 상태 4종. C1: classified 는 status 값이 아니라 분류 결과 표식이므로 제외.
+_PROCESSING_STATUSES = ("received", "routing", "classifying", "extracting")
+# relation_proposed 판별용 계보 activity(자산에 관계 제안이 붙은 lineage 기록).
+_RELATION_PROPOSED_ACTIVITY = "relations.proposed.v1"
+_RELATION_SCOPES = ("period", "alltime")  # 검증은 API 계층(G3) 책임·여기선 값만 사용
 # 자산 생성 추이 group_by 화이트리스트 → 컬럼식(고정 매핑·사용자 입력은 키로만 조회·인젝션 안전).
 # file_ext 는 평컬럼이 아닌 확장자 정규식(_EXT_EXPR) — 단일 테이블(asset) 쿼리라 fs_path 비한정 안전.
 _GROUP_COLS = {"modality": "modality", "status": "status", "domain": "domain_label",
                "file_ext": _EXT_EXPR}
+
+
+def _relation_proposed_exists(pfx: str, *, scoped: bool) -> str:
+    """asset_lineage 에 relation 제안 기록이 있는지 검사하는 EXISTS 조각.
+
+    ``pfx`` = asset 테이블 접두("" 단일 테이블 / "a." JOIN 모호성 방지). EXISTS 서브쿼리의
+    ``asset_lineage l`` 은 자체 alias 라 바깥 asset 컬럼과 모호성이 없다. ``scoped`` 면 관계 제안이
+    발생한 기간(occurred_at)을 ``%s,%s`` 로 바인딩(요청 §2.2: 자산 created 기간 = 관계 occurred 기간).
+    ``%s`` 순서 = activity → (scoped 면) occurred_since → occurred_until.
+    """
+    occ = " AND l.occurred_at >= %s AND l.occurred_at < %s" if scoped else ""
+    return (f"EXISTS (SELECT 1 FROM asset_lineage l WHERE l.asset_id = {pfx}asset_id "
+            f"AND l.activity = %s{occ})")
+
+
+def _snapshot_bucket_predicate(bucket: str, pfx: str, *, relation_scope: str,
+                               since: Any, until: Any) -> tuple[str, list[Any]]:
+    """스냅샷 버킷 → (WHERE 조각, 파라미터 list). status 집합 + relation_proposed EXISTS 분기.
+
+    ``pfx`` = asset 테이블 접두("" / "a."). relation_scope='period' 이고 since/until 이 둘 다 있으면
+    EXISTS 에 occurred_at 기간을 바인딩한다(period 여도 기간 미지정이면 스코프 없음). 'alltime' 이면
+    기간 조건을 넣지 않는다. 알 수 없는 버킷은 방어적으로 ``FALSE`` 를 돌려 0행을 만든다(화이트리스트
+    검증은 API 계층 G3 책임). status 리터럴은 고정 SQL(사용자 입력 아님)·인젝션 안전.
+    """
+    if bucket == "processing":
+        lits = ", ".join(f"'{s}'" for s in _PROCESSING_STATUSES)
+        return f"{pfx}status IN ({lits})", []
+    if bucket == "deferred":
+        return f"{pfx}status = 'deferred'", []
+    if bucket == "failed":
+        return f"{pfx}status = 'failed'", []
+    if bucket in ("registered", "relation_proposed"):
+        # 두 버킷 모두 등록완료(registered) 자산 중 관계 제안 유무로 갈린다(상호배타·합=전체 registered).
+        scoped = relation_scope == "period" and since is not None and until is not None
+        exists = _relation_proposed_exists(pfx, scoped=scoped)
+        neg = "" if bucket == "relation_proposed" else "NOT "
+        params: list[Any] = [_RELATION_PROPOSED_ACTIVITY]
+        if scoped:
+            params += [since, until]
+        return f"{pfx}status = 'registered' AND {neg}{exists}", params
+    return "FALSE", []  # 방어적: 미지의 버킷은 0행(정상 경로는 G3 화이트리스트로 차단)
 
 
 def _period_clause(since: Any, until: Any) -> tuple[str, list[Any]]:
@@ -70,6 +119,7 @@ def asset_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict[str,
 def query_assets(conn: Any, *, status: str | None = None, modality: str | None = None,
                  domain: str | None = None, file_ext: str | None = None,
                  created_from: Any = None, created_to: Any = None,
+                 snapshot_bucket: str | None = None, relation_scope: str = "period",
                  limit: int = 50, offset: int = 0, with_content: bool = False) -> dict[str, Any]:
     """자산 목록(FSM 단계·modality·domain·file_ext·날짜 필터·페이징·의료 제외·created_at DESC·FR-009f).
 
@@ -77,31 +127,46 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
     동반(모달리티 상세에서 자산을 안 열고도 내용 파악). 메타 미적재 자산은 LEFT JOIN 으로 행은 남되
     summary/keywords 가 None. 기본은 가벼운 목록(하위호환).
 
+    ``snapshot_bucket``(054·계보 현황) 지정 시 status 를 운영 5버킷으로 롤업해 필터한다. 이때
+    ``status`` 인자는 **무시**(C3: 버킷 우선)하고 버킷 술어를 대신 넣는다. ``relation_scope='period'``
+    (기본)이면 relation_proposed/registered 판별의 관계 제안 기간을 자산 created 기간(created_from/to)에
+    맞춰 스코프하고, ``'alltime'`` 이면 전 기간에서 관계 제안 유무만 본다. bucket 화이트리스트/relation_scope
+    검증은 API 계층(G3) 책임이며, 여기서는 알 수 없는 버킷을 방어적으로 0행 처리한다.
+    ``snapshot_bucket=None`` 이면 기존 동작·SQL 이 완전히 불변이다(하위호환).
+
     **모호성 주의**: ``asset`` 과 ``asset_metadata`` 둘 다 ``asset_id``·``created_at`` 컬럼을 가져,
     content 경로의 JOIN 에서 비한정 컬럼은 PG 오류가 난다. 그래서 content WHERE/SELECT/ORDER BY 는
     ``a.`` 한정(``_where("a.")``), COUNT·비콘텐츠 SELECT 는 단일 테이블이라 비한정(``_where("")``)으로 쓴다.
-    조건·파라미터는 ``specs`` 한 곳에서 (템플릿, 값) 쌍으로 누적해 순서 불변식을 구조적으로 보장한다.
+    조건·파라미터는 ``specs`` 한 곳에서 (템플릿, 값리스트) 쌍으로 누적해 순서 불변식을 구조적으로 보장한다.
     """
-    # (조건템플릿, 파라미터)를 한 곳에서 누적 → 조건 순서와 파라미터 순서가 구조적으로 일치(불변식 내재화).
+    # (조건템플릿, 파라미터리스트)를 한 곳에서 누적 → 조건 순서와 파라미터 순서가 구조적으로 일치(불변식 내재화).
     # 템플릿의 ``{a}`` = 테이블 접두사 자리("" 단일테이블 / "a." asset_metadata JOIN 모호성 방지).
-    # 파라미터 없는 조건(의료 제외)은 _NOPARAM 으로 표시해 params 에서 제외한다.
-    specs: list[tuple[str, Any]] = [("{a}" + _EXCLUDE_MEDICAL, _NOPARAM)]
-    if status:
-        specs.append(("{a}status = %s", status))
+    # 값리스트는 execute 시 순서대로 확장(extend) — 파라미터 없는 조건(의료 제외)은 [] 로 둔다.
+    specs: list[tuple[str, list[Any]]] = [("{a}" + _EXCLUDE_MEDICAL, [])]
+    if snapshot_bucket:
+        # C3: snapshot_bucket 우선 — status 스펙은 추가하지 않고 버킷 술어로 대체한다.
+        # 버킷 술어 파라미터 순서(activity→occurred_since→occurred_until)를 specs 값리스트에 그대로 실어
+        # WHERE 순서와 파라미터 순서가 어긋나지 않게 한다({a} 접두로 content/비content 경로 공용).
+        frag, bp = _snapshot_bucket_predicate(
+            snapshot_bucket, "{a}", relation_scope=relation_scope,
+            since=created_from, until=created_to)
+        specs.append((frag, bp))
+    elif status:
+        specs.append(("{a}status = %s", [status]))
     if modality:
-        specs.append(("{a}modality = %s", modality))
+        specs.append(("{a}modality = %s", [modality]))
     if domain:
-        specs.append(("{a}domain_label = %s", domain))
+        specs.append(("{a}domain_label = %s", [domain]))
     if file_ext:
-        specs.append((r"lower(substring({a}fs_path from '\.([^./]+)$')) = %s", file_ext))
+        specs.append((r"lower(substring({a}fs_path from '\.([^./]+)$')) = %s", [file_ext]))
     if created_from is not None:
-        specs.append(("{a}created_at >= %s", created_from))
+        specs.append(("{a}created_at >= %s", [created_from]))
     if created_to is not None:
-        specs.append(("{a}created_at < %s", created_to))
-    params = [v for _t, v in specs if v is not _NOPARAM]
+        specs.append(("{a}created_at < %s", [created_to]))
+    params = [v for _t, vs in specs for v in vs]
 
     def _where(pfx: str) -> str:  # 같은 조건을 접두사만 바꿔 — content 경로는 "a." 로 모호성 차단
-        return " WHERE " + " AND ".join(t.format(a=pfx) for t, _v in specs)
+        return " WHERE " + " AND ".join(t.format(a=pfx) for t, _vs in specs)
 
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM asset" + _where(""), params)  # COUNT 은 JOIN 불요(경량·비한정)

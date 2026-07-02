@@ -2,6 +2,10 @@ import unittest
 from datetime import datetime, timezone
 
 from src.portal.asset_stats import (
+    _PROCESSING_STATUSES,
+    _RELATION_PROPOSED_ACTIVITY,
+    _SNAPSHOT_BUCKETS,
+    _snapshot_bucket_predicate,
     asset_stats,
     asset_timeline,
     modality_detail,
@@ -210,6 +214,163 @@ class QueryAssetsContentTest(unittest.TestCase):
         self.assertIn("a.domain_label <> 'medical'", select_sql)
         self.assertNotIn("LEFT JOIN", count_sql)  # COUNT 은 단일 테이블·비한정(모호성 없음)
         self.assertIn("WHERE domain_label <> 'medical'", count_sql)
+
+
+class SnapshotBucketPredicateTest(unittest.TestCase):
+    """054 G1 — 스냅샷 버킷 술어 헬퍼 + 상수(FR-101~104/601)."""
+
+    def test_constants(self):
+        # 버킷 5종 순서·processing 4status(classified 없음·status 아님)·relation activity
+        self.assertEqual(
+            _SNAPSHOT_BUCKETS,
+            ("processing", "deferred", "registered", "failed", "relation_proposed"))
+        self.assertEqual(
+            _PROCESSING_STATUSES, ("received", "routing", "classifying", "extracting"))
+        self.assertNotIn("classified", _PROCESSING_STATUSES)  # C1: classified 는 status 가 아님
+        self.assertEqual(_RELATION_PROPOSED_ACTIVITY, "relations.proposed.v1")
+
+    def test_processing_predicate(self):
+        frag, params = _snapshot_bucket_predicate(
+            "processing", "", relation_scope="period", since=None, until=None)
+        self.assertIn("status IN (", frag)
+        for st in _PROCESSING_STATUSES:
+            self.assertIn(f"'{st}'", frag)
+        self.assertEqual(params, [])  # status 집합은 고정 리터럴·파라미터 없음
+
+    def test_deferred_predicate(self):
+        frag, params = _snapshot_bucket_predicate(
+            "deferred", "", relation_scope="period", since=None, until=None)
+        self.assertIn("status = 'deferred'", frag)
+        self.assertNotIn("EXISTS", frag)
+        self.assertEqual(params, [])
+
+    def test_failed_predicate(self):
+        frag, params = _snapshot_bucket_predicate(
+            "failed", "", relation_scope="period", since=None, until=None)
+        self.assertIn("status = 'failed'", frag)
+        self.assertNotIn("EXISTS", frag)
+        self.assertEqual(params, [])
+
+    def test_relation_proposed_predicate_alltime(self):
+        # alltime → EXISTS 에 occurred_at 기간 조건 없음, activity 만 %s
+        frag, params = _snapshot_bucket_predicate(
+            "relation_proposed", "", relation_scope="alltime",
+            since="X", until="Y")
+        self.assertIn("status = 'registered'", frag)
+        self.assertIn("EXISTS (SELECT 1 FROM asset_lineage l", frag)
+        self.assertIn("l.asset_id = asset_id", frag)
+        self.assertIn("l.activity = %s", frag)
+        self.assertNotIn("occurred_at", frag)  # alltime 은 기간 없음
+        self.assertNotIn("NOT EXISTS", frag)
+        self.assertEqual(params, [_RELATION_PROPOSED_ACTIVITY])  # activity 만
+
+    def test_relation_proposed_predicate_period_scoped(self):
+        # period + since/until → EXISTS 에 occurred_at 기간(%s,%s), 파라미터 activity→since→until
+        frag, params = _snapshot_bucket_predicate(
+            "relation_proposed", "", relation_scope="period",
+            since="S", until="U")
+        self.assertIn("status = 'registered'", frag)
+        self.assertIn("l.activity = %s", frag)
+        self.assertIn("l.occurred_at >= %s", frag)
+        self.assertIn("l.occurred_at < %s", frag)
+        self.assertEqual(params, [_RELATION_PROPOSED_ACTIVITY, "S", "U"])
+
+    def test_relation_proposed_period_without_range_is_unscoped(self):
+        # period 이지만 since/until 없으면 기간 조건 없음(activity 만 바인딩)
+        frag, params = _snapshot_bucket_predicate(
+            "relation_proposed", "", relation_scope="period",
+            since=None, until=None)
+        self.assertNotIn("occurred_at", frag)
+        self.assertEqual(params, [_RELATION_PROPOSED_ACTIVITY])
+
+    def test_registered_predicate_uses_not_exists(self):
+        frag, params = _snapshot_bucket_predicate(
+            "registered", "", relation_scope="alltime", since=None, until=None)
+        self.assertIn("status = 'registered'", frag)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM asset_lineage l", frag)
+        self.assertIn("l.activity = %s", frag)
+        self.assertEqual(params, [_RELATION_PROPOSED_ACTIVITY])
+
+    def test_predicate_prefix_applied(self):
+        # pfx="a." → asset 컬럼은 a. 한정(EXISTS 서브쿼리 l 은 자체 alias·모호성 없음)
+        frag, _params = _snapshot_bucket_predicate(
+            "relation_proposed", "a.", relation_scope="period",
+            since="S", until="U")
+        self.assertIn("a.status = 'registered'", frag)
+        self.assertIn("l.asset_id = a.asset_id", frag)
+
+
+class QueryAssetsSnapshotBucketTest(unittest.TestCase):
+    """054 G1 — query_assets snapshot_bucket 통합(C3: 버킷 우선·하위호환)."""
+
+    def test_relation_proposed_bucket_sql(self):
+        dtx = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dty = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([(0,), []])
+        # status 를 함께 줘도 snapshot_bucket 이 우선(C3) — status 스펙은 추가되지 않음
+        query_assets(conn, snapshot_bucket="relation_proposed",
+                     status="failed", created_from=dtx, created_to=dty)
+        count_sql, count_params = conn._cur.calls[0]
+        select_sql, _select_params = conn._cur.calls[1]
+        # 버킷 술어가 SQL 에 반영: EXISTS·activity·registered
+        self.assertIn("EXISTS (SELECT 1 FROM asset_lineage l", count_sql)
+        self.assertIn("l.activity = %s", count_sql)
+        self.assertIn("status = 'registered'", count_sql)
+        self.assertIn("l.occurred_at >= %s", count_sql)  # period 기본 + 기간 있음
+        self.assertIn("l.occurred_at < %s", count_sql)
+        # C3: snapshot_bucket 우선 → status = %s 스펙은 추가되지 않음
+        self.assertNotIn("status = %s", count_sql)
+        # 결정적 정렬·의료 제외 유지
+        self.assertIn("ORDER BY created_at DESC, asset_id DESC", select_sql)
+        self.assertIn("domain_label <> 'medical'", count_sql)
+        # 파라미터 순서 = WHERE 순서(specs 불변식): 의료 제외(무파라미터) →
+        #   버킷 술어 EXISTS[activity, occurred_since, occurred_until] →
+        #   자산 created 기간[created_from, created_to]. period 라 관계 occurred 기간도 스코프되고
+        #   자산 created 기간 필터도 그대로 유지되어 총 5개(요청 §2.2: 두 기간 = 같은 값).
+        # (status 는 C3 로 무시되므로 파라미터에 'failed' 없음)
+        self.assertNotIn("failed", count_params)
+        self.assertEqual(
+            count_params, [_RELATION_PROPOSED_ACTIVITY, dtx, dty, dtx, dty])
+
+    def test_relation_scope_default_is_period(self):
+        # relation_scope 미지정 기본 'period' — 기간 있으면 occurred_at 스코프
+        dtx = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dty = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([(0,), []])
+        query_assets(conn, snapshot_bucket="relation_proposed",
+                     created_from=dtx, created_to=dty)
+        count_sql = conn._cur.calls[0][0]
+        self.assertIn("l.occurred_at >= %s", count_sql)
+
+    def test_relation_scope_alltime_drops_occurred_range(self):
+        dtx = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dty = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([(0,), []])
+        query_assets(conn, snapshot_bucket="relation_proposed",
+                     relation_scope="alltime", created_from=dtx, created_to=dty)
+        count_sql, count_params = conn._cur.calls[0]
+        self.assertNotIn("l.occurred_at", count_sql)  # alltime → EXISTS 기간 없음
+        # activity 만·이어서 자산 created_at 기간(>= <)은 여전히 자산 필터로 바인딩
+        self.assertIn("created_at >= %s", count_sql)
+        self.assertEqual(count_params, [_RELATION_PROPOSED_ACTIVITY, dtx, dty])
+
+    def test_processing_bucket_sql(self):
+        conn = _Conn([(0,), []])
+        query_assets(conn, snapshot_bucket="processing")
+        count_sql, count_params = conn._cur.calls[0]
+        self.assertIn("status IN (", count_sql)
+        self.assertIn("'received'", count_sql)
+        self.assertNotIn("EXISTS", count_sql)
+        self.assertEqual(count_params, [])  # 상태집합 리터럴·파라미터 없음
+
+    def test_snapshot_bucket_none_keeps_legacy_sql(self):
+        # 하위호환: snapshot_bucket 미지정 시 기존 동작·SQL 불변(status 스펙 정상 동작)
+        conn = _Conn([(0,), []])
+        query_assets(conn, status="registered")
+        count_sql, count_params = conn._cur.calls[0]
+        self.assertIn("status = %s", count_sql)
+        self.assertNotIn("asset_lineage", count_sql)
+        self.assertEqual(count_params, ["registered"])
 
 
 class ModalityDetailTest(unittest.TestCase):
