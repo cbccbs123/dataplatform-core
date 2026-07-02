@@ -102,6 +102,16 @@ from src.relations.review import (
     promote_relation_kind,
     revise_edge,
 )
+
+# 056 포털 주제 표면 — 자산상세 same-topic·주제 브라우즈·검색 패싯(FR-501/502/503). 전부 순수 조회
+# (graph_query seam·active-only·의료 제외)로 **신규 LLM 호출 0**(FR-505). 모듈 상단 import 로 두어
+# 단위 테스트가 src.app.portal_api.<name> 을 patch 할 수 있게 한다(다른 조회 seam 과 동형).
+from src.relations.topic_query import (
+    assets_in_topic,
+    find_topic_neighbors,
+    list_topics,
+    project_asset_topics,
+)
 from src.search.search_filters import parse_search_filters
 from src.search.search_service import search_hybrid
 
@@ -896,6 +906,46 @@ def _project_grouped_search(
     return out
 
 
+def _search_topic_facet(
+    conn: Any, grouped: dict[str, list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    """검색 결과(의료 배제·top-N)의 자산들이 공유하는 주제 패싯을 집계한다(056 FR-503·US3).
+
+    결과 페이지 안의 각 자산에 대해 ``project_asset_topics``(active-only 투영·G1 seam 재사용)로
+    주제를 계산하고, ``topic_ko`` 별로 그 주제를 가진 **결과-자산 distinct 수**를 센다 — 클릭 시
+    ``topic=`` 필터로 결과를 좁히는 피벗의 근거다. **신규 LLM 0**(주제는 관계 단계 확정 산출 재사용)·
+    결정적 정렬(``asset_count desc → topic_ko asc``).
+
+    범위·비용: 패싯은 **현재 결과 페이지**(모달리티별 top-N·의료 배제 후)로 한정된다 — 자산 수가
+    페이지 크기로 상한돼 있어 자산당 투영(``project_asset_topics``)을 순차 재사용한다(seam 재구현
+    금지·plan 지침). 전역 무거운 패싯은 OS 담당(C6)이며, 결과-스코프 패싯은 이 bounded 조회로 둔다.
+    상세 조회와 **같은 읽기 트랜잭션**에서 계산한다(추가 풀 획득 없음).
+    """
+    # 결과 버킷을 순회하며 자산 id 를 최초 등장 순으로 dedup(결정성은 최종 정렬이 보장).
+    asset_ids: list[str] = []
+    seen: set[str] = set()
+    for rows in grouped.values():
+        for r in rows:
+            aid = str(r.get("asset_id") or "")
+            if aid and aid not in seen:
+                seen.add(aid)
+                asset_ids.append(aid)
+
+    topic_assets: dict[str, set[str]] = {}
+    for aid in asset_ids:
+        for t in project_asset_topics(conn, asset_id=aid):
+            topic_ko = t.get("topic_ko")
+            if topic_ko:  # 빈/None 주제는 투영 단계에서 스킵되지만 방어적으로 재확인
+                topic_assets.setdefault(topic_ko, set()).add(aid)
+
+    facet = [
+        {"topic_ko": ko, "asset_count": len(assets)} for ko, assets in topic_assets.items()
+    ]
+    # 결정성(헌법 3조): 자산 수 내림차순 → topic_ko 오름차순.
+    facet.sort(key=lambda f: (-f["asset_count"], f["topic_ko"]))
+    return facet
+
+
 def _search_min_scores() -> dict[str, float] | None:
     """settings 의 모달리티별 적합도 하한(``SEARCH_MIN_SCORE_*``)을 검색에 적용한다.
 
@@ -952,9 +1002,11 @@ def search(
     ),
     created_from: str | None = Query(None, description="생성일 하한(YYYY-MM-DD 또는 ISO datetime, UTC)"),
     created_to: str | None = Query(None, description="생성일 상한(YYYY-MM-DD 또는 ISO datetime, UTC)"),
+    topic: str | None = Query(None, description="주제(topic) 정확 일치 필터(056·keyword terms)"),
+    subtopic: str | None = Query(None, description="세부주제(subtopic) 정확 일치 필터(056·keyword terms)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003).
+    """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003 + 056 FR-503).
 
     내부: ``search_hybrid``(신규 LLM 호출 0, 006 seam) → ``group_ranked``(모달리티별 독립 랭킹·
     의료 배제, FR-014). 모달리티 간 점수 척도가 비교 불가라 단일 랭킹으로 합치지 않고 섹션별로
@@ -970,6 +1022,8 @@ def search(
             source_dataset=source_dataset,
             created_from=created_from,
             created_to=created_to,
+            topic=topic,
+            subtopic=subtopic,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"필터 파라미터 형식 오류: {exc}") from exc
@@ -986,12 +1040,15 @@ def search(
     )
 
     # FR-014: 버킷별 의료 배제 + 모달리티별 독립 랭킹·top-N. results 는 {modality: [rows]}.
-    grouped = group_ranked(result, limit_per_modality=size, exclude_domains=_EXCLUDE_DOMAINS)
-    grouped = _run_in_db(
-        lambda conn: _project_grouped_search(
-            conn, grouped, clearance=principal.clearance
-        )
-    )
+    grouped_raw = group_ranked(result, limit_per_modality=size, exclude_domains=_EXCLUDE_DOMAINS)
+
+    # tier projection(042)과 주제 패싯(056 FR-503)을 **같은 읽기 트랜잭션**에서 계산한다(풀 1회).
+    def _project_and_facet(conn: Any) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+        projected = _project_grouped_search(conn, grouped_raw, clearance=principal.clearance)
+        facet = _search_topic_facet(conn, projected)
+        return projected, facet
+
+    grouped, topic_facets = _run_in_db(_project_and_facet)
     counts = {modality: len(rows) for modality, rows in grouped.items()}
 
     meta: dict[str, Any] = {
@@ -999,6 +1056,8 @@ def search(
         "modalities": mods,
         "size": size,
         "counts": counts,
+        # 056 FR-503(US3): 결과-스코프 주제 패싯 집계(topic_ko별 결과-자산 수). 주제 클릭 → topic= 필터.
+        "topic_facets": topic_facets,
     }
     search_plan = (result.get("meta") or {}).get("search_plan")
     if search_plan is not None:
@@ -1013,6 +1072,8 @@ def search(
             "created_to": search_filters.created_to.isoformat()
             if search_filters.created_to is not None
             else None,
+            "topic": search_filters.topic,
+            "subtopic": search_filters.subtopic,
         }
 
     return {
@@ -1027,19 +1088,63 @@ def asset_detail(
     asset_id: str,
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """자산 1건 상세(메타·임베딩 채널 요약·관계 미니뷰)를 반환한다(FR-004/005/006).
+    """자산 1건 상세(메타·임베딩 채널 요약·관계 미니뷰)를 반환한다(FR-004/005/006 + 056 FR-501).
 
     노출 게이트(FR-014)는 ``fetch_asset_detail`` 이 책임진다 — 없음/비registered/의료면 None →
     404(자산 데이터 노출 0).
+
+    056 FR-501 — 노출 통과 자산에 관계 주제 렌즈를 함께 싣는다(신규 LLM 0·FR-505):
+    - ``topics``: 이 자산의 active 관계 주제 투영(``project_asset_topics``).
+    - ``same_topic_assets``: 같은 주제를 공유하는 다른 자산(``find_topic_neighbors``·직접 관계
+      여부 ``already_linked`` 포함) — ego-network(``relations``) 옆의 두 번째 탐색 렌즈(US1·의료 제외).
+    상세 조회와 **같은 읽기 트랜잭션**에서 계산한다(추가 풀 획득 없음). 게이트 미통과(None)면
+    주제 seam 을 호출하지 않는다(불필요한 조회 없음).
     """
-    detail = _run_in_db(
-        lambda conn: fetch_asset_detail(
-            conn, asset_id=asset_id, clearance=principal.clearance
-        )
-    )
+
+    def _work(conn: Any) -> dict[str, Any] | None:
+        detail = fetch_asset_detail(conn, asset_id=asset_id, clearance=principal.clearance)
+        if detail is None:
+            return None
+        detail["topics"] = project_asset_topics(conn, asset_id=asset_id)
+        detail["same_topic_assets"] = find_topic_neighbors(conn, asset_id=asset_id)
+        return detail
+
+    detail = _run_in_db(_work)
     if detail is None:
         raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 노출 대상이 아님")
     return detail
+
+
+@app.get("/topics")
+def topics_list(
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """관계 주제 목록(topic→subtopic 2단계·주제별 자산 수)을 반환한다(056 FR-502·US2). 조회 전용·LLM 0.
+
+    ``list_topics`` 가 active·의료 제외 엣지의 ``(topic_ko, subtopic_ko)`` 별 distinct 자산 수를
+    결정적 정렬(topic_ko asc→subtopic_ko asc)로 집계한다. 주제 브라우즈 진입점.
+    """
+    return {"topics": _run_in_db(list_topics)}
+
+
+@app.get("/topics/{topic}")
+def topic_assets(
+    topic: str,
+    subtopic: str | None = Query(None, description="세부주제(주면 topic 하위로 좁힘·정확 일치)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """특정 주제에 속한 자산을 페이징 조회한다(056 FR-502·US2). 조회 전용·의료 제외·LLM 0.
+
+    ``assets_in_topic`` 이 그 주제(active 엣지) 양끝 자산을 distinct·``asset_id asc`` 결정적 정렬로
+    페이징한다. ``subtopic`` 미지정이면 topic 하위 전체. 반환 ``{rows:[{asset_id, fs_uri, file_name}], total}``.
+    """
+    return _run_in_db(
+        lambda conn: assets_in_topic(
+            conn, topic_ko=topic, subtopic_ko=subtopic, limit=limit, offset=offset
+        )
+    )
 
 
 def _guess_content_type(file_name: str, modality: str | None) -> str:

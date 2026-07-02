@@ -108,6 +108,12 @@ class TestSearch(unittest.TestCase):
         tiers = patch("src.app.portal_api.fetch_access_tiers", side_effect=_empty_tiers)
         tiers.start()
         self.addCleanup(tiers.stop)
+        # 056: /search 는 결과-스코프 주제 패싯(FR-503)을 같은 읽기 트랜잭션에서 계산하며
+        # project_asset_topics(DB seam)를 자산마다 호출한다. object() conn 단위 테스트에선
+        # fetch_access_tiers 와 동일하게 이 DB seam 도 스텁한다(패싯=[]; 패싯 자체 검증은 test_portal_topics).
+        facet = patch("src.app.portal_api.project_asset_topics", return_value=[])
+        facet.start()
+        self.addCleanup(facet.stop)
         self.client = TestClient(app)
 
     @patch("src.app.portal_api.search_hybrid")
@@ -242,6 +248,13 @@ class TestAssetDetail(unittest.TestCase):
 
     def setUp(self) -> None:
         _enable_portal_test_auth_bypass(self)
+        # 056: 자산상세는 노출 통과 시 topics·same_topic_assets 를 같은 트랜잭션에서 계산하며
+        # project_asset_topics/find_topic_neighbors(DB seam)를 호출한다. object() conn 단위
+        # 테스트에선 fetch_asset_detail 과 동일하게 이 seam 들을 스텁한다(보강 검증은 test_portal_topics).
+        for name in ("project_asset_topics", "find_topic_neighbors"):
+            p = patch(f"src.app.portal_api.{name}", return_value=[])
+            p.start()
+            self.addCleanup(p.stop)
         self.client = TestClient(app)
 
     @patch("src.app.portal_api.fetch_asset_detail")
