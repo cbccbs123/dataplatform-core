@@ -8,6 +8,7 @@ from src.portal.asset_stats import (
     _snapshot_bucket_predicate,
     asset_stats,
     asset_timeline,
+    build_modality_overview,
     modality_detail,
     query_assets,
 )
@@ -569,6 +570,62 @@ class AssetTimelineTest(unittest.TestCase):
         conn = _Conn([[]])
         out = asset_timeline(conn, interval="month")
         self.assertEqual(out["interval"], "month")
+
+    def test_modality_filter_opt_in(self):
+        # 057 FR-302: modality 필터(모달리티 현황 BFF timeline) — 지정 시 WHERE modality=%s·바인딩.
+        conn = _Conn([[]])
+        asset_timeline(conn, modality="video", interval="month")
+        sql, params = conn._cur.calls[0]
+        self.assertIn("modality = %s", sql)
+        self.assertIn("video", params)
+        self.assertIn("domain_label <> 'medical'", sql)  # 의료 제외 유지
+
+    def test_no_modality_keeps_legacy_shape(self):
+        # 하위호환: modality 미지정(기본 None)이면 기존 SQL·동작 불변(modality 절 없음).
+        conn = _Conn([[]])
+        asset_timeline(conn, interval="day")
+        sql, params = conn._cur.calls[0]
+        self.assertNotIn("modality = %s", sql)
+        self.assertEqual(params, [])
+
+
+class BuildModalityOverviewTest(unittest.TestCase):
+    """057 FR-302 — 모달리티 현황 BFF(modality_detail + asset_timeline + first-page 를 한 트랜잭션 조합)."""
+
+    def test_overview_combines_three_slices(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        d = ts.date()
+        # 순서: modality_detail(COUNT→by_file_ext→by_status→by_date=4쿼리)
+        #      → asset_timeline(단일 execute·1)
+        #      → query_assets(COUNT→rows=2쿼리)
+        conn = _Conn([
+            (9,),                         # modality_detail COUNT
+            [("mp4", 7), ("mov", 2)],     # by_file_ext
+            [("registered", 9)],          # by_status
+            [(d, 9)],                     # by_date
+            [(ts, 9)],                    # asset_timeline buckets
+            (9,),                         # query_assets COUNT
+            [("a1", "registered", "video", "general", "/x/뉴스.mp4", ts, "요약", ["k"], "mp4")],  # rows(content)
+        ])
+        out = build_modality_overview(conn, "video", interval="month", limit=10)
+        self.assertEqual(out["detail"]["modality"], "video")
+        self.assertEqual(out["detail"]["total"], 9)
+        self.assertEqual(out["timeline"]["interval"], "month")
+        self.assertEqual(out["timeline"]["buckets"][0]["count"], 9)
+        self.assertEqual(out["first_page"]["rows"][0]["file_name"], "뉴스.mp4")
+        self.assertEqual(out["first_page"]["rows"][0]["summary"], "요약")  # with_content
+
+    def test_overview_scopes_all_slices_to_modality_and_medical_excluded(self):
+        conn = _Conn([
+            (0,), [], [], [],   # modality_detail
+            [],                 # asset_timeline
+            (0,), [],           # query_assets
+        ])
+        build_modality_overview(conn, "image")
+        for sql, _p in conn._cur.calls:
+            self.assertIn("domain_label <> 'medical'", sql)  # 의료 제외 상속(모든 슬라이스)
+        # asset_timeline 슬라이스(5번째 execute)에 modality=%s 스코프
+        self.assertIn("modality = %s", conn._cur.calls[4][0])
 
 
 if __name__ == "__main__":

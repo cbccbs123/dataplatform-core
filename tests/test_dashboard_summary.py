@@ -78,6 +78,28 @@ class TestBuildDashboardSummary(unittest.TestCase):
         self.assertEqual(m["lineage_tl"].call_args_list[0].kwargs["group_by"], "activity")
         self.assertEqual(m["asset_tl"].call_args_list[0].kwargs["group_by"], "modality")
 
+    def test_monthly_interval_default_is_day(self):
+        # 057 FR-303 하위호환: monthly_interval 미지정 → 기존대로 월별 시리즈=일별 버킷(프론트 무영향).
+        _, m = self._run()
+        self.assertEqual(m["access_tl"].call_args_list[0].kwargs["interval"], "day")
+        self.assertEqual(m["asset_tl"].call_args_list[0].kwargs["interval"], "day")
+
+    def test_monthly_interval_month_opt_in(self):
+        # 057 FR-303: monthly_interval="month" → 월별 슬라이스가 month 버킷(프론트 rollupTimelineSeriesToMonth 제거).
+        from src.portal import dashboard
+        conn = MagicMock()
+        with patch.object(dashboard, "access_log_stats", side_effect=lambda *a, **k: ("a_stats", k)), \
+             patch.object(dashboard, "access_log_timeline", side_effect=lambda *a, **k: ("a_tl", k)) as a_t, \
+             patch.object(dashboard, "lineage_stats", side_effect=lambda *a, **k: ("l_stats", k)), \
+             patch.object(dashboard, "lineage_timeline", side_effect=lambda *a, **k: ("l_tl", k)), \
+             patch.object(dashboard, "asset_stats", side_effect=lambda *a, **k: ("as_stats", k)), \
+             patch.object(dashboard, "asset_timeline", side_effect=lambda *a, **k: ("as_tl", k)) as as_t:
+            dashboard.build_dashboard_summary(conn, now=_NOW, months=6, monthly_interval="month")
+        # 월별(첫 timeline 호출)만 month, 오늘 시간별(두 번째)은 여전히 hour.
+        self.assertEqual(a_t.call_args_list[0].kwargs["interval"], "month")
+        self.assertEqual(a_t.call_args_list[1].kwargs["interval"], "hour")
+        self.assertEqual(as_t.call_args_list[0].kwargs["interval"], "month")
+
 
 if __name__ == "__main__":
     unittest.main()

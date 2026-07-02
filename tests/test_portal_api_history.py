@@ -276,6 +276,84 @@ class HistoryEndpointsTest(unittest.TestCase):
         s.assert_called_once()
         lst.assert_not_called()  # 검토 큐 핸들러로 새지 않음
 
+    # ── 057 FR-301: access-logs overview BFF(stats+timeline 1회) ───────────────
+    def test_access_logs_overview_endpoint(self):
+        with mock.patch.object(portal_api, "access_log_overview",
+                               return_value={"total": 12, "by_action": [{"action": "search", "count": 12}],
+                                             "timeline": {"interval": "day", "group_by": "action",
+                                                          "series": []}}) as ov, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/access-logs/overview?from=2026-06-01&to=2026-06-30&action=search")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["total"], 12)
+        self.assertIn("by_action", body)
+        self.assertIn("timeline", body)
+        kw = ov.call_args.kwargs
+        self.assertEqual(kw["action"], "search")
+        self.assertIsNotNone(kw["since"])
+        self.assertIsNotNone(kw["until"])
+
+    def test_access_logs_overview_interval_passthrough(self):
+        with mock.patch.object(portal_api, "access_log_overview",
+                               return_value={"total": 0, "by_action": [],
+                                             "timeline": {"interval": "month", "series": []}}) as ov, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/access-logs/overview?interval=month")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(ov.call_args.kwargs["interval"], "month")
+
+    def test_access_logs_overview_bad_interval_422(self):
+        r = self.client.get("/admin/access-logs/overview?interval=year")
+        self.assertEqual(r.status_code, 422)
+
+    def test_access_logs_overview_not_shadowed_by_list(self):
+        # /admin/access-logs/overview 가 /admin/access-logs(목록)로 새지 않음(구체 경로 우선).
+        with mock.patch.object(portal_api, "access_log_overview",
+                               return_value={"total": 0, "by_action": [],
+                                             "timeline": {"interval": "day", "series": []}}) as ov, \
+             mock.patch.object(portal_api, "query_access_logs", return_value={"rows": [], "total": 0}) as lst, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/access-logs/overview")
+        self.assertEqual(r.status_code, 200)
+        ov.assert_called_once()
+        lst.assert_not_called()
+
+    # ── 057 FR-302: 모달리티 현황 BFF(detail+timeline+first-page 1회) ───────────
+    def test_modality_overview_endpoint(self):
+        with mock.patch.object(portal_api, "build_modality_overview",
+                               return_value={"detail": {"modality": "video", "total": 9},
+                                             "timeline": {"interval": "month", "buckets": []},
+                                             "first_page": {"rows": [], "total": 9}}) as ov, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get(
+                "/admin/assets/modality/video/overview?from=2026-06-01&to=2026-06-30&interval=month&limit=10")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertIn("detail", body)
+        self.assertIn("timeline", body)
+        self.assertIn("first_page", body)
+        self.assertEqual(ov.call_args.args[1], "video")  # path param modality
+        kw = ov.call_args.kwargs
+        self.assertEqual(kw["interval"], "month")
+        self.assertEqual(kw["limit"], 10)
+        self.assertIsNotNone(kw["since"])
+
+    def test_modality_overview_bad_interval_422(self):
+        r = self.client.get("/admin/assets/modality/video/overview?interval=year")
+        self.assertEqual(r.status_code, 422)
+
+    def test_modality_overview_not_shadowed_by_asset_detail(self):
+        # /admin/assets/modality/{m}/overview 가 /admin/assets/{id} catch-all 로 새지 않음.
+        with mock.patch.object(portal_api, "build_modality_overview",
+                               return_value={"detail": {}, "timeline": {}, "first_page": {}}) as ov, \
+             mock.patch.object(portal_api, "fetch_asset_detail", return_value={"asset_id": "x"}) as det, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/modality/image/overview")
+        self.assertEqual(r.status_code, 200)
+        ov.assert_called_once()
+        det.assert_not_called()
+
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.

@@ -151,3 +151,23 @@ def access_log_timeline(conn: Any, *, since: Any = None, until: Any = None, acti
             {"bucket": b.isoformat() if b is not None else None, "count": int(c)}
             for b, c in cur.fetchall()]
     return {"interval": trunc, "buckets": buckets}
+
+
+def access_log_overview(conn: Any, *, since: Any = None, until: Any = None,
+                        action: str | None = None, interval: str = "day") -> dict[str, Any]:
+    """접근 이력 overview BFF(057 FR-301) — 기간 KPI(총계·action별) + 추이를 **한 트랜잭션·1회 응답**.
+
+    프론트가 stats+list+timeline 3회 순차 호출하던 것을 stats+timeline **1회**로 묶는다(list 는 별도
+    페이징 유지). 검증된 순수 조회 함수 2종(``access_log_stats``·``access_log_timeline``)을 그대로
+    재사용해 재구현 0·결정성·LLM 0(``build_dashboard_summary`` 조합 패턴을 따른다).
+
+    - ``total``·``by_action``: 기간 전체 KPI(``access_log_stats`` — action 무필터·전 action 분포).
+    - ``timeline``: ``group_by="action"`` 멀티시리즈. ``action`` 지정 시 그 action 으로 **드릴다운**
+      (해당 action 단일 시리즈)한다 — action 은 추이만 스코프하고 KPI(total/by_action)는 기간 전체다.
+
+    ``interval`` 은 ``access_log_timeline`` 화이트리스트(day/hour/month·그 외 day 폴백; API 계층 422).
+    """
+    stats = access_log_stats(conn, since=since, until=until)
+    timeline = access_log_timeline(
+        conn, since=since, until=until, action=action, interval=interval, group_by="action")
+    return {"total": stats["total"], "by_action": stats["by_action"], "timeline": timeline}

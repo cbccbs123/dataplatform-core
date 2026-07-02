@@ -44,18 +44,24 @@ def _month_floor_back(day_start: datetime, months: int) -> datetime:
 
 
 def build_dashboard_summary(
-    conn: Connection[Any], *, now: datetime, months: int = _DEFAULT_MONTHS
+    conn: Connection[Any], *, now: datetime, months: int = _DEFAULT_MONTHS,
+    monthly_interval: str = "day",
 ) -> dict[str, Any]:
     """운영 대시보드 3도메인 집계를 한 트랜잭션에서 조합해 반환한다.
 
     각 도메인 슬라이스:
         - ``kpi_alltime``: 전체 기간 stats(도넛·KPI 총계)
         - ``kpi_today``: 오늘([자정, 익일 자정)) stats
-        - ``monthly_timeline``: 최근 ``months``개월 **일별** 멀티시리즈(group_by)
+        - ``monthly_timeline``: 최근 ``months``개월 멀티시리즈(group_by·``monthly_interval`` 버킷)
         - ``hourly_timeline``: 오늘 **시간별** 멀티시리즈(group_by)
 
     조회 전용·의료 제외(각 함수)·LLM 0·마이그레이션 0. 윈도우는 ``now`` 로 계산(주입·결정적 테스트).
     반환 ``{access:{...}, lineage:{...}, asset:{...}, meta:{...}}``.
+
+    ``monthly_interval``(057 FR-303) — 월별 슬라이스 버킷 단위. 기본 ``"day"``(일별·하위호환·기존
+    동작 완전 불변). ``"month"`` 면 월 버킷으로 내려 프론트의 일→월 롤업(``rollupTimelineSeriesToMonth``)을
+    제거한다(각 timeline 함수의 TIMELINE_INTERVALS 화이트리스트·API 계층이 day|month 로 선검증). 시간별
+    슬라이스(hourly_timeline)는 항상 hour 로 불변.
     """
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
@@ -66,7 +72,8 @@ def build_dashboard_summary(
             "kpi_alltime": stats_fn(conn),
             "kpi_today": stats_fn(conn, since=today_start, until=today_end),
             "monthly_timeline": timeline_fn(
-                conn, since=month_start, until=today_end, interval="day", group_by=group_by),
+                conn, since=month_start, until=today_end, interval=monthly_interval,
+                group_by=group_by),
             "hourly_timeline": timeline_fn(
                 conn, since=today_start, until=today_end, interval="hour", group_by=group_by),
         }
@@ -80,6 +87,7 @@ def build_dashboard_summary(
     }
     summary["meta"] = {
         "months": months,
+        "monthly_interval": monthly_interval,  # 057 FR-303: 월별 슬라이스 버킷 단위(프론트 롤업 여부 판단)
         "today_from": today_start.isoformat(),
         "today_to": today_end.isoformat(),
         "monthly_from": month_start.isoformat(),

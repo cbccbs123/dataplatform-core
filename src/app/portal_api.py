@@ -57,6 +57,7 @@ from src.portal._timeline_util import TIMELINE_INTERVALS
 # 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
 # search_hybrid 만 006 검색 seam(LLM 경유) — 그 외는 순수/조회 함수. 직접 LLM 호출은 없다.
 from src.portal.access_log import (
+    access_log_overview,
     access_log_stats,
     access_log_timeline,
     derive_access_action,
@@ -69,6 +70,7 @@ from src.portal.asset_stats import (
     _SNAPSHOT_BUCKETS,
     asset_stats,
     asset_timeline,
+    build_modality_overview,
     modality_detail,
     query_assets,
 )
@@ -368,6 +370,29 @@ def access_logs_timeline(
             conn, since=since, until=until, action=action, interval=interval, group_by=group_by))
 
 
+@app.get("/admin/access-logs/overview")
+def access_logs_overview_endpoint(
+    from_: str | None = Query(None, alias="from", description="기간 하한(YYYY-MM-DD 또는 ISO)"),
+    to: str | None = Query(None, alias="to", description="기간 상한(exclusive)"),
+    action: str | None = Query(None, description="추이 드릴다운 action(총계/action별 KPI 는 기간 전체)"),
+    interval: str = Query("day", description="추이 버킷 단위: day(기본) | hour | month"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """접근 이력 overview 1회 응답(057 FR-301) — ``{total, by_action, timeline}``. 조회 전용·결정적·LLM 0.
+
+    프론트가 stats+list+timeline 3회 순차 호출하던 것을 stats+timeline **1회**로 묶는다(``access_log_overview``·
+    list 는 별도 페이징 유지). ``total``/``by_action`` 은 기간 전체 KPI, ``timeline`` 은 action 별 멀티시리즈
+    (``action`` 지정 시 그 action 단일 시리즈로 드릴다운). interval 화이트리스트 위반은 422.
+    """
+    if interval not in TIMELINE_INTERVALS:
+        raise HTTPException(status_code=422,
+                            detail=f"interval 은 {'|'.join(TIMELINE_INTERVALS)} 만 허용: {interval!r}")
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: access_log_overview(
+            conn, since=since, until=until, action=action, interval=interval))
+
+
 @app.get("/admin/lineage")
 def lineage_feed(
     from_: str | None = Query(None, alias="from", description="기간 하한(YYYY-MM-DD 또는 ISO)"),
@@ -505,6 +530,31 @@ def modality_detail_endpoint(
     return _run_in_db(lambda conn: modality_detail(conn, modality, since=since, until=until))
 
 
+@app.get("/admin/assets/modality/{modality}/overview")
+def modality_overview_endpoint(
+    modality: str,
+    from_: str | None = Query(None, alias="from", description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
+    to: str | None = Query(None, alias="to", description="생성일 상한(exclusive)"),
+    interval: str = Query("day", description="추이 버킷 단위: day(기본) | hour | month"),
+    limit: int = Query(50, ge=1, le=200),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """모달리티 현황 BFF 1회 응답(057 FR-302) — ``{detail, timeline, first_page}``. 조회 전용·의료 제외·LLM 0.
+
+    프론트 모달리티 상세가 stats+timeline+first-page 를 3~4회 순차 호출하던 것을 ``build_modality_overview``
+    로 **한 트랜잭션**에 묶는다. timeline 은 interval=month 를 지원해 프론트 일→월 롤업(FR-303)도 제거한다.
+    interval 화이트리스트 위반은 422. **라우트 순서(C8)**: 리터럴 3세그 경로라 catch-all 1세그
+    ``/admin/assets/{asset_id}`` 보다 위(구체 경로)에 두어 새지 않게 한다.
+    """
+    if interval not in TIMELINE_INTERVALS:
+        raise HTTPException(status_code=422,
+                            detail=f"interval 은 {'|'.join(TIMELINE_INTERVALS)} 만 허용: {interval!r}")
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: build_modality_overview(
+            conn, modality, since=since, until=until, interval=interval, limit=limit))
+
+
 @app.get("/admin/asset-timeline")
 def asset_timeline_endpoint(
     from_: str | None = Query(None, alias="from"),
@@ -554,18 +604,29 @@ def admin_asset_detail(
 @app.get("/admin/dashboard/summary")
 def dashboard_summary_endpoint(
     months: int = Query(6, ge=1, le=24, description="월별 시계열 창(개월·기본 6·최대 24)"),
+    monthly_interval: str = Query(
+        "day", description="월별 슬라이스 버킷 단위: day(기본·하위호환) | month(057 FR-303·프론트 롤업 제거)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """운영 대시보드 집계 1회 응답(013 운영 후속·052 번들) — access·lineage·asset 3도메인 ×
-    전체/오늘/월별(일별)/시간별. 조회 전용·의료 제외·결정적·LLM 0·마이그레이션 0.
+    전체/오늘/월별/시간별. 조회 전용·의료 제외·결정적·LLM 0·마이그레이션 0.
 
     프론트 대시보드가 상세 로더 조합으로 9~11회 호출하던 것을 **단일 응답**으로 대체한다(HTTP
     왕복·커넥션 풀 churn·모달리티 월별의 자산 전수 스캔 N+1 제거). 검증된 순수 조회 함수 6종을
     ``build_dashboard_summary`` 가 **한 트랜잭션**에서 조합한다(``src/portal/dashboard.py``).
     오늘·최근 months개월 윈도우는 서버 ``now``(UTC) 기준 — 대시보드의 시각 상대 창이다(결정성 무관).
+
+    ``monthly_interval``(057 FR-303) — 월별 슬라이스 버킷 단위. 기본 ``day``(하위호환·기존 동작 불변),
+    ``month`` 면 월 버킷으로 내려 프론트 일→월 롤업을 제거한다. 월 범위엔 day|month 만 유효(hour 부적합) →
+    그 외 422.
     """
+    if monthly_interval not in ("day", "month"):
+        raise HTTPException(status_code=422,
+                            detail=f"monthly_interval 은 day|month 만 허용: {monthly_interval!r}")
     now = datetime.now(timezone.utc)
-    return _run_in_db(lambda conn: build_dashboard_summary(conn, now=now, months=months))
+    return _run_in_db(
+        lambda conn: build_dashboard_summary(
+            conn, now=now, months=months, monthly_interval=monthly_interval))
 
 
 @app.get("/admin/relations/proposed-summary")

@@ -280,15 +280,22 @@ def modality_detail(conn: Any, modality: str, *, since: Any = None,
 
 
 def asset_timeline(conn: Any, *, since: Any = None, until: Any = None,
-                   interval: str = "day", group_by: str | None = None) -> dict[str, Any]:
+                   interval: str = "day", group_by: str | None = None,
+                   modality: str | None = None) -> dict[str, Any]:
     """자산 생성 일자 추이(보완 v6·계보 timeline 과 동일 멀티시리즈 패턴). 의료 제외·결정적·LLM 0.
 
     ``group_by``(modality/status/domain) 주면 멀티시리즈(시리즈 key ASC·버킷 ASC), 미지정이면 단일
     시리즈({interval, buckets}). trunc 화이트리스트(f-string 안전)·기간(since/until)은 %s 바인딩.
+
+    ``modality``(057 FR-302·모달리티 현황 BFF timeline) 지정 시 그 모달리티로 스코프한다(WHERE modality=%s·
+    %s 바인딩). 미지정(기본 None)이면 기존 SQL·동작이 완전히 불변이다(하위호환·바이트 동일).
     """
     trunc = interval if interval in TIMELINE_INTERVALS else "day"
     conds = [_EXCLUDE_MEDICAL]
     params: list[Any] = []
+    if modality:
+        conds.append("modality = %s")
+        params.append(modality)
     if since is not None:
         conds.append("created_at >= %s")
         params.append(since)
@@ -308,3 +315,26 @@ def asset_timeline(conn: Any, *, since: Any = None, until: Any = None,
         buckets = [{"bucket": b.isoformat() if b is not None else None, "count": int(c)}
                    for b, c in cur.fetchall()]
         return {"interval": trunc, "buckets": buckets}
+
+
+def build_modality_overview(conn: Any, modality: str, *, since: Any = None, until: Any = None,
+                            interval: str = "day", limit: int = 50) -> dict[str, Any]:
+    """모달리티 현황 BFF(057 FR-302) — 드릴다운 집계 + 생성 추이 + 첫 페이지 목록을 **한 트랜잭션·1회 응답**.
+
+    프론트 모달리티 상세가 stats+timeline+first-page 를 3~4회 순차 호출하던 것을 묶는다. 검증된 순수
+    조회 함수 3종을 그대로 재사용해 재구현 0·의료 제외 상속·결정성·LLM 0(``build_dashboard_summary``
+    조합 패턴). 세 슬라이스 전부 같은 modality/기간(created_at)으로 스코프해 화면 정합을 보장한다.
+
+    - ``detail``: ``modality_detail`` — 확장자·상태·일자 분포 + 총계.
+    - ``timeline``: ``asset_timeline(modality=…)`` — 생성 추이(interval=month 지원 → 프론트 일→월 롤업
+      제거·FR-303 동형). 단일 시리즈({interval, buckets}).
+    - ``first_page``: ``query_assets(with_content=True)`` 첫 페이지(요약·키워드 동반·페이징 봉투).
+
+    ``interval`` 은 ``asset_timeline`` 화이트리스트(day/hour/month·그 외 day 폴백; API 계층 422).
+    """
+    detail = modality_detail(conn, modality, since=since, until=until)
+    timeline = asset_timeline(conn, since=since, until=until, interval=interval, modality=modality)
+    first_page = query_assets(
+        conn, modality=modality, created_from=since, created_to=until,
+        with_content=True, limit=limit, offset=0)
+    return {"detail": detail, "timeline": timeline, "first_page": first_page}

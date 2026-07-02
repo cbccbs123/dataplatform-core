@@ -64,6 +64,30 @@ class TestDashboardSummary(unittest.TestCase):
             self.assertEqual(resp.status_code, 422, f"months={bad}")
         mock_build.assert_not_called()
 
+    @patch("src.app.portal_api.build_dashboard_summary")
+    def test_monthly_interval_month_passthrough(self, mock_build) -> None:
+        # 057 FR-303: monthly_interval=month 를 200 으로 허용·서비스에 전달(프론트 일→월 롤업 제거).
+        mock_build.return_value = _SENTINEL
+        resp = self.client.get("/admin/dashboard/summary", params={"monthly_interval": "month"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_build.call_args.kwargs["monthly_interval"], "month")
+
+    @patch("src.app.portal_api.build_dashboard_summary")
+    def test_monthly_interval_default_day(self, mock_build) -> None:
+        # 하위호환: 미지정 시 monthly_interval=day 로 전달(기존 동작 불변).
+        mock_build.return_value = _SENTINEL
+        resp = self.client.get("/admin/dashboard/summary")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_build.call_args.kwargs["monthly_interval"], "day")
+
+    @patch("src.app.portal_api.build_dashboard_summary")
+    def test_monthly_interval_bad_value_422(self, mock_build) -> None:
+        # 월별 슬라이스는 day|month 만 허용(hour 는 월 범위에 부적합) — 그 외 422.
+        for bad in ("hour", "year"):
+            resp = self.client.get("/admin/dashboard/summary", params={"monthly_interval": bad})
+            self.assertEqual(resp.status_code, 422, f"monthly_interval={bad}")
+        mock_build.assert_not_called()
+
 
 class TestDashboardSummaryAuth(unittest.TestCase):
     """auth bypass 없이 — 토큰 없으면 401(require_principal)."""

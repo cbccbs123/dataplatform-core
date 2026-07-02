@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from src.portal.access_log import (
+    access_log_overview,
     access_log_stats,
     access_log_timeline,
     derive_access_action,
@@ -132,6 +133,60 @@ class TimelineShapeTest(unittest.TestCase):
         out = access_log_timeline(conn, group_by="evil; DROP TABLE")
         self.assertIn("buckets", out)
         self.assertNotIn("series", out)
+
+
+class AccessLogOverviewTest(unittest.TestCase):
+    """057 FR-301 — access-logs overview BFF(stats + timeline 를 한 트랜잭션 조합·1회 응답).
+
+    프론트가 stats+list+timeline 3회 순차 호출하던 것을 stats+timeline 1회로 묶는다(list 는 별도 페이징).
+    검증된 순수 조회 함수 2종을 재사용해 재구현 0·의료 무관(access_log 는 자산 도메인 아님)·LLM 0.
+    """
+
+    def _conn(self, total, by_action, timeline_rows):
+        # access_log_stats: COUNT(fetchone) → by_action(fetchall) → by_user(fetchall)
+        # access_log_timeline(group_by=action): grouped rows(fetchall)
+        return _Conn([(total,), by_action, [("u1", total)], timeline_rows])
+
+    def test_overview_shape_total_by_action_timeline(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = self._conn(3, [("search", 2), ("asset_view", 1)],
+                          [("search", ts, 2), ("asset_view", ts, 1)])
+        out = access_log_overview(conn)
+        self.assertEqual(out["total"], 3)
+        self.assertEqual(out["by_action"][0], {"action": "search", "count": 2})
+        self.assertEqual(out["timeline"]["group_by"], "action")
+        self.assertEqual([s["key"] for s in out["timeline"]["series"]], ["search", "asset_view"])
+
+    def test_overview_action_scopes_timeline_only(self):
+        # action 은 timeline 을 드릴다운(단일 action 시리즈)·stats(total/by_action)는 기간 전체 KPI.
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = self._conn(3, [("search", 2)], [("search", ts, 2)])
+        access_log_overview(conn, action="search")
+        calls = conn._cur.calls
+        # 마지막 execute(timeline)에만 action=%s 바인딩, stats 3개 execute 엔 없음.
+        stats_sqls = [sql for sql, _p in calls[:3]]
+        timeline_sql, timeline_params = calls[3]
+        for s in stats_sqls:
+            self.assertNotIn("action = %s", s)
+        self.assertIn("action = %s", timeline_sql)
+        self.assertIn("search", timeline_params)
+
+    def test_overview_interval_passthrough(self):
+        conn = self._conn(0, [], [])
+        out = access_log_overview(conn, interval="month")
+        self.assertEqual(out["timeline"]["interval"], "month")
+        self.assertIn("date_trunc('month'", conn._cur.calls[3][0])
+
+    def test_overview_period_bound_on_all_queries(self):
+        dt1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dt2 = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = self._conn(0, [], [])
+        access_log_overview(conn, since=dt1, until=dt2)
+        for sql, params in conn._cur.calls:
+            self.assertIn("occurred_at >= %s", sql)
+            self.assertIn("occurred_at < %s", sql)
+            self.assertIn(dt1, params)
+            self.assertIn(dt2, params)
 
 
 if __name__ == "__main__":
