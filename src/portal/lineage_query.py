@@ -76,7 +76,8 @@ def query_lineage_feed(
             {"lineage_id": str(lid), "asset_id": str(aid), "activity": act, "agent": ag,
              "occurred_at": ts.isoformat() if ts is not None else None}
             for lid, aid, act, ag, ts in cur.fetchall()]
-    return {"rows": rows, "total": total}
+    # FR-701(054): 페이징 봉투 통일({rows,total,limit,offset}) — 프론트 목록 페이지/맨앞·맨끝 이동.
+    return {"rows": rows, "total": total, "limit": limit, "offset": offset}
 
 
 _INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)

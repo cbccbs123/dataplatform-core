@@ -179,6 +179,8 @@ class QueryAssetsShapeTest(unittest.TestCase):
         ])
         out = query_assets(conn)
         self.assertEqual(out["total"], 2)
+        self.assertEqual(out["limit"], 50)   # FR-701: 페이징 봉투(맨앞/맨끝 이동)
+        self.assertEqual(out["offset"], 0)
         self.assertEqual(out["rows"][0]["asset_id"], "a1")
         self.assertEqual(out["rows"][0]["status"], "registered")
         self.assertEqual(out["rows"][0]["modality"], "text")

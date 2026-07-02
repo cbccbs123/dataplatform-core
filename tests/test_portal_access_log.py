@@ -60,6 +60,8 @@ class QueryStatsShapeTest(unittest.TestCase):
         conn = _Conn([(2,), [("id1", "search", "u1", None, ts), ("id2", "asset_view", "u1", "a9", ts)]])
         out = query_access_logs(conn, user_id="u1")
         self.assertEqual(out["total"], 2)
+        self.assertEqual(out["limit"], 50)   # FR-701: 페이징 봉투(맨앞/맨끝 이동)
+        self.assertEqual(out["offset"], 0)
         self.assertEqual(out["rows"][0]["action"], "search")
         self.assertEqual(out["rows"][1]["asset_id"], "a9")
 

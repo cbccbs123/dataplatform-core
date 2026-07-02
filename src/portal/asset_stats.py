@@ -234,7 +234,8 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
                  "file_name": os.path.basename(fp) if fp else None,
                  "created_at": ts.isoformat() if ts is not None else None}
                 for aid, st, mod, dl, fp, ts in cur.fetchall()]
-    return {"rows": rows, "total": total}
+    # FR-701: 페이징 봉투 통일({rows,total,limit,offset}) — 프론트 전체 목록 페이지/맨앞·맨끝 이동 계약.
+    return {"rows": rows, "total": total, "limit": limit, "offset": offset}
 
 
 def modality_detail(conn: Any, modality: str, *, since: Any = None,

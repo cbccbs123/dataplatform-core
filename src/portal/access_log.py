@@ -85,7 +85,8 @@ def query_access_logs(conn: Any, *, user_id: str | None = None, action: str | No
              "asset_id": str(aid) if aid is not None else None,
              "occurred_at": ts.isoformat() if ts is not None else None}
             for a, act, u, aid, ts in cur.fetchall()]
-    return {"rows": rows, "total": total}
+    # FR-701(054): 페이징 봉투 통일({rows,total,limit,offset}) — 프론트 목록 페이지/맨앞·맨끝 이동.
+    return {"rows": rows, "total": total, "limit": limit, "offset": offset}
 
 
 def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict[str, Any]:
