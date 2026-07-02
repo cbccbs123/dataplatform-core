@@ -197,10 +197,17 @@ class TestFindTopicNeighbors(unittest.TestCase):
         m_fetch.return_value = [_nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="B")]
 
         # '요리' 주제를 실은 active 엣지들(cursor 반환). 양끝 자산을 후보로 수집한다.
+        # 057 FR-103: node→asset 조인으로 각 끝점의 modality·fs_path 를 함께 싣는다(assets_in_topic 패턴).
         rows = [
-            {"src_asset": "A", "dst_asset": "B", "topic_ko": "요리"},   # B +1 (A 는 대상→스킵)
-            {"src_asset": "C", "dst_asset": "D", "topic_ko": "요리"},   # C +1, D +1
-            {"src_asset": "C", "dst_asset": "E", "topic_ko": "요리"},   # C +1(=2), E +1
+            {"src_asset": "A", "src_modality": "text", "src_fs_path": "/d/A.txt",
+             "dst_asset": "B", "dst_modality": "image", "dst_fs_path": "/d/B.png",
+             "topic_ko": "요리"},   # B +1 (A 는 대상→스킵)
+            {"src_asset": "C", "src_modality": "video", "src_fs_path": "/d/영상C.mp4",
+             "dst_asset": "D", "dst_modality": "audio", "dst_fs_path": "/d/D.wav",
+             "topic_ko": "요리"},   # C +1, D +1
+            {"src_asset": "C", "src_modality": "video", "src_fs_path": "/d/영상C.mp4",
+             "dst_asset": "E", "dst_modality": "text", "dst_fs_path": "/d/E.txt",
+             "topic_ko": "요리"},   # C +1(=2), E +1
         ]
         conn, cur = _mock_conn(rows)
 
@@ -218,10 +225,14 @@ class TestFindTopicNeighbors(unittest.TestCase):
         self.assertFalse(linked["D"])
         # shared_topics 는 공유 topic_ko 집합(정렬)
         self.assertEqual(out[0]["shared_topics"], ["요리"])
-        # 엔트리 형상
+        # FR-103: 후보 자산 표시필드(file_name=fs_path basename·modality) 하향
+        self.assertEqual(out[0]["file_name"], "영상C.mp4")   # C 의 fs_path basename
+        self.assertEqual(out[0]["modality"], "video")        # C 의 modality
+        # 엔트리 형상(하위호환 필드 추가)
         self.assertEqual(
             set(out[0].keys()),
-            {"asset_id", "shared_topics", "overlap_weight", "already_linked"},
+            {"asset_id", "shared_topics", "overlap_weight", "already_linked",
+             "file_name", "modality"},
         )
 
     @patch(_PATCH_TARGET)
@@ -233,7 +244,9 @@ class TestFindTopicNeighbors(unittest.TestCase):
 
         m_fetch.return_value = [_nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="A")]
         u = uuid.uuid4()
-        rows = [{"src_asset": "A", "dst_asset": u, "topic_ko": "요리"}]
+        rows = [{"src_asset": "A", "src_modality": "text", "src_fs_path": "/x/u.txt",
+                 "dst_asset": u, "dst_modality": "image", "dst_fs_path": "/x/z.png",
+                 "topic_ko": "요리"}]
         conn, _ = _mock_conn(rows)
 
         out = find_topic_neighbors(conn, asset_id="A")
@@ -249,9 +262,12 @@ class TestFindTopicNeighbors(unittest.TestCase):
         m_fetch.return_value = [_nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="Z")]
         # C overlap 2, 나머지 1 → top_k=2 면 C + (asset_id asc 최솟값) 만.
         rows = [
-            {"src_asset": "C", "dst_asset": "D", "topic_ko": "요리"},
-            {"src_asset": "C", "dst_asset": "E", "topic_ko": "요리"},
-            {"src_asset": "F", "dst_asset": "G", "topic_ko": "요리"},
+            {"src_asset": "C", "src_modality": "video", "src_fs_path": "/x/c.mp4",
+             "dst_asset": "D", "dst_modality": "text", "dst_fs_path": "/x/d.txt", "topic_ko": "요리"},
+            {"src_asset": "C", "src_modality": "video", "src_fs_path": "/x/c.mp4",
+             "dst_asset": "E", "dst_modality": "text", "dst_fs_path": "/x/e.txt", "topic_ko": "요리"},
+            {"src_asset": "F", "src_modality": "text", "src_fs_path": "/x/f.txt",
+             "dst_asset": "G", "dst_modality": "text", "dst_fs_path": "/x/g.txt", "topic_ko": "요리"},
         ]
         conn, _ = _mock_conn(rows)
 
@@ -293,6 +309,22 @@ class TestFindTopicNeighbors(unittest.TestCase):
         params = cur.execute.call_args[0][1]
         self.assertEqual(params[0], ["요리"])   # 대상 주제 topic_ko 리스트(결정적 정렬)
 
+    @patch(_PATCH_TARGET)
+    def test_neighbor_sql_selects_asset_modality_and_fs_path(self, m_fetch) -> None:
+        # FR-103: 후보 표시필드(modality·file_name) 하향 위해 양끝 자산 modality·fs_path 를 SELECT.
+        from src.relations.topic_query import find_topic_neighbors
+
+        m_fetch.return_value = [_nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="B")]
+        conn, cur = _mock_conn([])
+
+        find_topic_neighbors(conn, asset_id="A")
+
+        sql = _compact_sql(cur)
+        self.assertIn("sa.modality", sql)
+        self.assertIn("da.modality", sql)
+        self.assertIn("sa.fs_path", sql)
+        self.assertIn("da.fs_path", sql)
+
 
 class TestListTopics(unittest.TestCase):
     """T201 — 주제 목록: (topic_ko, subtopic_ko) 별 distinct 양끝 자산 수·정렬·의료 제외."""
@@ -317,6 +349,35 @@ class TestListTopics(unittest.TestCase):
         self.assertEqual(counts[("요리", "제빵")], 3)   # {A,B,C} distinct
         self.assertEqual(counts[("음악", "재즈")], 2)   # {D,E}
         self.assertEqual(counts[("요리", None)], 2)     # {F,G}, 빈 subtopic → None 정규화
+
+    def test_topic_level_distinct_count_added_no_double_count(self) -> None:
+        # FR-105(057): 주제 레벨 정확 distinct asset_count 하향(하위호환 필드 추가·프론트 합산 제거).
+        # 한 자산(A)이 같은 주제의 두 하위주제에 걸치면 하위주제 asset_count 합(2+2=4)은 중복카운트다.
+        # topic_asset_count 는 주제 전체 distinct({A,B,C}=3)라 정확하다.
+        from src.relations.topic_query import list_topics
+
+        rows = [
+            {"src_asset": "A", "dst_asset": "B", "topic_ko": "요리", "subtopic_ko": "제빵"},
+            {"src_asset": "A", "dst_asset": "C", "topic_ko": "요리", "subtopic_ko": "제과"},
+            {"src_asset": "D", "dst_asset": "E", "topic_ko": "음악", "subtopic_ko": "재즈"},
+        ]
+        conn, _ = _mock_conn(rows)
+
+        out = list_topics(conn)
+
+        by_key = {(o["topic_ko"], o["subtopic_ko"]): o for o in out}
+        # 기존 키 보존(하위호환): topic_ko·subtopic_ko·asset_count(하위주제별 distinct)
+        self.assertEqual(by_key[("요리", "제빵")]["asset_count"], 2)   # {A,B}
+        self.assertEqual(by_key[("요리", "제과")]["asset_count"], 2)   # {A,C}
+        # 주제 레벨 정확 distinct(합산 아님): 요리 = {A,B,C} = 3 (2+2=4 가 아님)
+        self.assertEqual(by_key[("요리", "제빵")]["topic_asset_count"], 3)
+        self.assertEqual(by_key[("요리", "제과")]["topic_asset_count"], 3)
+        self.assertEqual(by_key[("음악", "재즈")]["topic_asset_count"], 2)   # {D,E}
+        # 같은 topic_ko 의 모든 행은 동일한 topic_asset_count(주제 총계·프론트가 바로 사용)
+        self.assertEqual(
+            by_key[("요리", "제빵")]["topic_asset_count"],
+            by_key[("요리", "제과")]["topic_asset_count"],
+        )
 
     def test_empty_topic_ko_rows_skipped(self) -> None:
         from src.relations.topic_query import list_topics

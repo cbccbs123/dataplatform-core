@@ -80,10 +80,15 @@ class TestGraphQueryNormalize(unittest.TestCase):
     _EXPECTED_KEYS = {
         "asset_id", "kind_code", "is_symmetric", "direction",
         "confidence", "status", "topic", "reason", "edge_id",
+        # 057 FR-102: 이웃 표시필드 하향(하위호환 필드 추가)
+        "file_name", "modality",
     }
 
     def _row(self, **over):
-        """SQL(dict_row) 한 행을 흉내. graph_query 가 select 하는 컬럼명 그대로."""
+        """SQL(dict_row) 한 행을 흉내. graph_query 가 select 하는 컬럼명 그대로.
+
+        057 FR-102: node→asset 조인으로 양끝 자산의 modality·fs_path 를 함께 끌어온다.
+        """
         base = {
             "edge_id": "e1",
             "kind_code": "duplicate_near",
@@ -94,6 +99,10 @@ class TestGraphQueryNormalize(unittest.TestCase):
             "status": "active",
             "src_asset": "A",
             "dst_asset": "B",
+            "src_modality": "text",
+            "dst_modality": "image",
+            "src_fs_path": "/data/raw/문서A.txt",
+            "dst_fs_path": "/data/raw/사진B.png",
         }
         base.update(over)
         return base
@@ -147,6 +156,39 @@ class TestGraphQueryNormalize(unittest.TestCase):
         self.assertEqual(out[0]["confidence"], 0.95)
         self.assertEqual(out[0]["topic"], {"topic_ko": "사진"})
         self.assertEqual(out[0]["edge_id"], "e1")
+
+    def test_neighbor_carries_other_side_file_name_and_modality(self) -> None:
+        # FR-102(057): 이웃 dict 에 상대 자산의 file_name(fs_path basename)·modality 를 싣는다.
+        # 질의 자산 A(src) → 이웃은 dst(B): dst 쪽 modality/fs_path 를 취해야 한다.
+        from src.relations.graph_query import fetch_active_relations_for_asset
+
+        conn, _ = _conn_returning([self._row(is_symmetric=True, src_asset="A", dst_asset="B")])
+        out = fetch_active_relations_for_asset(conn, asset_id="A")
+        self.assertEqual(out[0]["asset_id"], "B")
+        self.assertEqual(out[0]["file_name"], "사진B.png")  # dst basename
+        self.assertEqual(out[0]["modality"], "image")       # dst modality
+
+    def test_neighbor_from_dst_side_takes_src_file_name_and_modality(self) -> None:
+        # 질의 자산이 dst 인 경우(대칭 엣지가 접힘): 이웃은 src → src 쪽 modality/fs_path.
+        from src.relations.graph_query import fetch_active_relations_for_asset
+
+        conn, _ = _conn_returning([self._row(is_symmetric=True, src_asset="A", dst_asset="B")])
+        out = fetch_active_relations_for_asset(conn, asset_id="B")
+        self.assertEqual(out[0]["asset_id"], "A")
+        self.assertEqual(out[0]["file_name"], "문서A.txt")  # src basename
+        self.assertEqual(out[0]["modality"], "text")        # src modality
+
+    def test_sql_joins_asset_for_both_endpoints(self) -> None:
+        # FR-102: modality·fs_path 는 asset 에만 있으므로 양끝 node→asset 조인 필요(assets_in_topic 패턴).
+        from src.relations.graph_query import fetch_active_relations_for_asset
+
+        conn, cur = _conn_returning([])
+        fetch_active_relations_for_asset(conn, asset_id="A")
+        compact = " ".join(cur.execute.call_args[0][0].split())
+        self.assertIn("sa.modality", compact)
+        self.assertIn("da.modality", compact)
+        self.assertIn("sa.fs_path", compact)
+        self.assertIn("da.fs_path", compact)
 
     def test_determinism_same_input_same_output(self) -> None:
         # 같은 입력 2회 → 같은 결과(헌법 3조). 정규화는 순수하므로 안정적.

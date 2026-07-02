@@ -173,8 +173,8 @@ class QueryAssetsShapeTest(unittest.TestCase):
         conn = _Conn([
             (2,),
             [
-                ("a1", "registered", "text", "general", "/data/raw/문서1.pdf", ts),
-                ("a2", "failed", "image", "general", "/data/raw/사진.png", ts),
+                ("a1", "registered", "text", "general", "/data/raw/문서1.pdf", ts, "pdf"),
+                ("a2", "failed", "image", "general", "/data/raw/사진.png", ts, "png"),
             ],
         ])
         out = query_assets(conn)
@@ -191,10 +191,30 @@ class QueryAssetsShapeTest(unittest.TestCase):
         self.assertEqual(out["rows"][0]["created_at"], ts.isoformat())
 
     def test_null_fs_path_file_name_none(self):
-        conn = _Conn([(1,), [("a1", "registered", "text", "general", None, None)]])
+        conn = _Conn([(1,), [("a1", "registered", "text", "general", None, None, None)]])
         out = query_assets(conn)
         self.assertIsNone(out["rows"][0]["file_name"])
         self.assertIsNone(out["rows"][0]["created_at"])
+        self.assertIsNone(out["rows"][0]["file_ext"])  # 확장자 없음(NULL)
+
+    def test_rows_include_file_ext_from_by_file_ext_logic(self):
+        # FR-104(057): 목록 행에 file_ext 하향(하위호환) — by_file_ext 집계와 동일 SQL(_EXT_EXPR) 파생
+        # 이라 행의 file_ext == 집계 버킷 키(프론트 파일명 파싱·폴백 확장자 집계 제거).
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = _Conn([
+            (2,),
+            [
+                ("a1", "registered", "text", "general", "/data/raw/문서1.pdf", ts, "pdf"),
+                ("a2", "failed", "image", "general", "/data/raw/사진.png", ts, "png"),
+            ],
+        ])
+        out = query_assets(conn)
+        self.assertEqual(out["rows"][0]["file_ext"], "pdf")
+        self.assertEqual(out["rows"][1]["file_ext"], "png")
+        # SELECT 는 by_file_ext 와 동일한 확장자 파생식(fs_path substring)을 file_ext 로 노출
+        select_sql = conn._cur.calls[1][0]
+        self.assertIn("substring(fs_path from", select_sql)
+        self.assertIn("AS file_ext", select_sql)
 
     def test_always_excludes_medical(self):
         conn = _Conn([(0,), []])
@@ -256,13 +276,14 @@ class QueryAssetsContentTest(unittest.TestCase):
         conn = _Conn([
             (1,),
             [("a1", "registered", "video", "general", "/data/raw/뉴스.mp4", ts,
-              "서울시장 선거 여론조사 보도", ["선거", "여론조사"])],
+              "서울시장 선거 여론조사 보도", ["선거", "여론조사"], "mp4")],
         ])
         out = query_assets(conn, modality="video", with_content=True)
         row = out["rows"][0]
         self.assertEqual(row["file_name"], "뉴스.mp4")  # 제목=파일명
         self.assertEqual(row["summary"], "서울시장 선거 여론조사 보도")
         self.assertEqual(row["keywords"], ["선거", "여론조사"])
+        self.assertEqual(row["file_ext"], "mp4")  # FR-104: content 경로도 file_ext 하향
         # content SELECT 는 asset_metadata LEFT JOIN + ext_meta 요약/키워드
         select_sql = conn._cur.calls[1][0]
         self.assertIn("LEFT JOIN asset_metadata", select_sql)
@@ -272,7 +293,7 @@ class QueryAssetsContentTest(unittest.TestCase):
 
     def test_without_content_keeps_lean_shape(self):
         ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
-        conn = _Conn([(1,), [("a1", "registered", "text", "general", "/d/x.txt", ts)]])
+        conn = _Conn([(1,), [("a1", "registered", "text", "general", "/d/x.txt", ts, "txt")]])
         out = query_assets(conn)  # 기본 with_content=False — 하위호환(요약/키워드 없음)
         self.assertNotIn("summary", out["rows"][0])
         self.assertNotIn("keywords", out["rows"][0])

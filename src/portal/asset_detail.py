@@ -19,13 +19,16 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.portal.search_group import _basename
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
 from src.relations.graph_query import fetch_active_relations_for_asset
 
 # asset + metadata 1행. LEFT JOIN — 메타 없어도 자산 행 유지(core/ext NULL 가능).
+# fs_path(057 FR-101) — 최상위 file_name basename 파생용. fs_path 는 NOT NULL 이라 항상 존재하며
+# 검색 색인(opensearch_sync)·review 등 전 표면이 fs_path basename 을 파일명으로 쓰는 관례와 일치한다.
 _FETCH_ASSET_SQL = """
-SELECT a.asset_id, a.modality, a.domain_label, a.status,
+SELECT a.asset_id, a.modality, a.domain_label, a.status, a.fs_path,
        m.core_meta, m.ext_meta, m.tags
 FROM asset a
 LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
@@ -88,6 +91,8 @@ def fetch_asset_detail(
         "modality": row["modality"],
         "domain_label": row["domain_label"],
         "status": row["status"],
+        # FR-101(057): 표시용 파일명 하향(하위호환 필드 추가) — search_group._basename 단일 출처 재사용.
+        "file_name": _basename(str(row["fs_path"] or "")),
         "core_meta": row["core_meta"],
         "ext_meta": ext_meta,
         "tags": row["tags"],

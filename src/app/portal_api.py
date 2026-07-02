@@ -1123,6 +1123,9 @@ def topics_list(
 
     ``list_topics`` 가 active·의료 제외 엣지의 ``(topic_ko, subtopic_ko)`` 별 distinct 자산 수를
     결정적 정렬(topic_ko asc→subtopic_ko asc)로 집계한다. 주제 브라우즈 진입점.
+
+    057 FR-105 — 각 행에 ``topic_asset_count``(주제 전체 distinct 자산 수)를 함께 싣는다(하위호환
+    필드 추가). 프론트는 하위주제 ``asset_count`` 를 합산(중복카운트)하지 않고 이 값을 그대로 쓴다.
     """
     return {"topics": _run_in_db(list_topics)}
 

@@ -120,8 +120,12 @@ WHERE ge.status = 'active'
 """
 
 # 대상 주제(topic_ko 집합)를 실은 active 엣지의 양끝 자산 수집.
+# 057 FR-103: 후보 표시필드(modality·file_name) 하향 — _TOPIC_JOIN 이 이미 건 asset sa/da 에서
+#   양끝 modality·fs_path 를 함께 SELECT(조인 재사용·재구현 없음). basename 은 파이썬에서 파생.
 _NEIGHBOR_SQL = f"""
 SELECT sn.asset_id AS src_asset, dn.asset_id AS dst_asset,
+       sa.modality AS src_modality, sa.fs_path AS src_fs_path,
+       da.modality AS dst_modality, da.fs_path AS dst_fs_path,
        ge.topic->>'topic_ko' AS topic_ko
 {_TOPIC_JOIN}{_ACTIVE_MEDICAL_WHERE}
   AND ge.topic->>'topic_ko' = ANY(%s)
@@ -154,7 +158,8 @@ def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
         top_k: 반환 상한(기본 20).
 
     Returns:
-        ``[{asset_id(str), shared_topics:[topic_ko...], overlap_weight:int, already_linked:bool}]``.
+        ``[{asset_id(str), shared_topics:[topic_ko...], overlap_weight:int, already_linked:bool,
+        file_name(str·fs_path basename·FR-103), modality(str·FR-103)}]``.
         - ``overlap_weight`` = 그 자산이 (대상 주제를 실은) active 엣지에 참여한 횟수(엣지당 1).
         - ``shared_topics`` = 대상과 공유하는 topic_ko 집합(정렬).
         - ``already_linked`` = 그 자산이 대상의 **직접 관계 이웃**인지
@@ -179,14 +184,23 @@ def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
         rows = cur.fetchall()
 
     # 4) 후보 자산별 overlap_weight(엣지 참여 수)·shared_topics(공유 topic_ko) 집계. 대상 자신 스킵.
+    #    FR-103: 각 끝점의 modality·fs_path 를 함께 나른다(같은 자산은 어느 엣지에서 보든 같은 값이라
+    #    처음 만난 값 보존 — assets_in_topic 의 first-wins 관례와 동일·결정적).
     agg: dict[str, dict] = {}
     for r in rows:
         topic_ko = r["topic_ko"]
-        for endpoint in (r["src_asset"], r["dst_asset"]):
+        for endpoint, modality, fs_path in (
+            (r["src_asset"], r["src_modality"], r["src_fs_path"]),
+            (r["dst_asset"], r["dst_modality"], r["dst_fs_path"]),
+        ):
             aid = str(endpoint)
             if aid == target_str:
                 continue
-            entry = agg.setdefault(aid, {"overlap_weight": 0, "shared": set()})
+            entry = agg.setdefault(
+                aid,
+                {"overlap_weight": 0, "shared": set(),
+                 "modality": modality, "file_name": os.path.basename(fs_path or "")},
+            )
             entry["overlap_weight"] += 1
             if topic_ko:
                 entry["shared"].add(topic_ko)
@@ -197,6 +211,9 @@ def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
             "shared_topics": sorted(e["shared"]),
             "overlap_weight": e["overlap_weight"],
             "already_linked": aid in linked,
+            # FR-103(057): 후보 표시필드 하향(하위호환 필드 추가·상세 진입 폴백 제거).
+            "file_name": e["file_name"],
+            "modality": e["modality"],
         }
         for aid, e in agg.items()
     ]
@@ -209,27 +226,40 @@ def list_topics(conn) -> list[dict]:
     """active·의료제외 엣지의 주제 패싯 목록.
 
     Returns:
-        ``[{topic_ko, subtopic_ko|None, asset_count}]`` — ``(topic_ko, subtopic_ko)`` 조합별
-        **distinct 양끝 자산 수**. 빈 topic_ko 는 제외, 빈 subtopic_ko 는 ``None`` 으로 정규화.
-        정렬 ``topic_ko asc → subtopic_ko asc``(None 은 "" 로 최상단·결정적).
+        ``[{topic_ko, subtopic_ko|None, asset_count, topic_asset_count}]`` — ``(topic_ko,
+        subtopic_ko)`` 조합별 **distinct 양끝 자산 수**(``asset_count``). 빈 topic_ko 는 제외,
+        빈 subtopic_ko 는 ``None`` 으로 정규화. 정렬 ``topic_ko asc → subtopic_ko asc``
+        (None 은 "" 로 최상단·결정적).
+
+        057 FR-105 — ``topic_asset_count``(하위호환 필드 추가): ``topic_ko`` **주제 전체**의
+        distinct 양끝 자산 수. 한 자산이 여러 하위주제에 걸치면 하위주제 ``asset_count`` 합은
+        중복카운트가 되므로(web B2 실버그), 프론트가 합산하지 않고 이 주제 레벨 distinct 를 그대로
+        쓰게 한다. 같은 ``topic_ko`` 의 모든 행은 동일한 ``topic_asset_count`` 를 갖는다.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_LIST_TOPICS_SQL)
         rows = cur.fetchall()
 
     # (topic_ko, subtopic_ko) → distinct 자산 집합. 양끝 자산 모두 그 주제에 참여한 것으로 본다.
+    # topic_assets: topic_ko → 주제 전체 distinct 자산 집합(하위주제 합산 아님·FR-105 중복카운트 방지).
     groups: dict[tuple[str, Any], set[str]] = {}
+    topic_assets: dict[str, set[str]] = {}
     for r in rows:
         topic_ko = r["topic_ko"]
         if not topic_ko:  # COALESCE 로 조회 단계에서 걸러지지만 방어적 스킵.
             continue
         sub = r["subtopic_ko"] or None  # "" 또는 None → None 정규화
+        src, dst = str(r["src_asset"]), str(r["dst_asset"])
         assets = groups.setdefault((topic_ko, sub), set())
-        assets.add(str(r["src_asset"]))
-        assets.add(str(r["dst_asset"]))
+        assets.add(src)
+        assets.add(dst)
+        topic_set = topic_assets.setdefault(topic_ko, set())
+        topic_set.add(src)
+        topic_set.add(dst)
 
     out = [
-        {"topic_ko": ko, "subtopic_ko": sub, "asset_count": len(assets)}
+        {"topic_ko": ko, "subtopic_ko": sub, "asset_count": len(assets),
+         "topic_asset_count": len(topic_assets[ko])}
         for (ko, sub), assets in groups.items()
     ]
     out.sort(key=lambda o: (o["topic_ko"], o["subtopic_ko"] or ""))

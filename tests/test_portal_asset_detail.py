@@ -38,6 +38,7 @@ _REGISTERED_ROW = {
     "modality": "text",
     "domain_label": "general",
     "status": "registered",
+    "fs_path": "/data/raw/보고서.pdf",
     "core_meta": {"title": "보고서"},
     "ext_meta": {"pages": 12},
     "tags": ["report", "2026"],
@@ -72,6 +73,17 @@ class TestFetchAssetDetail(unittest.TestCase):
         self.assertEqual(out["core_meta"], {"title": "보고서"})
         self.assertEqual(out["ext_meta"], {"pages": 12})
         self.assertEqual(out["tags"], ["report", "2026"])
+
+    @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
+    def test_top_level_file_name_from_fs_path_basename(self, mock_rel) -> None:
+        # FR-101(057): 상세 응답 최상위 file_name = fs_path basename(search_group._basename 단일 출처).
+        # → web A3·admin A1 다운로드 프리플라이트 워크어라운드 제거 기반(N+1 소멸).
+        mock_rel.return_value = []
+        conn, _ = _conn_for_detail(dict(_REGISTERED_ROW), [])
+        from src.portal.asset_detail import fetch_asset_detail
+
+        out = fetch_asset_detail(conn, asset_id="A1")
+        self.assertEqual(out["file_name"], "보고서.pdf")
 
     @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
     def test_embedding_channels_count_only_no_raw_vector(self, mock_rel) -> None:

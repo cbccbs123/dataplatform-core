@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from psycopg import Connection
@@ -22,16 +23,23 @@ from psycopg.rows import dict_row
 
 # 양 끝점 asset 역조인(node_kind='asset')으로 src/dst asset_id 를 함께 끌어온 뒤,
 # 파이썬에서 질의 자산 관점으로 방향·이웃을 정규화한다.
+# 057 FR-102: 이웃 표시필드(file_name·modality) 하향을 위해 양끝 node→asset 조인을 하나 더 건다
+#   (topic_query._TOPIC_JOIN·assets_in_topic 과 동일 패턴). modality·fs_path 는 asset 에만 있고
+#   기존 소비자를 깨지 않도록 WHERE·정렬·기존 컬럼은 불변 — 필드/조인 추가만.
 # ORDER BY: confidence DESC NULLS LAST 동점 시 순서가 불안정하므로 edge_id 2차 키로
 # 결정성(헌법 3조)을 보장한다(ADR 원안 대비 강화 — plan R-3).
 _FETCH_RELATIONS_SQL = """
 SELECT ge.edge_id, rk.kind_code, rk.is_symmetric,
        ge.confidence, ge.reason, ge.topic, ge.status,
-       sn.asset_id AS src_asset, dn.asset_id AS dst_asset
+       sn.asset_id AS src_asset, dn.asset_id AS dst_asset,
+       sa.modality AS src_modality, sa.fs_path AS src_fs_path,
+       da.modality AS dst_modality, da.fs_path AS dst_fs_path
 FROM graph_edge ge
 JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
 JOIN node sn ON sn.node_id = ge.src_node AND sn.node_kind = 'asset'
 JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'
+JOIN asset sa ON sa.asset_id = sn.asset_id
+JOIN asset da ON da.asset_id = dn.asset_id
 WHERE (sn.asset_id = %s OR dn.asset_id = %s)
   AND ge.status = %s
 ORDER BY ge.confidence DESC NULLS LAST, ge.edge_id
@@ -51,7 +59,8 @@ def fetch_active_relations_for_asset(
         이웃 dict 리스트. 각 dict 키:
         ``asset_id``(상대 자산)·``kind_code``·``is_symmetric``·``direction``
         (``undirected``|``outbound``|``inbound``)·``confidence``·``status``·``topic``·
-        ``reason``·``edge_id``. 정렬은 confidence desc(동점 edge_id asc)로 결정적.
+        ``reason``·``edge_id``·``file_name``(상대 자산 fs_path basename·FR-102)·
+        ``modality``(상대 자산 모달리티·FR-102). 정렬은 confidence desc(동점 edge_id asc)로 결정적.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_FETCH_RELATIONS_SQL, (asset_id, asset_id, status))
@@ -65,6 +74,9 @@ def fetch_active_relations_for_asset(
         # 비대칭이면 질의 자산이 src 인지 dst 인지로 outbound/inbound 결정.
         is_query_src = src_asset == str(asset_id)
         other_asset = str(r["dst_asset"]) if is_query_src else src_asset
+        # FR-102: 이웃(반대편) 자산의 표시필드 — 질의 자산이 src 면 이웃=dst, 아니면 이웃=src.
+        other_modality = r["dst_modality"] if is_query_src else r["src_modality"]
+        other_fs_path = r["dst_fs_path"] if is_query_src else r["src_fs_path"]
         if is_symmetric:
             direction = "undirected"
         else:
@@ -80,6 +92,9 @@ def fetch_active_relations_for_asset(
                 "topic": r["topic"],
                 "reason": r["reason"],
                 "edge_id": str(r["edge_id"]),
+                # FR-102(057): 이웃 표시필드 하향(하위호환 필드 추가·N+1 재조회 제거).
+                "file_name": os.path.basename(other_fs_path or ""),
+                "modality": other_modality,
             }
         )
     return out

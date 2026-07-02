@@ -163,6 +163,9 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
                  limit: int = 50, offset: int = 0, with_content: bool = False) -> dict[str, Any]:
     """자산 목록(FSM 단계·modality·domain·file_ext·날짜 필터·페이징·의료 제외·created_at DESC·FR-009f).
 
+    각 행은 ``file_ext``(fs_path 확장자·057 FR-104·by_file_ext 집계와 동일 파생)를 포함한다 —
+    프론트가 파일명을 다시 파싱하지 않도록 표시필드를 하향(하위호환 필드 추가).
+
     ``with_content=True``(보완 v6) — asset_metadata LEFT JOIN 으로 행마다 요약·키워드(+제목=파일명)
     동반(모달리티 상세에서 자산을 안 열고도 내용 파악). 메타 미적재 자산은 LEFT JOIN 으로 행은 남되
     summary/keywords 가 None. 기본은 가벼운 목록(하위호환).
@@ -211,10 +214,14 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM asset" + _where(""), params)  # COUNT 은 JOIN 불요(경량·비한정)
         total = int(cur.fetchone()[0])
+        # FR-104(057): 행에 file_ext 하향(하위호환) — by_file_ext 집계와 동일한 _EXT_EXPR(fs_path 확장자)
+        # 로 파생해 행 file_ext == 집계 버킷 키(프론트 파일명 파싱·폴백 확장자 집계 제거·admin B2).
+        # content JOIN 경로에서도 fs_path 는 asset 에만 있어 비한정 참조가 모호하지 않다(단일 출처식).
         if with_content:
             cur.execute(
                 "SELECT a.asset_id, a.status, a.modality, a.domain_label, a.fs_path, a.created_at, "
-                "m.ext_meta->>'summary' AS summary, m.ext_meta->'keywords' AS keywords "
+                "m.ext_meta->>'summary' AS summary, m.ext_meta->'keywords' AS keywords, "
+                + _EXT_EXPR + " AS file_ext "
                 "FROM asset a LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id"
                 + _where("a.") + " ORDER BY a.created_at DESC, a.asset_id DESC LIMIT %s OFFSET %s",
                 [*params, limit, offset])
@@ -222,18 +229,19 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
                 {"asset_id": str(aid), "status": st, "modality": mod, "domain_label": dl,
                  "file_name": os.path.basename(fp) if fp else None,
                  "created_at": ts.isoformat() if ts is not None else None,
-                 "summary": summary, "keywords": kw}
-                for aid, st, mod, dl, fp, ts, summary, kw in cur.fetchall()]
+                 "summary": summary, "keywords": kw, "file_ext": fx}
+                for aid, st, mod, dl, fp, ts, summary, kw, fx in cur.fetchall()]
         else:
             cur.execute(
-                "SELECT asset_id, status, modality, domain_label, fs_path, created_at FROM asset"
+                "SELECT asset_id, status, modality, domain_label, fs_path, created_at, "
+                + _EXT_EXPR + " AS file_ext FROM asset"
                 + _where("") + " ORDER BY created_at DESC, asset_id DESC LIMIT %s OFFSET %s",
                 [*params, limit, offset])
             rows = [
                 {"asset_id": str(aid), "status": st, "modality": mod, "domain_label": dl,
                  "file_name": os.path.basename(fp) if fp else None,
-                 "created_at": ts.isoformat() if ts is not None else None}
-                for aid, st, mod, dl, fp, ts in cur.fetchall()]
+                 "created_at": ts.isoformat() if ts is not None else None, "file_ext": fx}
+                for aid, st, mod, dl, fp, ts, fx in cur.fetchall()]
     # FR-701: 페이징 봉투 통일({rows,total,limit,offset}) — 프론트 전체 목록 페이지/맨앞·맨끝 이동 계약.
     return {"rows": rows, "total": total, "limit": limit, "offset": offset}
 
