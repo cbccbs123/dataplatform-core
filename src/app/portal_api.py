@@ -64,6 +64,8 @@ from src.portal.access_log import (
 )
 from src.portal.asset_detail import fetch_asset_detail
 from src.portal.asset_stats import (
+    _RELATION_SCOPES,
+    _SNAPSHOT_BUCKETS,
     asset_stats,
     asset_timeline,
     modality_detail,
@@ -417,6 +419,8 @@ def lineage_timeline_endpoint(
 def asset_stats_endpoint(
     from_: str | None = Query(None, alias="from", description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
     to: str | None = Query(None, alias="to", description="생성일 상한(exclusive)"),
+    snapshot_buckets: bool = Query(
+        False, description="운영 5버킷 집계(by_snapshot_bucket) 동반(계보 현황 화면·054·FR-201/202)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """전체 자산 집계(FSM status·modality·domain·file_ext·date별·총계·013 FR-009e). 의료 제외·결정적·LLM 0.
@@ -424,9 +428,14 @@ def asset_stats_endpoint(
     관리자 API(`/admin/*`) — 계보·접근이력·대시보드는 전부 `/admin` 프리픽스(D12). 사용자용
     검색·상세·다운로드는 루트 유지. ``from``/``to``(생성일·to exclusive·보완 v6) 지정 시
     by_file_ext 포함 6개 집계가 그 기간으로 스코프(기간별 파일 포맷 통계).
+
+    ``snapshot_buckets=true``(054·계보 현황) 지정 시 응답에 ``by_snapshot_bucket``(운영 5버킷
+    count·``sum==total``·FR-201/202)이 추가된다. 미지정(기본 False)이면 기존 응답이 완전히 불변이다.
     """
     since, until = _parse_dt(from_), _parse_dt(to)
-    return _run_in_db(lambda conn: asset_stats(conn, since=since, until=until))
+    return _run_in_db(
+        lambda conn: asset_stats(
+            conn, since=since, until=until, snapshot_buckets=snapshot_buckets))
 
 
 @app.get("/admin/assets")
@@ -437,6 +446,12 @@ def assets_list(
     file_ext: str | None = Query(None, description="파일 확장자 필터(예: txt, pdf, mp4)"),
     created_from: str | None = Query(None, description="생성일 하한(YYYY-MM-DD 또는 ISO)"),
     created_to: str | None = Query(None, description="생성일 상한"),
+    snapshot_bucket: str | None = Query(
+        None, description="운영 스냅샷 버킷 필터(processing/deferred/registered/failed/"
+                          "relation_proposed·054). 지정 시 status 대신 버킷으로 롤업 필터(C3)"),
+    relation_scope: str = Query(
+        "period", description="relation_proposed/registered 관계 제안 판별 스코프: "
+                             "period(기본·자산 created 기간) | alltime(전 기간)"),
     with_content: bool = Query(False, description="행마다 요약·키워드 동반(모달리티 상세·보완 v6)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -445,12 +460,26 @@ def assets_list(
     """자산 목록(FSM·modality·domain·file_ext·날짜 필터·페이징·013 FR-009f). 의료 제외·created_at 역순·LLM 0.
 
     ``with_content=true`` 면 행마다 요약(summary)·키워드(keywords) 동반(자산을 안 열고 내용 파악·v6).
+
+    ``snapshot_bucket``(054·계보 현황·FR-103) 지정 시 FSM status 를 운영 5버킷으로 롤업해 필터한다
+    (``status`` 는 무시·C3). 버킷/스코프 화이트리스트 검증(400)은 이 API 계층 책임이며(f-string
+    인젝션 방지), 실제 술어 조립은 ``query_assets`` 가 한다. 둘 다 미지정 시 기존 동작 불변(하위호환).
     """
+    # 화이트리스트 검증(API 계층 책임·f-string 인젝션 차단·400). snapshot_bucket=None 이면 검증 생략.
+    if snapshot_bucket is not None and snapshot_bucket not in _SNAPSHOT_BUCKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 snapshot_bucket: {snapshot_bucket!r} (허용: {list(_SNAPSHOT_BUCKETS)})")
+    if relation_scope not in _RELATION_SCOPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 relation_scope: {relation_scope!r} (허용: {list(_RELATION_SCOPES)})")
     cfrom, cto = _parse_dt(created_from), _parse_dt(created_to)
     return _run_in_db(
         lambda conn: query_assets(
             conn, status=status, modality=modality, domain=domain, file_ext=file_ext,
-            created_from=cfrom, created_to=cto, limit=limit, offset=offset,
+            created_from=cfrom, created_to=cto, snapshot_bucket=snapshot_bucket,
+            relation_scope=relation_scope, limit=limit, offset=offset,
             with_content=with_content))
 
 
@@ -494,6 +523,26 @@ def asset_timeline_endpoint(
     return _run_in_db(
         lambda conn: asset_timeline(
             conn, since=since, until=until, interval=interval, group_by=group_by))
+
+
+# 054·FR-301: 계보 현황 목록에서 자산 1건으로 드릴다운(관리자 관점). 사용자용 루트
+# ``GET /assets/{id}`` 와 동일한 ``fetch_asset_detail`` 노출 게이트(없음/비registered/의료 → 404)를
+# 재사용한다(자산 데이터 노출 0·헌법 10조). **라우트 순서(C8)**: 리터럴/2세그 라우트
+# (``/admin/assets/modality/{modality}``·``/admin/assets/{asset_id}/lineage``)를 위에서 먼저 선언해야
+# 이 catch-all 1세그 경로가 그것들을 가리지 않는다 — 그래서 이 라우트를 두 라우트보다 **뒤**에 둔다.
+@app.get("/admin/assets/{asset_id}")
+def admin_asset_detail(
+    asset_id: str,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """관리자 자산 1건 상세(계보 현황 드릴다운·FR-301). 노출 게이트·의료 제외는 ``fetch_asset_detail``
+    책임(없음/비registered/의료 → None → 404). 조회 전용·LLM 0. clearance 로 ext_meta tier omit(042)."""
+    detail = _run_in_db(
+        lambda conn: fetch_asset_detail(
+            conn, asset_id=asset_id, clearance=principal.clearance))
+    if detail is None:
+        raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 노출 대상이 아님")
+    return detail
 
 
 @app.get("/admin/dashboard/summary")

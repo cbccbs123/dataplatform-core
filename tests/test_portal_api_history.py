@@ -261,5 +261,145 @@ class HistoryEndpointsTest(unittest.TestCase):
         self.assertEqual(bg.call_args.args[1], "/assets/a1")
 
 
+class SnapshotBucketApiTest(unittest.TestCase):
+    """054 G3 — /admin/assets snapshot_bucket·relation_scope·/admin/asset-stats snapshot_buckets·
+    /admin/assets/{id} 배선(FR-103/201/301). 전부 additive·기존 동작 불변."""
+
+    def setUp(self):
+        self.client = TestClient(portal_api.app)
+
+    def test_assets_list_snapshot_bucket_passthrough(self):
+        # snapshot_bucket·relation_scope 가 query_assets 로 전달되는지 배선 검증(FR-103).
+        with mock.patch.object(portal_api, "query_assets",
+                               return_value={"rows": [], "total": 0}) as qa, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get(
+                "/admin/assets?snapshot_bucket=relation_proposed"
+                "&created_from=2026-06-01&created_to=2026-06-30")
+        self.assertEqual(r.status_code, 200)
+        kw = qa.call_args.kwargs
+        self.assertEqual(kw["snapshot_bucket"], "relation_proposed")
+        self.assertEqual(kw["relation_scope"], "period")  # 기본값
+        self.assertIsNotNone(kw["created_from"])
+        self.assertIsNotNone(kw["created_to"])
+
+    def test_assets_list_relation_scope_alltime_passthrough(self):
+        with mock.patch.object(portal_api, "query_assets",
+                               return_value={"rows": [], "total": 0}) as qa, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get(
+                "/admin/assets?snapshot_bucket=registered&relation_scope=alltime")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(qa.call_args.kwargs["relation_scope"], "alltime")
+
+    def test_assets_list_bad_snapshot_bucket_400(self):
+        # 화이트리스트(_SNAPSHOT_BUCKETS) 밖 버킷은 400(query_assets 호출 없음).
+        with mock.patch.object(portal_api, "query_assets") as qa, \
+             mock.patch.object(portal_api, "_run_in_db",
+                               side_effect=lambda cb: cb(None)):  # 400 조기반환 시 미호출
+            r = self.client.get("/admin/assets?snapshot_bucket=xxx")
+        self.assertEqual(r.status_code, 400)
+        qa.assert_not_called()
+
+    def test_assets_list_bad_relation_scope_400(self):
+        with mock.patch.object(portal_api, "query_assets") as qa, \
+             mock.patch.object(portal_api, "_run_in_db",
+                               side_effect=lambda cb: cb(None)):  # 400 조기반환 시 미호출
+            r = self.client.get("/admin/assets?relation_scope=xxx")
+        self.assertEqual(r.status_code, 400)
+        qa.assert_not_called()
+
+    def test_assets_list_no_snapshot_bucket_unchanged(self):
+        # 미지정 시 기존 동작 불변(하위호환) — snapshot_bucket=None·relation_scope 기본.
+        with mock.patch.object(portal_api, "query_assets",
+                               return_value={"rows": [], "total": 0}) as qa, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets?status=registered")
+        self.assertEqual(r.status_code, 200)
+        kw = qa.call_args.kwargs
+        self.assertIsNone(kw["snapshot_bucket"])
+        self.assertEqual(kw["status"], "registered")
+
+    def test_asset_stats_snapshot_buckets_flag_passthrough(self):
+        # snapshot_buckets=1 → asset_stats(snapshot_buckets=True)(FR-201).
+        with mock.patch.object(
+                portal_api, "asset_stats",
+                return_value={"total": 0, "by_status": [], "by_modality": [], "by_domain": [],
+                              "by_file_ext": [], "by_date": [],
+                              "by_snapshot_bucket": [{"bucket": "processing", "count": 0}]}) as st, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/asset-stats?snapshot_buckets=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(st.call_args.kwargs["snapshot_buckets"])
+        self.assertIn("by_snapshot_bucket", r.json())
+
+    def test_asset_stats_snapshot_buckets_default_false(self):
+        # 미지정 시 snapshot_buckets=False(하위호환·기존 응답만).
+        with mock.patch.object(
+                portal_api, "asset_stats",
+                return_value={"total": 0, "by_status": [], "by_modality": [], "by_domain": [],
+                              "by_file_ext": [], "by_date": []}) as st, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/asset-stats")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(st.call_args.kwargs["snapshot_buckets"])
+
+    def test_asset_detail_endpoint(self):
+        # /admin/assets/{id} → fetch_asset_detail 호출·정상 detail 200.
+        with mock.patch.object(portal_api, "fetch_asset_detail",
+                               return_value={"asset_id": "a1", "modality": "text",
+                                             "status": "registered"}) as fd, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/a1")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["asset_id"], "a1")
+        self.assertEqual(fd.call_args.kwargs["asset_id"], "a1")
+
+    def test_asset_detail_none_404(self):
+        # 없음/의료/비registered → fetch_asset_detail None → 404.
+        with mock.patch.object(portal_api, "fetch_asset_detail", return_value=None), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/nope")
+        self.assertEqual(r.status_code, 404)
+
+    def test_asset_detail_requires_auth_401(self):
+        # require_principal — 인증 없으면 401(auth 활성·토큰 없음). 관계 테스트 관례 재사용.
+        from src.portal.auth.verifier import _reset_verifier_for_tests
+
+        _reset_verifier_for_tests()
+        with mock.patch.dict(os.environ,
+                             {"PORTAL_AUTH_DISABLED": "0", "PORTAL_JWT_SECRET": "test-secret"},
+                             clear=False):
+            client = TestClient(portal_api.app)
+            r = client.get("/admin/assets/a1")
+        _reset_verifier_for_tests()
+        self.assertEqual(r.status_code, 401)
+
+    def test_asset_detail_does_not_shadow_modality_route(self):
+        # 라우트 순서 회귀: /admin/assets/modality/{m} 는 여전히 modality_detail 로 매칭
+        # (신설 /admin/assets/{id} 로 새지 않음·C8).
+        with mock.patch.object(portal_api, "modality_detail",
+                               return_value={"modality": "text", "total": 0, "by_file_ext": [],
+                                             "by_status": [], "by_date": []}) as md, \
+             mock.patch.object(portal_api, "fetch_asset_detail") as fd, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/modality/text")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["modality"], "text")
+        md.assert_called_once()
+        fd.assert_not_called()  # 자산 상세 핸들러로 새지 않음
+
+    def test_asset_detail_does_not_shadow_lineage_route(self):
+        # 라우트 순서 회귀: /admin/assets/{id}/lineage 는 여전히 query_asset_lineage 로 매칭.
+        with mock.patch.object(portal_api, "query_asset_lineage", return_value=[]) as ln, \
+             mock.patch.object(portal_api, "fetch_asset_detail") as fd, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/assets/a1/lineage")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("activities", r.json())
+        ln.assert_called_once()
+        fd.assert_not_called()  # 자산 상세 핸들러로 새지 않음
+
+
 if __name__ == "__main__":
     unittest.main()
