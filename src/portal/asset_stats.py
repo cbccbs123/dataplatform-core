@@ -153,7 +153,8 @@ def _snapshot_bucket_counts(cur: Any, where: str, period_params: list[Any]) -> l
         f"FROM asset a {where}) t")
     cur.execute(sql, [_RELATION_PROPOSED_ACTIVITY, *period_params])
     counts = cur.fetchone()
-    return [{"bucket": b, "count": int(c)} for b, c in zip(_SNAPSHOT_BUCKETS, counts)]
+    # strict=True: 버킷 수(5)와 FILTER 컬럼 수가 어긋나면 조용히 잘리지 않고 즉시 예외(회귀 방지).
+    return [{"bucket": b, "count": int(c)} for b, c in zip(_SNAPSHOT_BUCKETS, counts, strict=True)]
 
 
 def query_assets(conn: Any, *, status: str | None = None, modality: str | None = None,

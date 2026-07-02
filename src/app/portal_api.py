@@ -333,7 +333,7 @@ def access_logs_stats(
 def access_logs_timeline(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
-    interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour | month(054)"),
     action: str | None = Query(None, description="단일 api 필터(search/asset_view/download/bundle)"),
     group_by: str | None = Query(None, description="멀티시리즈 분할: action | user_id(미지정=단일)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
@@ -342,8 +342,8 @@ def access_logs_timeline(
 
     ``group_by=action``(또는 user_id)이면 멀티시리즈 1회 응답(시리즈별 막대). 미지정이면 단일 시리즈.
     """
-    if interval not in ("day", "hour"):
-        raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    if interval not in ("day", "hour", "month"):
+        raise HTTPException(status_code=422, detail=f"interval 은 day|hour|month 만 허용: {interval!r}")
     if group_by is not None and group_by not in ("action", "user_id"):
         raise HTTPException(status_code=422, detail=f"group_by 는 action|user_id 만 허용: {group_by!r}")
     since, until = _parse_dt(from_), _parse_dt(to)
@@ -396,7 +396,7 @@ def lineage_timeline_endpoint(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
     activity: str | None = Query(None, description="활동명 필터"),
-    interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour | month(054)"),
     group_by: str | None = Query(None, description="멀티시리즈 분할: activity | modality | status(미지정=단일)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
@@ -405,8 +405,8 @@ def lineage_timeline_endpoint(
     ``group_by``(activity/modality/status) 주면 멀티시리즈, 미지정이면 단일 시리즈
     (access-logs/timeline 과 기본값 일관). 차트는 group_by=activity 를 명시해 호출.
     """
-    if interval not in ("day", "hour"):
-        raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    if interval not in ("day", "hour", "month"):
+        raise HTTPException(status_code=422, detail=f"interval 은 day|hour|month 만 허용: {interval!r}")
     if group_by is not None and group_by not in ("activity", "modality", "status"):
         raise HTTPException(status_code=422, detail=f"group_by 는 activity|modality|status 만: {group_by!r}")
     since, until = _parse_dt(from_), _parse_dt(to)
@@ -504,7 +504,7 @@ def modality_detail_endpoint(
 def asset_timeline_endpoint(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None, alias="to"),
-    interval: str = Query("day", description="버킷 단위: day(기본) | hour"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour | month(054)"),
     group_by: str | None = Query(
         None, description="멀티시리즈 분할: modality | status | domain | file_ext(미지정=단일)"),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
@@ -514,8 +514,8 @@ def asset_timeline_endpoint(
     ``group_by``(modality/status/domain/file_ext) 주면 멀티시리즈(예: 어느 날 어떤 포맷이 몇 개 생성),
     미지정이면 단일.
     """
-    if interval not in ("day", "hour"):
-        raise HTTPException(status_code=422, detail=f"interval 은 day|hour 만 허용: {interval!r}")
+    if interval not in ("day", "hour", "month"):
+        raise HTTPException(status_code=422, detail=f"interval 은 day|hour|month 만 허용: {interval!r}")
     if group_by is not None and group_by not in ("modality", "status", "domain", "file_ext"):
         raise HTTPException(status_code=422,
                             detail=f"group_by 는 modality|status|domain|file_ext 만: {group_by!r}")

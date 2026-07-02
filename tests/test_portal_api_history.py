@@ -69,6 +69,22 @@ class HistoryEndpointsTest(unittest.TestCase):
         r = self.client.get("/admin/access-logs/timeline?interval=year")
         self.assertEqual(r.status_code, 422)
 
+    def test_timeline_month_accepted_all_endpoints(self):
+        # 054 FR-401: 3 timeline 엔드포인트가 interval=month 를 200 으로 허용해야 함(422 아님).
+        # 서비스 화이트리스트에 month 추가됐어도 엔드포인트 하드코딩 검증이 막던 갭 회귀 가드.
+        with mock.patch.object(portal_api, "access_log_timeline",
+                               return_value={"interval": "month", "buckets": []}), \
+             mock.patch.object(portal_api, "lineage_timeline",
+                               return_value={"interval": "month", "buckets": []}), \
+             mock.patch.object(portal_api, "asset_timeline",
+                               return_value={"interval": "month", "buckets": []}), \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            for path in ("/admin/access-logs/timeline", "/admin/lineage/timeline",
+                         "/admin/asset-timeline"):
+                r = self.client.get(f"{path}?interval=month")
+                self.assertEqual(r.status_code, 200, f"{path} interval=month 은 200 이어야 함")
+                self.assertEqual(r.json()["interval"], "month")
+
     def test_timeline_group_by_action_multiseries(self):
         with mock.patch.object(portal_api, "access_log_timeline",
                                return_value={"interval": "day", "group_by": "action",
