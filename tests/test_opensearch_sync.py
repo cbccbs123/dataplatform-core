@@ -350,6 +350,13 @@ def _bulk_via_client(client, actions, **kwargs):
     return client.bulk(actions, **kwargs)
 
 
+def _no_topics(_conn, _asset_id):
+    """056 topics 투영 seam 주입 대역 — 관계 없는 자산(주제 0). 색인 경로 배선(project_asset_topics)은
+    실 DB 를 타므로, 이 순수 색인 seam 테스트는 topics_fn 을 [] 로 주입해 기존 문서 형상을 유지한다.
+    주제 수록/투영 자체는 tests/test_opensearch_topics.py 가 별도로 덮는다(T401·T403)."""
+    return []
+
+
 def _asset_row(**over) -> dict:
     """index_asset/sync_all SQL 이 돌려줄 1행(asset+meta+평균임베딩) 대역."""
     row = {
@@ -413,7 +420,7 @@ class TestIndexAsset(unittest.TestCase):
 
         client = _FakeClient(existing=True)
         conn = _FakeConn([_asset_row()])
-        doc = index_asset(client, conn, "a1", index="assets", channel="st")
+        doc = index_asset(client, conn, "a1", index="assets", channel="st", topics_fn=_no_topics)
 
         self.assertEqual(len(client.indexed), 1)
         call = client.indexed[0]
@@ -428,7 +435,10 @@ class TestIndexAsset(unittest.TestCase):
         from src.search.opensearch_sync import index_asset
 
         conn = _FakeConn([_asset_row()])
-        index_asset(_FakeClient(existing=True), conn, "a1", index="assets", channel="st")
+        index_asset(
+            _FakeClient(existing=True), conn, "a1", index="assets", channel="st",
+            topics_fn=_no_topics,
+        )
         sql, params = conn.cursors[0].executed[0]
         self.assertTrue(_is_read_only(sql))
         self.assertEqual(params, ("st", "a1"))
@@ -440,7 +450,10 @@ class TestIndexAsset(unittest.TestCase):
         from src.search.opensearch_sync import index_asset
 
         conn = _FakeConn([_asset_row()])
-        index_asset(_FakeClient(existing=True), conn, "a1", index="assets", channel="st")
+        index_asset(
+            _FakeClient(existing=True), conn, "a1", index="assets", channel="st",
+            topics_fn=_no_topics,
+        )
         sql, _params = conn.cursors[0].executed[0]
         self.assertIn("REGISTERED", sql.upper())
 
@@ -516,7 +529,8 @@ class TestSyncAll(unittest.TestCase):
         client = _FakeClient(existing=False)
         conn = _FakeConn([_asset_row(asset_id="a1"), _asset_row(asset_id="a2")])
         status, ok, errors = sync_all(
-            client, conn, index="assets", channel="st", bulk_fn=_bulk_via_client
+            client, conn, index="assets", channel="st",
+            bulk_fn=_bulk_via_client, topics_fn=_no_topics,
         )
 
         self.assertEqual(status, "created")  # 없던 인덱스를 ensure_index 가 생성
@@ -535,7 +549,10 @@ class TestSyncAll(unittest.TestCase):
         from src.search.opensearch_sync import sync_all
 
         conn = _FakeConn([_asset_row()])
-        sync_all(_FakeClient(), conn, index="assets", channel="st", bulk_fn=_bulk_via_client)
+        sync_all(
+            _FakeClient(), conn, index="assets", channel="st",
+            bulk_fn=_bulk_via_client, topics_fn=_no_topics,
+        )
         sql, params = conn.cursors[0].executed[0]
         self.assertTrue(_is_read_only(sql))
         self.assertEqual(params, ("st",))
@@ -548,7 +565,8 @@ class TestSyncAll(unittest.TestCase):
         client = _FakeClient(existing=True)
         conn = _FakeConn([_asset_row()])
         status, _ok, _errors = sync_all(
-            client, conn, index="assets", channel="st", recreate=True, bulk_fn=_bulk_via_client
+            client, conn, index="assets", channel="st", recreate=True,
+            bulk_fn=_bulk_via_client, topics_fn=_no_topics,
         )
         self.assertEqual(status, "recreated")
         self.assertEqual(client.indices.deleted, ["assets"])

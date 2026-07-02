@@ -210,6 +210,12 @@ def build_index_body(
                 "summary": {"type": "text", "analyzer": "nori_user"},
                 "keywords": {"type": "text", "analyzer": "nori_user"},
                 "labels": {"type": "keyword"},
+                # 056 관계 주제(FR-201) — 관계 단계가 확정한 graph_edge.topic 을 자산으로 투영한 값.
+                # topics/subtopics 는 패싯·정확필터용 keyword(terms), topics_text 는 관련도 보강(BM25)용
+                # text 로 한국어 형태소 분석기(커스텀 nori_user)를 공유한다(summary·keywords 와 동형).
+                "topics": {"type": "keyword"},
+                "subtopics": {"type": "keyword"},
+                "topics_text": {"type": "text", "analyzer": "nori_user"},
                 "filter_kw": {
                     "properties": {
                         "file_ext": {"type": "keyword"},
@@ -254,11 +260,52 @@ def _flatten_labels(raw: Any) -> list[str]:
     return out
 
 
+# 주제 필드 조립(056 FR-202) — asset_to_doc(전체문서)·update_asset_topics(부분문서) 단일 출처.
+# project_asset_topics 가 이미 (topic_ko,subtopic_ko) 그룹을 결정적으로 정렬해 주므로 여기서는
+# 입력 순서를 보존한 채 dedup·빈값 스킵만 한다(재정렬 없음 → 순수·결정적, 헌법 3조).
+
+
+def _dedup_in_order(values: Iterable[Any]) -> list[str]:
+    """빈/None 을 제외하고 첫 등장 순서를 보존해 중복 제거(keyword 필드용·결정적)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        if not v:
+            continue
+        s = str(v)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
+    """주제 리스트 → OS 문서 주제 3필드(순수·결정적).
+
+    - ``topics``    = dedup 된 ``topic_ko`` (keyword·패싯/필터)
+    - ``subtopics`` = dedup 된 ``subtopic_ko``(None/"" 스킵·keyword)
+    - ``topics_text`` = 각 주제의 ``topic_ko subtopic_ko topic_en subtopic_en`` 토큰(빈값 스킵)을
+      입력 순서대로 공백결합(BM25 관련도 보강·한/영 질의 모두 매칭). 반복 토큰은 TF 로 유효해 보존.
+    """
+    tokens = [
+        str(v)
+        for t in topics
+        for v in (t.get("topic_ko"), t.get("subtopic_ko"), t.get("topic_en"), t.get("subtopic_en"))
+        if v
+    ]
+    return {
+        "topics": _dedup_in_order(t.get("topic_ko") for t in topics),
+        "subtopics": _dedup_in_order(t.get("subtopic_ko") for t in topics),
+        "topics_text": " ".join(tokens),
+    }
+
+
 def asset_to_doc(
     row: dict[str, Any],
     channel: str,
     *,
     noise_patterns: Iterable[str] = (),
+    topics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """PG 행(asset+metadata+평균임베딩) → OpenSearch 문서(순수·결정적).
 
@@ -269,6 +316,11 @@ def asset_to_doc(
     ``file_name`` 필드 자체는 ``clean_file_name`` 으로 ID스러운 잡음 토큰을 정제한 값이다.
     ``labels`` 는 ``_flatten_labels`` 로 dict→label 문자열만 추출한다(P0·FR-002). ext_meta 가 None/
     비-리스트(스키마 위반)여도 빈 값으로 안전 처리한다. ``noise_patterns`` 는 settings 정제 패턴(IO 층 주입).
+
+    ``topics``(056 FR-202) 는 관계 투영(``project_asset_topics``) 결과 리스트다. **주어지고 비어있지
+    않으면** ``topics``/``subtopics``/``topics_text`` 세 필드를 수록하고, ``None``/빈 리스트면 세 필드를
+    **넣지 않는다**(관계 없는 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다 현재
+    active 주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
     """
     _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
     ext = row.get("ext_meta") or {}
@@ -294,6 +346,9 @@ def asset_to_doc(
     vec = parse_vector(row["emb"])
     if any(x != 0.0 for x in vec):
         doc["embedding"] = vec
+    # 관계 주제 수록(056) — 비어있지 않을 때만 세 필드 추가(None/[] → 생략·하위호환).
+    if topics:
+        doc.update(_topics_doc_fields(topics))
     doc.update(
         build_filter_index_fields(
             fs_path=str(row.get("fs_path") or ""),
@@ -400,19 +455,48 @@ def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> s
     return version
 
 
+def _default_topics_fn(conn: Any, asset_id: Any) -> list[dict[str, Any]]:
+    """자산의 현재 active 관계 주제 투영(056 배선 seam 기본값 — 색인 경로 공용).
+
+    ``project_asset_topics`` 는 ``psycopg``·``graph_query`` 를 모듈 상단에서 당기므로 **호출 시 지연
+    import** 한다 — 플래그 off(미도입) 환경의 순수 함수 게이트가 이 무거운 의존 없이 opensearch_sync
+    를 import 할 수 있게 하기 위함(모듈 상단 지연 import 원칙과 동일). 반환 [] 면 자산에 주제 없음.
+    """
+    from src.relations.topic_query import project_asset_topics
+
+    return project_asset_topics(conn, asset_id=str(asset_id))
+
+
+# 색인 경로에 topic 투영을 잇는 seam(056 T403). 기본은 project_asset_topics(현재 active 주제).
+# 단위 테스트/특수 경로는 topics_fn 을 주입해 실 DB 없이 색인 문서 조립을 검증한다(bulk_fn·sync_fn 동형).
+TopicsFn = Callable[[Any, Any], list[dict[str, Any]]]
+
+
 def iter_asset_docs(
-    conn: Any, channel: str, *, noise_patterns: Iterable[str] = ()
+    conn: Any,
+    channel: str,
+    *,
+    noise_patterns: Iterable[str] = (),
+    topics_fn: TopicsFn = _default_topics_fn,
 ) -> Iterator[dict[str, Any]]:
     """PG 에서 registered 자산을 읽어 OpenSearch 문서를 yield(읽기 전용).
 
     ``noise_patterns`` 는 파일명 정제용 settings 패턴(IO 층이 주입 — 순수 ``asset_to_doc`` 으로 전달).
+    ``topics_fn``(056) 은 자산별 현재 active 주제를 계산해 문서에 함께 싣는다 — 전체 재색인(백필·
+    복구) 문서가 topics 를 포함해 재색인이 색인된 주제를 지우지 않게 한다(C5·SC-03, R3 self-heal).
+
+    구현 주의(실 DB): 바깥 커서를 순회하며 자산마다 ``topics_fn`` 이 conn 에 **중첩 커서**로 topic 을
+    조회한다. psycopg3 기본(client-side) 커서는 ``execute`` 시 결과를 클라이언트로 내려받아 버퍼링하므로,
+    순회 중 같은 conn 에 다른 커서로 조회해도 안전하다(server-side named 커서가 아님). 이 중첩 조회의
+    실 DB 동작·성능은 T404 resync 게이트에서 확인한다.
     """
     from psycopg.rows import dict_row
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_SYNC_SQL, (channel,))
         for row in cur:
-            yield asset_to_doc(row, channel, noise_patterns=noise_patterns)
+            topics = topics_fn(conn, row["asset_id"])
+            yield asset_to_doc(row, channel, noise_patterns=noise_patterns, topics=topics)
 
 
 def index_asset(
@@ -423,19 +507,41 @@ def index_asset(
     index: str,
     channel: str,
     noise_patterns: Iterable[str] = (),
+    topics_fn: TopicsFn = _default_topics_fn,
 ) -> dict[str, Any] | None:
     """자산 1건을 OpenSearch 에 색인한다(증분 훅의 정상 경로 — PG 읽기 전용 → OS 쓰기).
 
     그 자산의 (메타 + 활성 채널 평균 임베딩) 1행을 조회해 ``asset_to_doc`` 로 문서를 만들고
     ``client.index(_id=asset_id)`` 로 **upsert**(재실행 멱등) 한다. 자산/임베딩이 없으면(INNER
     JOIN 제외) 색인하지 않고 ``None`` 을 반환한다(no-op). 반환: 색인한 문서 또는 ``None``.
+
+    ``topics_fn``(056·기본 ``project_asset_topics``) 으로 그 자산의 **현재 active 관계 주제**를
+    계산해 전체문서에 함께 싣는다 — run_ingest 증분 훅이 재수집 자산을 이 경로로 재색인해도 앞서
+    색인된 topics 를 지우지 않는다(C5·SC-03). ``_fetch_one`` 커서는 ``with`` 종료로 닫힌 뒤
+    ``topics_fn`` 이 conn 에 조회하므로 커서 충돌이 없다. 관계 없는 자산은 투영 [] → topics 필드 생략.
     """
     row = _fetch_one(conn, _ASSET_ONE_SQL, (channel, asset_id))
     if row is None:
         return None
-    doc = asset_to_doc(row, channel, noise_patterns=noise_patterns)
+    topics = topics_fn(conn, asset_id)
+    doc = asset_to_doc(row, channel, noise_patterns=noise_patterns, topics=topics)
     client.index(index=index, id=str(asset_id), body=doc)
     return doc
+
+
+def update_asset_topics(
+    client: Any, index: str, asset_id: Any, topics: list[dict[str, Any]]
+) -> None:
+    """자산 문서의 **주제 3필드만** 부분 갱신한다(056 FR-203 — 전체 재색인 아님).
+
+    G5 재색인 훅(관계 배치 꼬리·검토 승인 커밋 후)이 관계 변화를 반영할 때 쓰는 seam이다. OS
+    ``update`` API 의 부분 문서(``body={"doc": {...}}``)로 ``topics``/``subtopics``/``topics_text`` 만
+    덮어쓴다 — ``asset_to_doc`` 과 동일한 ``_topics_doc_fields`` 로 조립해 두 경로의 주제 표현을 일치시킨다.
+    ``topics`` 가 비면 세 필드를 **빈 값으로 갱신**해 강등/제거된 stale 주제를 지운다(SC-02). ``asset_to_doc``
+    은 관계 없는 자산에서 필드를 생략하지만, 여기서는 이미 색인된 문서의 주제를 갱신·삭제해야 하므로
+    비어도 필드를 실어 보낸다(전체문서 색인과 의도적으로 다른 대칭). ``_id`` 는 ``index`` 색인과 동형으로 str.
+    """
+    client.update(index=index, id=str(asset_id), body={"doc": _topics_doc_fields(topics)})
 
 
 def _bulk_actions(index: str, docs: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
@@ -455,6 +561,7 @@ def sync_all(
     bulk_fn: Callable[..., tuple[int, list]] | None = None,
     nori_user_words: Iterable[str] | None = None,
     noise_patterns: Iterable[str] = (),
+    topics_fn: TopicsFn = _default_topics_fn,
 ) -> tuple[str, int, list[Any]]:
     """registered 자산 전체를 OpenSearch 로 재동기화한다(복구 도구 — PG 읽기 전용 → OS 쓰기).
 
@@ -462,7 +569,8 @@ def sync_all(
     스키마 변경 시에만 ``recreate=True``. ``bulk_fn`` 은 색인 seam(기본 opensearch-py ``helpers.bulk``)
     으로, 단위 테스트가 가짜를 주입해 OS 없이 액션을 검증한다. 반환: ``(인덱스상태, 색인 건수, 오류 목록)``.
     ``nori_user_words``(인덱스 analyzer 사전)·``noise_patterns``(파일명 정제) 는 settings 단일 출처를
-    IO 층(복구 도구)이 주입한다 — 미지정 시 순수 함수 기본값(026 기본 사전·빈 패턴).
+    IO 층(복구 도구)이 주입한다 — 미지정 시 순수 함수 기본값(026 기본 사전·빈 패턴). ``topics_fn``(056)
+    은 문서마다 현재 active 관계 주제를 실어 전체 재색인(백필·복구)이 topics 를 포함하게 한다(R3·C5).
     """
     if bulk_fn is None:
         from opensearchpy import helpers
@@ -473,7 +581,8 @@ def sync_all(
         client, index, recreate=recreate, dim=dim, nori_user_words=nori_user_words
     )
     actions = _bulk_actions(
-        index, iter_asset_docs(conn, channel, noise_patterns=noise_patterns)
+        index,
+        iter_asset_docs(conn, channel, noise_patterns=noise_patterns, topics_fn=topics_fn),
     )
     ok, errors = bulk_fn(client, actions, stats_only=False, raise_on_error=False)
     client.indices.refresh(index=index)
