@@ -8,7 +8,6 @@ Revises: v292_modality_canonical
 from __future__ import annotations
 
 from alembic import op
-
 from migrations.alembic._runsql import run_sql_file
 
 revision = "v293_lineage_activity_idx"
