@@ -1,13 +1,13 @@
 """OpenSearch 주제 색인 단위 테스트 — DB·OS·opensearch-py 실서버 불필요 (056 G4).
 
 검증 의도 (FR-201~204·SC-03)
-    - ``build_index_body`` 매핑에 주제 3필드가 존재한다: ``topics``(keyword)·``subtopics``(keyword)·
-      ``topics_text``(text·``nori_user`` 분석기). 검색 패싯/필터(keyword)와 BM25 보강(text)을 겸한다.
+    - ``build_index_body`` 매핑에 주제 2필드가 존재한다: ``topics``(keyword)·``subtopics``(keyword).
+      검색 패싯/필터(keyword·terms)용이다. (topics_text BM25 보강 필드는 스코프 철회로 **색인하지 않는다**.)
     - ``asset_to_doc(row, ch, topics=[...])`` 는 주제를 문서 필드로 수록한다(순수·결정적):
-      ``topics``=dedup 된 topic_ko, ``subtopics``=subtopic_ko, ``topics_text``=ko+en 공백결합.
-      ``topics=None``(또는 생략)이면 세 필드를 **넣지 않는다**(관계 없는 자산·하위호환).
+      ``topics``=dedup 된 topic_ko, ``subtopics``=subtopic_ko.
+      ``topics=None``(또는 생략)이면 두 필드를 **넣지 않는다**(관계 없는 자산·하위호환).
     - ``update_asset_topics(client,index,asset_id,topics)`` 는 OS ``update`` 부분문서
-      (``body={"doc": {...}}``)로 주제 3필드만 갱신한다(전체 재색인 아님·G5 재색인 훅의 seam).
+      (``body={"doc": {...}}``)로 주제 2필드만 갱신한다(전체 재색인 아님·G5 재색인 훅의 seam).
     - T403 배선: ``index_asset``/``sync_all`` 전체문서 색인 경로가 ``project_asset_topics`` 로
       **현재 active 주제를 항상 함께 실어**, 재수집/재색인이 topics 를 지우지 않게 한다(C5·SC-03).
 
@@ -47,24 +47,23 @@ def _row(**over):
 
 
 class TestIndexBodyTopicMappings(unittest.TestCase):
-    """T401 — build_index_body 에 주제 3필드 매핑이 존재."""
+    """T401 — build_index_body 에 주제 keyword 필드만 존재(topics_text 미색인)."""
 
     def test_topics_and_subtopics_are_keyword(self) -> None:
         props = build_index_body()["mappings"]["properties"]
         self.assertEqual(props["topics"]["type"], "keyword")
         self.assertEqual(props["subtopics"]["type"], "keyword")
 
-    def test_topics_text_is_nori_user_analyzed_text(self) -> None:
-        # 관련도 보강(BM25)용 — 한국어 형태소 분석기(커스텀 nori_user)로 색인한다.
+    def test_topics_text_not_indexed(self) -> None:
+        # topics_text(BM25 관련도 보강)는 스코프 철회 — 매핑에 없어야 한다(패싯/필터 keyword 만 색인).
         props = build_index_body()["mappings"]["properties"]
-        self.assertEqual(props["topics_text"]["type"], "text")
-        self.assertEqual(props["topics_text"]["analyzer"], "nori_user")
+        self.assertNotIn("topics_text", props)
 
 
 class TestAssetToDocTopics(unittest.TestCase):
     """T401 — asset_to_doc 의 topics 수록·하위호환."""
 
-    def test_topics_present_populates_three_fields(self) -> None:
+    def test_topics_present_populates_two_fields(self) -> None:
         doc = asset_to_doc(
             _row(),
             channel="st",
@@ -72,11 +71,8 @@ class TestAssetToDocTopics(unittest.TestCase):
         )
         self.assertEqual(doc["topics"], ["요리"])
         self.assertEqual(doc["subtopics"], ["제빵"])
-        # topics_text 는 ko+en 토큰을 공백결합 — BM25 매칭용(한/영 질의 모두 보강).
-        self.assertIn("요리", doc["topics_text"])
-        self.assertIn("제빵", doc["topics_text"])
-        self.assertIn("cooking", doc["topics_text"])
-        self.assertIn("baking", doc["topics_text"])
+        # topics_text(BM25 보강)는 색인하지 않는다 — keyword 패싯/필터만.
+        self.assertNotIn("topics_text", doc)
 
     def test_multiple_topics_dedup_topic_ko_in_order(self) -> None:
         # 같은 topic_ko 가 여러 subtopic 으로 오면 topics(keyword)는 dedup, 입력 순서 보존(결정적).
@@ -92,22 +88,20 @@ class TestAssetToDocTopics(unittest.TestCase):
         self.assertEqual(doc["topics"], ["요리", "음악"])
         self.assertEqual(doc["subtopics"], ["제빵", "제과", "재즈"])
 
-    def test_none_topics_omits_all_three_fields(self) -> None:
-        # 관계 없는 자산(topics=None) → 세 필드 부재(하위호환·기존 문서 형상 불변).
+    def test_none_topics_omits_both_fields(self) -> None:
+        # 관계 없는 자산(topics=None) → 두 필드 부재(하위호환·기존 문서 형상 불변).
         doc = asset_to_doc(_row(), channel="st")
         self.assertNotIn("topics", doc)
         self.assertNotIn("subtopics", doc)
-        self.assertNotIn("topics_text", doc)
 
-    def test_empty_topics_list_omits_all_three_fields(self) -> None:
-        # 빈 리스트(투영 결과 주제 0)도 세 필드 부재 — None 과 동일(관계 없는 자산).
+    def test_empty_topics_list_omits_both_fields(self) -> None:
+        # 빈 리스트(투영 결과 주제 0)도 두 필드 부재 — None 과 동일(관계 없는 자산).
         doc = asset_to_doc(_row(), channel="st", topics=[])
         self.assertNotIn("topics", doc)
         self.assertNotIn("subtopics", doc)
-        self.assertNotIn("topics_text", doc)
 
     def test_none_or_empty_subtopic_skipped_in_subtopics(self) -> None:
-        # subtopic_ko 가 None/"" 이면 subtopics(keyword)에서 제외, topics_text 에서도 제외.
+        # subtopic_ko 가 None/"" 이면 subtopics(keyword)에서 제외(빈 keyword 리스트).
         doc = asset_to_doc(
             _row(),
             channel="st",
@@ -115,8 +109,6 @@ class TestAssetToDocTopics(unittest.TestCase):
         )
         self.assertEqual(doc["topics"], ["요리", "음악"])
         self.assertEqual(doc["subtopics"], [])  # None/"" subtopic 스킵 → 빈 keyword 리스트
-        self.assertIn("요리", doc["topics_text"])
-        self.assertIn("jazz", doc["topics_text"])
 
     def test_topics_do_not_disturb_existing_fields(self) -> None:
         # 주제 수록이 기존 문서 필드(summary·embedding 등)를 훼손하지 않는다.
@@ -149,8 +141,7 @@ class TestUpdateAssetTopics(unittest.TestCase):
         partial = body["doc"]
         self.assertEqual(partial["topics"], ["요리"])
         self.assertEqual(partial["subtopics"], ["제빵"])
-        self.assertIn("요리", partial["topics_text"])
-        self.assertIn("cooking", partial["topics_text"])
+        self.assertNotIn("topics_text", partial)  # BM25 보강 필드 미색인
 
     def test_id_coerced_to_str(self) -> None:
         # asset_id 가 비-str(UUID 등)이어도 OS _id 는 항상 str(index_asset 관례 미러).
@@ -172,7 +163,6 @@ class TestUpdateAssetTopics(unittest.TestCase):
         partial = client.update.call_args.kwargs["body"]["doc"]
         self.assertEqual(partial["topics"], [])
         self.assertEqual(partial["subtopics"], [])
-        self.assertEqual(partial["topics_text"], "")
 
 
 # ── T403 배선 테스트용 가짜 client/conn (실 OS·DB 없이 색인 액션 조립 검증) ──
@@ -267,7 +257,6 @@ class TestIndexAssetTopicWiring(unittest.TestCase):
         # 색인 문서가 현재 active 주제를 포함(C5) — topics_fn 미주입 시 project_asset_topics 계산.
         self.assertEqual(doc["topics"], ["요리"])
         self.assertEqual(doc["subtopics"], ["제빵"])
-        self.assertIn("요리", doc["topics_text"])
         self.assertEqual(client.indexed[0]["body"]["topics"], ["요리"])
         # project 는 conn + 해당 asset_id 로 호출(투영 seam 재사용)
         m_project.assert_called_once()
@@ -282,7 +271,7 @@ class TestIndexAssetTopicWiring(unittest.TestCase):
         client = _FakeClient()
         doc = index_asset(client, _FakeConn([_row()]), "a1", index="assets", channel="st")
         self.assertNotIn("topics", doc)
-        self.assertNotIn("topics_text", doc)
+        self.assertNotIn("subtopics", doc)
 
     def test_index_asset_topics_fn_injection_overrides_default(self) -> None:
         # topics_fn 주입 seam(테스트/특수 경로) — 주입 함수 결과가 문서에 실린다.

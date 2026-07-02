@@ -211,11 +211,10 @@ def build_index_body(
                 "keywords": {"type": "text", "analyzer": "nori_user"},
                 "labels": {"type": "keyword"},
                 # 056 관계 주제(FR-201) — 관계 단계가 확정한 graph_edge.topic 을 자산으로 투영한 값.
-                # topics/subtopics 는 패싯·정확필터용 keyword(terms), topics_text 는 관련도 보강(BM25)용
-                # text 로 한국어 형태소 분석기(커스텀 nori_user)를 공유한다(summary·keywords 와 동형).
+                # 패싯·정확필터용 keyword(terms)만 색인한다. BM25 관련도 보강(topics_text)은
+                # 스코프 철회(FR-504·SC-04 제거) — 랭킹 회귀 위험 대비 이득이 낮아 keyword 필터만 남긴다.
                 "topics": {"type": "keyword"},
                 "subtopics": {"type": "keyword"},
-                "topics_text": {"type": "text", "analyzer": "nori_user"},
                 "filter_kw": {
                     "properties": {
                         "file_ext": {"type": "keyword"},
@@ -280,23 +279,17 @@ def _dedup_in_order(values: Iterable[Any]) -> list[str]:
 
 
 def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
-    """주제 리스트 → OS 문서 주제 3필드(순수·결정적).
+    """주제 리스트 → OS 문서 주제 2필드(순수·결정적).
 
     - ``topics``    = dedup 된 ``topic_ko`` (keyword·패싯/필터)
     - ``subtopics`` = dedup 된 ``subtopic_ko``(None/"" 스킵·keyword)
-    - ``topics_text`` = 각 주제의 ``topic_ko subtopic_ko topic_en subtopic_en`` 토큰(빈값 스킵)을
-      입력 순서대로 공백결합(BM25 관련도 보강·한/영 질의 모두 매칭). 반복 토큰은 TF 로 유효해 보존.
+
+    BM25 관련도 보강 필드(``topics_text``·한/영 토큰 공백결합)는 스코프 철회로 색인하지 않는다
+    (FR-504·SC-04 제거). 주제는 keyword terms 필터/패싯으로만 검색에 반영한다.
     """
-    tokens = [
-        str(v)
-        for t in topics
-        for v in (t.get("topic_ko"), t.get("subtopic_ko"), t.get("topic_en"), t.get("subtopic_en"))
-        if v
-    ]
     return {
         "topics": _dedup_in_order(t.get("topic_ko") for t in topics),
         "subtopics": _dedup_in_order(t.get("subtopic_ko") for t in topics),
-        "topics_text": " ".join(tokens),
     }
 
 
@@ -318,7 +311,7 @@ def asset_to_doc(
     비-리스트(스키마 위반)여도 빈 값으로 안전 처리한다. ``noise_patterns`` 는 settings 정제 패턴(IO 층 주입).
 
     ``topics``(056 FR-202) 는 관계 투영(``project_asset_topics``) 결과 리스트다. **주어지고 비어있지
-    않으면** ``topics``/``subtopics``/``topics_text`` 세 필드를 수록하고, ``None``/빈 리스트면 세 필드를
+    않으면** ``topics``/``subtopics`` 두 필드(keyword)를 수록하고, ``None``/빈 리스트면 두 필드를
     **넣지 않는다**(관계 없는 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다 현재
     active 주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
     """
@@ -532,12 +525,12 @@ def index_asset(
 def update_asset_topics(
     client: Any, index: str, asset_id: Any, topics: list[dict[str, Any]]
 ) -> None:
-    """자산 문서의 **주제 3필드만** 부분 갱신한다(056 FR-203 — 전체 재색인 아님).
+    """자산 문서의 **주제 2필드만** 부분 갱신한다(056 FR-203 — 전체 재색인 아님).
 
     G5 재색인 훅(관계 배치 꼬리·검토 승인 커밋 후)이 관계 변화를 반영할 때 쓰는 seam이다. OS
-    ``update`` API 의 부분 문서(``body={"doc": {...}}``)로 ``topics``/``subtopics``/``topics_text`` 만
+    ``update`` API 의 부분 문서(``body={"doc": {...}}``)로 ``topics``/``subtopics`` 만
     덮어쓴다 — ``asset_to_doc`` 과 동일한 ``_topics_doc_fields`` 로 조립해 두 경로의 주제 표현을 일치시킨다.
-    ``topics`` 가 비면 세 필드를 **빈 값으로 갱신**해 강등/제거된 stale 주제를 지운다(SC-02). ``asset_to_doc``
+    ``topics`` 가 비면 두 필드를 **빈 값으로 갱신**해 강등/제거된 stale 주제를 지운다(SC-02). ``asset_to_doc``
     은 관계 없는 자산에서 필드를 생략하지만, 여기서는 이미 색인된 문서의 주제를 갱신·삭제해야 하므로
     비어도 필드를 실어 보낸다(전체문서 색인과 의도적으로 다른 대칭). ``_id`` 는 ``index`` 색인과 동형으로 str.
     """

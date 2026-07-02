@@ -3,8 +3,8 @@
 왜 이 모듈인가 (접근 C′·증분 재색인)
     관계 단계(``run_relations`` 배치·검토 승인/반려/정정)가 ``graph_edge`` 를 바꾸면, 그 엣지에
     걸린 자산의 **active-only 주제 투영**(``project_asset_topics``)이 달라진다. 전체 재색인
-    (``sync_all``) 없이, **변경 자산 + 그 이웃**의 OS topics 3필드(``topics``/``subtopics``/
-    ``topics_text``)만 부분 업데이트(``update_asset_topics``)해 검색·패싯을 최신으로 유지한다.
+    (``sync_all``) 없이, **변경 자산 + 그 이웃**의 OS topics 2필드(``topics``/``subtopics``)만
+    부분 업데이트(``update_asset_topics``)해 검색·패싯을 최신으로 유지한다.
 
 왜 이웃까지 재색인하나 (핵심)
     한 엣지는 **양끝 자산 모두**의 active-only 주제 집계를 바꾼다. 그래서 변경 자산만 재색인하면
