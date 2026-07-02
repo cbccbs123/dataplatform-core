@@ -86,6 +86,87 @@ class AssetStatsShapeTest(unittest.TestCase):
             self.assertEqual(params, [dt1, dt2])
 
 
+class AssetStatsSnapshotBucketsTest(unittest.TestCase):
+    """054 G2 — asset_stats by_snapshot_bucket 집계(FR-201/202)."""
+
+    def _conn_with_buckets(self, total, filter_row):
+        # 기존 6쿼리(COUNT→by_status→modality→domain→file_ext→date) 뒤에 단일 FILTER 쿼리(5 count)
+        return _Conn([
+            (total,),
+            [],  # by_status
+            [],  # by_modality
+            [],  # by_domain
+            [],  # by_file_ext
+            [],  # by_date
+            filter_row,  # FILTER 쿼리 fetchone → (processing, deferred, registered, failed, relation_proposed)
+        ])
+
+    def test_snapshot_buckets_shape_and_order(self):
+        # FILTER 행 순서 = SELECT 리스트 순서(processing, deferred, registered, failed, relation_proposed)
+        # 응답의 by_snapshot_bucket 은 _SNAPSHOT_BUCKETS 순서로 재배치(0 포함 5개)
+        conn = self._conn_with_buckets(20, (3, 2, 10, 1, 4))
+        out = asset_stats(conn, snapshot_buckets=True)
+        self.assertIn("by_snapshot_bucket", out)
+        buckets = out["by_snapshot_bucket"]
+        self.assertEqual([b["bucket"] for b in buckets], list(_SNAPSHOT_BUCKETS))
+        self.assertEqual(len(buckets), 5)
+        as_dict = {b["bucket"]: b["count"] for b in buckets}
+        self.assertEqual(as_dict["processing"], 3)
+        self.assertEqual(as_dict["deferred"], 2)
+        self.assertEqual(as_dict["registered"], 10)
+        self.assertEqual(as_dict["failed"], 1)
+        self.assertEqual(as_dict["relation_proposed"], 4)
+
+    def test_snapshot_buckets_zero_included(self):
+        # 0건 버킷도 응답에 항상 포함(5개 고정)
+        conn = self._conn_with_buckets(0, (0, 0, 0, 0, 0))
+        out = asset_stats(conn, snapshot_buckets=True)
+        self.assertEqual(len(out["by_snapshot_bucket"]), 5)
+        for b in out["by_snapshot_bucket"]:
+            self.assertEqual(b["count"], 0)
+
+    def test_sum_of_buckets_equals_total(self):
+        # sum(by_snapshot_bucket) == total (동일 스코프 _period_clause)
+        conn = self._conn_with_buckets(20, (3, 2, 10, 1, 4))
+        out = asset_stats(conn, snapshot_buckets=True)
+        self.assertEqual(sum(b["count"] for b in out["by_snapshot_bucket"]), out["total"])
+
+    def test_filter_query_shape_and_binding(self):
+        # 단일 FILTER 쿼리: 5 count·의료 제외 서브쿼리·activity=%s 바인딩
+        conn = self._conn_with_buckets(20, (3, 2, 10, 1, 4))
+        asset_stats(conn, snapshot_buckets=True)
+        # 기존 6쿼리 + FILTER 쿼리 1개 = 7 execute
+        self.assertEqual(len(conn._cur.calls), 7)
+        filter_sql, filter_params = conn._cur.calls[6]
+        self.assertEqual(filter_sql.count("FILTER"), 5)  # 5버킷 count
+        self.assertIn("domain_label <> 'medical'", filter_sql)  # 의료 제외 서브쿼리
+        self.assertIn("asset_lineage l", filter_sql)  # relation_proposed EXISTS
+        self.assertIn("l.activity = %s", filter_sql)
+        # activity 파라미터가 첫 번째(SELECT 리스트 EXISTS 가 WHERE 보다 먼저 등장)
+        self.assertEqual(filter_params, [_RELATION_PROPOSED_ACTIVITY])
+
+    def test_filter_query_period_binding_order(self):
+        # 기간 지정 시 params = [activity, since, until] (SELECT EXISTS 먼저, WHERE 기간 뒤)
+        dt1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dt2 = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = self._conn_with_buckets(20, (3, 2, 10, 1, 4))
+        asset_stats(conn, since=dt1, until=dt2, snapshot_buckets=True)
+        filter_sql, filter_params = conn._cur.calls[6]
+        self.assertIn("created_at >= %s", filter_sql)
+        self.assertIn("created_at < %s", filter_sql)
+        self.assertEqual(filter_params, [_RELATION_PROPOSED_ACTIVITY, dt1, dt2])
+
+    def test_no_snapshot_buckets_keeps_legacy_shape(self):
+        # 하위호환: snapshot_buckets 미지정(기본 False)이면 by_snapshot_bucket 없음·기존 6키만·6쿼리
+        conn = _Conn([(0,), [], [], [], [], []])
+        out = asset_stats(conn)
+        self.assertNotIn("by_snapshot_bucket", out)
+        self.assertEqual(
+            set(out.keys()),
+            {"total", "by_status", "by_modality", "by_domain", "by_file_ext", "by_date"})
+        self.assertEqual(len(conn._cur.calls), 6)  # FILTER 쿼리 미실행
+
+
 class QueryAssetsShapeTest(unittest.TestCase):
     def test_rows_shape_and_basename(self):
         ts = datetime(2026, 6, 30, tzinfo=timezone.utc)

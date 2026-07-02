@@ -86,11 +86,19 @@ def _period_clause(since: Any, until: Any) -> tuple[str, list[Any]]:
     return "WHERE " + " AND ".join(conds), params
 
 
-def asset_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict[str, Any]:
+def asset_stats(conn: Any, *, since: Any = None, until: Any = None,
+                snapshot_buckets: bool = False) -> dict[str, Any]:
     """전체 자산 집계(status·modality·domain·file_ext·date별·총계·의료 제외·결정적·FR-009e).
 
     ``since``/``until``(생성일 from/to·to exclusive·보완 v6) 지정 시 6개 집계 전부 기간 스코프
     (대시보드 기간 필터가 파일 포맷·모달리티·일자 분포에 일관 반영). 미지정이면 전체 기간.
+
+    ``snapshot_buckets=True``(054·계보 현황 화면·FR-201/202) 지정 시 응답에 ``by_snapshot_bucket``
+    (운영 5버킷 count·``_SNAPSHOT_BUCKETS`` 순서·0건도 항상 포함)을 추가한다. 버킷 자산집합은 total 과
+    **동일한 ``_period_clause`` 스코프**(의료 제외 + created_at 기간)라 ``sum(by_snapshot_bucket)==total``
+    이 보장된다. relation_proposed 판별(EXISTS)만은 관계 제안 유무를 전 기간에서 보는 alltime(FR-202:
+    자산 created 기간 안이면 과거 관계 제안도 반영). ``snapshot_buckets=False``(기본)면 기존 응답·SQL 이
+    완전히 불변이다(하위호환·FILTER 쿼리 미실행).
     """
     where, p = _period_clause(since, until)
     with conn.cursor() as cur:
@@ -112,8 +120,40 @@ def asset_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict[str,
                     "GROUP BY d ORDER BY d ASC", p)
         by_date = [{"date": d.isoformat() if d is not None else None, "count": int(c)}
                    for d, c in cur.fetchall()]
-    return {"total": total, "by_status": by_status, "by_modality": by_modality,
-            "by_domain": by_domain, "by_file_ext": by_file_ext, "by_date": by_date}
+        result = {"total": total, "by_status": by_status, "by_modality": by_modality,
+                  "by_domain": by_domain, "by_file_ext": by_file_ext, "by_date": by_date}
+        if snapshot_buckets:
+            result["by_snapshot_bucket"] = _snapshot_bucket_counts(cur, where, p)
+    return result
+
+
+def _snapshot_bucket_counts(cur: Any, where: str, period_params: list[Any]) -> list[dict[str, Any]]:
+    """운영 5버킷 count 를 단일 FILTER 쿼리로 뽑아 ``_SNAPSHOT_BUCKETS`` 순서로 반환(0 포함).
+
+    ``where``/``period_params`` = total 과 동일한 ``_period_clause``(의료 제외 + created_at 기간) →
+    버킷 자산집합이 total 과 같은 스코프라 ``sum==total`` 이 보장된다. 서브쿼리에서 자산별로
+    관계 제안 존재 여부(rp)를 EXISTS 로 계산(FR-202: alltime·occurred_at 기간 없음)한 뒤 바깥에서
+    FILTER 로 5버킷을 한 번에 센다. status IN 리터럴은 ``_PROCESSING_STATUSES`` 고정 SQL(인젝션 안전).
+
+    **파라미터 순서**: SELECT 리스트의 EXISTS(``activity=%s``)가 FROM/WHERE 의 기간 ``%s`` 보다 먼저
+    등장하므로 ``[_RELATION_PROPOSED_ACTIVITY, *period_params]`` 순으로 바인딩한다(순서 어긋남 방지).
+    FILTER 리스트 순서 = ``_SNAPSHOT_BUCKETS`` 순서(processing→deferred→registered→failed→relation_proposed).
+    """
+    proc = ", ".join(f"'{s}'" for s in _PROCESSING_STATUSES)  # C1: classified 제외 4status 리터럴
+    sql = (
+        f"SELECT "
+        f"count(*) FILTER (WHERE status IN ({proc})), "                 # processing
+        f"count(*) FILTER (WHERE status = 'deferred'), "               # deferred
+        f"count(*) FILTER (WHERE status = 'registered' AND NOT rp), "  # registered
+        f"count(*) FILTER (WHERE status = 'failed'), "                 # failed
+        f"count(*) FILTER (WHERE status = 'registered' AND rp) "       # relation_proposed
+        f"FROM (SELECT status, "
+        f"EXISTS (SELECT 1 FROM asset_lineage l "
+        f"WHERE l.asset_id = a.asset_id AND l.activity = %s) AS rp "
+        f"FROM asset a {where}) t")
+    cur.execute(sql, [_RELATION_PROPOSED_ACTIVITY, *period_params])
+    counts = cur.fetchone()
+    return [{"bucket": b, "count": int(c)} for b, c in zip(_SNAPSHOT_BUCKETS, counts)]
 
 
 def query_assets(conn: Any, *, status: str | None = None, modality: str | None = None,
