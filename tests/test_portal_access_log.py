@@ -100,6 +100,13 @@ class TimelineShapeTest(unittest.TestCase):
         self.assertEqual(out["interval"], "hour")
         self.assertIn("date_trunc('hour'", conn._cur.calls[0][0])
 
+    def test_interval_month_passthrough(self):
+        # 054 FR-401: month 화이트리스트 추가 — date_trunc('month') 사용
+        conn = _Conn([[]])
+        out = access_log_timeline(conn, interval="month")
+        self.assertEqual(out["interval"], "month")
+        self.assertIn("date_trunc('month'", conn._cur.calls[0][0])
+
     def test_action_filter_in_where(self):
         conn = _Conn([[]])
         access_log_timeline(conn, action="search")

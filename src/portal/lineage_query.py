@@ -80,7 +80,7 @@ def query_lineage_feed(
     return {"rows": rows, "total": total, "limit": limit, "offset": offset}
 
 
-_INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
+_INTERVALS = {"day", "hour", "month"}  # date_trunc 화이트리스트(f-string 인젝션 방지·054 month 추가)
 # 멀티시리즈 group_by 화이트리스트 → 컬럼식(고정 매핑·사용자 입력은 키로만 조회·인젝션 안전).
 _GROUP_COLS = {"activity": "al.activity", "modality": "a.modality", "status": "a.status"}
 

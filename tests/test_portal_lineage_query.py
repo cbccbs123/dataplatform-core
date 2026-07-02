@@ -135,6 +135,12 @@ class LineageTimelineTest(unittest.TestCase):
         self.assertEqual(out["buckets"][0]["count"], 5)
         self.assertNotIn("series", out)
 
+    def test_interval_month_passthrough(self):
+        # 054 FR-401: month 화이트리스트 추가(프론트 일→월 롤업 서버 이관)
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        out = lineage_timeline(_Conn([(ts, 5)]), interval="month", group_by=None)
+        self.assertEqual(out["interval"], "month")
+
     def test_multi_series_group_by_activity(self):
         ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
         # 그룹 행: (key, bucket, count) — key ASC·bucket ASC 정렬 가정

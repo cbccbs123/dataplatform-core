@@ -543,6 +543,12 @@ class AssetTimelineTest(unittest.TestCase):
         out = asset_timeline(conn, interval="year")
         self.assertEqual(out["interval"], "day")  # 화이트리스트 폴백(API 는 422 선처리)
 
+    def test_interval_month_passthrough(self):
+        # 054 FR-401: month 지원(프론트 일→월 롤업 서버 이관)
+        conn = _Conn([[]])
+        out = asset_timeline(conn, interval="month")
+        self.assertEqual(out["interval"], "month")
+
 
 if __name__ == "__main__":
     unittest.main()

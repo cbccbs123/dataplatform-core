@@ -112,7 +112,7 @@ def access_log_stats(conn: Any, *, since: Any = None, until: Any = None) -> dict
     return {"total": total, "by_action": by_action, "by_user": by_user}
 
 
-_TIMELINE_INTERVALS = {"day", "hour"}  # date_trunc 화이트리스트(f-string 인젝션 방지)
+_TIMELINE_INTERVALS = {"day", "hour", "month"}  # date_trunc 화이트리스트(f-string 인젝션 방지·054 month 추가)
 # group_by 멀티시리즈 화이트리스트 → 컬럼식(고정 매핑·인젝션 안전). action/user_id 만 허용.
 _TIMELINE_GROUP_COLS = {"action": "action", "user_id": "user_id"}
 
