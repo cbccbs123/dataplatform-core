@@ -20,8 +20,11 @@ seam 재사용
 """
 from __future__ import annotations
 
+import os
 from collections import Counter
 from typing import Any
+
+from psycopg.rows import dict_row
 
 from src.relations.graph_query import fetch_active_relations_for_asset
 
@@ -81,3 +84,200 @@ def project_asset_topics(conn, *, asset_id: str, top_n: int = 10) -> list[dict]:
             }
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# 주제 탐색 seam (056 G2 · FR-401~403)
+#
+# graph_query 조인 스타일 미러링: graph_edge → node(src/dst; node_kind='asset') →
+# asset(양끝) 로 자산을 해소한다. 대상 주제 실은 active 엣지의 양끝을 후보/집계 대상으로 쓴다.
+#
+# 의료(PHI) 제외 (헌법 10조) — ``review._build_review_where`` 와 **동일 조건 재사용**:
+#   양끝 asset(sa=src, da=dst)에 ``domain_label IS DISTINCT FROM 'medical'`` 을 건다.
+#   NULL 도메인 노출 방지 위해 ``= 'medical'`` 이 아니라 ``IS DISTINCT FROM`` 을 쓴다
+#   (``= 'medical'`` 은 NULL 을 놓친다). 어느 한 끝이라도 의료면 엣지 전체를 제외한다.
+#
+# 투영 = active-only (plan Global Constraints) — status 는 'active' 리터럴로 고정(사용자 입력 아님).
+# topic 술어는 표현식 인덱스(v294 ix_graph_edge_topic_ko/subtopic_ko) 친화형
+#   ``topic->>'topic_ko' = %s`` / ``= ANY(%s)`` — 값은 전부 %s 바인딩(f-string 값 주입 금지·인젝션 0).
+# 조회행 계약(graph_query 관례): 반환 asset_id 는 항상 ``str()``.
+# ---------------------------------------------------------------------------
+
+# 양끝 자산 해소 조인(graph_query _FETCH_RELATIONS_SQL 스타일) + review 의료 제외 2조건.
+_TOPIC_JOIN = """
+FROM graph_edge ge
+JOIN node sn ON sn.node_id = ge.src_node AND sn.node_kind = 'asset'
+JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'
+JOIN asset sa ON sa.asset_id = sn.asset_id
+JOIN asset da ON da.asset_id = dn.asset_id
+"""
+
+# active-only + 의료 제외(양끝) — 세 함수 공통 전제.
+_ACTIVE_MEDICAL_WHERE = """
+WHERE ge.status = 'active'
+  AND sa.domain_label IS DISTINCT FROM 'medical'
+  AND da.domain_label IS DISTINCT FROM 'medical'
+"""
+
+# 대상 주제(topic_ko 집합)를 실은 active 엣지의 양끝 자산 수집.
+_NEIGHBOR_SQL = f"""
+SELECT sn.asset_id AS src_asset, dn.asset_id AS dst_asset,
+       ge.topic->>'topic_ko' AS topic_ko
+{_TOPIC_JOIN}{_ACTIVE_MEDICAL_WHERE}
+  AND ge.topic->>'topic_ko' = ANY(%s)
+"""
+
+# 주제 목록 집계용 — 양끝 자산 + (topic_ko, subtopic_ko). 빈 topic_ko 는 조회 단계에서 배제.
+_LIST_TOPICS_SQL = f"""
+SELECT sn.asset_id AS src_asset, dn.asset_id AS dst_asset,
+       ge.topic->>'topic_ko' AS topic_ko,
+       ge.topic->>'subtopic_ko' AS subtopic_ko
+{_TOPIC_JOIN}{_ACTIVE_MEDICAL_WHERE}
+  AND COALESCE(ge.topic->>'topic_ko', '') <> ''
+"""
+
+# 주제별 자산 페이징용 — 양끝 자산 + 식별(fs_uri·fs_path). subtopic 필터는 호출 시 append.
+_ASSETS_IN_TOPIC_SQL = f"""
+SELECT sn.asset_id AS src_asset, sa.fs_uri AS src_fs_uri, sa.fs_path AS src_fs_path,
+       dn.asset_id AS dst_asset, da.fs_uri AS dst_fs_uri, da.fs_path AS dst_fs_path
+{_TOPIC_JOIN}{_ACTIVE_MEDICAL_WHERE}
+  AND ge.topic->>'topic_ko' = %s
+"""
+
+
+def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
+    """``asset_id`` 와 주제를 1개 이상 공유하는 다른 자산을 찾는다(같은-주제 탐색).
+
+    Args:
+        conn: DB 연결.
+        asset_id: 탐색 관점 자산.
+        top_k: 반환 상한(기본 20).
+
+    Returns:
+        ``[{asset_id(str), shared_topics:[topic_ko...], overlap_weight:int, already_linked:bool}]``.
+        - ``overlap_weight`` = 그 자산이 (대상 주제를 실은) active 엣지에 참여한 횟수(엣지당 1).
+        - ``shared_topics`` = 대상과 공유하는 topic_ko 집합(정렬).
+        - ``already_linked`` = 그 자산이 대상의 **직접 관계 이웃**인지
+          (``fetch_active_relations_for_asset(asset_id)`` 이웃 집합 포함 여부).
+        - 정렬 ``overlap_weight desc → asset_id asc``(결정적) 후 top_k 절단. 대상 자산 자신 제외.
+
+    대상 주제가 없으면(직접 이웃 topic 미부여) 빈 리스트(불필요한 DB 조회도 하지 않음).
+    """
+    # 1) 대상 주제 = 대상의 active 이웃 엣지 topic 투영(project_asset_topics seam 재사용).
+    target_topics = project_asset_topics(conn, asset_id=asset_id)
+    topic_kos = sorted({t["topic_ko"] for t in target_topics if t.get("topic_ko")})
+    if not topic_kos:
+        return []
+
+    # 2) already_linked 판정용 대상 직접 이웃 집합(같은 active read seam 재사용; asset_id 는 str).
+    linked = {nb["asset_id"] for nb in fetch_active_relations_for_asset(conn, asset_id=asset_id)}
+    target_str = str(asset_id)
+
+    # 3) 대상 주제를 실은 active·의료제외 엣지의 양끝 자산 수집.
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_NEIGHBOR_SQL, (topic_kos,))
+        rows = cur.fetchall()
+
+    # 4) 후보 자산별 overlap_weight(엣지 참여 수)·shared_topics(공유 topic_ko) 집계. 대상 자신 스킵.
+    agg: dict[str, dict] = {}
+    for r in rows:
+        topic_ko = r["topic_ko"]
+        for endpoint in (r["src_asset"], r["dst_asset"]):
+            aid = str(endpoint)
+            if aid == target_str:
+                continue
+            entry = agg.setdefault(aid, {"overlap_weight": 0, "shared": set()})
+            entry["overlap_weight"] += 1
+            if topic_ko:
+                entry["shared"].add(topic_ko)
+
+    out = [
+        {
+            "asset_id": aid,
+            "shared_topics": sorted(e["shared"]),
+            "overlap_weight": e["overlap_weight"],
+            "already_linked": aid in linked,
+        }
+        for aid, e in agg.items()
+    ]
+    # 결정성(헌법 3조): overlap_weight desc → asset_id asc.
+    out.sort(key=lambda o: (-o["overlap_weight"], o["asset_id"]))
+    return out[:top_k]
+
+
+def list_topics(conn) -> list[dict]:
+    """active·의료제외 엣지의 주제 패싯 목록.
+
+    Returns:
+        ``[{topic_ko, subtopic_ko|None, asset_count}]`` — ``(topic_ko, subtopic_ko)`` 조합별
+        **distinct 양끝 자산 수**. 빈 topic_ko 는 제외, 빈 subtopic_ko 는 ``None`` 으로 정규화.
+        정렬 ``topic_ko asc → subtopic_ko asc``(None 은 "" 로 최상단·결정적).
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_LIST_TOPICS_SQL)
+        rows = cur.fetchall()
+
+    # (topic_ko, subtopic_ko) → distinct 자산 집합. 양끝 자산 모두 그 주제에 참여한 것으로 본다.
+    groups: dict[tuple[str, Any], set[str]] = {}
+    for r in rows:
+        topic_ko = r["topic_ko"]
+        if not topic_ko:  # COALESCE 로 조회 단계에서 걸러지지만 방어적 스킵.
+            continue
+        sub = r["subtopic_ko"] or None  # "" 또는 None → None 정규화
+        assets = groups.setdefault((topic_ko, sub), set())
+        assets.add(str(r["src_asset"]))
+        assets.add(str(r["dst_asset"]))
+
+    out = [
+        {"topic_ko": ko, "subtopic_ko": sub, "asset_count": len(assets)}
+        for (ko, sub), assets in groups.items()
+    ]
+    out.sort(key=lambda o: (o["topic_ko"], o["subtopic_ko"] or ""))
+    return out
+
+
+def assets_in_topic(
+    conn, *, topic_ko: str, subtopic_ko: str | None = None, limit: int = 50, offset: int = 0
+) -> dict:
+    """특정 주제(active·의료제외 엣지)에 참여하는 자산을 페이징 조회.
+
+    Args:
+        topic_ko: 대주제(정확 일치).
+        subtopic_ko: 세부주제(주면 추가 필터, None 이면 topic_ko 하위 전체).
+        limit/offset: 페이징.
+
+    Returns:
+        ``{rows:[{asset_id(str), fs_uri, file_name}], total}``. ``total`` 은 페이징 전 distinct
+        자산 수. ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 ``[offset:offset+limit]``.
+        ``file_name`` 은 ``fs_path`` basename(review.py 관례 일치).
+    """
+    sql = _ASSETS_IN_TOPIC_SQL
+    params: list[Any] = [topic_ko]
+    if subtopic_ko is not None:
+        # 세부주제 필터도 표현식 인덱스(ix_graph_edge_subtopic_ko) 친화 술어 + %s 바인딩.
+        sql = sql + "  AND ge.topic->>'subtopic_ko' = %s\n"
+        params.append(subtopic_ko)
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+
+    # 양끝 자산을 distinct 수집(asset_id → 식별 필드). 중복 엣지·양방향 참여를 dedupe.
+    assets: dict[str, dict] = {}
+    for r in rows:
+        for aid_key, uri_key, path_key in (
+            ("src_asset", "src_fs_uri", "src_fs_path"),
+            ("dst_asset", "dst_fs_uri", "dst_fs_path"),
+        ):
+            aid = str(r[aid_key])
+            if aid not in assets:
+                assets[aid] = {
+                    "asset_id": aid,
+                    "fs_uri": r[uri_key],
+                    "file_name": os.path.basename(r[path_key] or ""),
+                }
+
+    ordered = sorted(assets.values(), key=lambda a: a["asset_id"])  # asset_id asc 결정적
+    total = len(ordered)
+    page = ordered[offset : offset + limit]
+    return {"rows": page, "total": total}
