@@ -10,6 +10,10 @@ from typing import Any
 
 from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
+# 057 FR-204: relations.proposed 판별 activity 는 054 스냅샷 카운트(asset_stats)와 **단일 출처** 공유 —
+# 문자열 표류 방지(관계 제안 집계 두 곳이 같은 activity 를 본다).
+from src.portal.asset_stats import _RELATION_PROPOSED_ACTIVITY
+
 # 의료 제외 고정 절(사용자 입력 아님·인젝션 안전). al=asset_lineage, a=asset.
 _NONMEDICAL = (
     "FROM asset_lineage al JOIN asset a ON a.asset_id = al.asset_id "
@@ -147,3 +151,42 @@ def lineage_timeline(conn: Any, *, since: Any = None, until: Any = None, activit
         buckets = [{"bucket": b.isoformat() if b is not None else None, "count": int(c)}
                    for b, c in cur.fetchall()]
         return {"interval": trunc, "buckets": buckets}
+
+
+def relation_proposed_summary(conn: Any, *, since: Any = None, until: Any = None,
+                              interval: str = "day") -> dict[str, Any]:
+    """관계 제안(relations.proposed.v1) distinct 자산 수 + 발생 추이(057 FR-204). 의료 제외·결정적·LLM 0.
+
+    admin 관계-제안 화면이 ``getLineageFeed(limit:200)`` 원시 피드를 프론트에서 distinct/버킷팅하던 것을
+    서버로 이관한다 — 200 초과 시 과소집계되던 **실버그**를 ``COUNT(DISTINCT al.asset_id)`` 전기간 집계로
+    바로잡는다(LIMIT 캡 없음). 판별 activity 는 054 스냅샷 카운트(asset_stats)와 **단일 출처** 공유.
+
+    - ``distinct_assets``: 관계 제안이 붙은 **고유 자산 수**(재실행 중복 제거).
+    - ``timeline``: ``date_trunc(interval, occurred_at)`` 버킷별 **고유 자산 수**(bucket ASC·결정적).
+      재실행 중복을 버킷 내에서 제거하므로 자산 추이가 부풀지 않는다. 자산이 서로 다른 날 제안되면 각
+      버킷에 계수되어 sum(buckets) ≥ distinct_assets 일 수 있다(추이 관점·분할 아님).
+
+    기간(since/until)은 **occurred_at**(제안 발생 시각) 기준·to exclusive. interval 은 TIMELINE_INTERVALS
+    화이트리스트(f-string 안전·그 외 값은 'day' 폴백; API 계층이 422 로 선처리). SQL 등장 순서 =
+    파라미터 순서(activity → occurred_since → occurred_until)로 순서 불변식을 지킨다. 의료 제외는
+    ``_NONMEDICAL`` 조인 재사용(헌법 10조).
+    """
+    trunc = interval if interval in TIMELINE_INTERVALS else "day"
+    where = _NONMEDICAL + " AND al.activity = %s"
+    params: list[Any] = [_RELATION_PROPOSED_ACTIVITY]
+    if since is not None:
+        where += " AND al.occurred_at >= %s"
+        params.append(since)
+    if until is not None:
+        where += " AND al.occurred_at < %s"
+        params.append(until)
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(DISTINCT al.asset_id) " + where, params)
+        distinct_assets = int(cur.fetchone()[0])
+        cur.execute(
+            f"SELECT date_trunc('{trunc}', al.occurred_at) AS bkt, COUNT(DISTINCT al.asset_id) "
+            + where + " GROUP BY bkt ORDER BY bkt ASC", params)
+        buckets = [{"bucket": b.isoformat() if b is not None else None, "count": int(c)}
+                   for b, c in cur.fetchall()]
+    return {"distinct_assets": distinct_assets,
+            "timeline": {"interval": trunc, "buckets": buckets}}

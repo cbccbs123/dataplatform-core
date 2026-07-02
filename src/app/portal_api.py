@@ -87,6 +87,7 @@ from src.portal.lineage_query import (
     lineage_timeline,
     query_asset_lineage,
     query_lineage_feed,
+    relation_proposed_summary,
 )
 from src.portal.search_group import group_ranked
 from src.registry.access_tier import project_ext_meta
@@ -565,6 +566,28 @@ def dashboard_summary_endpoint(
     """
     now = datetime.now(timezone.utc)
     return _run_in_db(lambda conn: build_dashboard_summary(conn, now=now, months=months))
+
+
+@app.get("/admin/relations/proposed-summary")
+def relations_proposed_summary_endpoint(
+    from_: str | None = Query(None, alias="from", description="발생일 하한(YYYY-MM-DD 또는 ISO)"),
+    to: str | None = Query(None, alias="to", description="발생일 상한(exclusive)"),
+    interval: str = Query("day", description="버킷 단위: day(기본) | hour | month"),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """관계 제안(relations.proposed) distinct 자산 수 + 발생 추이 1회 응답(057 FR-204). 조회 전용·의료 제외·LLM 0.
+
+    admin 관계-제안 화면이 ``getLineageFeed(limit:200)`` 원시 피드를 프론트에서 distinct/버킷팅하던
+    것을 서버로 이관한다 — 200 초과 시 과소집계되던 **실버그**를 ``COUNT(DISTINCT)`` 전기간 집계로
+    바로잡는다(``relation_proposed_summary``·lineage occurred_at 기준). 판별 activity 는 054 스냅샷
+    카운트와 단일 출처 공유. interval 화이트리스트 위반은 422(다른 timeline 엔드포인트와 동일).
+    """
+    if interval not in TIMELINE_INTERVALS:
+        raise HTTPException(status_code=422,
+                            detail=f"interval 은 {'|'.join(TIMELINE_INTERVALS)} 만 허용: {interval!r}")
+    since, until = _parse_dt(from_), _parse_dt(to)
+    return _run_in_db(
+        lambda conn: relation_proposed_summary(conn, since=since, until=until, interval=interval))
 
 
 # ── 052 HITL 관계 검토 API (CLI→HTTP thin 레이어) ──────────────────────────────

@@ -1,11 +1,13 @@
 import unittest
 from datetime import datetime, timezone
 
+from src.portal.asset_stats import _RELATION_PROPOSED_ACTIVITY
 from src.portal.lineage_query import (
     lineage_stats,
     lineage_timeline,
     query_asset_lineage,
     query_lineage_feed,
+    relation_proposed_summary,
 )
 
 
@@ -158,6 +160,74 @@ class LineageTimelineTest(unittest.TestCase):
         # group_by 컬럼은 화이트리스트 매핑이라 SQL 에 al.activity 로 들어감(인젝션 안전)
         self.assertIn("al.activity AS key", conn._cur.calls[0][0])
         self.assertIn("a.domain_label <> 'medical'", conn._cur.calls[0][0])
+
+
+class RelationProposedSummaryTest(unittest.TestCase):
+    """057 FR-204 — relations.proposed distinct 자산 수 + 발생 추이(limit 캡 없는 서버 집계).
+
+    admin 이 getLineageFeed(limit:200) 원시 피드를 프론트에서 distinct/버킷팅하던 것을 서버로 이관 —
+    200 초과 과소집계 실버그를 COUNT(DISTINCT)·전기간 집계로 바로잡는다. occurred_at 기준·의료 제외.
+    """
+
+    def _conn(self, distinct, timeline_rows):
+        # 1) COUNT(DISTINCT al.asset_id) → fetchone → (distinct,)
+        # 2) timeline (bucket, count) 목록 → fetchall
+        return _SeqConn([(distinct,), timeline_rows])
+
+    def test_shape_distinct_and_timeline(self):
+        ts = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        out = relation_proposed_summary(self._conn(42, [(ts, 5), (ts, 3)]))
+        self.assertEqual(out["distinct_assets"], 42)
+        self.assertEqual(out["timeline"]["interval"], "day")
+        self.assertEqual(out["timeline"]["buckets"][0], {"bucket": ts.isoformat(), "count": 5})
+        self.assertEqual(out["timeline"]["buckets"][1]["count"], 3)
+
+    def test_distinct_count_no_limit_cap(self):
+        # 실버그 회귀 가드: distinct 는 COUNT(DISTINCT al.asset_id) 로 LIMIT 없이 전기간 집계.
+        conn = self._conn(500, [])
+        relation_proposed_summary(conn)
+        count_sql = conn._cur.calls[0][0]
+        self.assertIn("COUNT(DISTINCT al.asset_id)", count_sql)
+        self.assertNotIn("LIMIT", count_sql.upper())
+
+    def test_activity_bound_and_medical_excluded(self):
+        conn = self._conn(0, [])
+        relation_proposed_summary(conn)
+        for sql, params in conn._cur.calls:
+            self.assertIn("al.activity = %s", sql)
+            self.assertIn("a.domain_label <> 'medical'", sql)  # 의료 제외 조인(헌법 10조)
+            self.assertIn(_RELATION_PROPOSED_ACTIVITY, params)
+
+    def test_timeline_distinct_assets_per_bucket_deterministic(self):
+        # 추이 버킷도 distinct 자산 수(재실행 중복 제거)·bucket ASC(결정적).
+        conn = self._conn(0, [])
+        relation_proposed_summary(conn, interval="day")
+        tl_sql = conn._cur.calls[1][0]
+        self.assertIn("COUNT(DISTINCT al.asset_id)", tl_sql)
+        self.assertIn("date_trunc('day', al.occurred_at)", tl_sql)
+        self.assertIn("GROUP BY bkt ORDER BY bkt ASC", tl_sql)
+
+    def test_interval_month_passthrough(self):
+        conn = self._conn(0, [])
+        out = relation_proposed_summary(conn, interval="month")
+        self.assertEqual(out["timeline"]["interval"], "month")
+        self.assertIn("date_trunc('month', al.occurred_at)", conn._cur.calls[1][0])
+
+    def test_bad_interval_falls_back_to_day(self):
+        conn = self._conn(0, [])
+        out = relation_proposed_summary(conn, interval="year")
+        self.assertEqual(out["timeline"]["interval"], "day")  # 화이트리스트 폴백(API 는 422 선처리)
+
+    def test_period_filter_bound_on_occurred_at(self):
+        dt1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        dt2 = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        conn = self._conn(0, [])
+        relation_proposed_summary(conn, since=dt1, until=dt2)
+        for sql, params in conn._cur.calls:
+            self.assertIn("al.occurred_at >= %s", sql)
+            self.assertIn("al.occurred_at < %s", sql)
+            # activity 먼저, 기간 뒤(SQL 등장 순서 = 파라미터 순서)
+            self.assertEqual(params, [_RELATION_PROPOSED_ACTIVITY, dt1, dt2])
 
 
 if __name__ == "__main__":

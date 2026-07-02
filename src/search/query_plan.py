@@ -89,12 +89,24 @@ def build_search_policy(q: str, mode: str = "auto") -> SearchPolicy:
     )
 
 
+# 057 FR-203: mode=keyword 안내는 **API 파라미터 조작 지시**라 dev-facing(프론트가 정규식으로 걸러온 문구).
+# 생성 출처가 문구를 상수로 소유하고, 아래 audience 매핑이 그 문구의 대상(dev)을 권위 있게 태깅한다 —
+# 프론트 정규식(isDevFacingSuggestion) 표류를 서버 단일 판정으로 대체(spec FR-203·B4).
+_KEYWORD_MODE_SUGGESTION = "단어 포함 문서를 보려면 mode=keyword 로 검색하세요."
+# suggestion 텍스트 → audience("user"|"dev"). 매핑에 없는 문구는 보수적으로 "user"(표시) —
+# 현행 프론트가 dev 만 거르고 나머지는 사용자에게 노출하던 동작과 정합(기본값 = 사용자 표시).
+_SUGGESTION_AUDIENCE: dict[str, str] = {_KEYWORD_MODE_SUGGESTION: "dev"}
+
+
+def _suggestion_audience(text: str) -> str:
+    """suggestion 문구의 대상 청중을 반환(미매핑 → 'user' 보수 폴백·프론트 노출 규칙 정합)."""
+    return _SUGGESTION_AUDIENCE.get(text, "user")
+
+
 def _build_suggestions(policy: SearchPolicy) -> tuple[str, ...]:
     """generic single term + auto → keyword 모드 안내(FR-302·spec C4)."""
     if policy.generic_single_term and policy.mode == "auto":
-        return (
-            "단어 포함 문서를 보려면 mode=keyword 로 검색하세요.",
-        )
+        return (_KEYWORD_MODE_SUGGESTION,)
     return ()
 
 
@@ -105,7 +117,12 @@ def build_query_plan(q: str, mode: str = "auto") -> QueryPlan:
 
 
 def search_plan_to_meta(plan: QueryPlan) -> dict[str, Any]:
-    """포탈 ``meta.search_plan`` minimal 노출(FR-303)."""
+    """포탈 ``meta.search_plan`` minimal 노출(FR-303).
+
+    057 FR-203: ``suggestions`` 를 ``[{text, audience}]`` 로 태깅해 내려, 프론트가 dev 힌트를
+    정규식으로 분류하던 로직을 제거한다(audience 로 필터). 제안이 없으면 키 자체를 두지 않는다
+    (기존 minimal 규칙 보존). 이는 P2 응답 shape 변경이라 프론트 lockstep 이 필요하다(spec C2).
+    """
     p = plan.policy
     out: dict[str, Any] = {
         "content_query": p.content_query,
@@ -114,7 +131,9 @@ def search_plan_to_meta(plan: QueryPlan) -> dict[str, Any]:
         "mode": p.mode,
     }
     if plan.suggestions:
-        out["suggestions"] = list(plan.suggestions)
+        out["suggestions"] = [
+            {"text": t, "audience": _suggestion_audience(t)} for t in plan.suggestions
+        ]
     return out
 
 

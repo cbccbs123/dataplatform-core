@@ -238,6 +238,44 @@ class HistoryEndpointsTest(unittest.TestCase):
         r = self.client.get("/admin/asset-timeline?group_by=evil")
         self.assertEqual(r.status_code, 422)
 
+    # ── 057 FR-204: 관계 제안 distinct·추이 서버 집계(limit 캡 없음) ──────────────
+    def test_relations_proposed_summary_endpoint(self):
+        with mock.patch.object(portal_api, "relation_proposed_summary",
+                               return_value={"distinct_assets": 42,
+                                             "timeline": {"interval": "day", "buckets": []}}) as s, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/relations/proposed-summary?from=2026-06-01&to=2026-06-30")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["distinct_assets"], 42)
+        self.assertIn("timeline", r.json())
+        self.assertIsNotNone(s.call_args.kwargs["since"])
+        self.assertIsNotNone(s.call_args.kwargs["until"])
+
+    def test_relations_proposed_summary_interval_passthrough(self):
+        with mock.patch.object(portal_api, "relation_proposed_summary",
+                               return_value={"distinct_assets": 0,
+                                             "timeline": {"interval": "month", "buckets": []}}) as s, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/relations/proposed-summary?interval=month")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(s.call_args.kwargs["interval"], "month")
+
+    def test_relations_proposed_summary_bad_interval_422(self):
+        r = self.client.get("/admin/relations/proposed-summary?interval=year")
+        self.assertEqual(r.status_code, 422)
+
+    def test_relations_proposed_summary_not_shadowed_by_relations_list(self):
+        # /admin/relations/proposed-summary 가 /admin/relations(검토 큐)로 새지 않음(구체 경로 우선).
+        with mock.patch.object(portal_api, "relation_proposed_summary",
+                               return_value={"distinct_assets": 0,
+                                             "timeline": {"interval": "day", "buckets": []}}) as s, \
+             mock.patch.object(portal_api, "list_edges_for_review", return_value={"rows": []}) as lst, \
+             mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)):
+            r = self.client.get("/admin/relations/proposed-summary")
+        self.assertEqual(r.status_code, 200)
+        s.assert_called_once()
+        lst.assert_not_called()  # 검토 큐 핸들러로 새지 않음
+
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.
