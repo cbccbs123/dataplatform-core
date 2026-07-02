@@ -63,7 +63,7 @@ def _collect_targets_and_topics(db: Any, inputs: list[str]) -> list[tuple[str, l
 
 
 def reindex_asset_topics(db: Any, *, asset_ids: list[str]) -> dict:
-    """변경 자산 ∪ 그 active 이웃의 OS topics 3필드를 부분 재색인한다(best-effort·격리).
+    """변경 자산 ∪ 그 active 이웃의 OS topics 2필드(topics·subtopics)를 부분 재색인한다(best-effort·격리).
 
     Args:
         db: ``PostgresUtil`` — PG 읽기(이웃 수집·주제 투영)에 ``db.transaction()`` 을 쓴다.

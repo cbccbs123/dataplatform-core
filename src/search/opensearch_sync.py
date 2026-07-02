@@ -339,7 +339,7 @@ def asset_to_doc(
     vec = parse_vector(row["emb"])
     if any(x != 0.0 for x in vec):
         doc["embedding"] = vec
-    # 관계 주제 수록(056) — 비어있지 않을 때만 세 필드 추가(None/[] → 생략·하위호환).
+    # 관계 주제 수록(056) — 비어있지 않을 때만 두 필드(topics·subtopics) 추가(None/[] → 생략·하위호환).
     if topics:
         doc.update(_topics_doc_fields(topics))
     doc.update(
