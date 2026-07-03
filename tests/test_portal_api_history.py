@@ -385,7 +385,7 @@ class HistoryEndpointsTest(unittest.TestCase):
         # _record_access_bg 를 AsyncMock 으로 가로채 호출 인자만 확인(실 DB·실제 태스크 실행 불요).
         with mock.patch.object(portal_api, "fetch_asset_detail", return_value={"asset_id": "a1"}), \
              mock.patch.object(portal_api, "project_asset_topics", return_value=[]), \
-             mock.patch.object(portal_api, "find_topic_neighbors", return_value=[]), \
+             mock.patch.object(portal_api, "find_topic_neighbor_groups", return_value=[]), \
              mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)), \
              mock.patch.object(portal_api, "_record_access_bg", new=mock.AsyncMock()) as bg:
             r = self.client.get("/assets/a1")

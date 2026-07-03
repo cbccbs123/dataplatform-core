@@ -326,6 +326,119 @@ class TestFindTopicNeighbors(unittest.TestCase):
         self.assertIn("da.fs_path", sql)
 
 
+class TestFindTopicNeighborGroups(unittest.TestCase):
+    """T201b(057-후속) — 같은-주제 이웃 **주제별 그룹화**: 그룹/자산 정렬·asset_count·already_linked·절단·형상."""
+
+    @patch(_PATCH_TARGET)
+    def test_groups_by_shared_topic_sorted_with_counts(self, m_fetch) -> None:
+        from src.relations.topic_query import find_topic_neighbor_groups
+
+        # 대상 A 의 직접 이웃 = B(요리)·H(여행) → 대상 주제 {요리,여행}, linked {B,H}.
+        m_fetch.return_value = [
+            _nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="B"),
+            _nb(_topic("여행", "국내", "travel", "domestic"), asset_id="H"),
+        ]
+        rows = [
+            # 요리: A-B(B+1·linked), C-D(C+1,D+1), C-E(C+1=2,E+1) → 요리 asset_count=4
+            {"src_asset": "A", "src_modality": "text", "src_fs_path": "/d/A.txt",
+             "dst_asset": "B", "dst_modality": "image", "dst_fs_path": "/d/B.png", "topic_ko": "요리"},
+            {"src_asset": "C", "src_modality": "video", "src_fs_path": "/d/영상C.mp4",
+             "dst_asset": "D", "dst_modality": "audio", "dst_fs_path": "/d/D.wav", "topic_ko": "요리"},
+            {"src_asset": "C", "src_modality": "video", "src_fs_path": "/d/영상C.mp4",
+             "dst_asset": "E", "dst_modality": "text", "dst_fs_path": "/d/E.txt", "topic_ko": "요리"},
+            # 여행: A-C(C+1), F-G(F+1,G+1) → 여행 asset_count=3
+            {"src_asset": "A", "src_modality": "text", "src_fs_path": "/d/A.txt",
+             "dst_asset": "C", "dst_modality": "video", "dst_fs_path": "/d/영상C.mp4", "topic_ko": "여행"},
+            {"src_asset": "F", "src_modality": "text", "src_fs_path": "/d/F.txt",
+             "dst_asset": "G", "dst_modality": "text", "dst_fs_path": "/d/G.txt", "topic_ko": "여행"},
+        ]
+        conn, _ = _mock_conn(rows)
+
+        out = find_topic_neighbor_groups(conn, asset_id="A")
+
+        # 그룹 정렬: asset_count desc → topic_ko asc → 요리(4), 여행(3)
+        self.assertEqual([g["topic_ko"] for g in out], ["요리", "여행"])
+        self.assertEqual(out[0]["asset_count"], 4)
+        self.assertEqual(out[1]["asset_count"], 3)
+        # 요리 그룹 내 자산: 엣지참여수 desc → asset_id asc → C(2),B(1),D(1),E(1)
+        self.assertEqual([a["asset_id"] for a in out[0]["assets"]], ["C", "B", "D", "E"])
+        # already_linked: B 는 직접 이웃(True), C 는 아님(False)
+        by_id = {a["asset_id"]: a for a in out[0]["assets"]}
+        self.assertTrue(by_id["B"]["already_linked"])
+        self.assertFalse(by_id["C"]["already_linked"])
+        # 표시필드(file_name=basename·modality) 하향
+        self.assertEqual(by_id["C"]["file_name"], "영상C.mp4")
+        self.assertEqual(by_id["C"]["modality"], "video")
+        # 여행 그룹: weight 동률 → asset_id asc → C,F,G
+        self.assertEqual([a["asset_id"] for a in out[1]["assets"]], ["C", "F", "G"])
+        # 형상(그룹·자산 키셋)
+        self.assertEqual(set(out[0].keys()), {"topic_ko", "asset_count", "assets"})
+        self.assertEqual(
+            set(out[0]["assets"][0].keys()),
+            {"asset_id", "file_name", "modality", "already_linked"},
+        )
+
+    @patch(_PATCH_TARGET)
+    def test_cap_max_topics_and_assets_per_topic(self, m_fetch) -> None:
+        from src.relations.topic_query import find_topic_neighbor_groups
+
+        m_fetch.return_value = [
+            _nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="B"),
+            _nb(_topic("여행", "국내", "travel", "domestic"), asset_id="H"),
+        ]
+        rows = [
+            # 요리: 자산 3개(P,Q,R) — max_assets_per_topic=2 로 절단
+            {"src_asset": "P", "src_modality": "text", "src_fs_path": "/d/P.txt",
+             "dst_asset": "Q", "dst_modality": "text", "dst_fs_path": "/d/Q.txt", "topic_ko": "요리"},
+            {"src_asset": "P", "src_modality": "text", "src_fs_path": "/d/P.txt",
+             "dst_asset": "R", "dst_modality": "text", "dst_fs_path": "/d/R.txt", "topic_ko": "요리"},
+            {"src_asset": "S", "src_modality": "text", "src_fs_path": "/d/S.txt",
+             "dst_asset": "T", "dst_modality": "text", "dst_fs_path": "/d/T.txt", "topic_ko": "여행"},
+        ]
+        conn, _ = _mock_conn(rows)
+
+        out = find_topic_neighbor_groups(
+            conn, asset_id="A", max_topics=1, max_assets_per_topic=2
+        )
+
+        self.assertEqual(len(out), 1)                       # max_topics=1 → 요리만
+        self.assertEqual(out[0]["topic_ko"], "요리")
+        self.assertEqual(out[0]["asset_count"], 3)          # 절단 전 실수(P,Q,R)
+        self.assertEqual(len(out[0]["assets"]), 2)          # max_assets_per_topic=2
+        self.assertEqual([a["asset_id"] for a in out[0]["assets"]], ["P", "Q"])  # P(2)>Q,R → asc Q
+
+    @patch(_PATCH_TARGET)
+    def test_no_target_topics_returns_empty_without_query(self, m_fetch) -> None:
+        from src.relations.topic_query import find_topic_neighbor_groups
+
+        m_fetch.return_value = [_nb(None, asset_id="B")]    # 대상 주제 없음
+        conn, cur = _mock_conn([])
+
+        out = find_topic_neighbor_groups(conn, asset_id="A")
+
+        self.assertEqual(out, [])
+        cur.execute.assert_not_called()
+
+    @patch(_PATCH_TARGET)
+    def test_asset_id_coerced_to_str(self, m_fetch) -> None:
+        import uuid
+
+        from src.relations.topic_query import find_topic_neighbor_groups
+
+        m_fetch.return_value = [_nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="A")]
+        u = uuid.uuid4()
+        rows = [{"src_asset": "A", "src_modality": "text", "src_fs_path": "/x/u.txt",
+                 "dst_asset": u, "dst_modality": "image", "dst_fs_path": "/x/z.png",
+                 "topic_ko": "요리"}]
+        conn, _ = _mock_conn(rows)
+
+        out = find_topic_neighbor_groups(conn, asset_id="A")
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["assets"][0]["asset_id"], str(u))
+        self.assertIsInstance(out[0]["assets"][0]["asset_id"], str)
+
+
 class TestListTopics(unittest.TestCase):
     """T201 — 주제 목록: (topic_ko, subtopic_ko) 별 distinct 양끝 자산 수·정렬·의료 제외."""
 

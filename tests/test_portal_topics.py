@@ -2,12 +2,12 @@
 
 전략(test_portal_api.py 패턴 재사용)
     FastAPI ``TestClient`` + auth bypass + ``_run_in_db`` passthrough. 주제 seam
-    (``project_asset_topics``/``find_topic_neighbors``/``list_topics``/``assets_in_topic``)과
+    (``project_asset_topics``/``find_topic_neighbor_groups``/``list_topics``/``assets_in_topic``)과
     검색 seam(``search_hybrid``)을 ``patch`` 로 대체해 **DB·OS·LLM·네트워크 없이** 순수 단위로 돈다.
 
 검증 대상
-    - 자산상세(``GET /assets/{id}``): 응답에 ``topics``(project_asset_topics) + ``same_topic_assets``
-      (find_topic_neighbors·``already_linked`` 포함) 동반. 노출 게이트(None→404) 보존.
+    - 자산상세(``GET /assets/{id}``): 응답에 ``topics``(project_asset_topics) + ``same_topic_groups``
+      (find_topic_neighbor_groups·공유 주제별 그룹·``already_linked`` 포함) 동반. 노출 게이트(None→404) 보존.
     - ``GET /topics`` → list_topics · ``GET /topics/{topic}`` → assets_in_topic 페이징(subtopic·limit·offset 전달).
     - ``GET /search`` → 응답 meta 에 주제 패싯 집계(``topic_facets``) · ``topic=``/``subtopic=`` 파라미터가
       parse_search_filters 를 거쳐 search_hybrid 의 ``search_filters`` 로 전달.
@@ -66,17 +66,17 @@ def _fake_search_result() -> dict:
 
 
 class TestAssetDetailTopics(unittest.TestCase):
-    """GET /assets/{id} — topics + same_topic_assets 보강(FR-501)."""
+    """GET /assets/{id} — topics + same_topic_groups 보강(FR-501·057-후속 그룹화)."""
 
     def setUp(self) -> None:
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.find_topic_neighbors")
+    @patch("src.app.portal_api.find_topic_neighbor_groups")
     @patch("src.app.portal_api.project_asset_topics")
     @patch("src.app.portal_api.fetch_asset_detail")
     def test_detail_includes_topics_and_same_topic(
-        self, mock_detail, mock_project, mock_neighbors
+        self, mock_detail, mock_project, mock_groups
     ) -> None:
         mock_detail.return_value = {
             "asset_id": "a1", "modality": "text", "domain_label": "general",
@@ -86,36 +86,40 @@ class TestAssetDetailTopics(unittest.TestCase):
             {"topic_ko": "요리", "subtopic_ko": "제빵", "topic_en": "cooking",
              "subtopic_en": "baking", "weight": 3},
         ]
-        mock_neighbors.return_value = [
-            {"asset_id": "a2", "shared_topics": ["요리"], "overlap_weight": 2,
-             "already_linked": True},
-            {"asset_id": "a7", "shared_topics": ["요리"], "overlap_weight": 1,
-             "already_linked": False},
+        # 057-후속: 공유 주제(topic_ko)별 그룹 — 관계탭처럼 "무슨 주제로 같은지"가 구조로 드러남.
+        mock_groups.return_value = [
+            {"topic_ko": "요리", "asset_count": 2, "assets": [
+                {"asset_id": "a2", "file_name": "a2.png", "modality": "image",
+                 "already_linked": True},
+                {"asset_id": "a7", "file_name": "a7.txt", "modality": "text",
+                 "already_linked": False},
+            ]},
         ]
         resp = self.client.get("/assets/a1")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["topics"], mock_project.return_value)
-        self.assertEqual(body["same_topic_assets"], mock_neighbors.return_value)
-        # already_linked 표식 보존
-        self.assertTrue(body["same_topic_assets"][0]["already_linked"])
-        self.assertFalse(body["same_topic_assets"][1]["already_linked"])
+        self.assertEqual(body["same_topic_groups"], mock_groups.return_value)
+        # 그룹 구조·already_linked 표식 보존
+        self.assertEqual(body["same_topic_groups"][0]["topic_ko"], "요리")
+        self.assertTrue(body["same_topic_groups"][0]["assets"][0]["already_linked"])
+        self.assertFalse(body["same_topic_groups"][0]["assets"][1]["already_linked"])
         # seam 은 대상 자산으로 조회
         self.assertEqual(mock_project.call_args.kwargs["asset_id"], "a1")
-        self.assertEqual(mock_neighbors.call_args.kwargs["asset_id"], "a1")
+        self.assertEqual(mock_groups.call_args.kwargs["asset_id"], "a1")
 
-    @patch("src.app.portal_api.find_topic_neighbors")
+    @patch("src.app.portal_api.find_topic_neighbor_groups")
     @patch("src.app.portal_api.project_asset_topics")
     @patch("src.app.portal_api.fetch_asset_detail")
     def test_detail_none_returns_404_no_topic_calls(
-        self, mock_detail, mock_project, mock_neighbors
+        self, mock_detail, mock_project, mock_groups
     ) -> None:
         # 노출 게이트: fetch_asset_detail None → 404, 주제 seam 미호출(불필요 조회 없음).
         mock_detail.return_value = None
         resp = self.client.get("/assets/nope")
         self.assertEqual(resp.status_code, 404)
         mock_project.assert_not_called()
-        mock_neighbors.assert_not_called()
+        mock_groups.assert_not_called()
 
 
 class TestTopicsList(unittest.TestCase):

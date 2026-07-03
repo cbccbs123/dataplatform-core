@@ -112,7 +112,7 @@ from src.relations.review import (
 # 단위 테스트가 src.app.portal_api.<name> 을 patch 할 수 있게 한다(다른 조회 seam 과 동형).
 from src.relations.topic_query import (
     assets_in_topic,
-    find_topic_neighbors,
+    find_topic_neighbor_groups,
     list_topics,
     project_asset_topics,
 )
@@ -1199,8 +1199,10 @@ def asset_detail(
 
     056 FR-501 — 노출 통과 자산에 관계 주제 렌즈를 함께 싣는다(신규 LLM 0·FR-505):
     - ``topics``: 이 자산의 active 관계 주제 투영(``project_asset_topics``).
-    - ``same_topic_assets``: 같은 주제를 공유하는 다른 자산(``find_topic_neighbors``·직접 관계
-      여부 ``already_linked`` 포함) — ego-network(``relations``) 옆의 두 번째 탐색 렌즈(US1·의료 제외).
+    - ``same_topic_groups``: 같은 주제를 공유하는 다른 자산을 **공유 주제(topic_ko)별로 묶은** 그룹
+      (``find_topic_neighbor_groups``·직접 관계 여부 ``already_linked`` 포함) — ego-network(``relations``)
+      옆의 두 번째 탐색 렌즈(US1·의료 제외). 057-후속: 평면 목록의 ``overlap_weight`` 오라벨 혼선을
+      "무슨 주제로 같은지" 그룹 구조로 대체.
     상세 조회와 **같은 읽기 트랜잭션**에서 계산한다(추가 풀 획득 없음). 게이트 미통과(None)면
     주제 seam 을 호출하지 않는다(불필요한 조회 없음).
     """
@@ -1210,7 +1212,7 @@ def asset_detail(
         if detail is None:
             return None
         detail["topics"] = project_asset_topics(conn, asset_id=asset_id)
-        detail["same_topic_assets"] = find_topic_neighbors(conn, asset_id=asset_id)
+        detail["same_topic_groups"] = find_topic_neighbor_groups(conn, asset_id=asset_id)
         return detail
 
     detail = _run_in_db(_work)

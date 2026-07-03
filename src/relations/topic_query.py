@@ -222,6 +222,74 @@ def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
     return out[:top_k]
 
 
+def find_topic_neighbor_groups(
+    conn, *, asset_id: str, max_topics: int = 12, max_assets_per_topic: int = 8
+) -> list[dict]:
+    """``asset_id`` 와 공유하는 **주제별로 묶은** 같은-주제 이웃 그룹(같은주제 탐색 UX·057-후속).
+
+    ``find_topic_neighbors`` 가 자산 단위 평면 목록이라면, 이 함수는 **무슨 주제로 같은지**가 바로
+    보이도록 ``topic_ko`` 로 그룹화한다(관계탭이 관계종류로 묶이듯). 한 자산이 여러 주제를 공유하면
+    각 주제 그룹에 모두 등장한다(주제 브라우즈 렌즈). 평면 목록의 ``overlap_weight``(엣지 참여수)를
+    사용자에게 "공유 주제 N개"로 오라벨하던 혼선을 구조로 제거한다.
+
+    Returns:
+        ``[{topic_ko, asset_count, assets:[{asset_id(str), file_name, modality, already_linked}]}]``.
+        - ``asset_count`` = 그 주제를 대상과 공유하는(대상 제외) distinct 자산 수(``assets`` 절단 전 실수).
+        - ``assets`` = 그 주제 그룹의 자산(엣지 참여수 desc → asset_id asc·결정적), ``max_assets_per_topic`` 절단.
+        - 그룹 정렬 = ``asset_count desc → topic_ko asc``(결정적), ``max_topics`` 절단.
+        - ``already_linked`` = 그 자산이 대상의 직접 관계 이웃인지(``fetch_active_relations_for_asset`` 집합).
+    대상 주제가 없으면 빈 리스트(DB 조회도 안 함). active·의료제외는 ``find_topic_neighbors`` 와 동일 SQL 재사용.
+    """
+    # 1) 대상 주제 + 직접 이웃 집합 — find_topic_neighbors 와 동일 seam(중복 재발명 없음).
+    target_topics = project_asset_topics(conn, asset_id=asset_id)
+    topic_kos = sorted({t["topic_ko"] for t in target_topics if t.get("topic_ko")})
+    if not topic_kos:
+        return []
+    linked = {nb["asset_id"] for nb in fetch_active_relations_for_asset(conn, asset_id=asset_id)}
+    target_str = str(asset_id)
+
+    # 2) 대상 주제를 실은 active·의료제외 엣지 양끝 자산 수집(_NEIGHBOR_SQL 공유).
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_NEIGHBOR_SQL, (topic_kos,))
+        rows = cur.fetchall()
+
+    # 3) topic_ko → {asset_id → {file_name, modality, already_linked, weight}} 그룹 집계. 대상 자신 스킵.
+    #    같은 자산은 어느 엣지에서 보든 같은 표시값이라 first-wins(assets_in_topic 관례·결정적).
+    groups: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        topic_ko = r["topic_ko"]
+        if not topic_ko:
+            continue
+        for endpoint, modality, fs_path in (
+            (r["src_asset"], r["src_modality"], r["src_fs_path"]),
+            (r["dst_asset"], r["dst_modality"], r["dst_fs_path"]),
+        ):
+            aid = str(endpoint)
+            if aid == target_str:
+                continue
+            bucket = groups.setdefault(topic_ko, {})
+            entry = bucket.setdefault(
+                aid,
+                {"file_name": os.path.basename(fs_path or ""), "modality": modality,
+                 "already_linked": aid in linked, "weight": 0},
+            )
+            entry["weight"] += 1
+
+    out = []
+    for topic_ko, bucket in groups.items():
+        # 그룹 내 자산: 엣지 참여수 desc → asset_id asc(결정적) 후 절단.
+        ordered = sorted(bucket.items(), key=lambda kv: (-kv[1]["weight"], kv[0]))
+        assets = [
+            {"asset_id": aid, "file_name": e["file_name"], "modality": e["modality"],
+             "already_linked": e["already_linked"]}
+            for aid, e in ordered[:max_assets_per_topic]
+        ]
+        out.append({"topic_ko": topic_ko, "asset_count": len(bucket), "assets": assets})
+    # 결정성(헌법 3조): asset_count desc → topic_ko asc.
+    out.sort(key=lambda o: (-o["asset_count"], o["topic_ko"]))
+    return out[:max_topics]
+
+
 def list_topics(conn) -> list[dict]:
     """active·의료제외 엣지의 주제 패싯 목록.
 

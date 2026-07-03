@@ -273,10 +273,10 @@ class TestAssetDetail(unittest.TestCase):
 
     def setUp(self) -> None:
         _enable_portal_test_auth_bypass(self)
-        # 056: 자산상세는 노출 통과 시 topics·same_topic_assets 를 같은 트랜잭션에서 계산하며
-        # project_asset_topics/find_topic_neighbors(DB seam)를 호출한다. object() conn 단위
+        # 056: 자산상세는 노출 통과 시 topics·same_topic_groups 를 같은 트랜잭션에서 계산하며
+        # project_asset_topics/find_topic_neighbor_groups(DB seam)를 호출한다. object() conn 단위
         # 테스트에선 fetch_asset_detail 과 동일하게 이 seam 들을 스텁한다(보강 검증은 test_portal_topics).
-        for name in ("project_asset_topics", "find_topic_neighbors"):
+        for name in ("project_asset_topics", "find_topic_neighbor_groups"):
             p = patch(f"src.app.portal_api.{name}", return_value=[])
             p.start()
             self.addCleanup(p.stop)
