@@ -495,5 +495,53 @@ class TestPortalOpenApiSecurity(unittest.TestCase):
         self.assertFalse(any(p.get("name") == "authorization" for p in params))
 
 
+class TestAssetThumbnail(unittest.TestCase):
+    """GET /assets/{id}/thumbnail — 썸네일 게이트(의료 배제·유형·파일 부재)·응답 계약(057-후속)."""
+
+    def setUp(self) -> None:
+        _enable_portal_test_auth_bypass(self)
+        self.client = TestClient(app)
+
+    @patch("src.app.portal_api.generate_thumbnail", return_value=b"\xff\xd8\xff\xe0JPG")
+    @patch("src.app.portal_api.resolve_download_target")
+    def test_image_returns_jpeg(self, mock_resolve, _gen) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            mock_resolve.return_value = {
+                "asset_id": "a1", "fs_path": f.name, "modality": "image", "file_name": "a.png"}
+            r = self.client.get("/assets/a1/thumbnail")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["content-type"], "image/jpeg")
+        self.assertEqual(r.content, b"\xff\xd8\xff\xe0JPG")
+        self.assertIn("max-age", r.headers.get("cache-control", ""))
+
+    @patch("src.app.portal_api.resolve_download_target", return_value=None)
+    def test_medical_or_missing_returns_404(self, _resolve) -> None:
+        # 의료/비registered/없음 → resolve_download_target None → 404 (의료 썸네일=PHI 원천 차단)
+        self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 404)
+
+    @patch("src.app.portal_api.resolve_download_target")
+    def test_audio_returns_404(self, mock_resolve) -> None:
+        mock_resolve.return_value = {"asset_id": "a1", "fs_path": "/x/a.mp3", "modality": "audio"}
+        self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 404)
+
+    @patch("src.app.portal_api.resolve_download_target")
+    def test_missing_file_returns_410(self, mock_resolve) -> None:
+        mock_resolve.return_value = {
+            "asset_id": "a1", "fs_path": "/nonexistent/x.png", "modality": "image"}
+        self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 410)
+
+    @patch("src.app.portal_api.generate_thumbnail", return_value=None)
+    @patch("src.app.portal_api.resolve_download_target")
+    def test_generation_failure_returns_404(self, mock_resolve, _gen) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            mock_resolve.return_value = {"asset_id": "a1", "fs_path": f.name, "modality": "image"}
+            r = self.client.get("/assets/a1/thumbnail")
+        self.assertEqual(r.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -92,6 +92,7 @@ from src.portal.lineage_query import (
     relation_proposed_summary,
 )
 from src.portal.search_group import group_ranked
+from src.portal.thumbnail import THUMBNAILABLE_MODALITIES, generate_thumbnail
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
 
@@ -1342,6 +1343,40 @@ def download(
         status_code=status_code,
         media_type=content_type,
         headers=headers,
+    )
+
+
+@app.get("/assets/{asset_id}/thumbnail")
+def asset_thumbnail(
+    asset_id: str,
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> Response:
+    """이미지·영상 자산의 축소 썸네일(JPEG)을 반환한다(057-후속·멀티모달 시각 미리보기). 조회 전용.
+
+    절차
+        1. ``resolve_download_target`` 노출 게이트(registered·**비의료**·FR-014) 통과 확인 → None → 404
+           (의료 자산 썸네일=PHI 이므로 여기서 원천 차단).
+        2. 이미지·영상이 아니면 404(오디오/텍스트/unknown 은 시각 표현 없음 → 프론트 아이콘 폴백).
+        3. 원본 파일 부재/접근 불가 → 410(FR-009). 생성 실패(손상·코덱) → 404.
+    ``generate_thumbnail`` 은 원본 무수정·결정적·LLM 0(단순 리사이즈/프레임 추출). 브라우저 캐시
+    (``Cache-Control``)로 반복 요청을 완화한다(서버측 캐시는 후속 최적화). 신규 LLM 0·읽기 전용·마이그레이션 0.
+    """
+    target = _run_in_db(lambda conn: resolve_download_target(conn, asset_id=asset_id))
+    if target is None:
+        raise HTTPException(status_code=404, detail="썸네일 대상을 찾을 수 없거나 노출 대상이 아님")
+    modality = target.get("modality")
+    if modality not in THUMBNAILABLE_MODALITIES:
+        raise HTTPException(status_code=404, detail="썸네일을 제공하지 않는 자산 유형")
+    fs_path = target.get("fs_path")
+    if not fs_path or not os.path.isfile(fs_path):
+        raise HTTPException(status_code=410, detail="원본 파일이 존재하지 않거나 접근할 수 없음")
+    data = generate_thumbnail(fs_path, modality)
+    if data is None:
+        raise HTTPException(status_code=404, detail="썸네일을 생성할 수 없음")
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
