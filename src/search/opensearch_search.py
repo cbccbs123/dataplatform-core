@@ -529,6 +529,10 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
         "domain_label": src.get("domain_label"),
         "summary": str(src.get("summary") or ""),
         "similarity": _safe_float(hit.get("_score"), 0.0),
+        # 057-후속: 결과-좁히기 패싯·클라 필터용 주제(색인된 keyword). 필터 terms{topics} 와 **동일 소스**
+        # 라 facet 약속과 클릭 결과가 일치한다(라이브 투영 대비 불일치·N+1 제거). OS 문서에 이미 있어 무비용.
+        "topics": [str(t) for t in (src.get("topics") or [])],
+        "subtopics": [str(t) for t in (src.get("subtopics") or [])],
     }
     mq = hit.get("matched_queries")
     if mq is not None:

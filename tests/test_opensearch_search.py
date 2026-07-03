@@ -92,6 +92,8 @@ class OsHitToRowTest(unittest.TestCase):
                 "file_name": "보고서.txt",
                 "fs_uri": "/data/보고서.txt",
                 "summary": "요약 텍스트",
+                "topics": ["요리", "베이킹"],
+                "subtopics": ["제빵"],
             },
         }
         row = os_hit_to_row(hit)
@@ -103,6 +105,9 @@ class OsHitToRowTest(unittest.TestCase):
         self.assertEqual(row["similarity"], 0.87)
         self.assertEqual(row["summary"], "요약 텍스트")
         self.assertEqual(row["file_uri"], "/data/보고서.txt")
+        # 057-후속: 색인 topics/subtopics 통과(결과-좁히기 패싯·클라 필터·필터와 동일 소스).
+        self.assertEqual(row["topics"], ["요리", "베이킹"])
+        self.assertEqual(row["subtopics"], ["제빵"])
 
     def test_row_keys_homogeneous_with_media_search_bucket(self) -> None:
         # SC-005 응답 동형: media_search 버킷 행 핵심 키 집합과 동일(042 domain_label 포함).
@@ -114,9 +119,11 @@ class OsHitToRowTest(unittest.TestCase):
         row = os_hit_to_row(hit)
         self.assertEqual(
             set(row),
-            {"id", "file_uri", "modality", "domain_label", "summary", "similarity"},
+            {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
+             "topics", "subtopics"},  # 057-후속: 주제 패싯·클라 좁히기용
         )
         self.assertEqual(row["domain_label"], "review")
+        self.assertEqual(row["topics"], [])  # topics 없는 hit → 빈 리스트(안전)
 
     def test_missing_source_safe(self) -> None:
         # 엣지: _source 누락·_score None 안전 처리.
@@ -719,7 +726,8 @@ class FuseHybridTest(unittest.TestCase):
         row = out[0]
         self.assertEqual(
             set(row),
-            {"id", "file_uri", "modality", "domain_label", "summary", "similarity", "_cos", "_bm25", "_rrtext"},
+            {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
+             "topics", "subtopics", "_cos", "_bm25", "_rrtext"},  # 057-후속: topics/subtopics 통과
         )
         self.assertEqual(row["modality"], "text")
 
@@ -1060,7 +1068,11 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         for r in text:
             self.assertNotIn("_cos", r)
             self.assertNotIn("_bm25", r)
-            self.assertEqual(set(r), {"id", "file_uri", "modality", "domain_label", "summary", "similarity"})
+            self.assertEqual(
+                set(r),
+                {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
+                 "topics", "subtopics"},  # 057-후속: topics/subtopics 통과(내부키만 strip)
+            )
 
     def test_gate_pass_keeps_bucket(self) -> None:
         # 강한 신호(top 0.85·robust baseline 낮음) → 게이트 통과·버킷 유지, gate_passed True.

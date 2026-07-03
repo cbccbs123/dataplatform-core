@@ -74,6 +74,10 @@ def _shape(row: dict[str, Any], modality: str) -> dict[str, Any]:
         "summary": row.get("summary", "") or "",
         "file_name": _basename(str(row.get("file_uri", ""))),
         "domain_label": row.get("domain_label") or "general",
+        # 057-후속: 주제 패싯·결과-좁히기용(os_hit_to_row 색인 topics 통과). 프론트가 로드된 결과를
+        # 이 topics 로 클라 필터(재검색 없이) → 패싯 수와 표시 수 일치·컷오프 무관.
+        "topics": [str(t) for t in (row.get("topics") or [])],
+        "subtopics": [str(t) for t in (row.get("subtopics") or [])],
     }
 
 

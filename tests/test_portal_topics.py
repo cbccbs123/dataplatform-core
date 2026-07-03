@@ -52,9 +52,13 @@ def _fake_search_result() -> dict:
         "query": "요리",
         "results": {
             "text_documents": [
-                {"id": "a1", "similarity": 0.9, "file_uri": "/x/a1.txt", "summary": "s1"},
-                {"id": "a2", "similarity": 0.8, "file_uri": "/x/a2.txt", "summary": "s2"},
-                {"id": "a3", "similarity": 0.7, "file_uri": "/x/a3.txt", "summary": "s3"},
+                # 057-후속: 결과 행에 색인 topics 포함(패싯·클라 좁히기 소스 = 필터와 동일).
+                {"id": "a1", "similarity": 0.9, "file_uri": "/x/a1.txt", "summary": "s1",
+                 "topics": ["요리"], "subtopics": ["제빵"]},
+                {"id": "a2", "similarity": 0.8, "file_uri": "/x/a2.txt", "summary": "s2",
+                 "topics": ["요리"], "subtopics": []},
+                {"id": "a3", "similarity": 0.7, "file_uri": "/x/a3.txt", "summary": "s3",
+                 "topics": ["스포츠"], "subtopics": []},
             ],
         },
         "meta": {},
@@ -175,22 +179,15 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
         self.addCleanup(tiers.stop)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.project_asset_topics")
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_returns_topic_facet(self, mock_search, mock_project) -> None:
+    def test_search_returns_topic_facet(self, mock_search) -> None:
+        # 057-후속: 패싯은 결과 행의 **색인 topics**(=필터 소스)로 집계 — project_asset_topics 미사용
+        # (라이브 투영 대비 소스 불일치·N+1 제거). 프론트는 이 행 topics 로 클라 좁히기.
         mock_search.return_value = _fake_search_result()
-
-        def _topics_for(conn, *, asset_id):
-            return {
-                "a1": [{"topic_ko": "요리", "subtopic_ko": "제빵"}],
-                "a2": [{"topic_ko": "요리", "subtopic_ko": None}],
-                "a3": [{"topic_ko": "스포츠", "subtopic_ko": None}],
-            }.get(asset_id, [])
-
-        mock_project.side_effect = _topics_for
         resp = self.client.get("/search", params={"q": "요리", "size": 10})
         self.assertEqual(resp.status_code, 200)
-        facets = resp.json()["meta"]["topic_facets"]
+        body = resp.json()
+        facets = body["meta"]["topic_facets"]
         # 요리 = {a1,a2} 2건, 스포츠 = {a3} 1건. count desc→topic_ko asc 결정적 정렬.
         self.assertEqual(
             facets,
@@ -199,6 +196,9 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
                 {"topic_ko": "스포츠", "asset_count": 1},
             ],
         )
+        # 결과 행에도 topics 노출(프론트 클라 좁히기용) → 패싯 클릭 = 이 topics 로 필터.
+        rows = [r for bucket in body["results"].values() for r in bucket]
+        self.assertTrue(any(r.get("topics") == ["요리"] for r in rows))
 
     @patch("src.app.portal_api.project_asset_topics", return_value=[])
     @patch("src.app.portal_api.search_hybrid")

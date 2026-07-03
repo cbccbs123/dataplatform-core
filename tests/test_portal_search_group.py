@@ -64,18 +64,23 @@ class TestGroupRanked(unittest.TestCase):
                     "file_uri": "/d/sub/report.txt",
                     "summary": "S",
                     "domain_label": "review",
+                    "topics": ["요리"],
+                    "subtopics": ["제빵"],
                 }
             ]}
         )
         item = group_ranked(result, limit_per_modality=20)["text"][0]
         self.assertEqual(
             set(item.keys()),
-            {"asset_id", "modality", "similarity", "summary", "file_name", "domain_label"},
+            {"asset_id", "modality", "similarity", "summary", "file_name", "domain_label",
+             "topics", "subtopics"},  # 057-후속: 주제 패싯·클라 좁히기용 통과
         )
         self.assertEqual(item["modality"], "text")
         self.assertEqual(item["domain_label"], "review")
         self.assertEqual(item["file_name"], "report.txt")
         self.assertEqual(item["summary"], "S")
+        self.assertEqual(item["topics"], ["요리"])
+        self.assertEqual(item["subtopics"], ["제빵"])
 
     def test_all_modality_labels(self) -> None:
         # 4개 버킷 키가 각각 text/audio/image/video 섹션으로 매핑된다.
