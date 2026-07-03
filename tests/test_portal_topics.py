@@ -188,12 +188,13 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         facets = body["meta"]["topic_facets"]
-        # 요리 = {a1,a2} 2건, 스포츠 = {a3} 1건. count desc→topic_ko asc 결정적 정렬.
+        # 요리={a1,a2} 2건(하위 제빵 a1 1건), 스포츠={a3} 1건(하위 없음). 결과-스코프 nested·결정적 정렬.
         self.assertEqual(
             facets,
             [
-                {"topic_ko": "요리", "asset_count": 2},
-                {"topic_ko": "스포츠", "asset_count": 1},
+                {"topic_ko": "요리", "asset_count": 2,
+                 "subtopics": [{"subtopic_ko": "제빵", "asset_count": 1}]},
+                {"topic_ko": "스포츠", "asset_count": 1, "subtopics": []},
             ],
         )
         # 결과 행에도 topics 노출(프론트 클라 좁히기용) → 패싯 클릭 = 이 topics 로 필터.

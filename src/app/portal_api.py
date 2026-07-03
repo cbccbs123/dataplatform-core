@@ -993,23 +993,43 @@ def _project_grouped_search(
 def _search_topic_facet(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     """검색 결과(의료 배제·top-N)의 자산들이 공유하는 주제 패싯을 집계한다(056 FR-503·US3).
 
-    각 결과 행에 이미 실린 **색인 topics**(os_hit_to_row → search_group._shape 통과)로 ``topic_ko``
-    별 distinct 결과-자산 수를 센다. topic 필터(``?topic=`` → ``terms{topics}``)와 **동일 소스**라,
-    패싯이 약속한 주제를 클릭했을 때 결과가 일치한다(라이브 투영 ``project_asset_topics`` 대비
-    소스 불일치 + 자산당 DB 호출 N+1 을 함께 제거·057-후속). 프론트는 이 패싯을 클릭해 로드된
-    결과를 같은 topics 로 **클라 필터(재검색 없음)** → 컷오프 무관·패싯 수 == 표시 수.
-    **신규 LLM 0·조회 0**(행에 이미 있는 값 집계)·결정적 정렬(asset_count desc → topic_ko asc·헌법 3조).
+    각 결과 행에 이미 실린 **색인 topics/subtopics**(os_hit_to_row → search_group._shape 통과)로
+    ``topic_ko`` 별 distinct 결과-자산 수와, 그 아래 ``subtopic_ko`` 별 결과-자산 수(nested)를 센다.
+    topic 필터(``?topic=``/``?subtopic=`` → ``terms{topics}``/``terms{subtopics}``)와 **동일 소스**라
+    패싯이 약속한 (하위)주제를 클릭했을 때 결과가 일치한다 — **subtopic 카운트도 결과-스코프**다
+    (코퍼스 `/topics` 카탈로그 전체 수가 아님). 라이브 투영·자산당 DB 호출(N+1) 없이 행 값만 집계.
+    프론트는 이 패싯을 클릭해 로드된 결과를 같은 topics/subtopics 로 **클라 필터(재검색 없음)** →
+    컷오프 무관·**패싯 수 == 표시 수**. 반환 형태:
+    ``[{topic_ko, asset_count, subtopics:[{subtopic_ko, asset_count}]}]``.
+
+    ⚠️ OS 색인 topics/subtopics 는 flat 리스트라 topic↔subtopic 정확 pairing이 없다 — nested 집계는
+    "한 결과 자산이 topic T 와 subtopic S 를 **함께** 보유" 기준(근사)이다. 단 이는 클릭 시 클라 좁히기
+    (topic AND subtopic 필터)와 정확히 동일하므로 카운트=표시 일관은 보장된다(정밀 pairing은 색인에
+    (topic,subtopic) 쌍 저장 필요·별도 작업).
+    **신규 LLM 0·조회 0**·결정적 정렬(asset_count desc → topic_ko/subtopic_ko asc·헌법 3조).
     """
     topic_assets: dict[str, set[str]] = {}
+    topic_subs: dict[str, dict[str, set[str]]] = {}  # topic_ko → {subtopic_ko → {asset_id}}
     for rows in grouped.values():
         for r in rows:
             aid = str(r.get("asset_id") or "")
             if not aid:
                 continue
-            for topic_ko in r.get("topics") or []:
-                if topic_ko:  # 빈/None 방어
-                    topic_assets.setdefault(str(topic_ko), set()).add(aid)
-    facet = [{"topic_ko": ko, "asset_count": len(assets)} for ko, assets in topic_assets.items()]
+            tks = [str(t) for t in (r.get("topics") or []) if t]
+            sks = [str(s) for s in (r.get("subtopics") or []) if s]
+            for tk in tks:
+                topic_assets.setdefault(tk, set()).add(aid)
+                sub_map = topic_subs.setdefault(tk, {})
+                for sk in sks:  # 근사 pairing: 같은 행의 subtopic 을 이 topic 아래로 귀속
+                    sub_map.setdefault(sk, set()).add(aid)
+    facet = []
+    for tk, assets in topic_assets.items():
+        subs = [
+            {"subtopic_ko": sk, "asset_count": len(a)}
+            for sk, a in topic_subs.get(tk, {}).items()
+        ]
+        subs.sort(key=lambda s: (-s["asset_count"], s["subtopic_ko"]))
+        facet.append({"topic_ko": tk, "asset_count": len(assets), "subtopics": subs})
     # 결정성(헌법 3조): 자산 수 내림차순 → topic_ko 오름차순.
     facet.sort(key=lambda f: (-f["asset_count"], f["topic_ko"]))
     return facet
