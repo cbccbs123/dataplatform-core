@@ -236,9 +236,13 @@ def find_topic_neighbor_groups(
 
     ``find_topic_neighbors`` 가 자산 단위 평면 목록이라면, 이 함수는 **무슨 주제·무슨 하위주제로 같은지**가
     바로 보이도록 ``topic_ko → subtopic_ko`` 로 중첩한다(검색 패싯 ``list_topics`` 와 동일한 2단 구조).
-    평면 목록의 ``overlap_weight``(엣지 참여수)를 "공유 주제 N개"로 오라벨하던 혼선을 구조로 제거하고,
-    스포츠처럼 광범위한 상위주제(예: 113건)를 마라톤·스키·축구… 하위주제로 드릴다운되게 한다.
-    한 자산이 여러 (하위)주제를 공유하면 각 그룹에 모두 등장한다(주제 브라우즈 렌즈).
+
+    **관련도 정밀화(057-후속2)**: 매칭을 ``topic_ko`` 단독이 아니라 **대상 자신의 (topic_ko, subtopic_ko)
+    '쌍'** 으로 한다. 상위주제(스포츠)는 너무 굵어(예: 113건) "관련"이라기보다 카테고리 브라우즈에 가까워
+    데이터 검색 의미가 희석되기 때문 — 골프 영상이면 스포츠›마라톤·스키가 아니라 **대상이 실제로 가진
+    쌍(스포츠›골프 등)만** 공유 자산으로 본다. 이로써 굵은 주제도 관련분으로 자연히 좁혀진다(스포츠 113→9).
+    하위주제 미부여 쌍 ``(topic, None)`` 만 가진 대상은 그 주제로 넓게 매칭된다(가진 신호가 그뿐).
+    한 자산이 여러 쌍을 공유하면 각 그룹에 모두 등장한다.
 
     Returns:
         ``[{topic_ko, asset_count, subtopics:[{subtopic_ko, asset_count,
@@ -253,11 +257,17 @@ def find_topic_neighbor_groups(
         - ``already_linked`` = 그 자산이 대상의 직접 관계 이웃인지(``fetch_active_relations_for_asset`` 집합).
     대상 주제가 없으면 빈 리스트(DB 조회도 안 함). active·의료제외는 ``find_topic_neighbors`` 와 동일 SQL 재사용.
     """
-    # 1) 대상 주제 + 직접 이웃 집합 — find_topic_neighbors 와 동일 seam(중복 재발명 없음).
+    # 1) 대상의 (topic_ko, subtopic_ko) '쌍' 집합 — 정밀 매칭 기준(굵은 상위주제 희석 방지).
+    #    topic_kos 는 SQL 회수용(v294 표현식 인덱스) 상위 필터일 뿐, 실제 포함 판정은 pairs 로 한다.
     target_topics = project_asset_topics(conn, asset_id=asset_id)
-    topic_kos = sorted({t["topic_ko"] for t in target_topics if t.get("topic_ko")})
-    if not topic_kos:
+    pairs = {
+        (t["topic_ko"], (t.get("subtopic_ko") or None))
+        for t in target_topics
+        if t.get("topic_ko")
+    }
+    if not pairs:
         return []
+    topic_kos = sorted({tk for (tk, _sk) in pairs})
     linked = {nb["asset_id"] for nb in fetch_active_relations_for_asset(conn, asset_id=asset_id)}
     target_str = str(asset_id)
 
@@ -274,6 +284,8 @@ def find_topic_neighbor_groups(
         if not topic_ko:
             continue
         subtopic_ko = r["subtopic_ko"] or None
+        if (topic_ko, subtopic_ko) not in pairs:  # 대상이 실제로 가진 (주제,하위주제) 쌍만(정밀 관련)
+            continue
         for endpoint, modality, fs_path in (
             (r["src_asset"], r["src_modality"], r["src_fs_path"]),
             (r["dst_asset"], r["dst_modality"], r["dst_fs_path"]),

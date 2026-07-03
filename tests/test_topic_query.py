@@ -327,65 +327,90 @@ class TestFindTopicNeighbors(unittest.TestCase):
 
 
 class TestFindTopicNeighborGroups(unittest.TestCase):
-    """T201b(057-후속) — 같은-주제 이웃 **주제→하위주제 2단 중첩**: 그룹/하위/자산 정렬·distinct count·already_linked·절단·형상."""
+    """T201b(057-후속2) — 같은-주제 이웃 **(주제,하위주제) 쌍 정밀 매칭 + 2단 중첩**: 비공유쌍 제외·정렬·distinct·절단·형상."""
 
     @patch(_PATCH_TARGET)
-    def test_nested_groups_sorted_with_distinct_counts(self, m_fetch) -> None:
+    def test_pair_match_excludes_nonshared_subtopics(self, m_fetch) -> None:
         from src.relations.topic_query import find_topic_neighbor_groups
 
-        # 대상 A 의 직접 이웃 = B(요리)·H(여행) → 대상 주제 {요리,여행}, linked {B,H}.
+        # 대상 A 의 직접 이웃 = B(요리·제빵)·H(여행·국내) → 대상 쌍 {(요리,제빵),(여행,국내)}, linked {B,H}.
         m_fetch.return_value = [
             _nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="B"),
             _nb(_topic("여행", "국내", "travel", "domestic"), asset_id="H"),
         ]
         rows = [
-            # 요리/제빵: A-B(B+1·linked)
+            # (요리,제빵): 대상 쌍 → 포함. A-B(B linked), C-D → 요리›제빵 {B,C,D}
             {"src_asset": "A", "src_modality": "text", "src_fs_path": "/d/A.txt",
              "dst_asset": "B", "dst_modality": "image", "dst_fs_path": "/d/B.png",
              "topic_ko": "요리", "subtopic_ko": "제빵"},
-            # 요리/한식: C-D, C-E → 한식 {C(2),D(1),E(1)}
             {"src_asset": "C", "src_modality": "video", "src_fs_path": "/d/영상C.mp4",
              "dst_asset": "D", "dst_modality": "audio", "dst_fs_path": "/d/D.wav",
-             "topic_ko": "요리", "subtopic_ko": "한식"},
+             "topic_ko": "요리", "subtopic_ko": "제빵"},
+            # (요리,한식): 대상이 안 가진 쌍 → **제외**(E 등장 금지 — 굵은주제 희석 방지의 핵심).
             {"src_asset": "C", "src_modality": "video", "src_fs_path": "/d/영상C.mp4",
              "dst_asset": "E", "dst_modality": "text", "dst_fs_path": "/d/E.txt",
              "topic_ko": "요리", "subtopic_ko": "한식"},
-            # 여행/국내: A-C(C+1)
-            {"src_asset": "A", "src_modality": "text", "src_fs_path": "/d/A.txt",
-             "dst_asset": "C", "dst_modality": "video", "dst_fs_path": "/d/영상C.mp4",
-             "topic_ko": "여행", "subtopic_ko": "국내"},
-            # 여행/(없음): F-G
+            # (여행,국내): 대상 쌍 → 포함. F-G → 여행›국내 {F,G}
             {"src_asset": "F", "src_modality": "text", "src_fs_path": "/d/F.txt",
              "dst_asset": "G", "dst_modality": "text", "dst_fs_path": "/d/G.txt",
-             "topic_ko": "여행", "subtopic_ko": None},
+             "topic_ko": "여행", "subtopic_ko": "국내"},
+            # (여행,해외): 대상이 안 가진 쌍 → **제외**(X,Y 등장 금지).
+            {"src_asset": "X", "src_modality": "text", "src_fs_path": "/d/X.txt",
+             "dst_asset": "Y", "dst_modality": "text", "dst_fs_path": "/d/Y.txt",
+             "topic_ko": "여행", "subtopic_ko": "해외"},
         ]
         conn, _ = _mock_conn(rows)
 
         out = find_topic_neighbor_groups(conn, asset_id="A")
 
-        # 주제 정렬: asset_count(distinct) desc → topic_ko asc → 요리{B,C,D,E}=4, 여행{C,F,G}=3
+        # 비공유 쌍의 자산은 전부 제외
+        all_ids = {a["asset_id"] for g in out for s in g["subtopics"] for a in s["assets"]}
+        self.assertNotIn("E", all_ids)   # (요리,한식) 제외
+        self.assertNotIn("X", all_ids)
+        self.assertNotIn("Y", all_ids)   # (여행,해외) 제외
+        # 주제 정렬: distinct desc → topic_ko asc → 요리{B,C,D}=3, 여행{F,G}=2
         self.assertEqual([g["topic_ko"] for g in out], ["요리", "여행"])
-        self.assertEqual(out[0]["asset_count"], 4)
-        self.assertEqual(out[1]["asset_count"], 3)
-        # 형상: 그룹·하위·자산 키셋
+        self.assertEqual(out[0]["asset_count"], 3)
+        self.assertEqual(out[1]["asset_count"], 2)
+        # 요리 하위주제: 제빵만(한식 제외)
+        self.assertEqual([s["subtopic_ko"] for s in out[0]["subtopics"]], ["제빵"])
+        bakery = out[0]["subtopics"][0]
+        self.assertEqual(bakery["asset_count"], 3)
+        self.assertEqual([a["asset_id"] for a in bakery["assets"]], ["B", "C", "D"])  # weight 동률 id asc
+        self.assertTrue(next(a for a in bakery["assets"] if a["asset_id"] == "B")["already_linked"])
+        c = next(a for a in bakery["assets"] if a["asset_id"] == "C")
+        self.assertEqual((c["file_name"], c["modality"]), ("영상C.mp4", "video"))
+        # 형상 키셋
         self.assertEqual(set(out[0].keys()), {"topic_ko", "asset_count", "subtopics"})
-        self.assertEqual(set(out[0]["subtopics"][0].keys()), {"subtopic_ko", "asset_count", "assets"})
+        self.assertEqual(set(bakery.keys()), {"subtopic_ko", "asset_count", "assets"})
         self.assertEqual(
-            set(out[0]["subtopics"][0]["assets"][0].keys()),
+            set(bakery["assets"][0].keys()),
             {"asset_id", "file_name", "modality", "already_linked"},
         )
-        # 요리 하위주제 정렬: 한식(3) → 제빵(1)
-        cook = {s["subtopic_ko"]: s for s in out[0]["subtopics"]}
-        self.assertEqual([s["subtopic_ko"] for s in out[0]["subtopics"]], ["한식", "제빵"])
-        self.assertEqual(cook["한식"]["asset_count"], 3)
-        # 한식 자산: 엣지참여수 desc → asset_id asc → C(2),D(1),E(1)
-        self.assertEqual([a["asset_id"] for a in cook["한식"]["assets"]], ["C", "D", "E"])
-        c = next(a for a in cook["한식"]["assets"] if a["asset_id"] == "C")
-        self.assertEqual((c["file_name"], c["modality"]), ("영상C.mp4", "video"))
-        # 제빵: B(linked)
-        self.assertTrue(cook["제빵"]["assets"][0]["already_linked"])
-        # 여행: 이름있는 국내(1) 먼저, None(기타·2) 마지막(카운트 커도 항상 뒤)
-        self.assertEqual([s["subtopic_ko"] for s in out[1]["subtopics"]], ["국내", None])
+
+    @patch(_PATCH_TARGET)
+    def test_none_subtopic_pair_matches_broadly(self, m_fetch) -> None:
+        # 대상이 (요리,None) 쌍만 가지면(하위 미부여) 그 주제로 넓게 매칭 — 가진 신호가 그뿐.
+        from src.relations.topic_query import find_topic_neighbor_groups
+
+        m_fetch.return_value = [_nb(_topic("요리", None, "cooking", None), asset_id="B")]
+        rows = [
+            {"src_asset": "C", "src_modality": "text", "src_fs_path": "/d/C.txt",
+             "dst_asset": "D", "dst_modality": "text", "dst_fs_path": "/d/D.txt",
+             "topic_ko": "요리", "subtopic_ko": None},
+            # (요리,제빵)은 대상 쌍(요리,None) 아님 → 제외.
+            {"src_asset": "E", "src_modality": "text", "src_fs_path": "/d/E.txt",
+             "dst_asset": "F", "dst_modality": "text", "dst_fs_path": "/d/F.txt",
+             "topic_ko": "요리", "subtopic_ko": "제빵"},
+        ]
+        conn, _ = _mock_conn(rows)
+
+        out = find_topic_neighbor_groups(conn, asset_id="A")
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["subtopics"][0]["subtopic_ko"], None)  # (기타)
+        ids = {a["asset_id"] for a in out[0]["subtopics"][0]["assets"]}
+        self.assertEqual(ids, {"C", "D"})   # E,F(요리,제빵)는 제외
 
     @patch(_PATCH_TARGET)
     def test_neighbor_sql_selects_subtopic_ko(self, m_fetch) -> None:
@@ -403,18 +428,19 @@ class TestFindTopicNeighborGroups(unittest.TestCase):
     def test_caps_topics_subtopics_and_assets(self, m_fetch) -> None:
         from src.relations.topic_query import find_topic_neighbor_groups
 
+        # 대상 쌍 {(요리,제빵),(여행,국내)}.
         m_fetch.return_value = [
             _nb(_topic("요리", "제빵", "cooking", "baking"), asset_id="B"),
             _nb(_topic("여행", "국내", "travel", "domestic"), asset_id="H"),
         ]
         rows = [
-            # 요리/한식: 자산 3개(P,Q,R) — max_assets_per_subtopic=2 로 절단
+            # (요리,제빵): 자산 3개(P,Q,R) — max_assets_per_subtopic=2 로 절단
             {"src_asset": "P", "src_modality": "text", "src_fs_path": "/d/P.txt",
              "dst_asset": "Q", "dst_modality": "text", "dst_fs_path": "/d/Q.txt",
-             "topic_ko": "요리", "subtopic_ko": "한식"},
+             "topic_ko": "요리", "subtopic_ko": "제빵"},
             {"src_asset": "P", "src_modality": "text", "src_fs_path": "/d/P.txt",
              "dst_asset": "R", "dst_modality": "text", "dst_fs_path": "/d/R.txt",
-             "topic_ko": "요리", "subtopic_ko": "한식"},
+             "topic_ko": "요리", "subtopic_ko": "제빵"},
             {"src_asset": "S", "src_modality": "text", "src_fs_path": "/d/S.txt",
              "dst_asset": "T", "dst_modality": "text", "dst_fs_path": "/d/T.txt",
              "topic_ko": "여행", "subtopic_ko": "국내"},
@@ -427,11 +453,11 @@ class TestFindTopicNeighborGroups(unittest.TestCase):
 
         self.assertEqual(len(out), 1)                       # max_topics=1 → 요리만
         self.assertEqual(out[0]["topic_ko"], "요리")
-        han = out[0]["subtopics"][0]
-        self.assertEqual(han["subtopic_ko"], "한식")
-        self.assertEqual(han["asset_count"], 3)             # 절단 전 실수(P,Q,R)
-        self.assertEqual(len(han["assets"]), 2)             # max_assets_per_subtopic=2
-        self.assertEqual([a["asset_id"] for a in han["assets"]], ["P", "Q"])  # P(2)>Q,R → asc Q
+        sub = out[0]["subtopics"][0]
+        self.assertEqual(sub["subtopic_ko"], "제빵")
+        self.assertEqual(sub["asset_count"], 3)             # 절단 전 실수(P,Q,R)
+        self.assertEqual(len(sub["assets"]), 2)             # max_assets_per_subtopic=2
+        self.assertEqual([a["asset_id"] for a in sub["assets"]], ["P", "Q"])  # P(2)>Q,R → asc Q
 
     @patch(_PATCH_TARGET)
     def test_no_target_topics_returns_empty_without_query(self, m_fetch) -> None:
