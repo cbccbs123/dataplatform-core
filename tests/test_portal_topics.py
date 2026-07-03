@@ -86,13 +86,15 @@ class TestAssetDetailTopics(unittest.TestCase):
             {"topic_ko": "요리", "subtopic_ko": "제빵", "topic_en": "cooking",
              "subtopic_en": "baking", "weight": 3},
         ]
-        # 057-후속: 공유 주제(topic_ko)별 그룹 — 관계탭처럼 "무슨 주제로 같은지"가 구조로 드러남.
+        # 057-후속: 공유 주제(topic_ko)→하위주제(subtopic_ko) 2단 중첩 — "무슨 주제·하위주제로 같은지".
         mock_groups.return_value = [
-            {"topic_ko": "요리", "asset_count": 2, "assets": [
-                {"asset_id": "a2", "file_name": "a2.png", "modality": "image",
-                 "already_linked": True},
-                {"asset_id": "a7", "file_name": "a7.txt", "modality": "text",
-                 "already_linked": False},
+            {"topic_ko": "요리", "asset_count": 2, "subtopics": [
+                {"subtopic_ko": "제빵", "asset_count": 2, "assets": [
+                    {"asset_id": "a2", "file_name": "a2.png", "modality": "image",
+                     "already_linked": True},
+                    {"asset_id": "a7", "file_name": "a7.txt", "modality": "text",
+                     "already_linked": False},
+                ]},
             ]},
         ]
         resp = self.client.get("/assets/a1")
@@ -100,10 +102,12 @@ class TestAssetDetailTopics(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["topics"], mock_project.return_value)
         self.assertEqual(body["same_topic_groups"], mock_groups.return_value)
-        # 그룹 구조·already_linked 표식 보존
+        # 그룹→하위주제 구조·already_linked 표식 보존
         self.assertEqual(body["same_topic_groups"][0]["topic_ko"], "요리")
-        self.assertTrue(body["same_topic_groups"][0]["assets"][0]["already_linked"])
-        self.assertFalse(body["same_topic_groups"][0]["assets"][1]["already_linked"])
+        sub0 = body["same_topic_groups"][0]["subtopics"][0]
+        self.assertEqual(sub0["subtopic_ko"], "제빵")
+        self.assertTrue(sub0["assets"][0]["already_linked"])
+        self.assertFalse(sub0["assets"][1]["already_linked"])
         # seam 은 대상 자산으로 조회
         self.assertEqual(mock_project.call_args.kwargs["asset_id"], "a1")
         self.assertEqual(mock_groups.call_args.kwargs["asset_id"], "a1")

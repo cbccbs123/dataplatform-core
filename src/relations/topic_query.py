@@ -122,11 +122,13 @@ WHERE ge.status = 'active'
 # 대상 주제(topic_ko 집합)를 실은 active 엣지의 양끝 자산 수집.
 # 057 FR-103: 후보 표시필드(modality·file_name) 하향 — _TOPIC_JOIN 이 이미 건 asset sa/da 에서
 #   양끝 modality·fs_path 를 함께 SELECT(조인 재사용·재구현 없음). basename 은 파이썬에서 파생.
+# 057-후속: subtopic_ko 도 SELECT — 같은주제 그룹의 하위주제 중첩용(평면 find_topic_neighbors 는 미사용·무영향).
 _NEIGHBOR_SQL = f"""
 SELECT sn.asset_id AS src_asset, dn.asset_id AS dst_asset,
        sa.modality AS src_modality, sa.fs_path AS src_fs_path,
        da.modality AS dst_modality, da.fs_path AS dst_fs_path,
-       ge.topic->>'topic_ko' AS topic_ko
+       ge.topic->>'topic_ko' AS topic_ko,
+       ge.topic->>'subtopic_ko' AS subtopic_ko
 {_TOPIC_JOIN}{_ACTIVE_MEDICAL_WHERE}
   AND ge.topic->>'topic_ko' = ANY(%s)
 """
@@ -223,20 +225,31 @@ def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
 
 
 def find_topic_neighbor_groups(
-    conn, *, asset_id: str, max_topics: int = 12, max_assets_per_topic: int = 8
+    conn,
+    *,
+    asset_id: str,
+    max_topics: int = 12,
+    max_subtopics_per_topic: int = 12,
+    max_assets_per_subtopic: int = 8,
 ) -> list[dict]:
-    """``asset_id`` 와 공유하는 **주제별로 묶은** 같은-주제 이웃 그룹(같은주제 탐색 UX·057-후속).
+    """``asset_id`` 와 공유하는 같은-주제 이웃을 **주제→하위주제 2단 중첩**으로 묶는다(같은주제 탐색 UX·057-후속).
 
-    ``find_topic_neighbors`` 가 자산 단위 평면 목록이라면, 이 함수는 **무슨 주제로 같은지**가 바로
-    보이도록 ``topic_ko`` 로 그룹화한다(관계탭이 관계종류로 묶이듯). 한 자산이 여러 주제를 공유하면
-    각 주제 그룹에 모두 등장한다(주제 브라우즈 렌즈). 평면 목록의 ``overlap_weight``(엣지 참여수)를
-    사용자에게 "공유 주제 N개"로 오라벨하던 혼선을 구조로 제거한다.
+    ``find_topic_neighbors`` 가 자산 단위 평면 목록이라면, 이 함수는 **무슨 주제·무슨 하위주제로 같은지**가
+    바로 보이도록 ``topic_ko → subtopic_ko`` 로 중첩한다(검색 패싯 ``list_topics`` 와 동일한 2단 구조).
+    평면 목록의 ``overlap_weight``(엣지 참여수)를 "공유 주제 N개"로 오라벨하던 혼선을 구조로 제거하고,
+    스포츠처럼 광범위한 상위주제(예: 113건)를 마라톤·스키·축구… 하위주제로 드릴다운되게 한다.
+    한 자산이 여러 (하위)주제를 공유하면 각 그룹에 모두 등장한다(주제 브라우즈 렌즈).
 
     Returns:
-        ``[{topic_ko, asset_count, assets:[{asset_id(str), file_name, modality, already_linked}]}]``.
-        - ``asset_count`` = 그 주제를 대상과 공유하는(대상 제외) distinct 자산 수(``assets`` 절단 전 실수).
-        - ``assets`` = 그 주제 그룹의 자산(엣지 참여수 desc → asset_id asc·결정적), ``max_assets_per_topic`` 절단.
-        - 그룹 정렬 = ``asset_count desc → topic_ko asc``(결정적), ``max_topics`` 절단.
+        ``[{topic_ko, asset_count, subtopics:[{subtopic_ko, asset_count,
+        assets:[{asset_id(str), file_name, modality, already_linked}]}]}]``.
+        - 상위 ``asset_count`` = 그 주제를 대상과 공유하는(대상 제외) **distinct** 자산 수(하위 합과 다를 수 있음
+          — 한 자산이 여러 하위주제에 걸치면 상위는 1회, 하위는 각각 계수).
+        - 하위 ``asset_count`` = 그 하위주제의 distinct 자산 수(``assets`` 절단 전 실수). ``subtopic_ko`` 는
+          하위주제 미부여 엣지면 ``None``(프론트에서 "기타/하위주제 없음"으로 표기).
+        - ``assets`` = 하위주제 내 자산(엣지 참여수 desc → asset_id asc·결정적), ``max_assets_per_subtopic`` 절단.
+        - 정렬(결정적): 주제 ``asset_count desc → topic_ko asc``(``max_topics`` 절단) · 하위주제는 이름있는
+          것 먼저(``asset_count desc → subtopic_ko asc``)·None(기타)은 항상 마지막(``max_subtopics_per_topic`` 절단).
         - ``already_linked`` = 그 자산이 대상의 직접 관계 이웃인지(``fetch_active_relations_for_asset`` 집합).
     대상 주제가 없으면 빈 리스트(DB 조회도 안 함). active·의료제외는 ``find_topic_neighbors`` 와 동일 SQL 재사용.
     """
@@ -248,18 +261,19 @@ def find_topic_neighbor_groups(
     linked = {nb["asset_id"] for nb in fetch_active_relations_for_asset(conn, asset_id=asset_id)}
     target_str = str(asset_id)
 
-    # 2) 대상 주제를 실은 active·의료제외 엣지 양끝 자산 수집(_NEIGHBOR_SQL 공유).
+    # 2) 대상 주제를 실은 active·의료제외 엣지 양끝 자산 수집(_NEIGHBOR_SQL 공유·subtopic_ko 포함).
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_NEIGHBOR_SQL, (topic_kos,))
         rows = cur.fetchall()
 
-    # 3) topic_ko → {asset_id → {file_name, modality, already_linked, weight}} 그룹 집계. 대상 자신 스킵.
+    # 3) topic_ko → {assets(상위 distinct 집합), subs: subtopic_ko → {asset_id → {표시필드, weight}}}.
     #    같은 자산은 어느 엣지에서 보든 같은 표시값이라 first-wins(assets_in_topic 관례·결정적).
-    groups: dict[str, dict[str, dict]] = {}
+    groups: dict[str, dict] = {}
     for r in rows:
         topic_ko = r["topic_ko"]
         if not topic_ko:
             continue
+        subtopic_ko = r["subtopic_ko"] or None
         for endpoint, modality, fs_path in (
             (r["src_asset"], r["src_modality"], r["src_fs_path"]),
             (r["dst_asset"], r["dst_modality"], r["dst_fs_path"]),
@@ -267,7 +281,9 @@ def find_topic_neighbor_groups(
             aid = str(endpoint)
             if aid == target_str:
                 continue
-            bucket = groups.setdefault(topic_ko, {})
+            g = groups.setdefault(topic_ko, {"assets": set(), "subs": {}})
+            g["assets"].add(aid)  # 상위 distinct(하위 걸침 무관 1회)
+            bucket = g["subs"].setdefault(subtopic_ko, {})
             entry = bucket.setdefault(
                 aid,
                 {"file_name": os.path.basename(fs_path or ""), "modality": modality,
@@ -276,16 +292,27 @@ def find_topic_neighbor_groups(
             entry["weight"] += 1
 
     out = []
-    for topic_ko, bucket in groups.items():
-        # 그룹 내 자산: 엣지 참여수 desc → asset_id asc(결정적) 후 절단.
-        ordered = sorted(bucket.items(), key=lambda kv: (-kv[1]["weight"], kv[0]))
-        assets = [
-            {"asset_id": aid, "file_name": e["file_name"], "modality": e["modality"],
-             "already_linked": e["already_linked"]}
-            for aid, e in ordered[:max_assets_per_topic]
-        ]
-        out.append({"topic_ko": topic_ko, "asset_count": len(bucket), "assets": assets})
-    # 결정성(헌법 3조): asset_count desc → topic_ko asc.
+    for topic_ko, g in groups.items():
+        subtopics = []
+        for subtopic_ko, bucket in g["subs"].items():
+            # 하위주제 내 자산: 엣지 참여수 desc → asset_id asc(결정적) 후 절단.
+            ordered = sorted(bucket.items(), key=lambda kv: (-kv[1]["weight"], kv[0]))
+            assets = [
+                {"asset_id": aid, "file_name": e["file_name"], "modality": e["modality"],
+                 "already_linked": e["already_linked"]}
+                for aid, e in ordered[:max_assets_per_subtopic]
+            ]
+            subtopics.append(
+                {"subtopic_ko": subtopic_ko, "asset_count": len(bucket), "assets": assets}
+            )
+        # 하위주제 정렬: 이름있는 하위주제 먼저(asset_count desc → subtopic_ko asc), None(기타)은 항상 마지막·절단.
+        subtopics.sort(key=lambda s: (s["subtopic_ko"] is None, -s["asset_count"], s["subtopic_ko"] or ""))
+        out.append({
+            "topic_ko": topic_ko,
+            "asset_count": len(g["assets"]),
+            "subtopics": subtopics[:max_subtopics_per_topic],
+        })
+    # 결정성(헌법 3조): 주제 asset_count desc → topic_ko asc.
     out.sort(key=lambda o: (-o["asset_count"], o["topic_ko"]))
     return out[:max_topics]
 
