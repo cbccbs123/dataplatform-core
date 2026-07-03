@@ -502,7 +502,7 @@ class TestAssetThumbnail(unittest.TestCase):
         _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.generate_thumbnail", return_value=b"\xff\xd8\xff\xe0JPG")
+    @patch("src.app.portal_api.cached_thumbnail", return_value=b"\xff\xd8\xff\xe0JPG")
     @patch("src.app.portal_api.resolve_download_target")
     def test_image_returns_jpeg(self, mock_resolve, _gen) -> None:
         import tempfile
@@ -532,7 +532,7 @@ class TestAssetThumbnail(unittest.TestCase):
             "asset_id": "a1", "fs_path": "/nonexistent/x.png", "modality": "image"}
         self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 410)
 
-    @patch("src.app.portal_api.generate_thumbnail", return_value=None)
+    @patch("src.app.portal_api.cached_thumbnail", return_value=None)
     @patch("src.app.portal_api.resolve_download_target")
     def test_generation_failure_returns_404(self, mock_resolve, _gen) -> None:
         import tempfile

@@ -14,6 +14,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
 _LOG = logging.getLogger("meta_extract.thumbnail")
@@ -21,6 +25,7 @@ _LOG = logging.getLogger("meta_extract.thumbnail")
 THUMB_MAX_DIM = 320  # 썸네일 최대 변(px) — 목록 카드용 소형
 THUMBNAILABLE_MODALITIES = frozenset({"image", "video"})
 _VIDEO_POS_MSEC = 1000.0  # 대표 프레임 위치(1초) — 0초는 검은 프레임이 흔해 회피(결정적)
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")  # 캐시 파일명 안전 id(경로 조작 방지)
 
 
 def _encode_thumb(pil_img: Any) -> bytes:
@@ -71,3 +76,45 @@ def generate_thumbnail(fs_path: str | None, modality: str | None) -> bytes | Non
     except Exception as exc:  # noqa: BLE001 — 손상 파일·코덱 등은 썸네일 없음(404)으로 격리(best-effort)
         _LOG.warning("썸네일 생성 실패(무시): fs_path=%s modality=%s: %s", fs_path, modality, exc)
         return None
+
+
+def _default_cache_dir() -> Path:
+    """썸네일 디스크 캐시 경로 — ``THUMBNAIL_CACHE_DIR`` 환경변수, 없으면 temp 하위(파생·삭제 안전)."""
+    return Path(os.getenv("THUMBNAIL_CACHE_DIR") or (Path(tempfile.gettempdir()) / "dataflatform_thumb_cache"))
+
+
+def cached_thumbnail(
+    asset_id: str, fs_path: str | None, modality: str | None, *, cache_dir: str | Path | None = None
+) -> bytes | None:
+    """디스크 캐시 경유 썸네일(**generate-once**) — 있으면 캐시 서빙, 없으면 1회 생성→저장→반환.
+
+    캐시 키 = ``<asset_id>.jpg``. 두 번째 요청부터는 원본을 읽지 않고 캐시 파일만 서빙한다(영상 재디코드
+    0). 결정적이라 동시 생성돼도 바이트 동일 — 임시파일 후 ``os.replace`` 원자 교체로 부분읽기 방지.
+    캐시는 **파생물**(원본·DB 무수정, 헌법 6조)이라 삭제·재생성 안전. 비대상 modality/생성 실패는
+    ``None``(캐시하지 않음). ``asset_id`` 가 안전 패턴이 아니면 경로 조작 방지로 캐시를 건너뛰고 직접 생성.
+
+    ⚠️ 캐시 기능은 자체 완결적이다 — 스키마/파이프라인 변경 0. 제거 시 이 함수·엔드포인트·캐시 디렉터리만
+    치우면 되고(마이그레이션·데이터 모델 없음), ``generate_thumbnail`` 로 즉시 되돌아간다.
+    """
+    if modality not in THUMBNAILABLE_MODALITIES or not fs_path:
+        return None
+    if not _SAFE_ID_RE.match(asset_id or ""):  # 경로 조작 방지 — 캐시 스킵하고 직접 생성
+        return generate_thumbnail(fs_path, modality)
+    cdir = Path(cache_dir) if cache_dir is not None else _default_cache_dir()
+    cpath = cdir / f"{asset_id}.jpg"
+    try:
+        if cpath.is_file():
+            return cpath.read_bytes()  # 캐시 히트 — 원본 안 읽음
+    except OSError as exc:
+        _LOG.warning("썸네일 캐시 읽기 실패(재생성): %s: %s", cpath, exc)
+    data = generate_thumbnail(fs_path, modality)
+    if data is None:
+        return None
+    try:
+        cdir.mkdir(parents=True, exist_ok=True)
+        tmp = cdir / f"{asset_id}.jpg.tmp.{os.getpid()}"
+        tmp.write_bytes(data)
+        os.replace(tmp, cpath)  # 원자 교체(동시 생성 안전·부분읽기 방지)
+    except OSError as exc:  # 저장 실패해도 생성분은 반환(캐시는 best-effort)
+        _LOG.warning("썸네일 캐시 저장 실패(무시): %s: %s", cpath, exc)
+    return data

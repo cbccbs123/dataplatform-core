@@ -12,8 +12,9 @@ import os
 import tempfile
 import unittest
 from io import BytesIO
+from unittest.mock import patch
 
-from src.portal.thumbnail import THUMB_MAX_DIM, generate_thumbnail
+from src.portal.thumbnail import THUMB_MAX_DIM, cached_thumbnail, generate_thumbnail
 
 
 def _make_png(path: str, size: tuple[int, int] = (800, 600)) -> None:
@@ -62,6 +63,40 @@ class GenerateThumbnailTest(unittest.TestCase):
     def test_missing_or_empty_path_none(self) -> None:
         self.assertIsNone(generate_thumbnail("", "image"))
         self.assertIsNone(generate_thumbnail("/nonexistent/nope.png", "image"))  # open 실패 → 격리 None
+
+
+class CachedThumbnailTest(unittest.TestCase):
+    """디스크 캐시 경유 — generate-once·캐시 히트·경로조작 방지·None 미캐시(057-후속)."""
+
+    def test_generate_once_then_cache_hit(self) -> None:
+        # 첫 호출 생성·저장, 둘째 호출은 캐시 히트(재생성 0). generate_thumbnail 호출 횟수로 검증.
+        with tempfile.TemporaryDirectory() as d:
+            with patch("src.portal.thumbnail.generate_thumbnail", return_value=b"JPGDATA") as gen:
+                b1 = cached_thumbnail("asset-1", "/x/a.png", "image", cache_dir=d)
+                b2 = cached_thumbnail("asset-1", "/x/a.png", "image", cache_dir=d)
+            self.assertEqual(b1, b"JPGDATA")
+            self.assertEqual(b2, b"JPGDATA")
+            gen.assert_called_once()  # 둘째는 원본 안 읽고 캐시 서빙
+            self.assertTrue(os.path.isfile(os.path.join(d, "asset-1.jpg")))
+
+    def test_generate_none_not_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            with patch("src.portal.thumbnail.generate_thumbnail", return_value=None):
+                self.assertIsNone(cached_thumbnail("asset-2", "/x/a.png", "image", cache_dir=d))
+            self.assertFalse(os.path.isfile(os.path.join(d, "asset-2.jpg")))  # 실패는 캐시 안 함
+
+    def test_unsafe_asset_id_skips_cache(self) -> None:
+        # 경로 조작 방지 — 안전 패턴 아니면 캐시 파일 생성 없이 직접 생성.
+        with tempfile.TemporaryDirectory() as d:
+            with patch("src.portal.thumbnail.generate_thumbnail", return_value=b"J") as gen:
+                out = cached_thumbnail("../etc/passwd", "/x/a.png", "image", cache_dir=d)
+            self.assertEqual(out, b"J")
+            gen.assert_called_once()
+            self.assertEqual(os.listdir(d), [])  # 캐시 파일 안 만듦
+
+    def test_non_thumbnailable_none(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(cached_thumbnail("a", "/x/a.mp3", "audio", cache_dir=d))
 
 
 if __name__ == "__main__":

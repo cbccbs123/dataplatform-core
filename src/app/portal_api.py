@@ -92,7 +92,7 @@ from src.portal.lineage_query import (
     relation_proposed_summary,
 )
 from src.portal.search_group import group_ranked
-from src.portal.thumbnail import THUMBNAILABLE_MODALITIES, generate_thumbnail
+from src.portal.thumbnail import THUMBNAILABLE_MODALITIES, cached_thumbnail
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
 
@@ -1358,8 +1358,10 @@ def asset_thumbnail(
            (의료 자산 썸네일=PHI 이므로 여기서 원천 차단).
         2. 이미지·영상이 아니면 404(오디오/텍스트/unknown 은 시각 표현 없음 → 프론트 아이콘 폴백).
         3. 원본 파일 부재/접근 불가 → 410(FR-009). 생성 실패(손상·코덱) → 404.
-    ``generate_thumbnail`` 은 원본 무수정·결정적·LLM 0(단순 리사이즈/프레임 추출). 브라우저 캐시
-    (``Cache-Control``)로 반복 요청을 완화한다(서버측 캐시는 후속 최적화). 신규 LLM 0·읽기 전용·마이그레이션 0.
+    ``cached_thumbnail`` 은 **디스크 캐시 경유(generate-once)** — 첫 요청만 원본을 읽어 생성·저장하고
+    이후는 캐시 파일만 서빙(영상 재디코드 0). 원본 무수정·결정적·LLM 0. 브라우저 캐시(``Cache-Control``)는
+    같은 사용자 반복을, 디스크 캐시는 전 사용자 재생성을 막는다. 캐시는 파생물(``THUMBNAIL_CACHE_DIR``)이라
+    삭제·재생성 안전. 읽기 전용·마이그레이션 0·자체 완결(제거 시 엔드포인트·모듈·캐시 dir 만 정리).
     """
     target = _run_in_db(lambda conn: resolve_download_target(conn, asset_id=asset_id))
     if target is None:
@@ -1370,7 +1372,7 @@ def asset_thumbnail(
     fs_path = target.get("fs_path")
     if not fs_path or not os.path.isfile(fs_path):
         raise HTTPException(status_code=410, detail="원본 파일이 존재하지 않거나 접근할 수 없음")
-    data = generate_thumbnail(fs_path, modality)
+    data = cached_thumbnail(asset_id, fs_path, modality)  # 디스크 캐시 경유(generate-once)
     if data is None:
         raise HTTPException(status_code=404, detail="썸네일을 생성할 수 없음")
     return Response(
