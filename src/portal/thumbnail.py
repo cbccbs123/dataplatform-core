@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -22,10 +23,10 @@ from typing import Any
 
 _LOG = logging.getLogger("meta_extract.thumbnail")
 
-THUMB_MAX_DIM = 320  # 기본(card) 최대 변(px) — 목록·hover 카드용
 # 057-후속: 용도별 크기 프리셋 — card(목록·hover)·detail(상세 히어로). _MAX_DIM 캡으로 남용 방지.
 _SIZE_PRESETS = {"card": 320, "detail": 640}
 _MAX_DIM = 1024
+THUMB_MAX_DIM = _SIZE_PRESETS["card"]  # 기본(card) 최대 변(px) — 프리셋 단일 출처(중복 리터럴 드리프트 방지)
 THUMBNAILABLE_MODALITIES = frozenset({"image", "video"})
 _VIDEO_POS_MSEC = 1000.0  # 대표 프레임 위치(1초) — 0초는 검은 프레임이 흔해 회피(결정적)
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")  # 캐시 파일명 안전 id(경로 조작 방지)
@@ -130,9 +131,17 @@ def cached_thumbnail(
         return None
     try:
         cdir.mkdir(parents=True, exist_ok=True)
-        tmp = cdir / f"{asset_id}_{dim}.jpg.tmp.{os.getpid()}"
-        tmp.write_bytes(data)
-        os.replace(tmp, cpath)  # 원자 교체(동시 생성 안전·부분읽기 방지)
+        # 고유 임시파일(mkstemp) → 원자 교체: 동일 워커 내 동시 스레드도 tmp 경로가 겹치지 않는다
+        # (PID-only 는 스레드 충돌 여지). 실패 시 tmp 잔여 제거 후 전파(바깥 except 가 best-effort 처리).
+        fd, tmp_name = tempfile.mkstemp(dir=cdir, prefix=f"{asset_id}_{dim}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp_name, cpath)  # 원자 교체(부분읽기 방지)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
     except OSError as exc:  # 저장 실패해도 생성분은 반환(캐시는 best-effort)
         _LOG.warning("썸네일 캐시 저장 실패(무시): %s: %s", cpath, exc)
     return data
