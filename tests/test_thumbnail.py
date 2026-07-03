@@ -54,6 +54,16 @@ class GenerateThumbnailTest(unittest.TestCase):
             im = Image.open(BytesIO(generate_thumbnail(p, "image")))
             self.assertEqual(im.size, (100, 80))
 
+    def test_max_dim_controls_output_size(self) -> None:
+        # 057-후속: max_dim 인자로 detail(640) 등 더 큰 히어로 썸네일 생성(비율 보존).
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "big.png")
+            _make_png(p, (800, 600))
+            im = Image.open(BytesIO(generate_thumbnail(p, "image", max_dim=640)))
+            self.assertEqual(im.size, (640, 480))  # 800x600 → 640x480(detail)
+
     def test_non_thumbnailable_modality_none(self) -> None:
         self.assertIsNone(generate_thumbnail("/x/a.txt", "text"))
         self.assertIsNone(generate_thumbnail("/x/a.mp3", "audio"))
@@ -77,13 +87,30 @@ class CachedThumbnailTest(unittest.TestCase):
             self.assertEqual(b1, b"JPGDATA")
             self.assertEqual(b2, b"JPGDATA")
             gen.assert_called_once()  # 둘째는 원본 안 읽고 캐시 서빙
-            self.assertTrue(os.path.isfile(os.path.join(d, "asset-1.jpg")))
+            self.assertTrue(os.path.isfile(os.path.join(d, "asset-1_320.jpg")))  # 기본 card=320
+
+    def test_size_detail_separate_cache_and_dim(self) -> None:
+        # 057-후속: size=detail 은 640 으로 별도 캐시 키(_640)·generate 에 max_dim=640 전달.
+        with tempfile.TemporaryDirectory() as d:
+            with patch("src.portal.thumbnail.generate_thumbnail", return_value=b"HERO") as gen:
+                out = cached_thumbnail("asset-9", "/x/a.png", "image", size="detail", cache_dir=d)
+            self.assertEqual(out, b"HERO")
+            gen.assert_called_once_with("/x/a.png", "image", max_dim=640)
+            self.assertTrue(os.path.isfile(os.path.join(d, "asset-9_640.jpg")))
+
+    def test_unknown_size_falls_back_to_card(self) -> None:
+        # 미지원 size 는 card(320) 폴백 — 타이포에 404 대신 기본 서빙(장식적 자원).
+        with tempfile.TemporaryDirectory() as d:
+            with patch("src.portal.thumbnail.generate_thumbnail", return_value=b"J") as gen:
+                cached_thumbnail("asset-x", "/x/a.png", "image", size="huge", cache_dir=d)
+            gen.assert_called_once_with("/x/a.png", "image", max_dim=320)
+            self.assertTrue(os.path.isfile(os.path.join(d, "asset-x_320.jpg")))
 
     def test_generate_none_not_cached(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             with patch("src.portal.thumbnail.generate_thumbnail", return_value=None):
                 self.assertIsNone(cached_thumbnail("asset-2", "/x/a.png", "image", cache_dir=d))
-            self.assertFalse(os.path.isfile(os.path.join(d, "asset-2.jpg")))  # 실패는 캐시 안 함
+            self.assertFalse(os.path.isfile(os.path.join(d, "asset-2_320.jpg")))  # 실패는 캐시 안 함
 
     def test_unsafe_asset_id_skips_cache(self) -> None:
         # 경로 조작 방지 — 안전 패턴 아니면 캐시 파일 생성 없이 직접 생성.

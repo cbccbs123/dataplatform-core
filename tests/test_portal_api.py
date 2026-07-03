@@ -516,6 +516,18 @@ class TestAssetThumbnail(unittest.TestCase):
         self.assertEqual(r.content, b"\xff\xd8\xff\xe0JPG")
         self.assertIn("max-age", r.headers.get("cache-control", ""))
 
+    @patch("src.app.portal_api.cached_thumbnail", return_value=b"HERO")
+    @patch("src.app.portal_api.resolve_download_target")
+    def test_size_query_passed_through(self, mock_resolve, mock_cached) -> None:
+        # ?size=detail → cached_thumbnail(size="detail") 로 전달(상세 히어로 640).
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            mock_resolve.return_value = {"asset_id": "a1", "fs_path": f.name, "modality": "image"}
+            r = self.client.get("/assets/a1/thumbnail?size=detail")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(mock_cached.call_args.kwargs.get("size"), "detail")
+
     @patch("src.app.portal_api.resolve_download_target", return_value=None)
     def test_medical_or_missing_returns_404(self, _resolve) -> None:
         # 의료/비registered/없음 → resolve_download_target None → 404 (의료 썸네일=PHI 원천 차단)
