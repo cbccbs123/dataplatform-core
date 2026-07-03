@@ -1007,6 +1007,21 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         self.assertIn(clause("충전"), bm25_sub["query"]["bool"]["must"])
         self.assertIn(clause("광고"), bm25_sub["query"]["bool"]["must_not"])
 
+    def test_must_include_exclude_applied_to_knn_prefilter(self) -> None:
+        # 057 FR-202: kNN 서브검색 pre-filter 에도 배선한다 — 융합(BM25∪kNN) 우회 방지(T213 골든에서
+        # BM25-only 필터 실효 없음 발견). must_include→knn filter, must_exclude→knn must_not.
+        self._run(modalities=("text",), must_include=["충전"], must_exclude=["광고"])
+        knn_sub = self.client.msearch_calls[0][1]  # [헤더, knn, 헤더, bm25] → knn 은 인덱스 1.
+        clause = lambda t: {  # noqa: E731
+            "multi_match": {
+                "query": t, "type": "cross_fields",
+                "fields": ["summary^3", "keywords^2"], "operator": "and",
+            }
+        }
+        knn_bool = knn_sub["query"]["knn"]["embedding"]["filter"]["bool"]
+        self.assertIn(clause("충전"), knn_bool["filter"])
+        self.assertIn(clause("광고"), knn_bool["must_not"])
+
     def test_no_lexical_filters_bm25_body_has_no_must(self) -> None:
         # 미지정(기본)이면 BM25 본문에 must 키가 없다(하위호환·회귀 0).
         self._run(modalities=("text",))
