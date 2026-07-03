@@ -234,6 +234,31 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(meta_filters["source_dataset"], ["wikipedia"])
 
     @patch("src.app.portal_api.search_hybrid")
+    def test_search_passes_must_include_exclude(self, mock_search) -> None:
+        # 057 FR-202: 반복 쿼리 파라미터 must_include/must_exclude 를 search_hybrid 에 배선한다.
+        mock_search.return_value = _fake_search_result()
+        resp = self.client.get(
+            "/search",
+            params=[
+                ("q", "충전"),
+                ("must_include", "배터리"),
+                ("must_include", "고속"),
+                ("must_exclude", "광고"),
+            ],
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_search.call_args.kwargs["must_include"], ["배터리", "고속"])
+        self.assertEqual(mock_search.call_args.kwargs["must_exclude"], ["광고"])
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_no_lexical_filters_forwards_empty(self, mock_search) -> None:
+        # 미지정이면 빈 리스트로 전달(하위호환 — OS 본문 무변경).
+        mock_search.return_value = _fake_search_result()
+        self.client.get("/search", params={"q": "충전", "size": 5})
+        self.assertEqual(mock_search.call_args.kwargs["must_include"], [])
+        self.assertEqual(mock_search.call_args.kwargs["must_exclude"], [])
+
+    @patch("src.app.portal_api.search_hybrid")
     def test_search_invalid_date_returns_422(self, mock_search) -> None:
         resp = self.client.get(
             "/search",

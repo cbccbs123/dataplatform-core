@@ -440,6 +440,30 @@ class TestBackendOsBm25OperatorWiring(unittest.TestCase):
         self.assertEqual(os_cap["bm25_operator"], "and")
 
 
+class TestBackendOsLexicalFilterWiring(unittest.TestCase):
+    """057 FR-202: search_hybrid 가 must_include/must_exclude 를 os_search_fn(OS seam)에 배선한다."""
+
+    def test_must_include_exclude_forwarded_to_os(self) -> None:
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
+        search_hybrid(
+            "질의", modalities=["text"],
+            must_include=["충전"], must_exclude=["광고"],
+            _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+        )
+        self.assertEqual(os_cap["must_include"], ["충전"])
+        self.assertEqual(os_cap["must_exclude"], ["광고"])
+
+    def test_default_lexical_filters_forwarded_empty(self) -> None:
+        # 미지정(기본)이면 빈 리스트로 전달 → OS seam 에서 body 무변경(하위호환).
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
+        search_hybrid(
+            "질의", modalities=["text"],
+            _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+        )
+        self.assertEqual(os_cap["must_include"], [])
+        self.assertEqual(os_cap["must_exclude"], [])
+
+
 class TestBackendOpenSearchUnreachable(unittest.TestCase):
     """(FR-007·SC-006) OS 미도달 → 예외 전파(silent 폴백 없음)."""
 

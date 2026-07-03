@@ -1088,6 +1088,12 @@ def search(
     created_to: str | None = Query(None, description="생성일 상한(YYYY-MM-DD 또는 ISO datetime, UTC)"),
     topic: str | None = Query(None, description="주제(topic) 정확 일치 필터(056·keyword terms)"),
     subtopic: str | None = Query(None, description="세부주제(subtopic) 정확 일치 필터(056·keyword terms)"),
+    must_include: list[str] | None = Query(
+        None, description="반드시 포함 텀(반복 가능·BM25 must·전체 코퍼스 기준·057 FR-202)"
+    ),
+    must_exclude: list[str] | None = Query(
+        None, description="반드시 제외 텀(반복 가능·BM25 must_not·전체 코퍼스 기준·057 FR-202)"
+    ),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
     """006 하이브리드 검색을 **모달리티별 그룹**으로 반환한다(FR-001/002/003 + 056 FR-503).
@@ -1112,6 +1118,11 @@ def search(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"필터 파라미터 형식 오류: {exc}") from exc
 
+    # 057 FR-202: 반복 쿼리 파라미터(must_include/must_exclude)를 strip·빈문자열 제거·순서 보존으로
+    # 정규화한다(미지정 None → []). 빈 리스트면 OS 본문이 바이트 동일(하위호환·회귀 0).
+    inc_terms = [s for s in ((t or "").strip() for t in (must_include or [])) if s]
+    exc_terms = [s for s in ((t or "").strip() for t in (must_exclude or [])) if s]
+
     # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
     # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
     result = search_hybrid(
@@ -1121,6 +1132,9 @@ def search(
         min_scores=_search_min_scores(),
         search_mode=search_mode,
         search_filters=search_filters,
+        # 057 FR-202: 서버 lexical 필터(전체 코퍼스 must/must_not) — 프론트 페이지-only 필터 대체.
+        must_include=inc_terms,
+        must_exclude=exc_terms,
     )
 
     # FR-014: 버킷별 의료 배제 + 모달리티별 독립 랭킹·top-N. results 는 {modality: [rows]}.

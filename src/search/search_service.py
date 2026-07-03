@@ -98,6 +98,8 @@ def _grouped_via_opensearch(
     query_norm_fn: Callable[[str], str] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
+    must_include: list[str] | None = None,
+    must_exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
 
@@ -204,6 +206,10 @@ def _grouped_via_opensearch(
             cfg, "search_evidence_debug", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
         ),
         search_filters=search_filters,
+        # 057 FR-202: 서버 lexical 필터(must_include/exclude)를 OS seam 에 그대로 전달한다. None 은
+        # 빈 리스트로 정규화해 넘겨 미지정과 동일한 하위호환 body(바이트 동일)를 보장한다.
+        must_include=list(must_include or []),
+        must_exclude=list(must_exclude or []),
     )  # client.msearch 미도달 예외도 전파(FR-007)
     # meta 에 게이트 관측성(os_gate) + search_plan(044 FR-303) 합류.
     grouped: dict[str, Any] = {
@@ -249,6 +255,8 @@ def search_hybrid(
     _query_norm_fn: Callable[[str], str] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
+    must_include: list[str] | None = None,
+    must_exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
@@ -275,6 +283,11 @@ def search_hybrid(
 
     ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/
     ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 ``noun_phrase_query`` 지연 import).
+
+    **057 FR-202 서버 lexical 필터**: ``must_include``/``must_exclude`` 를 OS seam 에 그대로 넘겨 BM25
+    본문의 must(전토큰 AND)/must_not 로 **전체 코퍼스**에 적용한다(프론트 페이지-only 필터의 서버 진실
+    불일치 해소). 필터 절만 추가하고 융합·게이트·컷 로직은 무변경 → 랭킹 산식·정렬 불변. 미지정(None)이면
+    빈 리스트로 넘어가 body 바이트 동일(하위호환·회귀 0).
 
     하위호환(037): ``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·
     ``min_scores``·``text_query_model``·``backend`` 인자는 호출부(portal 등) 무영향을 위해 시그니처에
@@ -332,6 +345,9 @@ def search_hybrid(
         query_norm_fn=_query_norm_fn,
         search_mode=search_mode,
         search_filters=search_filters,
+        # 057 FR-202: 서버 lexical 필터를 OS 경로로 배선(랭킹 융합·컷오프 불변 — 필터 절만 추가).
+        must_include=must_include,
+        must_exclude=must_exclude,
     )
     # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 수행하므로
     # 호출부 필터는 적용하지 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에

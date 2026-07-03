@@ -19,6 +19,7 @@ IO seam: ``search_assets_os``(질의 1회 임베딩 → 전 모달리티 [knn+bm
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date
 
@@ -464,6 +465,120 @@ class BuildBm25BodyTest(unittest.TestCase):
         self.assertIn({"terms": {"filter_kw.source_dataset": ["wikipedia"]}}, flt)
 
 
+class Bm25MustIncludeExcludeTest(unittest.TestCase):
+    """057 FR-202: BM25 서버 lexical 필터 — must_include→bool.must·must_exclude→bool.must_not.
+
+    각 텀은 **기존 cross_fields 텍스트 대상**(summary^3·keywords^2)에 **전토큰(operator=and)** 매칭
+    절로 삽입된다. 필터 절(must/must_not)만 추가하고 should(스코어)·filter·minimum_should_match 는
+    무변경이라야 랭킹 융합·컷오프·정렬이 불변이다. 미지정(빈)시 body 바이트 동일(하위호환·회귀 0).
+    """
+
+    def setUp(self) -> None:
+        self.query = "한국어 검색 질의"
+
+    def _cross_and_clause(self, term: str) -> dict:
+        # must/must_not 에 들어갈 lexical 절의 정본 형상 — cross_fields·operator=and·기존 필드 대상.
+        return {
+            "multi_match": {
+                "query": term,
+                "type": "cross_fields",
+                "fields": ["summary^3", "keywords^2"],
+                "operator": "and",
+            }
+        }
+
+    def test_must_include_adds_cross_fields_and_clause_to_must(self) -> None:
+        body = build_bm25_body(
+            self.query, modality_values=["txt"], k=10, must_include=["충전"]
+        )
+        must = body["query"]["bool"]["must"]
+        self.assertIn(self._cross_and_clause("충전"), must)
+
+    def test_each_include_term_is_its_own_must_clause(self) -> None:
+        # 텀 간 AND — 각 텀이 개별 must 절(전 텀이 모두 매칭돼야 결과 유지).
+        body = build_bm25_body(
+            self.query, modality_values=["txt"], k=10, must_include=["충전", "배터리"]
+        )
+        must = body["query"]["bool"]["must"]
+        self.assertEqual(len(must), 2)
+        self.assertIn(self._cross_and_clause("충전"), must)
+        self.assertIn(self._cross_and_clause("배터리"), must)
+
+    def test_must_exclude_adds_clause_to_must_not_beside_medical(self) -> None:
+        # 의료 must_not 은 유지되고(헌법 10조), 제외 텀 절이 함께 must_not 에 추가된다.
+        body = build_bm25_body(
+            self.query, modality_values=["txt"], k=10, must_exclude=["광고"]
+        )
+        must_not = body["query"]["bool"]["must_not"]
+        self.assertIn({"term": {"domain_label": "medical"}}, must_not)
+        self.assertIn(self._cross_and_clause("광고"), must_not)
+
+    def test_must_exclude_without_medical_when_disabled(self) -> None:
+        # exclude_medical=False 여도 제외 텀은 must_not 로 들어간다(의료 절만 빠짐).
+        body = build_bm25_body(
+            self.query,
+            modality_values=["txt"],
+            k=10,
+            exclude_medical=False,
+            must_exclude=["광고"],
+        )
+        must_not = body["query"]["bool"]["must_not"]
+        self.assertNotIn({"term": {"domain_label": "medical"}}, must_not)
+        self.assertEqual(must_not, [self._cross_and_clause("광고")])
+
+    def test_empty_filters_body_byte_identical(self) -> None:
+        # 하위호환 봉인: must_include/exclude 미지정(빈)이면 질의 body 가 **바이트 동일**해야 한다.
+        default_body = build_bm25_body(self.query, modality_values=["txt"], k=20)
+        empty_body = build_bm25_body(
+            self.query, modality_values=["txt"], k=20, must_include=[], must_exclude=[]
+        )
+        self.assertEqual(
+            json.dumps(default_body, ensure_ascii=False, sort_keys=False),
+            json.dumps(empty_body, ensure_ascii=False, sort_keys=False),
+        )
+        # 빈 필터면 must 키 자체가 없고 must_not 은 의료 절만(기존 형상 봉인).
+        self.assertNotIn("must", empty_body["query"]["bool"])
+        self.assertEqual(
+            empty_body["query"]["bool"]["must_not"],
+            [{"term": {"domain_label": "medical"}}],
+        )
+
+    def test_blank_terms_ignored_byte_identical(self) -> None:
+        # 공백·빈 문자열 텀은 무시(빈 절 생성 금지) → 미지정과 바이트 동일(방어적 정규화).
+        default_body = build_bm25_body(self.query, modality_values=["txt"], k=20)
+        blank_body = build_bm25_body(
+            self.query,
+            modality_values=["txt"],
+            k=20,
+            must_include=["", "   "],
+            must_exclude=["  "],
+        )
+        self.assertEqual(
+            json.dumps(default_body, ensure_ascii=False, sort_keys=False),
+            json.dumps(blank_body, ensure_ascii=False, sort_keys=False),
+        )
+
+    def test_should_and_filter_clauses_unchanged_with_filters(self) -> None:
+        # 랭킹 불변: 필터 텀을 넣어도 should(스코어) 절·filter·minimum_should_match 는 무변경.
+        default_body = build_bm25_body(self.query, modality_values=["txt"], k=20)
+        filtered_body = build_bm25_body(
+            self.query,
+            modality_values=["txt"],
+            k=20,
+            must_include=["충전"],
+            must_exclude=["광고"],
+        )
+        self.assertEqual(
+            filtered_body["query"]["bool"]["should"],
+            default_body["query"]["bool"]["should"],
+        )
+        self.assertEqual(
+            filtered_body["query"]["bool"]["filter"],
+            default_body["query"]["bool"]["filter"],
+        )
+        self.assertEqual(filtered_body["query"]["bool"]["minimum_should_match"], 1)
+
+
 class BuildKnnBodyTest(unittest.TestCase):
     """T003/FR-001: plain kNN 서브검색 본문(게이트 신호용) — native pre-filter·의료 must_not."""
 
@@ -495,6 +610,34 @@ class BuildKnnBodyTest(unittest.TestCase):
     def test_include_medical_when_disabled(self) -> None:
         body = build_knn_body(self.vector, modality_values=["text"], k=10, exclude_medical=False)
         self.assertNotIn("must_not", body["query"]["knn"]["embedding"]["filter"]["bool"])
+
+    def test_must_include_in_knn_prefilter(self) -> None:
+        # 057 FR-202: must_include 를 kNN pre-filter(bool.filter)에도 적용해야 융합에서 kNN 회수분이
+        # 필터를 우회하지 않는다(T213 골든에서 실효 없음 발견). BM25 와 동일 _lexical_clause 재사용.
+        from src.search.opensearch_search import _lexical_clause
+
+        body = build_knn_body(self.vector, modality_values=["text"], k=10, must_include=["핸드드립"])
+        self.assertIn(
+            _lexical_clause("핸드드립"),
+            body["query"]["knn"]["embedding"]["filter"]["bool"]["filter"],
+        )
+
+    def test_must_exclude_in_knn_must_not(self) -> None:
+        from src.search.opensearch_search import _lexical_clause
+
+        body = build_knn_body(self.vector, modality_values=["text"], k=10, must_exclude=["에스프레소"])
+        self.assertIn(
+            _lexical_clause("에스프레소"),
+            body["query"]["knn"]["embedding"]["filter"]["bool"]["must_not"],
+        )
+
+    def test_knn_body_byte_identical_when_no_lexical(self) -> None:
+        # 미지정/빈 must_include·must_exclude 는 kNN body 를 바이트 동일하게 유지(하위호환·회귀 0).
+        base = build_knn_body(self.vector, modality_values=["text"], k=10)
+        empty = build_knn_body(
+            self.vector, modality_values=["text"], k=10, must_include=[], must_exclude=["  "]
+        )
+        self.assertEqual(json.dumps(base, sort_keys=True), json.dumps(empty, sort_keys=True))
 
     def test_search_filters_in_knn_prefilter(self) -> None:
         filters = SearchFilters(created_from=date(2026, 1, 1))
@@ -849,6 +992,26 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             self.assertEqual(header, {"index": "assets"})
         kinds = [_sub_terms_label(sub) for sub in body[1::2]]
         self.assertEqual(kinds, [("knn", "text"), ("bm25", "text"), ("knn", "audio"), ("bm25", "audio")])
+
+    def test_must_include_exclude_applied_to_bm25_body(self) -> None:
+        # 057 FR-202: search_assets_os 가 must_include/exclude 를 BM25 서브검색 본문에 배선한다.
+        self._run(modalities=("text",), must_include=["충전"], must_exclude=["광고"])
+        body = self.client.msearch_calls[0]
+        bm25_sub = body[3]  # [헤더, knn, 헤더, bm25] → bm25 는 인덱스 3.
+        clause = lambda t: {  # noqa: E731 — 테스트 내 짧은 지역 헬퍼
+            "multi_match": {
+                "query": t, "type": "cross_fields",
+                "fields": ["summary^3", "keywords^2"], "operator": "and",
+            }
+        }
+        self.assertIn(clause("충전"), bm25_sub["query"]["bool"]["must"])
+        self.assertIn(clause("광고"), bm25_sub["query"]["bool"]["must_not"])
+
+    def test_no_lexical_filters_bm25_body_has_no_must(self) -> None:
+        # 미지정(기본)이면 BM25 본문에 must 키가 없다(하위호환·회귀 0).
+        self._run(modalities=("text",))
+        bm25_sub = self.client.msearch_calls[0][3]
+        self.assertNotIn("must", bm25_sub["query"]["bool"])
 
     def test_knn_k_is_max_request_and_sample(self) -> None:
         # kNN k = max(요청 k, OS_KNN_SAMPLE_K) — robust baseline 표본 하한. bm25 k = 요청 k.
