@@ -187,6 +187,48 @@ class TestJudgeTopic(unittest.TestCase):
         self.assertIsNone(judge_topic("양자컴퓨팅", ["요리", "음식"], client=client))
 
 
+class TestJudgePromptSynonymOnly(unittest.TestCase):
+    """judge 프롬프트가 **동의어/동일 개념 한정** 판정으로 조여졌는지 문자열 검사(사용자 결정).
+
+    왜 이 가드가 필요한가
+        직전 replay 는 judge 가 상위 카테고리·is-a·광역 부모까지 흡수해(등산→스포츠·사진→예술·
+        물리학→과학) "주제가 너무 넓어지는" 문제가 재발했다. 이를 막으려면 프롬프트가 **같은 것을
+        다른 말로 부르는 동의어일 때만** 매칭하고, 상위분류·종류(is-a)·부분-전체·단순 연관은 NEW 로
+        보내도록 지침·예시를 명시해야 한다. temp=0·complete_json·단일 seam(2조)은 유지된다.
+    """
+
+    def test_prompt_states_synonym_only_criterion(self) -> None:
+        # 동의어/동일 개념 한정 지침이 프롬프트에 명시돼야 한다.
+        from src.relations.topic_canonicalize import _JUDGE_PROMPT
+
+        self.assertIn("동의어", _JUDGE_PROMPT)
+        # "같은 것을 다른 말로 부르는가" 취지의 기준
+        self.assertIn("바꿔", _JUDGE_PROMPT)
+
+    def test_prompt_forbids_hierarchy_and_is_a(self) -> None:
+        # 상위분류·is-a(종류/장르/분야)·연관은 매칭 금지(→ NEW) 임을 못박아야 한다.
+        from src.relations.topic_canonicalize import _JUDGE_PROMPT
+
+        self.assertIn("상위", _JUDGE_PROMPT)
+        self.assertIn("is-a", _JUDGE_PROMPT)
+        self.assertIn("NEW", _JUDGE_PROMPT)
+
+    def test_prompt_contains_positive_synonym_example(self) -> None:
+        # 긍정(동의어) 예시가 있어야 한다 — 예: 등산 == 산악.
+        from src.relations.topic_canonicalize import _JUDGE_PROMPT
+
+        self.assertIn("등산", _JUDGE_PROMPT)
+        self.assertIn("산악", _JUDGE_PROMPT)
+
+    def test_prompt_contains_negative_broad_examples(self) -> None:
+        # 부정(상위분류·is-a) 예시가 있어야 한다 — 스포츠·예술·과학 광역흡수 재발 방지.
+        from src.relations.topic_canonicalize import _JUDGE_PROMPT
+
+        self.assertIn("스포츠", _JUDGE_PROMPT)
+        self.assertIn("예술", _JUDGE_PROMPT)
+        self.assertIn("과학", _JUDGE_PROMPT)
+
+
 class TestCanonicalizeTopic(unittest.TestCase):
     """canonicalize_topic 오케스트레이션 — passthrough·정확일치·kNN 매칭·신규·결정성."""
 
