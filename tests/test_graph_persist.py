@@ -163,6 +163,108 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
         self.assertEqual(self._run([self._edge()], kind=None), (0, 1))
 
 
+# ── 058 G4(FR-401): topic 정본화 배선 — 플래그 게이트·동작 불변(T401/T403) ─────
+class TestTopicCanonicalizeGate(unittest.TestCase):
+    """``_topic_canonicalize_enabled`` — TOPIC_CANONICALIZE_ENABLED 설정 조회 헬퍼.
+
+    settings 미초기화(순수 단위 등)에서는 보수적 False 폴백이라 현행 경로(canonicalize 미배선)를
+    보존한다 — 기존 graph_persist 단위 테스트가 init_settings 없이도 동작 불변이도록(chunk_agg 선례).
+    """
+
+    def test_gate_false_when_settings_uninitialized(self) -> None:
+        from src.config import settings as settings_mod
+        from src.relations import graph_persist
+        with mock.patch.object(settings_mod, "get_current_settings", side_effect=RuntimeError):
+            self.assertIs(graph_persist._topic_canonicalize_enabled(), False)
+
+    def test_gate_reads_setting(self) -> None:
+        from src.config import settings as settings_mod
+        from src.relations import graph_persist
+        fake = mock.MagicMock(topic_canonicalize_enabled=True)
+        with mock.patch.object(settings_mod, "get_current_settings", return_value=fake):
+            self.assertIs(graph_persist._topic_canonicalize_enabled(), True)
+
+
+class TestSyncGraphEdgesCanonicalize(unittest.TestCase):
+    """플래그 게이트로 persist 직전 topic/subtopic 정본화(FR-401). 기본 off=동작 불변(T403)."""
+
+    def setUp(self) -> None:
+        self.conn = mock.MagicMock()
+        self.cur = self.conn.cursor.return_value.__enter__.return_value
+
+    def _edge(self, **kw):
+        e = {"target_media_item_id": _T1, "relation_type_code": "same_domain",
+             "topic_ko": "식품", "topic_en": "food",
+             "subtopic_ko": "김밥", "subtopic_en": "gimbap",
+             "reason": "유사", "confidence": 0.5}
+        e.update(kw)
+        return e
+
+    def _run(self, *, enabled, sub_return="김밥"):
+        """canonicalize seam 을 mock 으로 주입하고 INSERT topic jsonb·mock 을 돌려준다."""
+        import json
+
+        from src.relations import graph_persist
+        kdict = {"relation_kind_id": "k1", "is_symmetric": True}
+        with mock.patch.object(graph_persist, "ensure_asset_node", side_effect=lambda conn, aid: "n_" + aid), \
+             mock.patch.object(graph_persist, "fetch_relation_kind", return_value=kdict), \
+             mock.patch.object(graph_persist, "_topic_canonicalize_enabled", return_value=enabled), \
+             mock.patch.object(graph_persist, "canonicalize_topic") as m_topic, \
+             mock.patch.object(graph_persist, "canonicalize_subtopic") as m_sub:
+            m_topic.return_value = {"canonical_ko": "요리", "canonical_en": "cooking",
+                                    "decided_by": "exact"}
+            m_sub.return_value = sub_return
+            graph_persist.sync_graph_edges(
+                self.conn, source_asset_id=_SRC, edges=[self._edge()],
+                allowed_target_ids=frozenset({_T1}))
+        params = self.cur.execute.call_args[0][1]  # 마지막 INSERT 바인딩
+        return m_topic, m_sub, json.loads(params[6])  # topic jsonb 는 7번째 바인딩
+
+    def test_flag_off_no_canonicalize_and_topic_unchanged(self) -> None:
+        # T401/T403 동작 불변: flag off → canonicalize 미호출·저장 topic == coerce 결과(식품/food).
+        m_topic, m_sub, topic = self._run(enabled=False)
+        m_topic.assert_not_called()
+        m_sub.assert_not_called()
+        self.assertEqual(topic["topic_ko"], "식품")
+        self.assertEqual(topic["topic_en"], "food")
+        self.assertEqual(topic["subtopic_ko"], "김밥")
+        self.assertEqual(topic["subtopic_en"], "gimbap")
+
+    def test_flag_on_canonicalizes_topic_and_subtopic(self) -> None:
+        # flag on → canonicalize 호출·정본(요리/cooking) 저장.
+        m_topic, m_sub, topic = self._run(enabled=True)
+        m_topic.assert_called_once()
+        m_sub.assert_called_once()
+        self.assertEqual(topic["topic_ko"], "요리")
+        self.assertEqual(topic["topic_en"], "cooking")
+        self.assertEqual(topic["subtopic_ko"], "김밥")
+
+    def test_flag_on_subtopic_none_empties_subtopic(self) -> None:
+        # flag on + canonicalize_subtopic None(모달리티/계층 규칙) → subtopic ko/en 비움.
+        _, _, topic = self._run(enabled=True, sub_return=None)
+        self.assertEqual(topic["subtopic_ko"], "")
+        self.assertEqual(topic["subtopic_en"], "")
+
+    def test_flag_on_subtopic_receives_canonical_topic(self) -> None:
+        # canonicalize_subtopic 는 정본화된 상위 topic 을 문맥으로 받는다(계약 대칭).
+        from src.relations import graph_persist
+        kdict = {"relation_kind_id": "k1", "is_symmetric": True}
+        with mock.patch.object(graph_persist, "ensure_asset_node", side_effect=lambda conn, aid: "n_" + aid), \
+             mock.patch.object(graph_persist, "fetch_relation_kind", return_value=kdict), \
+             mock.patch.object(graph_persist, "_topic_canonicalize_enabled", return_value=True), \
+             mock.patch.object(graph_persist, "canonicalize_topic",
+                               return_value={"canonical_ko": "요리", "canonical_en": "cooking",
+                                             "decided_by": "exact"}), \
+             mock.patch.object(graph_persist, "canonicalize_subtopic", return_value="김밥") as m_sub:
+            graph_persist.sync_graph_edges(
+                self.conn, source_asset_id=_SRC, edges=[self._edge()],
+                allowed_target_ids=frozenset({_T1}))
+        # 두 번째 위치인자 = 정본 topic_ko('요리'), 세 번째 = 원본 subtopic('김밥').
+        _, call_args, _ = m_sub.mock_calls[0]
+        self.assertEqual(call_args[1], "요리")
+        self.assertEqual(call_args[2], "김밥")
+
+
 # ── 실 DB 통합(RUN_DB_E2E=1) ────────────────────────────────────────────────
 def _vec():
     from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION

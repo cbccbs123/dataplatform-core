@@ -141,6 +141,12 @@ class PipelineSettings:
     # 안전판). vlm_summary_ab_judge 는 A/B 측정 하니스(G4)의 LLM-judge 옵션 — 평가용·추출 무영향.
     vlm_summary_prompt_v2: bool
     vlm_summary_ab_judge: bool
+    # 058: 관계 topic 정본화 배선 토글(FR-401). graph_persist 가 persist 직전 topic/subtopic 을
+    # canonicalize_topic/canonicalize_subtopic 로 정본화할지 고르는 단일 출처. _env_bool_default
+    # 선택 필드(029/049 동형) — 미설정 시 기본 **False**. 빈 레지스트리에서 켜면 raw topic 이 전부
+    # 자동등록(부작용)돼 시드 전 동작이 깨지므로 기본 off(동작 불변·시드 전 동치); 시드(G5) 후 명시적
+    # 활성화한다. False 면 sync_graph_edges 가 coerce_topic_fields_mvp 결과를 그대로 저장한다(회귀 0).
+    topic_canonicalize_enabled: bool
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -549,6 +555,10 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 경로(현행 inline 키워드 루프)를 그대로 써 추출 결과가 바이트 동일하다.
         vlm_summary_prompt_v2=_env_bool_default("VLM_SUMMARY_PROMPT_V2", False),
         vlm_summary_ab_judge=_env_bool_default("VLM_SUMMARY_AB_JUDGE", False),
+        # 058: 관계 topic 정본화 배선 토글(기본 False — 동작 불변·시드 전 동치·FR-401). 순수 토글이라
+        # _env_bool_default 가 불리언 형식 오류만 fail-fast(029/049 동형). False 면 graph_persist 가
+        # 현행 경로(coerce 결과 그대로 저장)를 써 관계 저장이 바이트 동일하다(canonicalize·registry·LLM 0).
+        topic_canonicalize_enabled=_env_bool_default("TOPIC_CANONICALIZE_ENABLED", False),
     )
     # 038: 단일 필드 fail-fast(_resolve_*)로 못 잡는 교차필드 불변식(OS read ⇒ OS write 필수)을
     # 빌드 완료 후 검증한다 — 오설정이 런타임까지 숨지 않게(init_settings=_build_settings 검증 지점).

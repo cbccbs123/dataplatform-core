@@ -83,6 +83,9 @@ _BACKEND_KEYS = (
     # 오염시키지 않게 비운다(048 키와 동형 격리).
     "VLM_SUMMARY_PROMPT_V2",
     "VLM_SUMMARY_AB_JUDGE",
+    # 058: 관계 topic 정본화 배선 토글. 기본 False(동작 불변·시드 전 동치) 단언을 실행 환경 잔존값이
+    # 오염시키지 않게 비운다(049 키와 동형 격리).
+    "TOPIC_CANONICALIZE_ENABLED",
 )
 
 
@@ -721,6 +724,36 @@ class TestVlmSummaryPromptV2Settings(unittest.TestCase):
     def test_invalid_bool_fail_fast(self) -> None:
         # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 추출하지 않게).
         with _env(VLM_SUMMARY_PROMPT_V2="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestTopicCanonicalizeEnabledSettings(unittest.TestCase):
+    """058 G4(FR-401): 관계 topic 정본화 배선 토글 ``topic_canonicalize_enabled``.
+
+    기존 ``_env_bool_default`` 선택 필드 패턴(029/049 동형) — 미설정 시 기본 **False**(동작 불변).
+    빈 레지스트리에서 canonicalize 를 켜면 raw topic 이 전부 자동등록(부작용)돼 시드 전 동작이 깨지므로
+    기본 off 로 두고, 시드(G5) 후 명시적으로 켠다. 순수 토글이라 불리언 형식 오류만 fail-fast.
+    """
+
+    def test_default_off_when_unset(self) -> None:
+        # 미설정 → 기본 False(동작 불변·시드 전 동치). _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.topic_canonicalize_enabled, False)
+
+    def test_env_override_true(self) -> None:
+        with _env(TOPIC_CANONICALIZE_ENABLED="true"):
+            s = _build_settings("dev")
+        self.assertIs(s.topic_canonicalize_enabled, True)
+
+    def test_env_override_false_explicit(self) -> None:
+        with _env(TOPIC_CANONICALIZE_ENABLED="off"):
+            s = _build_settings("dev")
+        self.assertIs(s.topic_canonicalize_enabled, False)
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        with _env(TOPIC_CANONICALIZE_ENABLED="maybe"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 

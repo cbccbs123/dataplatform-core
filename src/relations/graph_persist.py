@@ -15,6 +15,22 @@ from psycopg import Connection
 from src.database.ids import uuid7_str
 from src.relations.relation_type_catalog import fetch_relation_kind
 from src.relations.schema import coerce_topic_fields_mvp
+from src.relations.topic_canonicalize import canonicalize_subtopic, canonicalize_topic
+
+
+def _topic_canonicalize_enabled() -> bool:
+    """``TOPIC_CANONICALIZE_ENABLED`` 설정 조회(058 FR-401). 미초기화 시 보수적 **False** 폴백.
+
+    settings 미초기화(순수 단위 테스트 등)에서는 ``get_current_settings()`` 가 ``RuntimeError`` 이므로
+    False 로 폴백해 현행 경로(canonicalize 미배선·coerce 결과 그대로)를 보존한다 —
+    ``chunk_agg_config`` 선례. 운영 진입점은 항상 ``init_settings`` 하므로 이 폴백은 비운영 경로다.
+    기본값 False 라 시드 전에는 관계 저장이 바이트 동일하다(동작 불변·회귀 0)."""
+    from src.config.settings import get_current_settings
+
+    try:
+        return bool(get_current_settings().topic_canonicalize_enabled)
+    except RuntimeError:
+        return False
 
 
 def _as_uuid_str(value: Any) -> str | None:
@@ -126,6 +142,9 @@ def sync_graph_edges(
     allowed = frozenset(str(t) for t in allowed_target_ids)
     upserted = 0
     skipped = 0
+    # 058 FR-401: topic 정본화 배선 여부를 루프 밖에서 1회 조회(엣지마다 동일·설정 불변).
+    # 기본 False → 아래 배선 블록을 통째로 건너뛰어 canonicalize·registry 쓰기·LLM 0(동작 불변).
+    canonicalize_on = _topic_canonicalize_enabled()
     src_node = ensure_asset_node(conn, source_asset_id)
     for edge in edges:
         tid = _as_uuid_str(edge.get("target_media_item_id"))
@@ -152,6 +171,26 @@ def sync_graph_edges(
         # topic은 C+ 슬림화 설계에 따라 graph_edge.topic jsonb에 비정규화 저장.
         # relation_type / relation_subtopic / relation_topic_parent 3테이블은 v210에서 드랍됨.
         topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
+        # 058 FR-401: persist 직전 정본화(플래그 게이트). off(기본)면 이 블록 통째로 skip →
+        # coerce 결과를 그대로 저장(canonicalize·registry·LLM 0·바이트 동일·동작 불변·T403).
+        # on 이면 topic 은 canonicalize_topic(정본 ko/en), subtopic 은 canonicalize_subtopic 통과.
+        # ⚠ LLM-in-transaction 한계: sync_graph_edges 는 execute_in_transaction 안에서 돌고,
+        #   flag-on 경로의 canonicalize_topic 은 캐시 미스 시 judge_topic(LLM)을 부를 수 있다.
+        #   그러나 (1) 이 트랜잭션에는 관계-제안 LLM(propose_edges_json)이 이미 동거하는 선례가 있고
+        #   (asset_entry._run), (2) 시드(G5)된 레지스트리에선 alias 정확일치가 대부분이라 LLM 은
+        #   희소하다(캐시 히트). 트랜잭션 밖 사전 정본화는 다중 호출부(asset_entry·sample) 배선 확장이
+        #   필요해 1차 배제하고, 여기 배선 + 본 주석으로 한계를 명시한다(ADR 2026-07-06·헌법 ⑤).
+        if canonicalize_on:
+            res = canonicalize_topic(conn, topic_ko, topic_en)
+            topic_ko = res["canonical_ko"]
+            # canonical_en 이 None(registry topic_en NULL)이면 기존 topic_en 보존(빈 라벨 방지).
+            topic_en = res["canonical_en"] or topic_en
+            sub = canonicalize_subtopic(conn, topic_ko, subtopic_ko)
+            if sub is None:
+                # 모달리티어/계층 규칙으로 비운 경우 en 도 함께 비운다(계층 일관·FR-301/302).
+                subtopic_ko, subtopic_en = "", ""
+            else:
+                subtopic_ko = sub  # subtopic_en 정본화(영문)는 후속 여지(1차는 ko 라벨만)
         topic_json = json.dumps(
             {"topic_ko": topic_ko, "subtopic_ko": subtopic_ko,
              "topic_en": topic_en, "subtopic_en": subtopic_en},
