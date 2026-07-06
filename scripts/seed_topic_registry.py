@@ -14,12 +14,14 @@ replay 설계
     registry/alias 가 replay 로 성장하며, 그 결과를 역집계(alias raw→canonical)해 그룹 초안을 만든다.
 
 두 모드
-    ``--replay --dry-run``(기본): **하나의 커넥션/트랜잭션** 안에서 전체 replay 를 수행한다
+    ``--dry-run``(기본): **하나의 커넥션/트랜잭션** 안에서 전체 replay 를 수행한다
         (register_topic·alias INSERT 가 같은 txn 내 kNN 에 보임 → 순차 성장 재현). replay 후
         registry 스냅샷을 뜬 뒤 **롤백**(dev DB 미오염). 결과를 초안 JSON 에 기록 + 콘솔 요약.
-        LLM/임베딩은 **실호출**되지만(캡처는 메모리), DB 변경은 롤백으로 0.
-    ``--replay --apply``: 같은 replay 를 **커밋**(dev registry/alias 실적재). **T502 사람 게이트
-        이후에만.** T501 에서는 실행하지 않는다.
+        LLM/임베딩은 **실호출**되지만(캡처는 메모리), DB 변경은 롤백으로 0. 검수 재생성용.
+    ``--from-draft <file>``(= ``--apply``): **검수본 초안 JSON 을 그대로 적재**(T502). replay 를
+        재실행하지 않고(LLM/kNN 0) group→register_topic(source='seed')·member→alias(decided_by='seed')
+        만 결정적으로 커밋한다. **검수본이 정본** — 사람 수정(정본 뒤집기·분리)이 그대로 반영된다
+        (replay-commit 은 검수 수정을 무시하므로 폐기). 경로 생략 시 ``--out`` 사용.
 
 헌법·불변식
     - **LLM 단일 seam**(2조): judge 는 ``src.llm.client.complete_json`` 만·temp=0·zero-shot·후보 K개만.
@@ -28,11 +30,14 @@ replay 설계
     - **학습 0**(2조): 임베딩은 추론만(``register_topic``·kNN), 규칙은 결정적.
     - 조회행 topic_ko/topic_en 은 ``str()`` 강제(graph_query 관례).
 
-실행(T501)
+실행
     conda activate AuroraFS
-    python -m scripts.seed_topic_registry --env dev --replay --dry-run
+    # T501 초안 생성(검수용·DB 미오염):
+    python -m scripts.seed_topic_registry --env dev --dry-run
       → specs/058-relation-topic-canonicalization/seed_topic_draft.json + 콘솔 요약.
-    ※ ``--replay --apply`` 는 사람 검수(T502) 후에만. T501 에서는 실행하지 않는다.
+    # T502 검수본 적재(사람 검수 완료 후·커밋·LLM 0):
+    python -m scripts.seed_topic_registry --env dev \
+        --from-draft specs/058-relation-topic-canonicalization/seed_topic_draft.json
 """
 from __future__ import annotations
 
@@ -327,6 +332,83 @@ def run_replay(db, out_path: Path, *, apply: bool = False, client=None) -> dict[
     return draft
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 6) 검수본 draft 적재 (--from-draft) — 결정적·LLM/kNN 재실행 0 (T502)
+# ────────────────────────────────────────────────────────────────────────────
+# 왜 replay-commit 이 아니라 draft 적재인가(T502 결정):
+#   replay(--apply)는 LLM judge 를 재실행·커밋이라 **사람 검수 수정을 무시**한다(천문학→천문 뒤집기,
+#   레저/여가·서예/캘리그라피 분리는 replay 로 재현 불가). 검수본 JSON 을 정본으로 삼아 **그대로**
+#   registry/alias 에 적재하면 LLM 0·결정적·재현 가능하다(plan "검수본 파일로 재현" 부합).
+def read_draft(path: Path | str) -> dict[str, Any]:
+    """검수본 초안 JSON 을 읽어 dict 로 반환(순수 I/O·파싱만)."""
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def draft_registry_entries(draft: dict[str, Any]) -> list[dict[str, str]]:
+    """검수본 → 정본(registry) 적재 행 ``[{canonical_ko, canonical_en}]`` (group 당 1개·draft 순서 보존).
+
+    조회/적재행 계약(graph_query 관례)에 맞춰 라벨은 ``str()`` 강제.
+    """
+    return [
+        {"canonical_ko": str(g["canonical_ko"]), "canonical_en": str(g["canonical_en"])}
+        for g in draft["groups"]
+    ]
+
+
+def draft_alias_entries(draft: dict[str, Any]) -> list[dict[str, str]]:
+    """검수본 → alias 적재 행 ``[{raw_ko, canonical_ko}]`` (group 의 각 member 를 raw→canonical 로).
+
+    정본 자신도 members 에 포함되므로 self-alias(raw=canonical)로 자연히 처리된다. 분리 그룹은
+    각자 자신만 member 이므로 상호 alias 가 생기지 않는다(병합 아님). draft 순서 보존.
+    """
+    rows: list[dict[str, str]] = []
+    for g in draft["groups"]:
+        cano = str(g["canonical_ko"])
+        for m in g["members"]:
+            rows.append({"raw_ko": str(m), "canonical_ko": cano})
+    return rows
+
+
+def apply_draft(
+    conn, draft: dict[str, Any], *, register_fn=None, alias_fn=None
+) -> dict[str, int]:
+    """검수본을 registry/alias 에 **결정적 적재**(LLM/kNN 재실행 0). 적재 수 ``{n_registry, n_alias}``.
+
+    - 각 group: ``register_topic(conn, canonical_ko, canonical_en, source='seed')`` — 라벨 임베딩
+      계산·``ON CONFLICT DO NOTHING`` 멱등(0-노름 가드 유지).
+    - 각 member: ``_freeze_alias(conn, raw_ko, canonical_ko, 'seed')`` — ``ON CONFLICT DO NOTHING``.
+    - ``register_fn``/``alias_fn`` 주입 가능(단위 테스트용·기본은 topic_canonicalize seam). 커밋은
+      호출부(``run_from_draft``) 책임.
+    """
+    if register_fn is None or alias_fn is None:
+        # 지연 import(모듈 기동 경량 유지·기존 lazy 관례). 무거운 임베더는 register_topic 내부에서만.
+        from src.relations.topic_canonicalize import _freeze_alias, register_topic
+
+        register_fn = register_fn or register_topic
+        alias_fn = alias_fn or _freeze_alias
+
+    reg = draft_registry_entries(draft)
+    ali = draft_alias_entries(draft)
+    for e in reg:
+        register_fn(conn, e["canonical_ko"], e["canonical_en"], source="seed")
+    for e in ali:
+        alias_fn(conn, e["raw_ko"], e["canonical_ko"], "seed")
+    return {"n_registry": len(reg), "n_alias": len(ali)}
+
+
+def run_from_draft(db, path: Path) -> dict[str, int]:
+    """검수본 파일을 dev registry/alias 에 적재하고 **커밋**(T502). 적재 수 반환.
+
+    LLM/kNN 재실행 없음 — 검수본이 정본. 한 트랜잭션으로 register/alias 적재 후 commit.
+    """
+    draft = read_draft(path)
+    with db.connection() as conn:
+        counts = apply_draft(conn, draft)
+        conn.commit()  # 검수 완료분 실적재(T502)
+    return counts
+
+
 def main() -> int:
     from dotenv import load_dotenv
 
@@ -343,19 +425,28 @@ def main() -> int:
         action="store_true",
         help="런타임 canonicalize 재생 방식(기본·유일). 명시성용 플래그.",
     )
+    # --from-draft: 검수본 JSON 을 결정적 적재(LLM/kNN 재실행 0·T502). 경로 미지정 시 --out 사용.
+    p.add_argument(
+        "--from-draft",
+        default=None,
+        metavar="PATH",
+        help="검수본 초안 JSON 을 그대로 registry/alias 에 적재(결정적·LLM/kNN 0·커밋). "
+        "경로 생략 시 --out 을 사용. --apply 도 이 경로로 동작(replay-commit 아님).",
+    )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument(
         "--dry-run",
         action="store_true",
-        help="트랜잭션 롤백 — DB 미오염·초안 산출(기본). LLM/임베딩은 실호출.",
+        help="트랜잭션 롤백 — DB 미오염·replay 초안 산출(기본). LLM/임베딩은 실호출(검수 재생성용).",
     )
     mode.add_argument(
         "--apply",
         action="store_true",
-        help="같은 replay 를 커밋 — dev registry/alias 실적재(T502 사람 게이트 이후).",
+        help="검수본 draft 적재 모드(=--from-draft, 경로는 --from-draft 또는 --out). "
+        "LLM 재실행 없이 검수본을 dev registry/alias 에 커밋(T502).",
     )
     p.add_argument(
-        "--out", default=str(_DEFAULT_DRAFT_PATH), help="초안 저장 경로"
+        "--out", default=str(_DEFAULT_DRAFT_PATH), help="초안 저장/적재 경로"
     )
     args = p.parse_args()
 
@@ -364,15 +455,24 @@ def main() -> int:
         load_dotenv(dotenv_path=dotenv_path, override=False)
     init_settings(args.env)
 
+    # 적재 모드 여부: --from-draft 지정 or --apply. (--apply 는 이제 replay-commit 이 아니라 draft 적재.)
+    load_mode = args.apply or (args.from_draft is not None)
+
     db = PostgresUtil()
     with db:
-        draft = run_replay(db, Path(args.out), apply=args.apply)
+        if load_mode:
+            draft_path = Path(args.from_draft or args.out)
+            counts = run_from_draft(db, draft_path)
+            print(
+                f"[FROM-DRAFT] 검수본 적재 완료: {draft_path}\n"
+                f"  정본(register_topic) {counts['n_registry']}개 · "
+                f"alias {counts['n_alias']}개 (LLM/kNN 재실행 0·커밋)."
+            )
+            return 0
+        draft = run_replay(db, Path(args.out), apply=False)
 
     print("\n".join(summarize_lines(draft)))
-    if args.apply:
-        print("\n[APPLY] dev registry/alias 커밋 완료.")
-    else:
-        print(f"\n초안 저장: {args.out} (dry-run·롤백·DB 미오염)")
+    print(f"\n초안 저장: {args.out} (dry-run·롤백·DB 미오염)")
     return 0
 
 

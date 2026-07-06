@@ -1,17 +1,23 @@
-"""scripts/seed_topic_registry.py 순수 함수 단위 테스트 (spec 058 T501 · replay 교체).
+"""scripts/seed_topic_registry.py 순수 함수 단위 테스트 (spec 058 T501·T502).
 
-LLM/DB 불필요 — replay 결과의 역집계·정렬·통계·초안 구성·요약의 결정적 순수 함수만 검증한다.
-(실제 replay 는 ``canonicalize_topic`` 을 실 DB/LLM 로 재생하는 임퓨어 경로이며 여기서 다루지 않는다.)
+LLM/DB 불필요 — replay 결과의 역집계·정렬·통계·초안 구성·요약 + **검수본 draft 적재**(파싱·정본/alias
+추출·주입형 적재)의 결정적 순수 함수만 검증한다. (실제 replay·실 DB 적재는 임퓨어 경로이며 여기서
+다루지 않는다.)
 """
 from __future__ import annotations
 
 import unittest
 
 from scripts.seed_topic_registry import (
+    _DEFAULT_DRAFT_PATH,
+    apply_draft,
     build_draft,
     build_replay_groups,
     build_replay_order,
     build_stats,
+    draft_alias_entries,
+    draft_registry_entries,
+    read_draft,
     summarize_lines,
 )
 
@@ -141,6 +147,115 @@ class TestSummary(unittest.TestCase):
         self.assertIn("병합", text)
         self.assertIn("LLM", text)
         self.assertIn("2", text)  # llm_calls
+
+
+class TestDraftRegistryEntries(unittest.TestCase):
+    """검수본 → 정본(registry) 추출 — group 당 (canonical_ko, canonical_en) 하나·draft 순서 보존."""
+
+    def test_one_entry_per_group_with_en(self):
+        draft = {
+            "groups": [
+                {"canonical_ko": "천문", "canonical_en": "astronomy", "members": ["천문", "천문학"]},
+                {"canonical_ko": "서예", "canonical_en": "calligraphy", "members": ["서예"]},
+            ]
+        }
+        self.assertEqual(
+            draft_registry_entries(draft),
+            [
+                {"canonical_ko": "천문", "canonical_en": "astronomy"},
+                {"canonical_ko": "서예", "canonical_en": "calligraphy"},
+            ],
+        )
+
+
+class TestDraftAliasEntries(unittest.TestCase):
+    """검수본 → alias 추출 — group 당 각 member 를 raw→canonical 로(정본 자신=self-alias)."""
+
+    def test_alias_per_member_including_self(self):
+        draft = {
+            "groups": [
+                {"canonical_ko": "천문", "canonical_en": "astronomy", "members": ["천문", "천문학"]},
+            ]
+        }
+        self.assertEqual(
+            draft_alias_entries(draft),
+            [
+                {"raw_ko": "천문", "canonical_ko": "천문"},
+                {"raw_ko": "천문학", "canonical_ko": "천문"},
+            ],
+        )
+
+    def test_split_groups_have_no_cross_alias(self):
+        # 서예/캘리그라피 분리 → 각자 self-alias 만·상호 alias 없음(병합 아님).
+        draft = {
+            "groups": [
+                {"canonical_ko": "서예", "canonical_en": "calligraphy", "members": ["서예"]},
+                {"canonical_ko": "캘리그라피", "canonical_en": "calligraphy", "members": ["캘리그라피"]},
+            ]
+        }
+        pairs = {(r["raw_ko"], r["canonical_ko"]) for r in draft_alias_entries(draft)}
+        self.assertIn(("서예", "서예"), pairs)
+        self.assertIn(("캘리그라피", "캘리그라피"), pairs)
+        self.assertNotIn(("서예", "캘리그라피"), pairs)
+        self.assertNotIn(("캘리그라피", "서예"), pairs)
+
+
+class TestApplyDraft(unittest.TestCase):
+    """draft 적재 — register_topic(source='seed')·alias(decided_by='seed') 만 호출(LLM/kNN 재실행 0)."""
+
+    def test_registers_and_aliases_with_seed_source_no_llm(self):
+        draft = {
+            "groups": [
+                {"canonical_ko": "천문", "canonical_en": "astronomy", "members": ["천문", "천문학"]},
+                {"canonical_ko": "서예", "canonical_en": "calligraphy", "members": ["서예"]},
+            ]
+        }
+        reg_calls: list[tuple] = []
+        ali_calls: list[tuple] = []
+
+        def fake_register(conn, ko, en, *, source):  # noqa: ANN001
+            reg_calls.append((ko, en, source))
+
+        def fake_alias(conn, raw, cano, decided):  # noqa: ANN001
+            ali_calls.append((raw, cano, decided))
+
+        counts = apply_draft(None, draft, register_fn=fake_register, alias_fn=fake_alias)
+        # 정본: group 당 1회·source='seed'
+        self.assertEqual(
+            reg_calls,
+            [("천문", "astronomy", "seed"), ("서예", "calligraphy", "seed")],
+        )
+        # alias: member 당 1회·decided_by='seed'(정본 자신 self-alias 포함)
+        self.assertEqual(
+            ali_calls,
+            [("천문", "천문", "seed"), ("천문학", "천문", "seed"), ("서예", "서예", "seed")],
+        )
+        self.assertEqual(counts, {"n_registry": 2, "n_alias": 3})
+
+
+class TestReviewedDraftFile(unittest.TestCase):
+    """검수 반영본(seed_topic_draft.json)이 3건 교정을 담고 적재 계약과 정합함을 확인(파일 파싱만·DB 0)."""
+
+    def test_corrections_present_and_load_semantics(self):
+        draft = read_draft(_DEFAULT_DRAFT_PATH)
+        cks = {g["canonical_ko"] for g in draft["groups"]}
+        # 천문 정본 뒤집기 — 천문 존재·천문학은 정본 아님
+        self.assertIn("천문", cks)
+        self.assertNotIn("천문학", cks)
+        # 레저/여가·서예/캘리그라피 분리 — 넷 다 정본
+        for k in ("레저", "여가", "서예", "캘리그라피"):
+            self.assertIn(k, cks)
+        aliases = {(r["raw_ko"], r["canonical_ko"]) for r in draft_alias_entries(draft)}
+        self.assertIn(("천문학", "천문"), aliases)  # 병합 유지
+        # 분리 그룹은 상호 alias 없음
+        self.assertNotIn(("여가", "레저"), aliases)
+        self.assertNotIn(("레저", "여가"), aliases)
+        self.assertNotIn(("캘리그라피", "서예"), aliases)
+        self.assertNotIn(("서예", "캘리그라피"), aliases)
+        # stats 정합
+        self.assertEqual(draft["stats"]["n_canonical"], 111)
+        self.assertEqual(draft["stats"]["n_merged_groups"], 9)
+        self.assertEqual(draft["stats"]["n_singleton"], 102)
 
 
 if __name__ == "__main__":
