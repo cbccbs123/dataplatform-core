@@ -12,6 +12,7 @@ PostgreSQL 에서만 실행한다(사람 게이트 — T203).
     (실 dev DB 의 기존 active 엣지 ~수천 건과 겹치지 않게 하여 정확한 카운트 단언 가능).
       엣지(모두 active·유니크 topic): A—B, A—C, B—C, M—B
     - ``find_topic_neighbors(A)``   → {B(overlap2), C(overlap2)} · M 제외 · B/C already_linked
+    - ``find_topic_neighbor_groups(A)`` → 주제›하위주제 2단 중첩 {B,C} · M(의료) 제외 · already_linked
     - ``assets_in_topic(topic)``    → {A,B,C} total=3 · M 제외 · 페이징 · subtopic 필터
     - ``list_topics()``             → 유니크 topic 엔트리 asset_count=3 · M 제외
 """
@@ -116,6 +117,39 @@ class TestTopicQueryDB(unittest.TestCase):
         self.assertEqual(by_id[b]["shared_topics"], [self._topic])
         # 조회행 계약: asset_id 는 str
         self.assertIsInstance(by_id[b]["asset_id"], str)
+
+    def test_find_topic_neighbor_groups_pairs_and_medical_excluded(self):
+        # 057 리뷰 권고 1: 같은주제 2단 중첩 그룹의 **실 SQL 의료 제외**(PHI)·쌍 매칭·already_linked 검증.
+        # mock 단위(test_topic_query.py)는 _ACTIVE_MEDICAL_WHERE 가 실제로 M—B 를 거르는지 못 잡는다.
+        from src.relations.topic_query import find_topic_neighbor_groups
+        a, b, c, m = self._seed_graph()
+
+        out = self.db.execute_in_transaction(
+            lambda conn: find_topic_neighbor_groups(conn, asset_id=a),
+            idempotent=True)
+
+        # 유니크 topic 이라 대상 그룹은 1개(self._topic).
+        groups = [g for g in out if g["topic_ko"] == self._topic]
+        self.assertEqual(len(groups), 1)
+        g = groups[0]
+        self.assertEqual(g["asset_count"], 2)   # {B,C} distinct — 대상 A 제외·M(의료) 제외
+
+        # 하위주제 = self._subtopic 단일(대상 쌍 (topic, 제빵) 매칭)
+        self.assertEqual([s["subtopic_ko"] for s in g["subtopics"]], [self._subtopic])
+        sub = g["subtopics"][0]
+        self.assertEqual(sub["asset_count"], 2)
+        ids = {x["asset_id"] for x in sub["assets"]}
+        self.assertEqual(ids, {b, c})
+        # B·C 는 A 직접 이웃(A—B, A—C) → already_linked True
+        self.assertTrue(all(x["already_linked"] for x in sub["assets"]))
+        # 조회행 계약: asset_id 는 str
+        self.assertTrue(all(isinstance(x["asset_id"], str) for x in sub["assets"]))
+
+        # 핵심(PHI): 의료 자산 M 은 out 어디에도 없다(_ACTIVE_MEDICAL_WHERE 가 M—B 엣지 제외).
+        #           대상 자신 A 도 제외.
+        all_ids = {x["asset_id"] for gr in out for s in gr["subtopics"] for x in s["assets"]}
+        self.assertNotIn(m, all_ids)
+        self.assertNotIn(a, all_ids)
 
     def test_assets_in_topic_paging_and_medical_excluded(self):
         from src.relations.topic_query import assets_in_topic

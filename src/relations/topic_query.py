@@ -29,13 +29,18 @@ from psycopg.rows import dict_row
 from src.relations.graph_query import fetch_active_relations_for_asset
 
 
-def project_asset_topics(conn, *, asset_id: str, top_n: int = 10) -> list[dict]:
+def project_asset_topics(
+    conn, *, asset_id: str, top_n: int = 10, neighbors: list[dict] | None = None
+) -> list[dict]:
     """``asset_id`` 의 active 이웃 엣지 ``topic`` 을 ``(topic_ko, subtopic_ko)`` 로 집계.
 
     Args:
         conn: DB 연결(이웃 수집 seam 에 그대로 전달).
         asset_id: 투영 대상 자산.
         top_n: 반환 상한(기본 10). weight 상위 top_n 개만.
+        neighbors: (선택) 호출부가 이미 조회한 ``asset_id`` 의 active 이웃 목록. 주면 재조회를
+            생략해 DB 왕복을 줄인다(같은 asset_id 의 ``status='active'`` 결과와 동치여야 함).
+            None 이면 직접 조회(기존 동작·하위호환).
 
     Returns:
         ``[{topic_ko, subtopic_ko, topic_en, subtopic_en, weight}]``.
@@ -44,8 +49,11 @@ def project_asset_topics(conn, *, asset_id: str, top_n: int = 10) -> list[dict]:
         - 빈/None ``topic_ko`` 또는 dict 아닌 ``topic`` 이웃은 스킵(주제 미부여 엣지).
         - 정렬 ``weight desc → topic_ko asc → subtopic_ko asc``(결정적) 후 앞에서 top_n 절단.
     """
-    # active-only 이웃 수집(status 고정 — 투영은 확정 관계만 반영, proposed/rejected 제외)
-    neighbors = fetch_active_relations_for_asset(conn, asset_id=asset_id, status="active")
+    # active-only 이웃 수집(status 고정 — 투영은 확정 관계만 반영, proposed/rejected 제외).
+    # 057-후속(리뷰 권고 5): 호출부가 이미 같은 active 이웃을 조회했으면 재조회 대신 재사용(왕복 절감).
+    #   기본 status='active' 와 동일 결과라 동치. neighbors 미전달 시 종전대로 직접 조회(하위호환).
+    if neighbors is None:
+        neighbors = fetch_active_relations_for_asset(conn, asset_id=asset_id, status="active")
 
     counts: Counter[tuple[str, Any]] = Counter()
     # 그룹별 en 표기는 처음 본 이웃 값으로 고정(결정적·안정적)
@@ -170,14 +178,18 @@ def find_topic_neighbors(conn, *, asset_id: str, top_k: int = 20) -> list[dict]:
 
     대상 주제가 없으면(직접 이웃 topic 미부여) 빈 리스트(불필요한 DB 조회도 하지 않음).
     """
-    # 1) 대상 주제 = 대상의 active 이웃 엣지 topic 투영(project_asset_topics seam 재사용).
-    target_topics = project_asset_topics(conn, asset_id=asset_id)
+    # 057-후속(리뷰 권고 5): 대상 active 이웃을 1회 조회해 주제 투영·already_linked 양쪽에 재사용
+    #   (종전 2회 왕복 → 1회). 두 용도 모두 status='active' 이웃이라 동치.
+    neighbors = fetch_active_relations_for_asset(conn, asset_id=asset_id, status="active")
+
+    # 1) 대상 주제 = 대상의 active 이웃 엣지 topic 투영(project_asset_topics seam 재사용·이웃 재사용).
+    target_topics = project_asset_topics(conn, asset_id=asset_id, neighbors=neighbors)
     topic_kos = sorted({t["topic_ko"] for t in target_topics if t.get("topic_ko")})
     if not topic_kos:
         return []
 
-    # 2) already_linked 판정용 대상 직접 이웃 집합(같은 active read seam 재사용; asset_id 는 str).
-    linked = {nb["asset_id"] for nb in fetch_active_relations_for_asset(conn, asset_id=asset_id)}
+    # 2) already_linked 판정용 대상 직접 이웃 집합(위에서 조회한 이웃 재사용; asset_id 는 str).
+    linked = {nb["asset_id"] for nb in neighbors}
     target_str = str(asset_id)
 
     # 3) 대상 주제를 실은 active·의료제외 엣지의 양끝 자산 수집.
@@ -257,9 +269,12 @@ def find_topic_neighbor_groups(
         - ``already_linked`` = 그 자산이 대상의 직접 관계 이웃인지(``fetch_active_relations_for_asset`` 집합).
     대상 주제가 없으면 빈 리스트(DB 조회도 안 함). active·의료제외는 ``find_topic_neighbors`` 와 동일 SQL 재사용.
     """
+    # 057-후속(리뷰 권고 5): 대상 active 이웃 1회 조회 → 쌍 투영·already_linked 재사용(2회→1회 왕복).
+    neighbors = fetch_active_relations_for_asset(conn, asset_id=asset_id, status="active")
+
     # 1) 대상의 (topic_ko, subtopic_ko) '쌍' 집합 — 정밀 매칭 기준(굵은 상위주제 희석 방지).
     #    topic_kos 는 SQL 회수용(v294 표현식 인덱스) 상위 필터일 뿐, 실제 포함 판정은 pairs 로 한다.
-    target_topics = project_asset_topics(conn, asset_id=asset_id)
+    target_topics = project_asset_topics(conn, asset_id=asset_id, neighbors=neighbors)
     pairs = {
         (t["topic_ko"], (t.get("subtopic_ko") or None))
         for t in target_topics
@@ -268,7 +283,7 @@ def find_topic_neighbor_groups(
     if not pairs:
         return []
     topic_kos = sorted({tk for (tk, _sk) in pairs})
-    linked = {nb["asset_id"] for nb in fetch_active_relations_for_asset(conn, asset_id=asset_id)}
+    linked = {nb["asset_id"] for nb in neighbors}
     target_str = str(asset_id)
 
     # 2) 대상 주제를 실은 active·의료제외 엣지 양끝 자산 수집(_NEIGHBOR_SQL 공유·subtopic_ko 포함).
