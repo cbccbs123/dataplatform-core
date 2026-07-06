@@ -315,5 +315,103 @@ class TestCanonicalizeTopic(unittest.TestCase):
         self.assertEqual(second["decided_by"], "exact")
 
 
+class TestCanonicalizeSubtopic(unittest.TestCase):
+    """058 G3 — subtopic 계층·모달리티 규칙(FR-301/302).
+
+    규칙 순서: ① None/빈 → None  ② 모달리티 블랙리스트 → None(매체어는 하위주제 아님)
+    ③ 계층 일관성: 정규화 라벨이 정본 topic 자격이면 → None(상위 topic 유지·하위주제만 제거)
+    ④ 그 외 → 정규화 라벨. 계층 판정은 registry/alias 룩업으로 **결정적**(LLM 0·mutation 0).
+    """
+
+    def test_none_or_empty_returns_none(self) -> None:
+        # ①: None/빈/공백만 → None. conn 접근 없이 조기 반환(object() 로 DB 미접근 확인).
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        self.assertIsNone(canonicalize_subtopic(object(), "요리", None))
+        self.assertIsNone(canonicalize_subtopic(object(), "요리", ""))
+        self.assertIsNone(canonicalize_subtopic(object(), "요리", "   "))
+
+    def test_modality_words_ko_and_en_return_none(self) -> None:
+        # T301 (FR-302): 매체어(텍스트/오디오/영상/이미지 + en·대소문자 무관) → None.
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        for w in [
+            "텍스트", "오디오", "영상", "이미지",
+            "text", "audio", "video", "image",
+            "TEXT", "Video", "AUDIO", "Image",
+        ]:
+            self.assertIsNone(canonicalize_subtopic(object(), "요리", w), msg=w)
+
+    def test_modality_first_token_return_none(self) -> None:
+        # 정규화(한 어절) 후 매체어면 차단: "audio file" → "audio" → None.
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        self.assertIsNone(canonicalize_subtopic(object(), "요리", "audio file"))
+        self.assertIsNone(canonicalize_subtopic(object(), "요리", "text 데이터"))
+
+    def test_modality_check_precedes_registry_lookup(self) -> None:
+        # 모달리티어는 registry/alias 조회 전에 차단(비용 0·결정성) — 룩업 미호출.
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        with patch(f"{_MOD}.lookup_alias") as m_alias, \
+             patch(f"{_MOD}._topic_exists") as m_exists:
+            self.assertIsNone(canonicalize_subtopic(object(), "요리", "텍스트"))
+            m_alias.assert_not_called()
+            m_exists.assert_not_called()
+
+    @patch(f"{_MOD}._topic_exists", return_value=False)
+    @patch(f"{_MOD}.lookup_alias", return_value="등산")
+    def test_subtopic_resolving_to_topic_via_alias_returns_none(self, m_alias, m_exists) -> None:
+        # T302 (FR-301): raw_sub 가 alias 로 정본 topic 으로 해소 → None(상위 유지·하위 제거).
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        conn = object()
+        self.assertIsNone(canonicalize_subtopic(conn, "여가", "등산"))
+        m_alias.assert_called_once_with(conn, "등산")   # 정규화 라벨로 룩업
+
+    @patch(f"{_MOD}._topic_exists", return_value=True)
+    @patch(f"{_MOD}.lookup_alias", return_value=None)
+    def test_subtopic_that_is_registry_topic_returns_none(self, m_alias, m_exists) -> None:
+        # T302 (FR-301): raw_sub 자체가 registry 정본 topic → None(계층 일관성).
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        conn = object()
+        self.assertIsNone(canonicalize_subtopic(conn, "여가", "등산"))
+        m_exists.assert_called_once_with(conn, "등산")
+
+    @patch(f"{_MOD}._topic_exists", return_value=False)
+    @patch(f"{_MOD}.lookup_alias", return_value=None)
+    def test_ordinary_subtopic_returns_normalized_label(self, m_alias, m_exists) -> None:
+        # ④: 비모달리티·비정본-topic → 정규화 라벨(한 어절) 반환.
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        conn = object()
+        self.assertEqual(canonicalize_subtopic(conn, "요리", "김밥 만들기"), "김밥")
+        m_alias.assert_called_once_with(conn, "김밥")   # 정규화 후 룩업
+
+    @patch(f"{_MOD}._topic_exists", return_value=False)
+    @patch(f"{_MOD}.lookup_alias", return_value=None)
+    def test_llm_not_invoked_for_hierarchy_judgment(self, m_alias, m_exists) -> None:
+        # 헌법 3조: 계층 판정은 registry 룩업만 — LLM(client) 미사용(결정성).
+        from src.relations.topic_canonicalize import canonicalize_subtopic
+
+        client = MagicMock()
+        out = canonicalize_subtopic(object(), "요리", "김밥", client=client)
+        self.assertEqual(out, "김밥")
+        client.chat.completions.create.assert_not_called()
+
+
+class TestModalityBlacklist(unittest.TestCase):
+    """모달리티 블랙리스트 단일 출처(plan §계약)."""
+
+    def test_blacklist_is_single_source_module_constant(self) -> None:
+        from src.relations.topic_canonicalize import _MODALITY_BLACKLIST
+
+        self.assertEqual(
+            set(_MODALITY_BLACKLIST),
+            {"텍스트", "오디오", "영상", "이미지", "text", "audio", "video", "image"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

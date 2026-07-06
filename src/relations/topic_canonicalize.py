@@ -30,9 +30,17 @@ from psycopg.rows import dict_row
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.database.ids import uuid7_str
+from src.relations.schema import normalize_subtopic_ko
 
 # 임베딩 채널: 라벨 문자열을 검색·적재와 같은 벡터 공간(BGE-M3·1536D)에서 임베딩해 kNN 후보 회수.
 _EMBED_CHANNEL = "st_bge"
+
+# 모달리티 블랙리스트(FR-302) — 매체어(텍스트/오디오/영상/이미지 + en)는 '주제'가 아니라 자산의
+# 매체 형태이므로 하위주제(subtopic) 자격이 없다. **단일 출처**(plan §계약): 다른 모듈이 필요하면
+# 여기서 import 해 공유한다(schema.py 중복 정의 금지). 한글은 대소문자 무관, 영문은 소문자로 비교.
+_MODALITY_BLACKLIST: frozenset[str] = frozenset(
+    {"텍스트", "오디오", "영상", "이미지", "text", "audio", "video", "image"}
+)
 
 
 def _embed_label(raw_ko: str) -> list[float]:
@@ -234,3 +242,70 @@ def canonicalize_topic(
         "canonical_en": topic_en,
         "decided_by": "llm",
     }
+
+
+def _topic_exists(conn, topic_ko: str) -> bool:
+    """``topic_ko`` 가 ``topic_registry`` 에 **정본 topic** 으로 존재하는지(계층 판정용·결정적 룩업).
+
+    ``_lookup_topic_en`` 은 topic_en 이 NULL 이면 존재해도 None 을 돌려주므로 존재-판정에는
+    부적합하다. 여기서는 행 존재만 본다(``SELECT 1``·``%s`` 바인딩).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM topic_registry WHERE topic_ko = %s LIMIT 1",
+            (topic_ko,),
+        )
+        return cur.fetchone() is not None
+
+
+def _resolves_to_canonical_topic(conn, label: str) -> bool:
+    """``label`` 이 '정본 topic 자격'인지 registry/alias 룩업으로 **결정적** 판정(LLM 0·mutation 0).
+
+    - ``topic_alias`` 에서 canonical 로 해소되면(동의어 포함) 그 label 은 topic 을 가리키므로 topic 자격.
+    - ``topic_registry`` 에 topic_ko 로 직접 존재하면 정본 topic.
+
+    계층 규칙(FR-301)은 ``canonicalize_topic`` 을 재사용하지 **않는다**: 그 경로는 미스 시 LLM 판정·
+    ``register_topic`` 로 레지스트리를 변형(부작용)해 결정성/의도를 해친다. 하위주제 판정은 순수 룩업만.
+    """
+    if lookup_alias(conn, label) is not None:
+        return True
+    return _topic_exists(conn, label)
+
+
+def canonicalize_subtopic(
+    conn, topic_ko_canonical: str, raw_sub: str | None, *, client=None
+) -> str | None:
+    """subtopic 정규화 — 계층 일관성·모달리티 규칙(spec 058 G3·FR-301/302).
+
+    규칙(순서):
+      1. ``raw_sub`` 가 None/빈 → ``None``(하위주제 없음·그대로).
+      2. **모달리티 블랙리스트**(FR-302): 정규화된 라벨이 매체어(텍스트/오디오/영상/이미지 + en)면
+         → ``None``. 매체어는 자산의 형태이지 주제가 아니다(registry 조회 전 차단·비용 0).
+      3. **계층 일관성**(FR-301): 정규화 라벨이 **정본 topic 자격**(registry/alias 로 해소)이면
+         → ``None``(상위 topic 유지·하위주제만 제거). 승격/재배치는 1차 배제(ADR 2026-07-06).
+      4. 그 외 → ``normalize_subtopic_ko`` 정규화 라벨(한 어절).
+
+    파라미터
+        ``topic_ko_canonical``: 이미 정본화된 상위 topic(문맥·향후 확장용·현 규칙에서는 미사용).
+        ``client``: ``canonicalize_topic`` 과 시그니처 대칭(graph_persist 호출부 동형)을 위해 받되,
+            계층 판정은 **registry 룩업만**으로 결정적이라 LLM 을 **호출하지 않는다**(헌법 3조).
+    """
+    # 1) None/빈/공백만 → 하위주제 없음
+    if raw_sub is None or not str(raw_sub).strip():
+        return None
+
+    # 문자열 정규화(한 어절·기존 schema seam 재사용). 이후 판정은 정규화 라벨 기준.
+    normalized = normalize_subtopic_ko(raw_sub)
+    if not normalized:
+        return None
+
+    # 2) 모달리티 블랙리스트(FR-302) — registry 조회 전에 차단(결정성·비용 0). 영문은 소문자로 비교.
+    if normalized.lower() in _MODALITY_BLACKLIST:
+        return None
+
+    # 3) 계층 일관성(FR-301) — 정규화 라벨이 정본 topic 자격이면 하위주제 비움(상위 topic 유지).
+    if _resolves_to_canonical_topic(conn, normalized):
+        return None
+
+    # 4) 그 외 → 정규화 subtopic 라벨
+    return normalized
