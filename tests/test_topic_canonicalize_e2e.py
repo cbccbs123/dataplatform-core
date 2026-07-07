@@ -159,6 +159,7 @@ class TestTopicCanonicalizeMigrationV295(unittest.TestCase):
         # v297: 같은 topic_ko 라도 부모가 다르면 공존(subtopic 층 스코프 유니크), 같은 (부모, topic_ko)
         #   재삽입은 유니크 위반. topic 층(parent NULL)은 topic_ko 단일 유니크.
         import psycopg
+
         from src.database.ids import uuid7
         sub = "e2e하위_" + os.urandom(4).hex()
         p1 = "e2e부모A_" + os.urandom(4).hex()
@@ -192,19 +193,24 @@ class TestTopicCanonicalizeMigrationV295(unittest.TestCase):
 
 @unittest.skipUnless(_RUN, "실 DB 필요(RUN_DB_E2E=1)")
 class TestTopicCanonicalizeWiringE2E(unittest.TestCase):
-    """058 G8(T801) — 플래그-on 정본화 **배선** 실 DB e2e(생성시 동의어→정본 수렴 실증).
+    """058 G14(T1401·v2) — 플래그-on **v2 배선** 실 DB e2e(닫힌 분류체계 + 부모 스코프 subtopic).
 
-    무DB 환경에서는 자동 skip. ``RUN_DB_E2E=1`` + head=v295 dev DB 에서만 실행(사람/드라이버 게이트).
+    무DB 환경에서는 자동 skip. ``RUN_DB_E2E=1`` + head=v297 dev DB 에서만 실행(사람/드라이버 게이트).
 
-    검증 의도 (SC-01/03/04/05·FR-401·헌법 flag-off 동작 불변)
-        단위(``tests/test_graph_persist.py``)는 mock 으로 배선 분기만 본다. 여기서는 **실 DB 라운드트립**으로
-        생성시(플래그 on) 자유기입 동의어 라벨이 정본으로 수렴해 ``graph_edge.topic`` 에 저장되는지,
-        모달리티 subtopic 이 비워지는지, 그리고 플래그 off 면 원본이 그대로 저장돼 동작이 불변인지 단언한다.
+    검증 의도 (v2 · SC-01v2/03v2/04v2/05v2·FR-401v2·헌법 flag-off 동작 불변)
+        v1 은 자유 동의어를 **임의 정본으로 병합**했으나, v2 는 topic 을 **닫힌 taxonomy 범주**로
+        분류(또는 정본 alias 수렴)하고 subtopic 은 **부모 스코프**로 정리한다. 단위(``tests/test_graph_persist.py``)
+        는 mock 으로 배선 분기만 보므로, 여기서는 **실 DB 라운드트립**으로:
+          - 플래그 on: 자유 topic 동의어가 **닫힌 taxonomy 정본**으로 수렴(``_fetch_canonical_topics`` 안)
+            하고, subtopic 은 부모 스코프로 정리(모달리티·부모 범주명 비움·부모 스코프 alias 동의어 수렴),
+          - 플래그 off: 원본 그대로 저장(동작 불변),
+          - 결정성: 같은 입력 재실행 동일 정본·동의어 신규 topic 등록 0.
 
-    자기완결(기존 시드 dev 상태 비의존)
-        테스트가 유니크 라벨로 자기 registry(정본·임베딩 계산)·alias(동의어→정본) 를 시딩하고,
-        생성한 asset/edge/registry/alias 를 tearDown 에서 정리한다. 운영 데이터(``graph_edge_topic_bak_058``
-        등)·``.env`` 파일은 건드리지 않는다(플래그 토글은 settings 모듈 전역만 mock 으로 스와프).
+    자기완결(v2 픽스처 — dev 시드 상태 비의존)
+        테스트가 유니크 라벨로 **닫힌 taxonomy 범주 소수**(``source='taxonomy'``·parent NULL)와
+        topic 층 alias(동의어→정본), **부모 스코프 subtopic** 정본·alias(``parent_topic=범주``)를 시딩하고,
+        생성한 asset/edge/registry/alias 를 tearDown 에서 정리한다. 운영 데이터·``.env`` 파일은 건드리지
+        않는다(플래그 토글은 settings 모듈 전역만 mock 으로 스와프).
     """
 
     @classmethod
@@ -222,27 +228,37 @@ class TestTopicCanonicalizeWiringE2E(unittest.TestCase):
         cls.db.__exit__(None, None, None)
 
     def setUp(self):
-        # 충돌 방지 유니크 라벨 — 실 dev 레지스트리(정본 111·alias 120)와 겹치지 않아 단언이 견고.
+        # 충돌 방지 유니크 라벨 — 실 dev 레지스트리(taxonomy 28+subtopic)와 겹치지 않아 단언이 견고.
         suffix = uuid.uuid4().hex[:8]
-        self._canonical = "e2e정본_" + suffix
+        self._canonical = "e2e정본_" + suffix            # 닫힌 taxonomy 범주(테스트 시드·parent NULL)
         self._canonical_en = "e2e_canon_" + suffix
-        self._synonym = "e2e동의_" + suffix
+        self._synonym = "e2e동의_" + suffix              # topic 층 동의어 → canonical alias
+        self._sub_canonical = "e2e하위정본_" + suffix     # 부모 스코프 subtopic 정본(parent=canonical)
+        self._sub_synonym = "e2e하위동의_" + suffix       # 부모 스코프 subtopic 동의어 → sub_canonical alias
         self._asset_ids: list = []           # create_asset → uuid.UUID(정리용)
-        # 시드: 정본 register_topic(임베딩 계산·비-0노름 불변식) + 동의어 alias→정본 동결.
+        # v2 픽스처: (1) 닫힌 taxonomy 범주 소수 시드(source='taxonomy'·parent NULL) — _fetch_canonical_topics
+        #   가 이걸 닫힌 대분류로 인식. (2) topic 층 alias(자유 동의어→닫힌 정본·§3 선시드 축소판). (3) 부모
+        #   스코프 subtopic 정본·alias(parent_topic=범주) — subtopic 층 스코프 해소 실증.
         from src.relations.topic_canonicalize import _freeze_alias, register_topic
         with self.db.transaction() as conn:
-            register_topic(conn, self._canonical, self._canonical_en, source="e2e")
-            _freeze_alias(conn, self._synonym, self._canonical, "e2e")
+            register_topic(conn, self._canonical, self._canonical_en, source="taxonomy")
+            _freeze_alias(conn, self._synonym, self._canonical, "seed")
+            register_topic(conn, self._sub_canonical, None, source="e2e",
+                           parent_topic=self._canonical)
+            _freeze_alias(conn, self._sub_synonym, self._sub_canonical, "seed",
+                          parent_topic=self._canonical)
 
     def tearDown(self):
-        # asset 삭제 → node(CASCADE) → graph_edge(CASCADE). 그다음 alias(FK)→registry 순서로 시드 정리.
-        # 정본·동의어 둘 다 정리(동의어가 신규 정본으로 잘못 등록됐어도 회수·운영 데이터 불변).
-        labels = [self._canonical, self._synonym]
+        # asset 삭제 → node(CASCADE) → graph_edge(CASCADE). 그다음 topic 층 + 부모 스코프 alias/registry 정리.
+        # 라벨 전수 + parent_topic=canonical 스코프(부모 밑 새로 등록됐을 수 있는 subtopic 잔재)까지 회수.
+        labels = [self._canonical, self._synonym, self._sub_canonical, self._sub_synonym]
         with self.db.transaction() as conn, conn.cursor() as cur:
             if self._asset_ids:
                 cur.execute("DELETE FROM asset WHERE asset_id = ANY(%s)", (self._asset_ids,))
-            cur.execute("DELETE FROM topic_alias WHERE raw_ko = ANY(%s)", (labels,))
-            cur.execute("DELETE FROM topic_registry WHERE topic_ko = ANY(%s)", (labels,))
+            cur.execute("DELETE FROM topic_alias WHERE raw_ko = ANY(%s) OR parent_topic = %s",
+                        (labels, self._canonical))
+            cur.execute("DELETE FROM topic_registry WHERE topic_ko = ANY(%s) OR parent_topic = %s",
+                        (labels, self._canonical))
 
     @contextmanager
     def _flag(self, enabled: bool):
@@ -283,6 +299,12 @@ class TestTopicCanonicalizeWiringE2E(unittest.TestCase):
             idempotent=False)
         self.assertEqual(up, 1)
 
+    def _closed_topics(self) -> set[str]:
+        """현 닫힌 taxonomy 정본 집합(source='taxonomy'·parent NULL) — 시드한 범주가 그 안에 있는지 단언용."""
+        from src.relations.topic_canonicalize import _fetch_canonical_topics
+        with self.db.transaction() as conn:
+            return set(_fetch_canonical_topics(conn))
+
     def _read_edge_topic(self, src_id: str, dst_id: str) -> dict[str, str | None]:
         """(src,dst) asset 쌍의 graph_edge.topic 에서 topic_ko·subtopic_ko 회수(방향 무관·대칭 kind 대비)."""
         sql = """
@@ -299,50 +321,73 @@ class TestTopicCanonicalizeWiringE2E(unittest.TestCase):
         self.assertIsNotNone(row, "graph_edge 미생성")
         return {"topic_ko": row[0], "subtopic_ko": row[1]}
 
-    def test_flag_on_synonym_converges_and_modality_subtopic_emptied(self):
-        """플래그 on: 동의어 topic_ko → 정본 수렴(alias 히트) · 모달리티 subtopic('텍스트') 비움(SC-01/04)."""
-        src = self._make_asset()
-        dst = self._make_asset()
+    def test_flag_on_synonym_converges_to_taxonomy_and_subtopic_scoped(self):
+        """플래그 on(v2): 자유 topic → 닫힌 taxonomy 정본 · subtopic 부모 스코프 정리(SC-01v2/03v2/04v2)."""
+        # (a) topic 동의어 → 닫힌 taxonomy 정본 수렴 · 모달리티 subtopic('텍스트') 비움(C7).
+        s1 = self._make_asset()
+        d1 = self._make_asset()
         with self._flag(True):
-            self._persist_edge(src, dst, topic_ko=self._synonym, subtopic_ko="텍스트")
+            self._persist_edge(s1, d1, topic_ko=self._synonym, subtopic_ko="텍스트")
+        got1 = self._read_edge_topic(s1, d1)
+        self.assertEqual(got1["topic_ko"], self._canonical)          # 자유 동의어 → 정본 수렴
+        self.assertIn(self._canonical, self._closed_topics())        # 정본이 닫힌 taxonomy 집합 안(v2)
+        self.assertEqual(got1["subtopic_ko"], "")                    # 모달리티어 → 비움
 
-        got = self._read_edge_topic(src, dst)
-        self.assertEqual(got["topic_ko"], self._canonical)  # 동의어→정본 수렴(생성시 정규화)
-        self.assertEqual(got["subtopic_ko"], "")            # 모달리티어 → 비움(계층·모달리티 규칙)
+        # (b) subtopic == 부모 범주명 → 비움(C7 계층 일관·redundant 차단).
+        s2 = self._make_asset()
+        d2 = self._make_asset()
+        with self._flag(True):
+            self._persist_edge(s2, d2, topic_ko=self._canonical, subtopic_ko=self._canonical)
+        got2 = self._read_edge_topic(s2, d2)
+        self.assertEqual(got2["topic_ko"], self._canonical)          # 닫힌 정본 정확일치
+        self.assertEqual(got2["subtopic_ko"], "")                    # 부모 범주명 → 비움
 
-    def test_flag_off_keeps_raw_synonym_behavior_unchanged(self):
-        """플래그 off(기본): 같은 동의어라도 원본 그대로 저장 · subtopic 원본 유지(동작 불변 재확인)."""
+        # (c) 부모 스코프 subtopic 동의어 → 같은 부모 정본 수렴(부모 스코프 alias 히트·LLM 0·동음이의 보존 반경).
+        s3 = self._make_asset()
+        d3 = self._make_asset()
+        with self._flag(True):
+            self._persist_edge(s3, d3, topic_ko=self._canonical, subtopic_ko=self._sub_synonym)
+        got3 = self._read_edge_topic(s3, d3)
+        self.assertEqual(got3["topic_ko"], self._canonical)
+        self.assertEqual(got3["subtopic_ko"], self._sub_canonical)   # 부모 스코프 정본 수렴
+
+    def test_flag_off_keeps_raw_behavior_unchanged(self):
+        """플래그 off(기본): 자유 topic·subtopic 원본 그대로 저장(동작 불변 재확인·정규화·LLM 0)."""
         src = self._make_asset()
         dst = self._make_asset()
         with self._flag(False):
             self._persist_edge(src, dst, topic_ko=self._synonym, subtopic_ko="텍스트")
 
         got = self._read_edge_topic(src, dst)
-        self.assertEqual(got["topic_ko"], self._synonym)   # 정규화 안 됨(원본 동의어 유지)
+        self.assertEqual(got["topic_ko"], self._synonym)   # 분류 안 됨(원본 유지)
         self.assertEqual(got["subtopic_ko"], "텍스트")      # 모달리티어도 비우지 않음(coerce 결과 그대로)
 
-    def test_flag_on_deterministic_alias_hit_no_new_registry(self):
-        """결정성(SC-05): 같은 동의어 2회 → 동일 정본(alias 히트) · 동의어는 신규 정본 등록 안 됨(LLM/등록 0)."""
+    def test_flag_on_deterministic_no_new_topic_registered(self):
+        """결정성(SC-04v2): 같은 자유 라벨 2회 → 동일 닫힌 정본 · 자유 topic 은 신규 등록 0(고정 층·LLM 0)."""
         from src.relations.topic_canonicalize import lookup_alias
         resolved = []
         for _ in range(2):
             s = self._make_asset()
             d = self._make_asset()
             with self._flag(True):
-                self._persist_edge(s, d, topic_ko=self._synonym, subtopic_ko="이미지")
-            resolved.append(self._read_edge_topic(s, d)["topic_ko"])
+                self._persist_edge(s, d, topic_ko=self._synonym, subtopic_ko=self._sub_synonym)
+            resolved.append(self._read_edge_topic(s, d))
 
-        self.assertEqual(resolved[0], self._canonical)
-        self.assertEqual(resolved[1], self._canonical)
-        self.assertEqual(resolved[0], resolved[1])          # 두 번 다 동일 정본(결정적)
+        self.assertEqual(resolved[0]["topic_ko"], self._canonical)
+        self.assertEqual(resolved[1]["topic_ko"], self._canonical)
+        self.assertEqual(resolved[0]["topic_ko"], resolved[1]["topic_ko"])   # 동일 정본(결정적)
+        # 부모 스코프 subtopic 도 재실행 동일(부모 alias 히트).
+        self.assertEqual(resolved[0]["subtopic_ko"], self._sub_canonical)
+        self.assertEqual(resolved[1]["subtopic_ko"], self._sub_canonical)
 
         with self.db.transaction() as conn:
-            # 동의어는 정본 registry 에 새로 등록되지 않는다(alias 정확일치 경로만·kNN/judge/register 0).
             with conn.cursor() as cur:
+                # v2: 닫힌 topic 층은 고정 — 자유 동의어는 신규 topic 으로 등록되지 않는다(분류·alias 만).
                 cur.execute(
-                    "SELECT count(*) FROM topic_registry WHERE topic_ko = %s", (self._synonym,))
+                    "SELECT count(*) FROM topic_registry WHERE topic_ko = %s "
+                    "AND parent_topic IS NULL", (self._synonym,))
                 self.assertEqual(cur.fetchone()[0], 0)
-            # alias 는 시드 그대로 동의어→정본 유지(자기 정본으로 뒤집히지 않음).
+            # topic 층 alias 는 시드 그대로 동의어→정본 유지(자기 정본으로 뒤집히지 않음).
             self.assertEqual(lookup_alias(conn, self._synonym), self._canonical)
 
 
