@@ -1,29 +1,42 @@
-"""관계 topic 정규화 seam — 자유기입 라벨을 성장하는 정본 레지스트리로 수렴(spec 058 G2).
+"""관계 topic 정규화 seam — 닫힌 topic 분류체계 + 열린 subtopic(부모 스코프)로 수렴(spec 058 v2).
 
-왜 이 seam 인가 (spec 058 §접근 C1·C2)
-    관계 생성(``run_relations``)은 LLM 이 ``topic_ko`` 를 자유 기입해 동의어(요리/음식/식품)·
-    계층·모달리티 난립을 낳는다. 정본 어휘 집합(``topic_registry``)과 해소 캐시(``topic_alias``)를
-    **데이터**로 두고, persist 직전에 라벨을 정본으로 해소한다.
+왜 이 seam 인가 (spec 058 v2 §접근 C1~C3·ADR 2026-07-07)
+    관계 생성(``run_relations``)은 LLM 이 ``topic_ko``/``subtopic_ko`` 를 자유 기입해 동의어
+    (요리/음식/식품)·계층 불일치·subtopic 충돌(김밥이 요리·식품 양쪽)·모달리티 누수를 낳았다.
+    v1 의 "열린 어휘 + 쌍별 동의어 병합"은 실측 3연속 실패(광역 흡수↔충돌 잔존의 진동)로 폐기하고
+    **2층 구조**로 전환한다:
+      - **topic 층 = 닫힌 27+기타**(``taxonomy_seed.json`` 정본·``source='taxonomy'``·parent NULL).
+        신규 topic 을 만들지 않는다(고정 대분류) — 자유 라벨을 목록 중 하나로 **분류**할 뿐.
+      - **subtopic 층 = 열린 성장 + 부모 스코프**(``parent_topic`` = 부모 topic_ko). 동의어 정리를
+        부모 안에서만 수행해 동음이의(교통>사고 ≠ 사회>사고)를 보존하고, 오병합의 폭발 반경을
+        부모 버킷 안에 가둔다.
 
-해소 파이프라인(retrieve-then-judge — 리랭커와 동형)
-    ① ``lookup_alias`` 정확일치(캐시) → 반환(**LLM 0**·결정적).
-    ② 미스 → ``knn_topic_candidates`` 임베딩 kNN 후보(pgvector ``<=>``·결정적 정렬).
-    ③ ``judge_topic`` LLM 판정(후보 K개만 주입·``src.llm.client`` 단일 seam·temp=0):
-       - 매칭 → ``topic_alias`` 에 raw→canonical **동결** → 반환(재실행 캐시 히트).
-       - NEW → ``register_topic``(라벨 임베딩 저장) + self-alias 동결 → 신규 정본 반환.
+topic 해소(``canonicalize_topic``) — 분류(classify)
+    ① 빈/None → passthrough. ② 닫힌 정본 집합 정확일치 → 그대로. ③ alias 캐시(parent NULL) 히트
+    → 정본. ④ 미스 → ``classify_topic`` LLM 분류(후보=닫힌 27+기타 전체·temp=0): 목록 중 하나로
+    분류, 애매하면 ``기타``(+제안 라벨 로그) → alias 동결(``decided_by='classify'``). **신규 등록 없음**.
+
+subtopic 해소(``canonicalize_subtopic``) — 부모 스코프 retrieve-then-judge
+    ⓪ 빈/None·모달리티어·부모 범주명 → None(C7). ① (부모, raw) alias 정확일치 → 정본. ② 미스 →
+    같은 부모 스코프 kNN. ③ 동의어-한정 ``judge_topic`` 재사용(후보 same-parent 만). ④ NEW →
+    ``register_topic``(부모 스코프)·매칭=정본 → alias 동결(부모 스코프).
 
 헌법·불변식
-    - **결정성(3조)**: 재사용=데이터 룩업, LLM 판정 결과는 alias 에 동결(재실행 LLM 0·SC-05).
+    - **결정성(3조)**: 재사용=데이터 룩업, LLM 결과는 alias 에 동결(재실행 LLM 0·SC-04v2).
       kNN 정렬 타이브레이커 = **거리 asc → topic_ko asc**(같은 입력 같은 순서).
-    - **LLM 단일 seam(2조)**: ``judge_topic`` 만 ``complete_json``(temp=0·client 주입)을 쓴다.
+    - **LLM 단일 seam(2조)**: ``classify_topic``/``judge_topic`` 만 ``complete_json``(temp=0·client 주입).
     - **임베딩 불변식(034 교훈·plan Global Constraints)**: ``register_topic`` 은 항상 **비어있지 않은
       (0-노름 아님) 라벨 임베딩**만 저장한다(0-노름이면 ValueError). NULL/0-노름 topic 은 kNN
       불가시 → 동의어 재난립이므로 앱에서 금지.
+    - **subtopic 스코프 불변식(migration-reviewer v297 🟡·plan)**: subtopic 층 쓰기는 반드시 **같은
+      ``parent_topic`` 스코프로 register → 그 스코프로 freeze** 순서를 지킨다(v297 FK 완화를 앱
+      불변식으로 보증하므로). ``canonicalize_subtopic`` 은 (부모, raw) 스코프로만 registry/alias 기입.
     - **학습 0(2조)**: 임베딩은 추론만, 규칙은 결정적. 임베딩 seam 은 검색 질의 임베딩부를
       **재사용**한다(037 이후 공유·1536D ``st_bge``).
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -31,6 +44,8 @@ from psycopg.rows import dict_row
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.database.ids import uuid7_str
 from src.relations.schema import normalize_subtopic_ko
+
+logger = logging.getLogger(__name__)
 
 # 임베딩 채널: 라벨 문자열을 검색·적재와 같은 벡터 공간(BGE-M3·1536D)에서 임베딩해 kNN 후보 회수.
 _EMBED_CHANNEL = "st_bge"
@@ -62,16 +77,24 @@ def _l2_norm(vec: list[float]) -> float:
     return sum(x * x for x in vec) ** 0.5
 
 
-def lookup_alias(conn, raw_ko: str) -> str | None:
+def lookup_alias(conn, raw_ko: str, *, parent_topic: str | None = None) -> str | None:
     """``topic_alias`` 정확일치 canonical_ko(캐시 룩업). 없으면 None.
 
+    **부모 스코프(v297)**: ``parent_topic`` None=topic 층(parent NULL) / 값=subtopic 층(부모 스코프).
+    v297 이후 raw_ko 는 층별 부분 유니크라 스코프를 함께 조여야 subtopic 오히트를 막는다(동음이의 보존).
     조회행 계약(graph_query 관례): canonical_ko 는 ``str()`` 로 강제.
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT canonical_ko FROM topic_alias WHERE raw_ko = %s",
-            (raw_ko,),
-        )
+        if parent_topic is None:
+            cur.execute(
+                "SELECT canonical_ko FROM topic_alias WHERE raw_ko = %s AND parent_topic IS NULL",
+                (raw_ko,),
+            )
+        else:
+            cur.execute(
+                "SELECT canonical_ko FROM topic_alias WHERE raw_ko = %s AND parent_topic = %s",
+                (raw_ko, parent_topic),
+            )
         row = cur.fetchone()
     if row is None:
         return None
@@ -93,15 +116,47 @@ def _lookup_topic_en(conn, topic_ko: str) -> str | None:
     return str(en) if en is not None else None
 
 
-def knn_topic_candidates(conn, raw_ko: str, k: int = 5) -> list[str]:
+def _fetch_canonical_topics(conn) -> dict[str, str | None]:
+    """닫힌 정본 topic 집합 조회 → ``{topic_ko: topic_en}`` (v2 topic 층).
+
+    - **스코프**: ``parent_topic IS NULL`` 이고 ``source='taxonomy'`` 인 행만 = 닫힌 27+기타 분류체계
+      (``taxonomy_seed.json`` 시드본). subtopic 층·auto 등록 잔재를 배제한다.
+    - **결정적 정렬**: ``ORDER BY topic_ko`` — 분류 프롬프트에 넣는 후보 목록 순서를 재실행마다 고정
+      (헌법 3조 재현성). dict 는 삽입 순서를 보존하므로 호출부가 그대로 후보 순서로 쓴다.
+    - 레지스트리 미시드면 ``{}``(→ canonicalize_topic 은 분류하지 않고 원본 유지·동작 보존).
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT topic_ko, topic_en
+            FROM topic_registry
+            WHERE parent_topic IS NULL AND source = 'taxonomy'
+            ORDER BY topic_ko ASC
+            """
+        )
+        rows = cur.fetchall()
+    return {
+        str(r["topic_ko"]): (str(r["topic_en"]) if r["topic_en"] is not None else None)
+        for r in rows
+    }
+
+
+def knn_topic_candidates(
+    conn, raw_ko: str, k: int = 5, *, parent_topic: str | None = None
+) -> list[str]:
     """raw_ko 임베딩 → ``topic_registry.embedding`` pgvector 코사인 상위 k topic_ko.
 
+    - **부모 스코프(v297)**: ``parent_topic`` None=topic 층(parent NULL) / 값=subtopic 층(같은 부모만).
+      subtopic 후보를 같은 부모 안으로 한정해 오병합 폭발 반경을 버킷 안에 가둔다(C3).
     - ``<=>`` 는 pgvector 코사인 거리(0=동일). 결정적 정렬 = **거리 asc → topic_ko asc**
       (동거리 타이브레이커가 없으면 PG 실행계획에 따라 순서가 흔들려 헌법 3조 재현성을 깬다).
     - 034 교훈: NULL/0-노름 registry 임베딩은 코사인이 NaN 이라 후보를 오염시키므로 제외.
-    - 레지스트리가 비면 ``[]``(→ judge 는 LLM 없이 NEW). topic_ko 는 ``str()`` 로 강제.
+    - 후보가 비면 ``[]``(→ judge 는 LLM 없이 NEW). topic_ko 는 ``str()`` 로 강제.
     """
     vec = _embed_label(raw_ko)
+    scope_sql = "parent_topic IS NULL" if parent_topic is None else "parent_topic = %s"
+    # 바인딩 순서 = SQL 텍스트상 %s 등장 순서: [WHERE parent(있으면)] → ORDER BY vec → LIMIT k.
+    params: tuple = (vec, k) if parent_topic is None else (parent_topic, vec, k)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             f"""
@@ -109,10 +164,11 @@ def knn_topic_candidates(conn, raw_ko: str, k: int = 5) -> list[str]:
             FROM topic_registry
             WHERE embedding IS NOT NULL
               AND vector_norm(embedding) > 0
+              AND {scope_sql}
             ORDER BY embedding <=> %s::vector({FIX_EMBEDDING_DIMENSION}), topic_ko ASC
             LIMIT %s
             """,
-            (vec, k),
+            params,
         )
         rows = cur.fetchall()
     return [str(r["topic_ko"]) for r in rows]
@@ -121,18 +177,19 @@ def knn_topic_candidates(conn, raw_ko: str, k: int = 5) -> list[str]:
 def register_topic(
     conn,
     topic_ko: str,
-    topic_en: str,
+    topic_en: str | None,
     *,
     source: str = "auto",
     parent_topic: str | None = None,
 ) -> None:
-    """정본 topic 등록 — 라벨 임베딩 계산·``topic_registry`` INSERT(멱등).
+    """정본 topic/subtopic 등록 — 라벨 임베딩 계산·``topic_registry`` INSERT(멱등).
 
     - **임베딩 불변식(plan)**: 비어있지 않은(0-노름 아님) 임베딩만 저장한다. 0-노름이면
       ``ValueError`` 로 차단(034 교훈: 0-노름 벡터는 NaN 코사인 → kNN 불가시 → 동의어 재난립).
     - **부모 스코프(v297)**: ``parent_topic`` 이 None 이면 topic 층(닫힌 27+기타), 값이 있으면
       subtopic 층(부모 스코프). ON CONFLICT 는 층별 **부분 유니크 인덱스**를 인덱스 술어(WHERE)로
       지정해 인퍼런스한다 — v297 이후 topic_ko 에 단일 유니크가 없으므로 술어가 필수다.
+    - ``topic_en`` 은 None 허용(subtopic 층은 정본 en 을 추적하지 않음 → NULL 저장·후속 여지).
     - topic_id 는 앱 발급 UUIDv7(런타임 테이블 관례). 벡터는 ``::vector(1536)`` 캐스트.
     """
     vec = _embed_label(topic_ko)
@@ -202,6 +259,57 @@ def _freeze_alias(
             )
 
 
+# topic 분류 프롬프트(v2·FR-201v2) — 자유 라벨을 닫힌 27+기타 중 하나로 **분류**한다.
+#
+# judge(동의어 판정)와 다르다: judge 는 "원본과 후보가 서로 바꿔 써도 되는 같은 것인가"를 묻지만,
+# classify 는 "이 라벨이 어느 대분류에 속하는가(is-a·소속)"를 묻는다. 닫힌 대분류는 상호 배타 설계라
+# 상위분류 흡수(등산→스포츠·레저) 가 오히려 정답이다. 확신이 없으면 강제 배정하지 말고 '기타'로 파킹
+# (거버넌스 §4 가산 확장의 입력). 후보=닫힌 목록 전체를 주입(27+기타는 프롬프트에 충분히 작다).
+_CLASSIFY_PROMPT = """너는 한국어 주제(topic) 라벨을 **닫힌 분류체계**로 분류하는 분류기다.
+아래 "분류할 라벨"을 "범주 목록"에 있는 범주 중 **정확히 하나**로 분류하라.
+
+핵심 기준: "이 라벨은 어느 대분류에 속하는가?"(소속·is-a). 동의어 판정이 아니라 **분류**다.
+- 라벨이 어느 범주의 한 종류·종목·장르·분야여도 그 범주로 분류한다(예: 등산 → 스포츠·레저).
+- 어느 범주에도 자신 있게 넣기 어려우면 **"기타"** 를 고른다(억지로 배정하지 마라).
+
+규칙:
+- 반드시 "범주 목록"에 있는 라벨 하나만 고른다. 목록에 없는 라벨을 지어내지 않는다.
+- 확신이 없으면 "기타".
+- JSON 객체 하나만 출력한다. 코드블록·설명 문장 금지.
+- 형식: {{"category": "<범주 목록 중 하나>"}}.
+
+분류할 라벨(한글): {raw_ko}
+분류할 라벨(영문): {raw_en}
+
+범주 목록:
+{categories}
+
+출력: {{"category": "..."}}"""
+
+
+def classify_topic(
+    raw_ko: str, raw_en: str | None, categories: list[str], *, client=None
+) -> str:
+    """자유 topic 라벨을 닫힌 범주 목록 중 하나로 **분류**(동의어 판정 아님)·확신 없으면 '기타'.
+
+    - ``src.llm.client.complete_json`` 단일 seam·temp=0·``client=`` 주입. 후보=닫힌 목록 전체를 주입.
+    - LLM 이 목록 밖 라벨을 지어내거나 응답이 누락되면 안전하게 ``"기타"``(강제·오배정 방지·결정성).
+    - 후보가 비면(레지스트리 미시드) 호출부(``canonicalize_topic``)가 분류 자체를 건너뛴다.
+    """
+    from src.llm.client import complete_json
+
+    prompt = _CLASSIFY_PROMPT.format(
+        raw_ko=raw_ko,
+        raw_en=raw_en or "",
+        categories="\n".join(f"- {c}" for c in categories),
+    )
+    out = complete_json(prompt, client=client)
+    category = out.get("category")
+    if isinstance(category, str) and category in categories:
+        return category
+    return "기타"
+
+
 # LLM 판정 프롬프트 — 후보 K개만 주입(전체 레지스트리 주입 금지·프롬프트 비대화 방지·FR-203).
 #
 # 동의어-한정(사용자 결정): judge 가 상위 카테고리·is-a·광역 부모까지 흡수하면(등산→스포츠·
@@ -260,13 +368,14 @@ def judge_topic(raw_ko: str, candidates: list[str], *, client=None) -> str | Non
 def canonicalize_topic(
     conn, raw_ko: str, raw_en: str | None = None, *, client=None
 ) -> dict[str, Any]:
-    """자유기입 topic 라벨 → 정본 ``{canonical_ko, canonical_en, decided_by}``.
+    """자유기입 topic 라벨 → 닫힌 정본 ``{canonical_ko, canonical_en, decided_by}`` (v2·FR-201v2).
 
-    1. 빈/None raw_ko → ``{raw_ko, raw_en or "general", "passthrough"}``(정규화 안 함).
-    2. ``lookup_alias`` 히트 → canonical + registry en + ``decided_by="exact"``(**judge 미호출**).
-    3. 미스 → ``knn_topic_candidates`` → ``judge_topic``:
-       - 매칭 C → alias raw→C 동결(``decided_by="llm"``) → C + registry en.
-       - None(NEW) → ``register_topic``(임베딩 저장) + self-alias 동결 → raw_ko + (raw_en or "general").
+    1. 빈/None raw_ko → passthrough(정규화 안 함·하위호환).
+    2. 레지스트리 미시드(닫힌 집합 빈) → 원본 유지(동작 보존·G4 T401).
+    3. 닫힌 정본 집합 정확일치 → 그대로(``decided_by="exact"``·LLM 0).
+    4. alias 캐시(parent NULL) 히트 → 정본 + registry en(``decided_by="exact"``·LLM 0).
+    5. 미스 → ``classify_topic`` LLM 분류(후보=닫힌 목록 전체·temp=0): 목록 중 하나로 분류, 애매하면
+       ``기타``(+제안 라벨 로그) → alias 동결(``decided_by="classify"``). **신규 topic 등록 없음**(고정 층).
     """
     # 1) 빈/None → passthrough(정규화 안 함·하위호환)
     if not raw_ko or not str(raw_ko).strip():
@@ -276,85 +385,56 @@ def canonicalize_topic(
             "decided_by": "passthrough",
         }
 
-    # 2) alias 정확일치(캐시) → LLM 0
+    # 닫힌 정본 집합(27+기타·source taxonomy·parent NULL). {topic_ko: topic_en}·정렬됨.
+    canonical = _fetch_canonical_topics(conn)
+
+    # 2) 레지스트리 미시드 → 정본화 불가·원본 유지(동작 보존·플래그 시드 전 동치·G4 T401)
+    if not canonical:
+        return {
+            "canonical_ko": raw_ko,
+            "canonical_en": raw_en or "general",
+            "decided_by": "passthrough",
+        }
+
+    # 3) 닫힌 정본 집합 정확일치 → 그대로(분류 불필요·LLM 0)
+    if raw_ko in canonical:
+        return {"canonical_ko": raw_ko, "canonical_en": canonical[raw_ko], "decided_by": "exact"}
+
+    # 4) alias 캐시(parent NULL·topic 층) 히트 → 정본(재실행 결정적·LLM 0)
     hit = lookup_alias(conn, raw_ko)
     if hit is not None:
-        return {
-            "canonical_ko": hit,
-            "canonical_en": _lookup_topic_en(conn, hit),
-            "decided_by": "exact",
-        }
+        return {"canonical_ko": hit, "canonical_en": canonical.get(hit), "decided_by": "exact"}
 
-    # 3) 미스 → 임베딩 kNN 후보 → LLM 판정
-    candidates = knn_topic_candidates(conn, raw_ko)
-    match = judge_topic(raw_ko, candidates, client=client)
-    if match is not None:
-        # 재사용 판정 → alias 동결(재실행 결정적)
-        _freeze_alias(conn, raw_ko, match, "llm")
-        return {
-            "canonical_ko": match,
-            "canonical_en": _lookup_topic_en(conn, match),
-            "decided_by": "llm",
-        }
-
-    # NEW → registry 등록(임베딩 저장) + self-alias 동결(다음 호출부터 캐시 히트)
-    topic_en = raw_en or "general"
-    register_topic(conn, raw_ko, topic_en, source="auto")
-    _freeze_alias(conn, raw_ko, raw_ko, "llm")
-    return {
-        "canonical_ko": raw_ko,
-        "canonical_en": topic_en,
-        "decided_by": "llm",
-    }
-
-
-def _topic_exists(conn, topic_ko: str) -> bool:
-    """``topic_ko`` 가 ``topic_registry`` 에 **정본 topic** 으로 존재하는지(계층 판정용·결정적 룩업).
-
-    ``_lookup_topic_en`` 은 topic_en 이 NULL 이면 존재해도 None 을 돌려주므로 존재-판정에는
-    부적합하다. 여기서는 행 존재만 본다(``SELECT 1``·``%s`` 바인딩).
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM topic_registry WHERE topic_ko = %s LIMIT 1",
-            (topic_ko,),
+    # 5) 미스 → LLM 분류(닫힌 목록 중 하나·애매하면 기타). dict 삽입순=정렬순이라 후보 순서 결정적.
+    label = classify_topic(raw_ko, raw_en, list(canonical), client=client)
+    _freeze_alias(conn, raw_ko, label, "classify")  # 결정 동결(재실행 캐시 히트·SC-04v2)
+    if label == "기타":
+        # 기타 파킹 = 가산 확장의 입력(거버넌스 §4). 제안 라벨(원본)을 로그로 남긴다(범주 추가 근거).
+        logger.info(
+            "topic 분류 기타 폴백 — 제안 라벨: raw_ko=%r raw_en=%r", raw_ko, raw_en
         )
-        return cur.fetchone() is not None
-
-
-def _resolves_to_canonical_topic(conn, label: str) -> bool:
-    """``label`` 이 '정본 topic 자격'인지 registry/alias 룩업으로 **결정적** 판정(LLM 0·mutation 0).
-
-    - ``topic_alias`` 에서 canonical 로 해소되면(동의어 포함) 그 label 은 topic 을 가리키므로 topic 자격.
-    - ``topic_registry`` 에 topic_ko 로 직접 존재하면 정본 topic.
-
-    계층 규칙(FR-301)은 ``canonicalize_topic`` 을 재사용하지 **않는다**: 그 경로는 미스 시 LLM 판정·
-    ``register_topic`` 로 레지스트리를 변형(부작용)해 결정성/의도를 해친다. 하위주제 판정은 순수 룩업만.
-    """
-    if lookup_alias(conn, label) is not None:
-        return True
-    return _topic_exists(conn, label)
+    return {"canonical_ko": label, "canonical_en": canonical.get(label), "decided_by": "classify"}
 
 
 def canonicalize_subtopic(
     conn, topic_ko_canonical: str, raw_sub: str | None, *, client=None
 ) -> str | None:
-    """subtopic 정규화 — 계층 일관성·모달리티 규칙(spec 058 G3·FR-301/302).
+    """subtopic 정규화 — 부모 스코프 해소(spec 058 v2·FR-202v2·C7).
 
     규칙(순서):
-      1. ``raw_sub`` 가 None/빈 → ``None``(하위주제 없음·그대로).
-      2. **모달리티 블랙리스트**(FR-302): 정규화된 라벨이 매체어(텍스트/오디오/영상/이미지 + en)면
-         → ``None``. 매체어는 자산의 형태이지 주제가 아니다(registry 조회 전 차단·비용 0).
-      3. **계층 일관성**(FR-301): 정규화 라벨이 **정본 topic 자격**(registry/alias 로 해소)이면
-         → ``None``(상위 topic 유지·하위주제만 제거). 승격/재배치는 1차 배제(ADR 2026-07-06).
-      4. 그 외 → ``normalize_subtopic_ko`` 정규화 라벨(한 어절).
+      0. ``raw_sub`` None/빈 → ``None`` · 모달리티 블랙리스트(매체어) → ``None`` ·
+         정규화 라벨 == 부모 범주명(``topic_ko_canonical``) → ``None``(C7·redundant). registry 조회 전 차단.
+      1. **(부모, raw) alias 정확일치**(부모 스코프 캐시) → 그 정본(LLM 0·결정적).
+      2. 미스 → **같은 부모 스코프 kNN** 후보(``parent_topic=부모``).
+      3. **동의어-한정 judge**(기존 ``judge_topic`` 재사용·후보 same-parent 만·temp=0): 매칭 or NEW.
+      4. NEW → ``register_topic``(부모 스코프·라벨 임베딩)·매칭=그 정본 → **동일 부모 스코프로 alias 동결**.
+         (스코프 불변식·plan: v297 FK 완화를 앱 불변식으로 보증 — register→freeze 를 같은 parent 로.)
 
     파라미터
-        ``topic_ko_canonical``: 이미 정본화된 상위 topic(문맥·향후 확장용·현 규칙에서는 미사용).
-        ``client``: ``canonicalize_topic`` 과 시그니처 대칭(graph_persist 호출부 동형)을 위해 받되,
-            계층 판정은 **registry 룩업만**으로 결정적이라 LLM 을 **호출하지 않는다**(헌법 3조).
+        ``topic_ko_canonical``: 이미 정본화된 상위 topic(부모 스코프 키·범주명 비움 기준).
+        ``client``: 동의어 judge 에 주입(캐시 미스에만 호출). 캐시 히트·조기 반환 경로는 LLM 0(결정성).
     """
-    # 1) None/빈/공백만 → 하위주제 없음
+    # 0a) None/빈/공백만 → 하위주제 없음
     if raw_sub is None or not str(raw_sub).strip():
         return None
 
@@ -363,13 +443,31 @@ def canonicalize_subtopic(
     if not normalized:
         return None
 
-    # 2) 모달리티 블랙리스트(FR-302) — registry 조회 전에 차단(결정성·비용 0). 영문은 소문자로 비교.
+    # 0b) 모달리티 블랙리스트(C7) — registry 조회 전에 차단(결정성·비용 0). 영문은 소문자로 비교.
     if normalized.lower() in _MODALITY_BLACKLIST:
         return None
 
-    # 3) 계층 일관성(FR-301) — 정규화 라벨이 정본 topic 자격이면 하위주제 비움(상위 topic 유지).
-    if _resolves_to_canonical_topic(conn, normalized):
+    # 0c) 부모 범주명과 동일하면 비움(C7) — subtopic 이 부모 topic 을 반복하는 redundant 케이스.
+    if normalized == topic_ko_canonical:
         return None
 
-    # 4) 그 외 → 정규화 subtopic 라벨
+    # 1) (부모, raw) alias 정확일치(부모 스코프 캐시) → 정본(LLM 0)
+    hit = lookup_alias(conn, normalized, parent_topic=topic_ko_canonical)
+    if hit is not None:
+        return hit
+
+    # 2) 미스 → 같은 부모 스코프 kNN 후보(오병합 폭발 반경 = 부모 버킷·C3)
+    candidates = knn_topic_candidates(conn, normalized, parent_topic=topic_ko_canonical)
+
+    # 3) 동의어-한정 judge(후보 same-parent 만) → 매칭 or NEW
+    match = judge_topic(normalized, candidates, client=client)
+    if match is not None:
+        # 매칭(재사용) → 같은 부모 스코프로 alias 동결(재실행 캐시 히트·SC-04v2)
+        _freeze_alias(conn, normalized, match, "llm", parent_topic=topic_ko_canonical)
+        return match
+
+    # 4) NEW → 부모 스코프로 register → 그 스코프로 freeze(스코프 불변식: register 가 freeze 보다 먼저).
+    #    subtopic 은 정본 en 을 별도로 추적하지 않는다(subtopic_en 정본화는 후속 여지) → topic_en=None.
+    register_topic(conn, normalized, None, source="auto", parent_topic=topic_ko_canonical)
+    _freeze_alias(conn, normalized, normalized, "llm", parent_topic=topic_ko_canonical)
     return normalized
