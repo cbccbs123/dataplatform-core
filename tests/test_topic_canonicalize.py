@@ -117,7 +117,8 @@ class TestRegisterTopic(unittest.TestCase):
         sql = _compact_sql(cur)
         self.assertIn("INSERT INTO topic_registry", sql)
         self.assertIn("::vector(1536)", sql)
-        self.assertIn("ON CONFLICT (topic_ko) DO NOTHING", sql)
+        # v297: topic 층(parent_topic None) 등록은 부분 유니크 인덱스(parent NULL) 술어로 인퍼런스.
+        self.assertIn("ON CONFLICT (topic_ko) WHERE parent_topic IS NULL DO NOTHING", sql)
         params = cur.execute.call_args[0][1]
         self.assertIn("양자컴퓨팅", params)
         self.assertIn("quantum", params)

@@ -118,12 +118,21 @@ def knn_topic_candidates(conn, raw_ko: str, k: int = 5) -> list[str]:
     return [str(r["topic_ko"]) for r in rows]
 
 
-def register_topic(conn, topic_ko: str, topic_en: str, *, source: str = "auto") -> None:
+def register_topic(
+    conn,
+    topic_ko: str,
+    topic_en: str,
+    *,
+    source: str = "auto",
+    parent_topic: str | None = None,
+) -> None:
     """정본 topic 등록 — 라벨 임베딩 계산·``topic_registry`` INSERT(멱등).
 
     - **임베딩 불변식(plan)**: 비어있지 않은(0-노름 아님) 임베딩만 저장한다. 0-노름이면
       ``ValueError`` 로 차단(034 교훈: 0-노름 벡터는 NaN 코사인 → kNN 불가시 → 동의어 재난립).
-    - ``ON CONFLICT (topic_ko) DO NOTHING`` — 이미 있으면 무시(멱등·동시성 안전).
+    - **부모 스코프(v297)**: ``parent_topic`` 이 None 이면 topic 층(닫힌 27+기타), 값이 있으면
+      subtopic 층(부모 스코프). ON CONFLICT 는 층별 **부분 유니크 인덱스**를 인덱스 술어(WHERE)로
+      지정해 인퍼런스한다 — v297 이후 topic_ko 에 단일 유니크가 없으므로 술어가 필수다.
     - topic_id 는 앱 발급 UUIDv7(런타임 테이블 관례). 벡터는 ``::vector(1536)`` 캐스트.
     """
     vec = _embed_label(topic_ko)
@@ -132,30 +141,65 @@ def register_topic(conn, topic_ko: str, topic_en: str, *, source: str = "auto") 
             f"0-노름 임베딩은 등록 불가(kNN 불가시 → 동의어 재난립): topic_ko={topic_ko!r}"
         )
     with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            INSERT INTO topic_registry (topic_id, topic_ko, topic_en, embedding, source)
-            VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s)
-            ON CONFLICT (topic_ko) DO NOTHING
-            """,
-            (uuid7_str(), topic_ko, topic_en, vec, source),
-        )
+        if parent_topic is None:
+            # topic 층: 부분 유니크 인덱스 (topic_ko) WHERE parent_topic IS NULL.
+            cur.execute(
+                f"""
+                INSERT INTO topic_registry
+                    (topic_id, topic_ko, topic_en, embedding, source, parent_topic)
+                VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s, NULL)
+                ON CONFLICT (topic_ko) WHERE parent_topic IS NULL DO NOTHING
+                """,
+                (uuid7_str(), topic_ko, topic_en, vec, source),
+            )
+        else:
+            # subtopic 층: 부분 유니크 인덱스 (parent_topic, topic_ko) WHERE parent_topic IS NOT NULL.
+            cur.execute(
+                f"""
+                INSERT INTO topic_registry
+                    (topic_id, topic_ko, topic_en, embedding, source, parent_topic)
+                VALUES (%s, %s, %s, %s::vector({FIX_EMBEDDING_DIMENSION}), %s, %s)
+                ON CONFLICT (parent_topic, topic_ko) WHERE parent_topic IS NOT NULL DO NOTHING
+                """,
+                (uuid7_str(), topic_ko, topic_en, vec, source, parent_topic),
+            )
 
 
-def _freeze_alias(conn, raw_ko: str, canonical_ko: str, decided_by: str) -> None:
+def _freeze_alias(
+    conn,
+    raw_ko: str,
+    canonical_ko: str,
+    decided_by: str,
+    *,
+    parent_topic: str | None = None,
+) -> None:
     """해소 결과를 ``topic_alias`` 에 동결(결정성 캐시). 이미 있으면 무시(멱등).
 
-    ``ON CONFLICT (raw_ko) DO NOTHING`` — 같은 raw 재판정 없이 최초 결정을 유지(재실행 결정적).
+    **부모 스코프(v297)**: ``parent_topic`` None=topic 층 / 값=subtopic 층. ON CONFLICT 는 층별
+    **부분 유니크 인덱스**를 인덱스 술어(WHERE)로 지정해 인퍼런스한다(raw_ko 단일 PK 는 v297 에서
+    드롭됐으므로 술어 필수). 같은 스코프의 raw 재판정 없이 최초 결정을 유지(재실행 결정적).
     """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO topic_alias (raw_ko, canonical_ko, decided_by)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (raw_ko) DO NOTHING
-            """,
-            (raw_ko, canonical_ko, decided_by),
-        )
+        if parent_topic is None:
+            # topic 층: 부분 유니크 인덱스 (raw_ko) WHERE parent_topic IS NULL.
+            cur.execute(
+                """
+                INSERT INTO topic_alias (raw_ko, canonical_ko, decided_by, parent_topic)
+                VALUES (%s, %s, %s, NULL)
+                ON CONFLICT (raw_ko) WHERE parent_topic IS NULL DO NOTHING
+                """,
+                (raw_ko, canonical_ko, decided_by),
+            )
+        else:
+            # subtopic 층: 부분 유니크 인덱스 (parent_topic, raw_ko) WHERE parent_topic IS NOT NULL.
+            cur.execute(
+                """
+                INSERT INTO topic_alias (raw_ko, canonical_ko, decided_by, parent_topic)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (parent_topic, raw_ko) WHERE parent_topic IS NOT NULL DO NOTHING
+                """,
+                (raw_ko, canonical_ko, decided_by, parent_topic),
+            )
 
 
 # LLM 판정 프롬프트 — 후보 K개만 주입(전체 레지스트리 주입 금지·프롬프트 비대화 방지·FR-203).

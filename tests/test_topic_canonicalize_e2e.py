@@ -52,11 +52,20 @@ class TestTopicCanonicalizeMigrationV295(unittest.TestCase):
         ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def _indexdefs(self, conn, table: str) -> list[str]:
+        """테이블의 인덱스 정의 목록(indexdef) — 부분 유니크 인덱스의 WHERE 술어까지 포함."""
+        rows = conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE tablename = %s", (table,)
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def test_topic_registry_schema(self):
         with self.db.transaction() as conn:
             cols = self._columns(conn, "topic_registry")
             self.assertNotEqual(cols, {}, "topic_registry 테이블이 없음(v295 미적용?)")
-            for c in ("topic_id", "topic_ko", "topic_en", "embedding", "source", "created_at"):
+            # v297: parent_topic 스코프 컬럼 추가(topic 층 NULL·subtopic 층 = 부모 topic_ko).
+            for c in ("topic_id", "topic_ko", "topic_en", "embedding", "source",
+                      "created_at", "parent_topic"):
                 self.assertIn(c, cols, f"topic_registry.{c} 컬럼 누락")
             # embedding 은 pgvector vector 타입
             self.assertEqual(cols["embedding"], "vector", "embedding 이 vector 타입이 아님")
@@ -69,15 +78,11 @@ class TestTopicCanonicalizeMigrationV295(unittest.TestCase):
             self.assertIsNotNone(pk, "topic_registry PK 제약 없음")
             self.assertIn("topic_id", pk[0])
 
-            # topic_ko UNIQUE
-            uniq = conn.execute(
-                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                "WHERE conrelid = 'topic_registry'::regclass AND contype = 'u'"
-            ).fetchall()
-            self.assertTrue(
-                any("topic_ko" in u[0] for u in uniq),
-                "topic_registry.topic_ko UNIQUE 제약 없음",
-            )
+            # v297: topic_ko 단일 UNIQUE 제약은 드롭되고 **부모 스코프 부분 유니크 인덱스**로 대체됐다.
+            defs = " ".join(self._indexdefs(conn, "topic_registry"))
+            self.assertIn("UNIQUE", defs, "topic_registry 유니크 인덱스 없음")
+            self.assertIn("topic_ko", defs, "topic_registry.topic_ko 유니크 인덱스 없음")
+            self.assertIn("parent_topic IS NULL", defs, "topic 층 부분 유니크(parent NULL) 없음")
 
     def test_topic_registry_embedding_dim_1536(self):
         # embedding vector(1536) — 차원 헌법 불변식
@@ -98,67 +103,91 @@ class TestTopicCanonicalizeMigrationV295(unittest.TestCase):
             self.assertIn("embedding", defs, "topic_registry.embedding 인덱스 없음")
             self.assertIn("vector_cosine_ops", defs, "pgvector cosine opclass 인덱스 없음")
 
+    def test_topic_registry_scope_unique_indexes(self):
+        # v297 FR-102v2: registry 부모 스코프 부분 유니크 인덱스 2개 —
+        #   topic 층 = (topic_ko) WHERE parent_topic IS NULL,
+        #   subtopic 층 = (parent_topic, topic_ko) WHERE parent_topic IS NOT NULL.
+        with self.db.transaction() as conn:
+            defs = self._indexdefs(conn, "topic_registry")
+            root = [d for d in defs
+                    if "UNIQUE" in d and "topic_ko" in d and "parent_topic IS NULL" in d]
+            child = [d for d in defs
+                     if "UNIQUE" in d and "parent_topic" in d and "topic_ko" in d
+                     and "parent_topic IS NOT NULL" in d]
+            self.assertTrue(root, "topic 층 부분 유니크 인덱스(parent NULL·topic_ko) 없음")
+            self.assertTrue(child, "subtopic 층 부분 유니크 인덱스(parent, topic_ko) 없음")
+
     def test_topic_alias_schema(self):
         with self.db.transaction() as conn:
             cols = self._columns(conn, "topic_alias")
             self.assertNotEqual(cols, {}, "topic_alias 테이블이 없음(v295 미적용?)")
-            for c in ("raw_ko", "canonical_ko", "decided_by", "created_at"):
+            # v297: parent_topic 스코프 컬럼 추가.
+            for c in ("raw_ko", "canonical_ko", "decided_by", "created_at", "parent_topic"):
                 self.assertIn(c, cols, f"topic_alias.{c} 컬럼 누락")
 
-            # raw_ko PK
+            # v297: raw_ko PK 는 드롭되고 **부모 스코프 부분 유니크 인덱스**로 대체됐다(PK 없음).
             pk = conn.execute(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
                 "WHERE conrelid = 'topic_alias'::regclass AND contype = 'p'"
             ).fetchone()
-            self.assertIsNotNone(pk, "topic_alias PK 제약 없음")
-            self.assertIn("raw_ko", pk[0])
+            self.assertIsNone(pk, "topic_alias PK 는 v297 에서 부분 유니크 인덱스로 대체(드롭)돼야 함")
+            defs = " ".join(self._indexdefs(conn, "topic_alias"))
+            self.assertIn("UNIQUE", defs, "topic_alias 유니크 인덱스 없음")
+            self.assertIn("raw_ko", defs, "topic_alias.raw_ko 유니크 인덱스 없음")
 
-            # canonical_ko FK → topic_registry(topic_ko)
+            # v297: canonical_ko FK 는 **완화(드롭)**됐다 — 부분 유니크 인덱스를 FK 대상으로 삼을 수
+            #   없고 복합 FK 는 parent NULL(topic 층)에서 검사 스킵돼 무의미하므로, 앱 불변식으로 보증.
             fk = conn.execute(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
                 "WHERE conrelid = 'topic_alias'::regclass AND contype = 'f'"
             ).fetchall()
-            self.assertTrue(fk, "topic_alias FK 제약 없음")
-            joined = " ".join(f[0] for f in fk)
-            self.assertIn("canonical_ko", joined)
-            self.assertIn("topic_registry", joined)
-            self.assertIn("topic_ko", joined)
+            self.assertEqual(fk, [], "topic_alias FK 는 v297 에서 완화(드롭)돼야 함")
 
-    def test_topic_alias_fk_roundtrip(self):
-        # FK 무결성: 미등록 canonical 은 거부, 등록 후 alias 삽입 성공(가역 검증 겸)
+    def test_topic_alias_scope_unique_indexes(self):
+        # v297 FR-102v2: alias 부모 스코프 부분 유니크 인덱스 2개(registry 와 동형).
+        with self.db.transaction() as conn:
+            defs = self._indexdefs(conn, "topic_alias")
+            root = [d for d in defs
+                    if "UNIQUE" in d and "raw_ko" in d and "parent_topic IS NULL" in d]
+            child = [d for d in defs
+                     if "UNIQUE" in d and "parent_topic" in d and "raw_ko" in d
+                     and "parent_topic IS NOT NULL" in d]
+            self.assertTrue(root, "topic 층 alias 부분 유니크 인덱스(parent NULL·raw_ko) 없음")
+            self.assertTrue(child, "subtopic 층 alias 부분 유니크 인덱스(parent, raw_ko) 없음")
+
+    def test_topic_registry_parent_scope_roundtrip(self):
+        # v297: 같은 topic_ko 라도 부모가 다르면 공존(subtopic 층 스코프 유니크), 같은 (부모, topic_ko)
+        #   재삽입은 유니크 위반. topic 층(parent NULL)은 topic_ko 단일 유니크.
         import psycopg
-        topic_ko = "e2e정본_v295_" + os.urandom(4).hex()
-        raw_ko = "e2e원본_v295_" + os.urandom(4).hex()
+        from src.database.ids import uuid7
+        sub = "e2e하위_" + os.urandom(4).hex()
+        p1 = "e2e부모A_" + os.urandom(4).hex()
+        p2 = "e2e부모B_" + os.urandom(4).hex()
+
+        def _ins(conn, ko, parent):
+            conn.execute(
+                "INSERT INTO topic_registry (topic_id, topic_ko, source, parent_topic) "
+                "VALUES (%s, %s, %s, %s)",
+                (str(uuid7()), ko, "e2e", parent),
+            )
         try:
-            # 미등록 canonical → FK 위반
-            with self.assertRaises(psycopg.errors.ForeignKeyViolation):
-                with self.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT INTO topic_alias (raw_ko, canonical_ko, decided_by) "
-                        "VALUES (%s, %s, %s)",
-                        (raw_ko, topic_ko, "e2e"),
-                    )
-            # 정본 등록 후 alias 삽입 성공
-            from src.database.ids import uuid7
+            # 서로 다른 부모 아래 같은 subtopic 라벨 → 둘 다 성공(동음이의 보존)
             with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT INTO topic_registry (topic_id, topic_ko, source) "
-                    "VALUES (%s, %s, %s)",
-                    (str(uuid7()), topic_ko, "e2e"),
-                )
-                conn.execute(
-                    "INSERT INTO topic_alias (raw_ko, canonical_ko, decided_by) "
-                    "VALUES (%s, %s, %s)",
-                    (raw_ko, topic_ko, "e2e"),
-                )
-                got = conn.execute(
-                    "SELECT canonical_ko FROM topic_alias WHERE raw_ko = %s", (raw_ko,)
-                ).fetchone()
-                self.assertEqual(got[0], topic_ko)
+                _ins(conn, sub, p1)
+                _ins(conn, sub, p2)
+                n = conn.execute(
+                    "SELECT count(*) FROM topic_registry WHERE topic_ko = %s", (sub,)
+                ).fetchone()[0]
+                self.assertEqual(n, 2)
+            # 같은 (부모, topic_ko) 재삽입 → 부분 유니크 위반
+            with self.assertRaises(psycopg.errors.UniqueViolation):
+                with self.db.transaction() as conn:
+                    _ins(conn, sub, p1)
         finally:
             with self.db.transaction() as conn:
-                conn.execute("DELETE FROM topic_alias WHERE raw_ko = %s", (raw_ko,))
-                conn.execute("DELETE FROM topic_registry WHERE topic_ko = %s", (topic_ko,))
+                conn.execute(
+                    "DELETE FROM topic_registry WHERE topic_ko = %s", (sub,)
+                )
 
 
 @unittest.skipUnless(_RUN, "실 DB 필요(RUN_DB_E2E=1)")
