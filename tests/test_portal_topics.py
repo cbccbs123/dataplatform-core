@@ -53,12 +53,13 @@ def _fake_search_result() -> dict:
         "results": {
             "text_documents": [
                 # 057-후속: 결과 행에 색인 topics 포함(패싯·클라 좁히기 소스 = 필터와 동일).
+                # 060: topic_pairs(부모>자식 짝)로 nested 집계(교차곱 제거). 단일 topic 이라 결과 불변(SC-02).
                 {"id": "a1", "similarity": 0.9, "file_uri": "/x/a1.txt", "summary": "s1",
-                 "topics": ["요리"], "subtopics": ["제빵"]},
+                 "topics": ["요리"], "subtopics": ["제빵"], "topic_pairs": ["요리>제빵"]},
                 {"id": "a2", "similarity": 0.8, "file_uri": "/x/a2.txt", "summary": "s2",
-                 "topics": ["요리"], "subtopics": []},
+                 "topics": ["요리"], "subtopics": [], "topic_pairs": ["요리"]},
                 {"id": "a3", "similarity": 0.7, "file_uri": "/x/a3.txt", "summary": "s3",
-                 "topics": ["스포츠"], "subtopics": []},
+                 "topics": ["스포츠"], "subtopics": [], "topic_pairs": ["스포츠"]},
             ],
         },
         "meta": {},
@@ -208,6 +209,52 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
         # 결과 행에도 topics 노출(프론트 클라 좁히기용) → 패싯 클릭 = 이 topics 로 필터.
         rows = [r for bucket in body["results"].values() for r in bucket]
         self.assertTrue(any(r.get("topics") == ["요리"] for r in rows))
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_facet_pairs_no_cross_product(self, mock_search) -> None:
+        # 060 SC-01: 멀티토픽 자산 — 평면 topics=[요리,IT·기술]×subtopics=[제빵,데이터] 를 교차곱하면
+        # 요리>데이터·IT·기술>제빵 오배치가 난다. topic_pairs 짝으로 집계하면 각자 올바른 부모 아래로만.
+        mock_search.return_value = {
+            "query": "요리", "meta": {},
+            "results": {"text_documents": [
+                {"id": "m1", "similarity": 0.9, "file_uri": "/x/m1.txt", "summary": "s",
+                 "topics": ["요리", "IT·기술"], "subtopics": ["제빵", "데이터"],
+                 "topic_pairs": ["요리>제빵", "IT·기술>데이터"]},
+            ]},
+        }
+        resp = self.client.get("/search", params={"q": "요리", "size": 10})
+        self.assertEqual(resp.status_code, 200)
+        facets = resp.json()["meta"]["topic_facets"]
+        self.assertEqual(
+            facets,
+            [
+                {"topic_ko": "IT·기술", "asset_count": 1,
+                 "subtopics": [{"subtopic_ko": "데이터", "asset_count": 1}]},
+                {"topic_ko": "요리", "asset_count": 1,
+                 "subtopics": [{"subtopic_ko": "제빵", "asset_count": 1}]},
+            ],
+        )
+        # 교차곱 오배치가 없어야 한다(요리 밑에 데이터, IT·기술 밑에 제빵 금지).
+        by_topic = {f["topic_ko"]: [s["subtopic_ko"] for s in f["subtopics"]] for f in facets}
+        self.assertNotIn("데이터", by_topic["요리"])
+        self.assertNotIn("제빵", by_topic["IT·기술"])
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_facet_fallback_without_pairs(self, mock_search) -> None:
+        # 060 SC-03: topic_pairs 부재(미재색인 인덱스) → topic 카운트만·nested 비움·예외 없음(오배치 0).
+        mock_search.return_value = {
+            "query": "요리", "meta": {},
+            "results": {"text_documents": [
+                {"id": "f1", "similarity": 0.9, "file_uri": "/x/f1.txt", "summary": "s",
+                 "topics": ["요리"], "subtopics": ["제빵"]},  # topic_pairs 없음
+            ]},
+        }
+        resp = self.client.get("/search", params={"q": "요리", "size": 10})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json()["meta"]["topic_facets"],
+            [{"topic_ko": "요리", "asset_count": 1, "subtopics": []}],
+        )
 
     @patch("src.app.portal_api.project_asset_topics", return_value=[])
     @patch("src.app.portal_api.search_hybrid")

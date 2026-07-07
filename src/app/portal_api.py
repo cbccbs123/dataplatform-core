@@ -994,19 +994,20 @@ def _project_grouped_search(
 def _search_topic_facet(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     """검색 결과(의료 배제·top-N)의 자산들이 공유하는 주제 패싯을 집계한다(056 FR-503·US3).
 
-    각 결과 행에 이미 실린 **색인 topics/subtopics**(os_hit_to_row → search_group._shape 통과)로
-    ``topic_ko`` 별 distinct 결과-자산 수와, 그 아래 ``subtopic_ko`` 별 결과-자산 수(nested)를 센다.
-    topic 필터(``?topic=``/``?subtopic=`` → ``terms{topics}``/``terms{subtopics}``)와 **동일 소스**라
-    패싯이 약속한 (하위)주제를 클릭했을 때 결과가 일치한다 — **subtopic 카운트도 결과-스코프**다
-    (코퍼스 `/topics` 카탈로그 전체 수가 아님). 라이브 투영·자산당 DB 호출(N+1) 없이 행 값만 집계.
-    프론트는 이 패싯을 클릭해 로드된 결과를 같은 topics/subtopics 로 **클라 필터(재검색 없음)** →
-    컷오프 무관·**패싯 수 == 표시 수**. 반환 형태:
+    각 결과 행에 이미 실린 **색인 topic_pairs**(059·os_hit_to_row → search_group._shape 통과)로
+    ``topic_ko`` 별 distinct 결과-자산 수와, 그 아래 실제 부모의 ``subtopic_ko`` 별 결과-자산 수(nested)를
+    센다. 라이브 투영·자산당 DB 호출(N+1) 없이 행 값만 집계. 반환 형태:
     ``[{topic_ko, asset_count, subtopics:[{subtopic_ko, asset_count}]}]``.
 
-    ⚠️ OS 색인 topics/subtopics 는 flat 리스트라 topic↔subtopic 정확 pairing이 없다 — nested 집계는
-    "한 결과 자산이 topic T 와 subtopic S 를 **함께** 보유" 기준(근사)이다. 단 이는 클릭 시 클라 좁히기
-    (topic AND subtopic 필터)와 정확히 동일하므로 카운트=표시 일관은 보장된다(정밀 pairing은 색인에
-    (topic,subtopic) 쌍 저장 필요·별도 작업).
+    **060 짝 정밀화**: nested 집계를 평면 ``topics×subtopics`` 근사(교차곱)에서 **부모-자식 짝
+    ``topic_pairs``** 기준으로 바꿨다 — subtopic 을 **실제 부모 topic 아래에만** 귀속해, 멀티토픽 자산에서
+    먹방이 IT·기술 밑에 집계되던 오배치를 제거한다. 짝 파싱은 059 계약대로 **첫 ``>`` 로만 분할**한다
+    (topic 층은 닫힌 통제어휘·058·``>`` 없음 → 부모 항상 정확). ``topic_pairs`` 부재(미재색인 인덱스)면
+    평면 ``topics`` 를 **topic 단독 짝**으로 폴백한다(topic 카운트만·nested 비움·**틀린 교차곱 없음**).
+
+    정합: "패싯 수 == 클릭 표시 수" 는 프론트가 **짝(topic_pairs)으로 클라 좁히기**할 때 성립한다(059
+    채택·행마다 topic_pairs 보유). 서버 ``?topic=``/``?subtopic=`` terms 필터(코퍼스-스코프·평면)는 별개
+    메커니즘으로 불변.
     **신규 LLM 0·조회 0**·결정적 정렬(asset_count desc → topic_ko/subtopic_ko asc·헌법 3조).
     """
     topic_assets: dict[str, set[str]] = {}
@@ -1016,12 +1017,19 @@ def _search_topic_facet(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[s
             aid = str(r.get("asset_id") or "")
             if not aid:
                 continue
-            tks = [str(t) for t in (r.get("topics") or []) if t]
-            sks = [str(s) for s in (r.get("subtopics") or []) if s]
-            for tk in tks:
+            # 060: 부모-자식 짝(topic_pairs)으로 집계. 부재 시 평면 topics 를 topic 단독 짝으로 폴백.
+            pairs = [str(p) for p in (r.get("topic_pairs") or []) if p]
+            if not pairs:
+                pairs = [str(t) for t in (r.get("topics") or []) if t]
+            for pair in pairs:
+                idx = pair.find(">")  # 첫 '>' 로만 분할(059 파싱 계약)
+                tk = pair if idx < 0 else pair[:idx]
+                sk = "" if idx < 0 else pair[idx + 1 :]
+                if not tk:
+                    continue
                 topic_assets.setdefault(tk, set()).add(aid)
                 sub_map = topic_subs.setdefault(tk, {})
-                for sk in sks:  # 근사 pairing: 같은 행의 subtopic 을 이 topic 아래로 귀속
+                if sk:  # subtopic 은 실제 부모 tk 아래에만 귀속(교차곱 제거)
                     sub_map.setdefault(sk, set()).add(aid)
     facet = []
     for tk, assets in topic_assets.items():
