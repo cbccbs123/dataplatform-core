@@ -533,6 +533,10 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
         # 라 facet 약속과 클릭 결과가 일치한다(라이브 투영 대비 불일치·N+1 제거). OS 문서에 이미 있어 무비용.
         "topics": [str(t) for t in (src.get("topics") or [])],
         "subtopics": [str(t) for t in (src.get("subtopics") or [])],
+        # 059 FR-104: 색인된 topic_pairs("topic>subtopic" 짝)를 행에 전달한다 — 프론트가 topic→subtopic
+        # 트리를 교차곱 오배치 없이 그리게(하위호환 필드·미존재 시 [] 폴백). 평면 topics/subtopics 와
+        # 동일 소스(_topics_doc_fields)라 표시·패싯 전용·랭킹 미반영(무회귀).
+        "topic_pairs": [str(t) for t in (src.get("topic_pairs") or [])],
     }
     mq = hit.get("matched_queries")
     if mq is not None:

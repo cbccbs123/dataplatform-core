@@ -133,6 +133,33 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(body["meta"]["size"], 10)
 
     @patch("src.app.portal_api.search_hybrid")
+    def test_search_response_rows_include_topic_pairs(self, mock_search) -> None:
+        # 059 FR-104: /search 응답 행에 topic_pairs(부모>자식 짝) 포함(하위호환 필드·프론트 트리용).
+        # 짝 없는 행은 [] 폴백. os_hit_to_row→_shape→_project_grouped_search 경유로 전달된다.
+        mock_search.return_value = {
+            "query": "먹방",
+            "results": {
+                "text_documents": [
+                    {
+                        "id": "a1",
+                        "similarity": 0.9,
+                        "file_uri": "/x/a1.mp4",
+                        "summary": "s1",
+                        "topics": ["음식·요리", "IT·기술"],
+                        "subtopics": ["먹방", "데이터"],
+                        "topic_pairs": ["음식·요리>먹방", "IT·기술>데이터"],
+                    },
+                    {"id": "a2", "similarity": 0.8, "file_uri": "/x/a2.txt", "summary": "s2"},
+                ],
+            },
+            "meta": {},
+        }
+        body = self.client.get("/search", params={"q": "먹방", "size": 10}).json()
+        rows = body["results"]["text"]
+        self.assertEqual(rows[0]["topic_pairs"], ["음식·요리>먹방", "IT·기술>데이터"])
+        self.assertEqual(rows[1]["topic_pairs"], [])  # 짝 없는 행 → [] 폴백(하위호환)
+
+    @patch("src.app.portal_api.search_hybrid")
     def test_search_excludes_medical_per_bucket(self, mock_search) -> None:
         # FR-014: domain_label='medical' 은 해당 버킷에서 배제된다(image 섹션에서 med1 사라짐).
         mock_search.return_value = _fake_search_result()

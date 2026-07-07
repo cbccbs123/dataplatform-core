@@ -215,6 +215,10 @@ def build_index_body(
                 # 스코프 철회(FR-504·SC-04 제거) — 랭킹 회귀 위험 대비 이득이 낮아 keyword 필터만 남긴다.
                 "topics": {"type": "keyword"},
                 "subtopics": {"type": "keyword"},
+                # 059 FR-102 — (topic_ko, subtopic_ko) 짝을 "topic>subtopic" 한 문자열로 보존한
+                # keyword. 평면 topics/subtopics 는 부모-자식 짝을 잃어 프론트 트리가 교차곱으로
+                # 오배치되는 문제를 해소한다(표시·패싯 전용·랭킹 미반영). topics/subtopics 옆 동형 keyword.
+                "topic_pairs": {"type": "keyword"},
                 "filter_kw": {
                     "properties": {
                         "file_ext": {"type": "keyword"},
@@ -278,11 +282,33 @@ def _dedup_in_order(values: Iterable[Any]) -> list[str]:
     return out
 
 
-def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
-    """주제 리스트 → OS 문서 주제 2필드(순수·결정적).
+def _topic_pair(topic_ko: Any, subtopic_ko: Any) -> str:
+    """(topic_ko, subtopic_ko) → ``"topic>subtopic"`` 짝 문자열(순수·결정적, 059 FR-101).
 
-    - ``topics``    = dedup 된 ``topic_ko`` (keyword·패싯/필터)
-    - ``subtopics`` = dedup 된 ``subtopic_ko``(None/"" 스킵·keyword)
+    subtopic 이 None/"" 이면 ``topic_ko`` 단독으로 돌려준다(짝 없는 주제도 트리 루트로 표시).
+    구분자 ``>`` 는 정규화 라벨에 나타나지 않는 문자다(라벨은 한 어절·``·`` 만 허용) → 충돌 0·프론트
+    파싱 계약(C2). ``topic_ko`` 가 falsy 면 빈 문자열을 돌려주고 ``_dedup_in_order`` 가 스킵한다
+    (평면 ``topics`` 가 falsy topic_ko 를 스킵하는 것과 동형).
+    """
+    tk = str(topic_ko) if topic_ko else ""
+    if not tk:
+        return ""
+    sk = str(subtopic_ko) if subtopic_ko else ""
+    return f"{tk}>{sk}" if sk else tk
+
+
+def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
+    """주제 리스트 → OS 문서 주제 필드(순수·결정적).
+
+    - ``topics``      = dedup 된 ``topic_ko`` (keyword·패싯/필터)
+    - ``subtopics``   = dedup 된 ``subtopic_ko``(None/"" 스킵·keyword)
+    - ``topic_pairs`` = dedup 된 ``"topic_ko>subtopic_ko"`` 짝(subtopic 없으면 topic 단독·keyword)
+
+    ``topic_pairs``(059 FR-101)는 평면 ``topics``/``subtopics`` 가 잃어버리는 **부모-자식 짝**을
+    한 문자열로 보존해, 프론트가 topic→subtopic 트리를 교차곱 오배치 없이 그리게 한다. 짝은 입력
+    (``project_asset_topics``)에 이미 있으므로 그대로 나르며(생성 아님), ``_dedup_in_order`` 로
+    순서 보존·중복 제거만 한다. **평면 ``topics``/``subtopics`` 반환값·로직은 불변**(짝 필드는
+    표시·패싯 전용·랭킹 미반영 — 검색 무회귀, C5).
 
     BM25 관련도 보강 필드(``topics_text``·한/영 토큰 공백결합)는 스코프 철회로 색인하지 않는다
     (FR-504·SC-04 제거). 주제는 keyword terms 필터/패싯으로만 검색에 반영한다.
@@ -290,6 +316,9 @@ def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "topics": _dedup_in_order(t.get("topic_ko") for t in topics),
         "subtopics": _dedup_in_order(t.get("subtopic_ko") for t in topics),
+        "topic_pairs": _dedup_in_order(
+            _topic_pair(t.get("topic_ko"), t.get("subtopic_ko")) for t in topics
+        ),
     }
 
 

@@ -94,6 +94,7 @@ class OsHitToRowTest(unittest.TestCase):
                 "summary": "요약 텍스트",
                 "topics": ["요리", "베이킹"],
                 "subtopics": ["제빵"],
+                "topic_pairs": ["요리>제빵", "베이킹"],
             },
         }
         row = os_hit_to_row(hit)
@@ -108,6 +109,8 @@ class OsHitToRowTest(unittest.TestCase):
         # 057-후속: 색인 topics/subtopics 통과(결과-좁히기 패싯·클라 필터·필터와 동일 소스).
         self.assertEqual(row["topics"], ["요리", "베이킹"])
         self.assertEqual(row["subtopics"], ["제빵"])
+        # 059 FR-104: 색인 topic_pairs 통과(프론트 트리 짝 파싱용·하위호환 필드).
+        self.assertEqual(row["topic_pairs"], ["요리>제빵", "베이킹"])
 
     def test_row_keys_homogeneous_with_media_search_bucket(self) -> None:
         # SC-005 응답 동형: media_search 버킷 행 핵심 키 집합과 동일(042 domain_label 포함).
@@ -120,10 +123,12 @@ class OsHitToRowTest(unittest.TestCase):
         self.assertEqual(
             set(row),
             {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
-             "topics", "subtopics"},  # 057-후속: 주제 패싯·클라 좁히기용
+             "topics", "subtopics",  # 057-후속: 주제 패싯·클라 좁히기용
+             "topic_pairs"},  # 059: 부모>자식 짝(프론트 트리)
         )
         self.assertEqual(row["domain_label"], "review")
         self.assertEqual(row["topics"], [])  # topics 없는 hit → 빈 리스트(안전)
+        self.assertEqual(row["topic_pairs"], [])  # 059: topic_pairs 없는 hit → 빈 리스트(폴백)
 
     def test_missing_source_safe(self) -> None:
         # 엣지: _source 누락·_score None 안전 처리.
@@ -727,7 +732,9 @@ class FuseHybridTest(unittest.TestCase):
         self.assertEqual(
             set(row),
             {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
-             "topics", "subtopics", "_cos", "_bm25", "_rrtext"},  # 057-후속: topics/subtopics 통과
+             "topics", "subtopics",  # 057-후속: topics/subtopics 통과
+             "topic_pairs",  # 059: 부모>자식 짝 통과
+             "_cos", "_bm25", "_rrtext"},
         )
         self.assertEqual(row["modality"], "text")
 
@@ -1071,7 +1078,8 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             self.assertEqual(
                 set(r),
                 {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
-                 "topics", "subtopics"},  # 057-후속: topics/subtopics 통과(내부키만 strip)
+                 "topics", "subtopics",  # 057-후속: topics/subtopics 통과(내부키만 strip)
+                 "topic_pairs"},  # 059: 부모>자식 짝 통과
             )
 
     def test_gate_pass_keeps_bucket(self) -> None:

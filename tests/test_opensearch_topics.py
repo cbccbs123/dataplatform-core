@@ -18,7 +18,11 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from src.search.opensearch_sync import asset_to_doc, build_index_body
+from src.search.opensearch_sync import (
+    _topics_doc_fields,
+    asset_to_doc,
+    build_index_body,
+)
 
 
 def _topic(topic_ko, subtopic_ko, topic_en, subtopic_en, weight=1):
@@ -59,6 +63,74 @@ class TestIndexBodyTopicMappings(unittest.TestCase):
         props = build_index_body()["mappings"]["properties"]
         self.assertNotIn("topics_text", props)
 
+    def test_topic_pairs_is_keyword(self) -> None:
+        # 059 FR-102 — 부모>자식 짝 보존 필드. topics/subtopics 옆에 keyword(패싯·정확필터).
+        props = build_index_body()["mappings"]["properties"]
+        self.assertEqual(props["topic_pairs"]["type"], "keyword")
+
+
+class TestTopicsDocFieldsTopicPairs(unittest.TestCase):
+    """T101 — _topics_doc_fields 의 topic_pairs 조립(순수·결정적) + 평면필드 불변."""
+
+    def test_topic_pairs_join_parent_child(self) -> None:
+        # 각 짝은 "topic_ko>subtopic_ko" — 부모·자식이 한 문자열로 보존된다(교차곱 오배치 방지).
+        fields = _topics_doc_fields(
+            [
+                _topic("음식·요리", "먹방", "food", "mukbang"),
+                _topic("IT·기술", "데이터", "it", "data"),
+            ]
+        )
+        self.assertEqual(fields["topic_pairs"], ["음식·요리>먹방", "IT·기술>데이터"])
+
+    def test_topic_pairs_standalone_when_no_subtopic(self) -> None:
+        # subtopic 이 None/"" 이면 topic_ko 단독으로 넣는다(짝 없는 주제도 트리 루트로 표시).
+        fields = _topics_doc_fields(
+            [_topic("음식·요리", None, "food", ""), _topic("음악", "", "music", "")]
+        )
+        self.assertEqual(fields["topic_pairs"], ["음식·요리", "음악"])
+
+    def test_topic_pairs_dedup_in_order(self) -> None:
+        # 같은 짝 반복은 첫 등장만 남기고 입력 순서 보존(결정적, _dedup_in_order 재사용).
+        fields = _topics_doc_fields(
+            [
+                _topic("음식·요리", "먹방", "food", "mukbang"),
+                _topic("IT·기술", "데이터", "it", "data"),
+                _topic("음식·요리", "먹방", "food", "mukbang"),  # 중복 짝
+                _topic("음식·요리", None, "food", ""),  # 단독(다른 문자열)
+            ]
+        )
+        self.assertEqual(
+            fields["topic_pairs"],
+            ["음식·요리>먹방", "IT·기술>데이터", "음식·요리"],
+        )
+
+    def test_spec_example_pairs_and_flat_fields(self) -> None:
+        # spec 059 개요 예시: 멀티토픽 자산의 짝 보존 + 평면 필드 값(회귀 가드).
+        fields = _topics_doc_fields(
+            [
+                _topic("음식·요리", "먹방", "food", "mukbang"),
+                _topic("IT·기술", "데이터", "it", "data"),
+                _topic("음식·요리", None, "food", ""),
+            ]
+        )
+        self.assertEqual(
+            fields["topic_pairs"], ["음식·요리>먹방", "IT·기술>데이터", "음식·요리"]
+        )
+        # 평면 topics/subtopics 는 059 전과 **바이트 동일**해야 한다(랭킹·필터 무회귀).
+        self.assertEqual(fields["topics"], ["음식·요리", "IT·기술"])
+        self.assertEqual(fields["subtopics"], ["먹방", "데이터"])
+
+    def test_flat_fields_unchanged_by_topic_pairs_addition(self) -> None:
+        # 회귀 가드: topic_pairs 추가가 기존 평면 topics/subtopics 로직을 건드리지 않는다.
+        topics = [
+            _topic("요리", "제빵", "cooking", "baking"),
+            _topic("요리", "제과", "cooking", "confectionery"),
+            _topic("음악", "재즈", "music", "jazz"),
+        ]
+        fields = _topics_doc_fields(topics)
+        self.assertEqual(fields["topics"], ["요리", "음악"])
+        self.assertEqual(fields["subtopics"], ["제빵", "제과", "재즈"])
+
 
 class TestAssetToDocTopics(unittest.TestCase):
     """T401 — asset_to_doc 의 topics 수록·하위호환."""
@@ -71,8 +143,22 @@ class TestAssetToDocTopics(unittest.TestCase):
         )
         self.assertEqual(doc["topics"], ["요리"])
         self.assertEqual(doc["subtopics"], ["제빵"])
+        # 059 FR-101 — asset_to_doc(전체문서)도 단일 출처(_topics_doc_fields) 경유라 짝 자동 반영.
+        self.assertEqual(doc["topic_pairs"], ["요리>제빵"])
         # topics_text(BM25 보강)는 색인하지 않는다 — keyword 패싯/필터만.
         self.assertNotIn("topics_text", doc)
+
+    def test_topic_pairs_present_in_full_doc(self) -> None:
+        # 멀티토픽(짝 손실 케이스) — 전체문서에 짝이 부모별로 보존된다(교차곱 방지·SC-02 계약).
+        doc = asset_to_doc(
+            _row(),
+            channel="st",
+            topics=[
+                _topic("음식·요리", "먹방", "food", "mukbang"),
+                _topic("IT·기술", "데이터", "it", "data"),
+            ],
+        )
+        self.assertEqual(doc["topic_pairs"], ["음식·요리>먹방", "IT·기술>데이터"])
 
     def test_multiple_topics_dedup_topic_ko_in_order(self) -> None:
         # 같은 topic_ko 가 여러 subtopic 으로 오면 topics(keyword)는 dedup, 입력 순서 보존(결정적).
@@ -141,6 +227,8 @@ class TestUpdateAssetTopics(unittest.TestCase):
         partial = body["doc"]
         self.assertEqual(partial["topics"], ["요리"])
         self.assertEqual(partial["subtopics"], ["제빵"])
+        # 059 FR-101 — 부분문서 갱신도 단일 출처(_topics_doc_fields) 경유라 topic_pairs 자동 반영.
+        self.assertEqual(partial["topic_pairs"], ["요리>제빵"])
         self.assertNotIn("topics_text", partial)  # BM25 보강 필드 미색인
 
     def test_id_coerced_to_str(self) -> None:

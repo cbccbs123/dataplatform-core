@@ -78,6 +78,9 @@ def _shape(row: dict[str, Any], modality: str) -> dict[str, Any]:
         # 이 topics 로 클라 필터(재검색 없이) → 패싯 수와 표시 수 일치·컷오프 무관.
         "topics": [str(t) for t in (row.get("topics") or [])],
         "subtopics": [str(t) for t in (row.get("subtopics") or [])],
+        # 059 FR-104: 부모>자식 짝(topic_pairs)을 응답 행에 통과시켜 프론트가 topic→subtopic 트리를
+        # 교차곱 오배치 없이 그리게 한다(하위호환 필드·미존재 시 [] 폴백·os_hit_to_row 색인 짝 통과).
+        "topic_pairs": [str(t) for t in (row.get("topic_pairs") or [])],
     }
 
 

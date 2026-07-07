@@ -66,6 +66,7 @@ class TestGroupRanked(unittest.TestCase):
                     "domain_label": "review",
                     "topics": ["요리"],
                     "subtopics": ["제빵"],
+                    "topic_pairs": ["요리>제빵"],
                 }
             ]}
         )
@@ -73,7 +74,8 @@ class TestGroupRanked(unittest.TestCase):
         self.assertEqual(
             set(item.keys()),
             {"asset_id", "modality", "similarity", "summary", "file_name", "domain_label",
-             "topics", "subtopics"},  # 057-후속: 주제 패싯·클라 좁히기용 통과
+             "topics", "subtopics",  # 057-후속: 주제 패싯·클라 좁히기용 통과
+             "topic_pairs"},  # 059: 부모>자식 짝(프론트 트리) 통과
         )
         self.assertEqual(item["modality"], "text")
         self.assertEqual(item["domain_label"], "review")
@@ -81,6 +83,15 @@ class TestGroupRanked(unittest.TestCase):
         self.assertEqual(item["summary"], "S")
         self.assertEqual(item["topics"], ["요리"])
         self.assertEqual(item["subtopics"], ["제빵"])
+        self.assertEqual(item["topic_pairs"], ["요리>제빵"])
+
+    def test_topic_pairs_default_empty_when_absent(self) -> None:
+        # 059: topic_pairs 없는 행(하위호환)도 안전하게 빈 리스트로 통과한다.
+        from src.portal.search_group import group_ranked
+
+        result = _result({"text_documents": [{"id": "a", "similarity": 0.5}]})
+        item = group_ranked(result, limit_per_modality=20)["text"][0]
+        self.assertEqual(item["topic_pairs"], [])
 
     def test_all_modality_labels(self) -> None:
         # 4개 버킷 키가 각각 text/audio/image/video 섹션으로 매핑된다.
