@@ -234,7 +234,7 @@ class TestApplyDraft(unittest.TestCase):
 
 
 class TestReviewedDraftFile(unittest.TestCase):
-    """검수 반영본(seed_topic_draft.json)이 3건 교정을 담고 적재 계약과 정합함을 확인(파일 파싱만·DB 0)."""
+    """검수 반영본(seed_topic_draft.json)이 3건 교정 + T502 후속 2건 병합을 담고 적재 계약과 정합함을 확인(파일 파싱만·DB 0)."""
 
     def test_corrections_present_and_load_semantics(self):
         draft = read_draft(_DEFAULT_DRAFT_PATH)
@@ -245,17 +245,25 @@ class TestReviewedDraftFile(unittest.TestCase):
         # 레저/여가·서예/캘리그라피 분리 — 넷 다 정본
         for k in ("레저", "여가", "서예", "캘리그라피"):
             self.assertIn(k, cks)
+        # T502 후속 근접-동의어 부모 병합 2건 — 식품→요리·식음료→음료(정본 유지·단독 아님)
+        self.assertIn("요리", cks)
+        self.assertIn("음료", cks)
+        self.assertNotIn("식품", cks)
+        self.assertNotIn("식음료", cks)
         aliases = {(r["raw_ko"], r["canonical_ko"]) for r in draft_alias_entries(draft)}
         self.assertIn(("천문학", "천문"), aliases)  # 병합 유지
+        # T502 후속 병합 alias — 식품→요리·식음료→음료
+        self.assertIn(("식품", "요리"), aliases)
+        self.assertIn(("식음료", "음료"), aliases)
         # 분리 그룹은 상호 alias 없음
         self.assertNotIn(("여가", "레저"), aliases)
         self.assertNotIn(("레저", "여가"), aliases)
         self.assertNotIn(("캘리그라피", "서예"), aliases)
         self.assertNotIn(("서예", "캘리그라피"), aliases)
-        # stats 정합
-        self.assertEqual(draft["stats"]["n_canonical"], 111)
-        self.assertEqual(draft["stats"]["n_merged_groups"], 9)
-        self.assertEqual(draft["stats"]["n_singleton"], 102)
+        # stats 정합(111→109·병합 9→10·단독 102→99)
+        self.assertEqual(draft["stats"]["n_canonical"], 109)
+        self.assertEqual(draft["stats"]["n_merged_groups"], 10)
+        self.assertEqual(draft["stats"]["n_singleton"], 99)
 
 
 if __name__ == "__main__":
