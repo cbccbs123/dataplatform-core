@@ -287,7 +287,10 @@ def _topic_pair(topic_ko: Any, subtopic_ko: Any) -> str:
 
     subtopic 이 None/"" 이면 ``topic_ko`` 단독으로 돌려준다(짝 없는 주제도 트리 루트로 표시).
     구분자 ``>`` 는 정규화 라벨에 나타나지 않는 문자다(라벨은 한 어절·``·`` 만 허용) → 충돌 0·프론트
-    파싱 계약(C2). ``topic_ko`` 가 falsy 면 빈 문자열을 돌려주고 ``_dedup_in_order`` 가 스킵한다
+    파싱 계약(C2). **프론트 파싱 계약: 첫 ``>`` 로만 분할한다**(``split('>', 1)``) — topic 층은
+    닫힌 통제어휘(058·``>`` 불포함)라 항상 첫 토큰으로 정확히 복원되고, 만에 하나 열린 subtopic
+    라벨에 ``>`` 가 섞여도 부모 오배치(교차곱)는 나지 않는다(subtopic 표기만 그대로 보존).
+    ``topic_ko`` 가 falsy 면 빈 문자열을 돌려주고 ``_dedup_in_order`` 가 스킵한다
     (평면 ``topics`` 가 falsy topic_ko 를 스킵하는 것과 동형).
     """
     tk = str(topic_ko) if topic_ko else ""
