@@ -1,7 +1,13 @@
-"""백필 topic 정규화 스크립트 단위 테스트(spec 058 G6 · T601/T602).
+"""백필 topic 정규화 스크립트 v2 단위 테스트(spec 058 v2 · G12 · T1201 · FR-501v2·C6·C7).
 
-순수 재작성 계산(주입 seam)·SC 판정(01/03/04/07)·DB 해소 결선의 **LLM 0 불변식**을 실 DB 없이 덮는다.
-해소 seam(alias 룩업·canonicalize_subtopic)은 가짜로 주입해 조립·규칙만 검증한다(docs/테스트_가이드 §seam).
+v2 백필은 **distinct (old_topic, old_subtopic) 쌍** 단위로 LLM 이 (범주 분류 + 주제어 subtopic 선정)을
+결정해 캐시 동결하고 엣지를 재작성한다. 실 DB/LLM 없이 다음을 덮는다:
+  - 후보 구성(``_candidate_sources``)·주제어 선정(``select_subtopic_term``·주입 select seam)의 순수 규칙
+  - LLM 선정 seam(``_llm_select_subtopic``·complete_json mock)의 후보-강제·NONE 방어
+  - 쌍→엣지 재작성 계획 조립(``build_plan``·주입 resolve_pair seam)·en 유도
+  - SC 판정(topic∩subtopic·모달리티·distinct·기타율·분포)·리포트 포맷
+  - DB 결선(``make_pair_resolver``)의 쌍 캐시(엣지수 아닌 쌍수만 LLM)
+해소 seam(canonicalize_topic·select·canonicalize_subtopic)은 가짜 주입으로 조립·규칙만 검증한다.
 """
 from __future__ import annotations
 
@@ -9,205 +15,333 @@ import unittest
 from unittest import mock
 
 from scripts.backfill_topic_canonical import (
+    _candidate_sources,
+    _llm_select_subtopic,
     build_plan,
+    etc_rate,
     format_report_lines,
-    make_db_resolvers,
-    rewrite_topic_row,
+    make_pair_resolver,
+    mapping_sample,
     sc03_topic_subtopic_overlap,
     sc04_modality_subtopics,
     sc07_distinct_topics,
+    select_subtopic_term,
     summarize_plan,
+    topic_distribution,
 )
 
 
-def _resolve_topic_via(alias: dict[str, str], reg_en: dict[str, str]):
-    """가짜 resolve_topic — alias 정확일치(미스=원본 유지)·registry en 폴백."""
+# ────────────────────────────────────────────────────────────────────────────
+# 후보 구성(_candidate_sources) — 순수
+# ────────────────────────────────────────────────────────────────────────────
+class TestCandidateSources(unittest.TestCase):
+    def test_both_present_distinct(self):
+        # subtopic·topic 둘 다 후보(빈/모달 아님) — 각 출처 표식.
+        srcs = _candidate_sources("요리", "김밥")
+        self.assertEqual(srcs, {"김밥": "subtopic", "요리": "topic"})
 
-    def _fn(topic_ko: str, topic_en: str):
-        hit = alias.get(topic_ko)
-        alias_miss = hit is None and bool(topic_ko.strip())
-        canonical_ko = hit if hit is not None else topic_ko
-        canonical_en = reg_en.get(canonical_ko) or topic_en
-        return canonical_ko, canonical_en, alias_miss
+    def test_modality_subtopic_excluded(self):
+        srcs = _candidate_sources("요리", "텍스트")
+        self.assertEqual(srcs, {"요리": "topic"})
+
+    def test_modality_topic_excluded(self):
+        srcs = _candidate_sources("영상", "폭포")
+        self.assertEqual(srcs, {"폭포": "subtopic"})
+
+    def test_empty_subtopic_only_topic(self):
+        srcs = _candidate_sources("스포츠", "")
+        self.assertEqual(srcs, {"스포츠": "topic"})
+
+    def test_same_string_prefers_subtopic_source(self):
+        srcs = _candidate_sources("등산", "등산")
+        self.assertEqual(srcs, {"등산": "subtopic"})
+
+    def test_all_empty(self):
+        self.assertEqual(_candidate_sources("", ""), {})
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 주제어 선정(select_subtopic_term) — 순수(select seam 주입)
+# ────────────────────────────────────────────────────────────────────────────
+class TestSelectSubtopicTerm(unittest.TestCase):
+    def test_no_candidates_returns_none_without_calling_llm(self):
+        calls = []
+
+        def _sel(nt, cands):
+            calls.append((nt, cands))
+            return "x"
+
+        chosen, source = select_subtopic_term("음식·요리", "", "텍스트", select_fn=_sel)
+        self.assertEqual((chosen, source), (None, None))
+        self.assertEqual(calls, [])  # 후보 0 → LLM 미호출
+
+    def test_picks_subtopic(self):
+        # (요리, 김밥) → LLM 이 김밥 선택 → source=subtopic.
+        chosen, source = select_subtopic_term(
+            "음식·요리", "요리", "김밥", select_fn=lambda nt, cands: "김밥"
+        )
+        self.assertEqual((chosen, source), ("김밥", "subtopic"))
+
+    def test_picks_topic(self):
+        # (등산, 입문) → LLM 이 등산(옛 topic) 선택 → source=topic.
+        chosen, source = select_subtopic_term(
+            "스포츠·레저", "등산", "입문", select_fn=lambda nt, cands: "등산"
+        )
+        self.assertEqual((chosen, source), ("등산", "topic"))
+
+    def test_single_candidate_still_offered_to_llm_can_reject(self):
+        # (스포츠, "") 처럼 후보 1개(스포츠·범주급 광의어)여도 LLM 에 넘겨 거부(NONE) 가능해야 한다.
+        seen = {}
+
+        def _sel(nt, cands):
+            seen["cands"] = cands
+            return None  # LLM 이 광의어 거부
+
+        chosen, source = select_subtopic_term("스포츠·레저", "스포츠", "", select_fn=_sel)
+        self.assertEqual((chosen, source), (None, None))
+        self.assertEqual(seen["cands"], ["스포츠"])  # 단일 후보도 LLM 에 제시
+
+    def test_llm_returns_noncandidate_is_dropped(self):
+        chosen, source = select_subtopic_term(
+            "음식·요리", "요리", "김밥", select_fn=lambda nt, cands: "라면"
+        )
+        self.assertEqual((chosen, source), (None, None))
+
+    def test_candidate_order_subtopic_first(self):
+        # 후보 목록은 구체(subtopic) 우선으로 제시(광의 topic 뒤).
+        seen = {}
+        select_subtopic_term(
+            "스포츠·레저", "등산", "보행법",
+            select_fn=lambda nt, cands: seen.setdefault("c", cands) and None,
+        )
+        self.assertEqual(seen["c"], ["보행법", "등산"])
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# LLM 선정 seam(_llm_select_subtopic) — complete_json mock
+# ────────────────────────────────────────────────────────────────────────────
+class TestLlmSelectSubtopic(unittest.TestCase):
+    def test_valid_pick_in_candidates(self):
+        with mock.patch("src.llm.client.complete_json", return_value={"subtopic": "김밥"}):
+            self.assertEqual(_llm_select_subtopic("음식·요리", ["김밥", "요리"]), "김밥")
+
+    def test_pick_not_in_candidates_returns_none(self):
+        with mock.patch("src.llm.client.complete_json", return_value={"subtopic": "라면"}):
+            self.assertIsNone(_llm_select_subtopic("음식·요리", ["김밥", "요리"]))
+
+    def test_none_verdict_returns_none(self):
+        with mock.patch("src.llm.client.complete_json", return_value={"subtopic": "NONE"}):
+            self.assertIsNone(_llm_select_subtopic("스포츠·레저", ["스포츠"]))
+
+    def test_empty_response_returns_none(self):
+        with mock.patch("src.llm.client.complete_json", return_value={}):
+            self.assertIsNone(_llm_select_subtopic("음식·요리", ["김밥"]))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 쌍→엣지 재작성 계획(build_plan) — 순수(resolve_pair seam 주입)
+# ────────────────────────────────────────────────────────────────────────────
+def _fake_resolver(mapping: dict[tuple[str, str], dict]):
+    """가짜 resolve_pair — (topic_ko, subtopic_ko) → 결정 dict(고정 매핑)."""
+
+    def _fn(topic_ko: str, subtopic_ko: str) -> dict:
+        return mapping[(topic_ko, subtopic_ko)]
 
     return _fn
 
 
-def _resolve_subtopic_via(topic_labels: set[str], modality: set[str]):
-    """가짜 resolve_subtopic — 모달리티어/정본 topic 라벨이면 None(비움), 아니면 그대로."""
-
-    def _fn(canonical_ko: str, subtopic_ko: str):
-        if not subtopic_ko or not subtopic_ko.strip():
-            return None
-        if subtopic_ko.lower() in modality:
-            return None
-        if subtopic_ko in topic_labels:
-            return None
-        return subtopic_ko
-
-    return _fn
-
-
-class TestRewriteTopicRow(unittest.TestCase):
+class TestBuildPlanV2(unittest.TestCase):
     def setUp(self):
-        # 요리←음식 병합, 요리 en=cooking. 정본 topic 라벨 집합 {요리, 자전거}. 모달리티 {텍스트, 오디오}.
-        self.rt = _resolve_topic_via({"음식": "요리", "요리": "요리", "자전거": "자전거"},
-                                     {"요리": "cooking", "자전거": "bicycle"})
-        self.rs = _resolve_subtopic_via({"요리", "자전거"}, {"텍스트", "오디오"})
-
-    def test_alias_hit_rewrites_topic_to_canonical(self):
-        old = {"topic_ko": "음식", "subtopic_ko": "김밥", "topic_en": "food", "subtopic_en": "gimbap"}
-        new, changed, flags = rewrite_topic_row(old, self.rt, self.rs)
-        self.assertEqual(new["topic_ko"], "요리")
-        self.assertEqual(new["topic_en"], "cooking")
-        self.assertEqual(new["subtopic_ko"], "김밥")  # 일반 subtopic 유지
-        self.assertEqual(new["subtopic_en"], "gimbap")
-        self.assertTrue(changed)
-        self.assertTrue(flags["topic_changed"])
-        self.assertFalse(flags["alias_miss"])
-
-    def test_alias_miss_keeps_original_topic(self):
-        old = {"topic_ko": "양자컴퓨팅", "subtopic_ko": "큐비트",
-               "topic_en": "quantum", "subtopic_en": "qubit"}
-        new, changed, flags = rewrite_topic_row(old, self.rt, self.rs)
-        self.assertEqual(new["topic_ko"], "양자컴퓨팅")  # 미스 → 원본 유지(비파괴)
-        self.assertEqual(new["topic_en"], "quantum")
-        self.assertTrue(flags["alias_miss"])
-        self.assertFalse(flags["topic_changed"])
-        self.assertFalse(changed)  # subtopic 도 정상(비모달·비topic) → 변경 없음
-
-    def test_topic_en_falls_back_when_registry_en_missing(self):
-        # 정본 en 이 없으면(등록 en None) 기존 topic_en 보존(빈 라벨 방지).
-        rt = _resolve_topic_via({"음식": "요리"}, {})  # reg_en 비어 → canonical_en=원본 en
-        old = {"topic_ko": "음식", "subtopic_ko": "", "topic_en": "food", "subtopic_en": ""}
-        new, _, _ = rewrite_topic_row(old, rt, self.rs)
-        self.assertEqual(new["topic_ko"], "요리")
-        self.assertEqual(new["topic_en"], "food")  # 정본 en 없음 → 원본 보존
-
-    def test_subtopic_modality_cleared(self):
-        old = {"topic_ko": "요리", "subtopic_ko": "텍스트", "topic_en": "cooking", "subtopic_en": "text"}
-        new, changed, flags = rewrite_topic_row(old, self.rt, self.rs)
-        self.assertEqual(new["subtopic_ko"], "")  # 모달리티어 → 비움
-        self.assertEqual(new["subtopic_en"], "")  # en 도 함께 비움
-        self.assertTrue(flags["subtopic_cleared"])
-        self.assertTrue(changed)
-
-    def test_subtopic_hierarchy_cleared(self):
-        # subtopic 이 정본 topic 라벨(자전거)이면 계층 규칙으로 비움.
-        old = {"topic_ko": "요리", "subtopic_ko": "자전거", "topic_en": "cooking", "subtopic_en": "bicycle"}
-        new, changed, flags = rewrite_topic_row(old, self.rt, self.rs)
-        self.assertEqual(new["subtopic_ko"], "")
-        self.assertTrue(flags["subtopic_cleared"])
-
-    def test_no_change_when_already_canonical(self):
-        old = {"topic_ko": "요리", "subtopic_ko": "김밥", "topic_en": "cooking", "subtopic_en": "gimbap"}
-        new, changed, flags = rewrite_topic_row(old, self.rt, self.rs)
-        self.assertFalse(changed)
-        self.assertEqual(new, {"topic_ko": "요리", "subtopic_ko": "김밥",
-                               "topic_en": "cooking", "subtopic_en": "gimbap"})
-
-
-class TestBuildPlanAndSC(unittest.TestCase):
-    def setUp(self):
-        self.rt = _resolve_topic_via({"음식": "요리", "요리": "요리", "등산": "등산", "여가": "여가"},
-                                     {"요리": "cooking", "등산": "hiking", "여가": "leisure"})
-        # 정본 topic 라벨 집합에 '등산' 포함 → subtopic '등산' 은 계층 규칙으로 비워짐(SC-03 후 0).
-        self.rs = _resolve_subtopic_via({"요리", "등산", "여가"}, {"텍스트", "오디오", "영상", "이미지"})
         self.rows = [
-            {"edge_id": "e1", "topic_ko": "음식", "subtopic_ko": "김밥",
-             "topic_en": "food", "subtopic_en": "gimbap"},
-            {"edge_id": "e2", "topic_ko": "여가", "subtopic_ko": "등산",  # subtopic=정본 topic → 비움
-             "topic_en": "leisure", "subtopic_en": "hiking"},
-            {"edge_id": "e3", "topic_ko": "요리", "subtopic_ko": "오디오",  # 모달리티 → 비움
-             "topic_en": "cooking", "subtopic_en": "audio"},
+            {"edge_id": "e1", "topic_ko": "요리", "subtopic_ko": "김밥",
+             "topic_en": "cooking", "subtopic_en": "gimbap"},
+            {"edge_id": "e2", "topic_ko": "등산", "subtopic_ko": "입문",
+             "topic_en": "hiking", "subtopic_en": "intro"},
+            {"edge_id": "e3", "topic_ko": "스포츠", "subtopic_ko": "",
+             "topic_en": "sports", "subtopic_en": ""},
         ]
+        self.mapping = {
+            # (요리,김밥): 옛 subtopic 김밥이 subtopic 유지 → source subtopic → en 은 subtopic_en.
+            ("요리", "김밥"): {"new_topic_ko": "음식·요리", "new_topic_en": "food_cooking",
+                              "new_subtopic_ko": "김밥", "selected_source": "subtopic"},
+            # (등산,입문): 옛 topic 등산이 subtopic 로 → source topic → en 은 topic_en.
+            ("등산", "입문"): {"new_topic_ko": "스포츠·레저", "new_topic_en": "sports_leisure",
+                              "new_subtopic_ko": "등산", "selected_source": "topic"},
+            # (스포츠,""): 광의어만 → subtopic None(비움).
+            ("스포츠", ""): {"new_topic_ko": "스포츠·레저", "new_topic_en": "sports_leisure",
+                            "new_subtopic_ko": None, "selected_source": None},
+        }
 
-    def test_build_plan_covers_all_rows(self):
-        plan = build_plan(self.rows, self.rt, self.rs)
-        self.assertEqual(len(plan), 3)
-        self.assertEqual([p["edge_id"] for p in plan], ["e1", "e2", "e3"])
+    def test_assembles_new_topic_and_subtopic(self):
+        plan = build_plan(self.rows, _fake_resolver(self.mapping))
+        p1 = plan[0]
+        self.assertEqual(p1["new"], {"topic_ko": "음식·요리", "subtopic_ko": "김밥",
+                                     "topic_en": "food_cooking", "subtopic_en": "gimbap"})
+        self.assertTrue(p1["changed"])
+        self.assertTrue(p1["flags"]["topic_changed"])
 
-    def test_sc07_distinct_topics_shrinks(self):
-        plan = build_plan(self.rows, self.rt, self.rs)
-        news = [p["new"] for p in plan]
-        # 음식→요리 병합: {요리, 여가} = 2 (원본은 음식/여가/요리 = 3)
-        self.assertEqual(sc07_distinct_topics(news), 2)
-        olds = [p["old"] for p in plan]
-        self.assertEqual(sc07_distinct_topics(olds), 3)
+    def test_old_topic_promoted_to_subtopic_uses_topic_en(self):
+        plan = build_plan(self.rows, _fake_resolver(self.mapping))
+        p2 = plan[1]
+        # subtopic 이 옛 topic(등산)에서 왔으니 subtopic_en 은 옛 topic_en(hiking).
+        self.assertEqual(p2["new"]["subtopic_ko"], "등산")
+        self.assertEqual(p2["new"]["subtopic_en"], "hiking")
+        self.assertEqual(p2["new"]["topic_ko"], "스포츠·레저")
 
-    def test_sc03_overlap_zero_after(self):
-        plan = build_plan(self.rows, self.rt, self.rs)
-        news = [p["new"] for p in plan]
-        # 재작성 후 topic∩subtopic 라벨 0 (등산 subtopic 비워짐)
+    def test_subtopic_stays_empty_when_decision_none(self):
+        # e3 (스포츠, "") → 광의어라 subtopic None. 원래 빈값이라 비움은 아니고 topic 만 변경.
+        plan = build_plan(self.rows, _fake_resolver(self.mapping))
+        p3 = plan[2]
+        self.assertEqual(p3["new"]["subtopic_ko"], "")
+        self.assertEqual(p3["new"]["subtopic_en"], "")
+        self.assertFalse(p3["flags"]["subtopic_changed"])  # "" → "" 변경 없음
+        self.assertTrue(p3["flags"]["topic_changed"])
+
+    def test_nonempty_subtopic_cleared_when_decision_none(self):
+        # 비지 않은 subtopic 이 결정 None(모달/범용)이면 비움 플래그.
+        rows = [{"edge_id": "z", "topic_ko": "배경", "subtopic_ko": "텍스트",
+                 "topic_en": "bg", "subtopic_en": "text"}]
+        mapping = {("배경", "텍스트"): {"new_topic_ko": "미분류", "new_topic_en": "unclassified",
+                                      "new_subtopic_ko": None, "selected_source": None}}
+        plan = build_plan(rows, _fake_resolver(mapping))
+        self.assertEqual(plan[0]["new"]["subtopic_ko"], "")
+        self.assertTrue(plan[0]["flags"]["subtopic_cleared"])
+
+    def test_etc_flag_when_topic_is_etc(self):
+        rows = [{"edge_id": "x", "topic_ko": "배경", "subtopic_ko": "",
+                 "topic_en": "bg", "subtopic_en": ""}]
+        mapping = {("배경", ""): {"new_topic_ko": "미분류", "new_topic_en": "unclassified",
+                                 "new_subtopic_ko": None, "selected_source": None}}
+        plan = build_plan(rows, _fake_resolver(mapping))
+        self.assertTrue(plan[0]["flags"]["etc_topic"])
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# SC 판정·분포·리포트 — 순수
+# ────────────────────────────────────────────────────────────────────────────
+class TestScAndReport(unittest.TestCase):
+    def _plan(self):
+        rows = [
+            {"edge_id": "e1", "topic_ko": "요리", "subtopic_ko": "김밥",
+             "topic_en": "cooking", "subtopic_en": "gimbap"},
+            {"edge_id": "e2", "topic_ko": "등산", "subtopic_ko": "입문",
+             "topic_en": "hiking", "subtopic_en": "intro"},
+            {"edge_id": "e3", "topic_ko": "스포츠", "subtopic_ko": "",
+             "topic_en": "sports", "subtopic_en": ""},
+            {"edge_id": "e4", "topic_ko": "배경", "subtopic_ko": "텍스트",
+             "topic_en": "bg", "subtopic_en": "text"},
+        ]
+        mapping = {
+            ("요리", "김밥"): {"new_topic_ko": "음식·요리", "new_topic_en": "food_cooking",
+                              "new_subtopic_ko": "김밥", "selected_source": "subtopic"},
+            ("등산", "입문"): {"new_topic_ko": "스포츠·레저", "new_topic_en": "sports_leisure",
+                              "new_subtopic_ko": "등산", "selected_source": "topic"},
+            ("스포츠", ""): {"new_topic_ko": "스포츠·레저", "new_topic_en": "sports_leisure",
+                            "new_subtopic_ko": None, "selected_source": None},
+            ("배경", "텍스트"): {"new_topic_ko": "미분류", "new_topic_en": "unclassified",
+                               "new_subtopic_ko": None, "selected_source": None},
+        }
+        return build_plan(rows, _fake_resolver(mapping))
+
+    def test_sc07_distinct_new_topics(self):
+        news = [p["new"] for p in self._plan()]
+        # 음식·요리, 스포츠·레저(x2), 기타 = 3 distinct.
+        self.assertEqual(sc07_distinct_topics(news), 3)
+
+    def test_sc03_no_overlap_after(self):
+        news = [p["new"] for p in self._plan()]
         self.assertEqual(sc03_topic_subtopic_overlap(news), [])
 
-    def test_sc04_modality_zero_after(self):
-        plan = build_plan(self.rows, self.rt, self.rs)
-        news = [p["new"] for p in plan]
+    def test_sc04_no_modality_after(self):
+        news = [p["new"] for p in self._plan()]
         self.assertEqual(sc04_modality_subtopics(news), [])
-        # 원본에는 오디오 모달리티 subtopic 존재
-        olds = [p["old"] for p in plan]
-        self.assertEqual(sc04_modality_subtopics(olds), ["오디오"])
+        # 원본엔 텍스트 모달리티 subtopic 존재.
+        olds = [p["old"] for p in self._plan()]
+        self.assertEqual(sc04_modality_subtopics(olds), ["텍스트"])
 
-    def test_summarize_plan_metrics(self):
-        plan = build_plan(self.rows, self.rt, self.rs)
-        rep = summarize_plan(plan)
-        self.assertEqual(rep["n_edges"], 3)
-        self.assertEqual(rep["sc07_before"], 3)
-        self.assertEqual(rep["sc07_after"], 2)
+    def test_topic_distribution(self):
+        news = [p["new"] for p in self._plan()]
+        dist = topic_distribution(news)
+        self.assertEqual(dist["스포츠·레저"], 2)
+        self.assertEqual(dist["음식·요리"], 1)
+        self.assertEqual(dist["미분류"], 1)
+
+    def test_etc_rate(self):
+        news = [p["new"] for p in self._plan()]
+        n_etc, n_total = etc_rate(news)
+        self.assertEqual((n_etc, n_total), (1, 4))
+
+    def test_summarize_and_format(self):
+        rep = summarize_plan(self._plan())
+        self.assertEqual(rep["n_edges"], 4)
+        self.assertEqual(rep["sc07_after"], 3)
         self.assertEqual(rep["sc03_after"], [])
         self.assertEqual(rep["sc04_after"], [])
-        self.assertEqual(rep["alias_miss"], [])  # 전 topic 커버
-        self.assertEqual(rep["n_subtopic_cleared"], 2)  # e2(등산)·e3(오디오)
-
-    def test_format_report_lines_smoke(self):
-        rep = summarize_plan(build_plan(self.rows, self.rt, self.rs))
+        self.assertEqual(rep["n_etc"], 1)
+        self.assertEqual(rep["n_pairs"], 4)
         lines = format_report_lines(rep, mode="dry-run")
-        self.assertTrue(any("SC-07" in ln for ln in lines))
-        self.assertTrue(any("SC-03" in ln for ln in lines))
-        self.assertTrue(any("SC-04" in ln for ln in lines))
+        self.assertTrue(any("topic∩subtopic" in ln for ln in lines))
+        self.assertTrue(any("미분류율" in ln for ln in lines))
+        self.assertTrue(any("분포" in ln for ln in lines))
+
+    def test_mapping_sample_distinct_pairs(self):
+        sample = mapping_sample(self._plan(), n=20)
+        # distinct 쌍 4개 · old→new 표기 포함.
+        self.assertEqual(len(sample), 4)
+        keys = {(s["old_topic"], s["old_subtopic"]) for s in sample}
+        self.assertIn(("요리", "김밥"), keys)
+        one = next(s for s in sample if s["old_topic"] == "요리")
+        self.assertEqual(one["new_topic"], "음식·요리")
+        self.assertEqual(one["new_subtopic"], "김밥")
+        self.assertEqual(one["count"], 1)
 
 
-class TestDbResolversLLMZero(unittest.TestCase):
-    """DB 해소 결선(make_db_resolvers)이 alias 룩업·canonicalize_subtopic 만 쓰고 LLM/kNN/register 0 임을 단언."""
+# ────────────────────────────────────────────────────────────────────────────
+# DB 결선 쌍 캐시(make_pair_resolver) — 엣지수 아닌 쌍수만 LLM
+# ────────────────────────────────────────────────────────────────────────────
+class TestMakePairResolver(unittest.TestCase):
+    def test_pair_cache_computes_once(self):
+        import scripts.backfill_topic_canonical as bf
 
-    def test_resolvers_use_only_lookup_seams_and_memoize(self):
-        import src.relations.topic_canonicalize as tc
+        with mock.patch.object(
+            bf, "canonicalize_topic",
+            return_value={"canonical_ko": "음식·요리", "canonical_en": "food_cooking",
+                          "decided_by": "classify"},
+        ) as m_topic, \
+            mock.patch.object(bf, "_llm_select_subtopic", return_value="김밥") as m_sel, \
+            mock.patch.object(bf, "canonicalize_subtopic", return_value="김밥") as m_sub:
+            resolve, stats = bf.make_pair_resolver(conn=object())
+            d1 = resolve("요리", "김밥")
+            d2 = resolve("요리", "김밥")  # 같은 쌍 → 캐시(재계산 0)
 
-        with mock.patch.object(tc, "lookup_alias", return_value="요리") as m_alias, \
-             mock.patch.object(tc, "_lookup_topic_en", return_value="cooking") as m_en, \
-             mock.patch.object(tc, "canonicalize_subtopic", return_value="김밥") as m_sub, \
-             mock.patch.object(tc, "knn_topic_candidates") as m_knn, \
-             mock.patch.object(tc, "judge_topic") as m_judge, \
-             mock.patch.object(tc, "register_topic") as m_reg, \
-             mock.patch.object(tc, "canonicalize_topic") as m_cano:
-            rt, rs = make_db_resolvers(conn=object())
-            # 같은 키 2회 → 메모이즈로 seam 1회만
-            self.assertEqual(rt("음식", "food"), ("요리", "cooking", False))
-            self.assertEqual(rt("음식", "food"), ("요리", "cooking", False))
-            self.assertEqual(rs("요리", "김밥"), "김밥")
-            self.assertEqual(rs("요리", "김밥"), "김밥")
-
-        m_alias.assert_called_once()  # 메모이즈
-        m_en.assert_called_once()
+        self.assertEqual(d1, d2)
+        self.assertEqual(d1["new_topic_ko"], "음식·요리")
+        self.assertEqual(d1["new_subtopic_ko"], "김밥")
+        self.assertEqual(d1["selected_source"], "subtopic")
+        # 같은 쌍 2회 → 각 seam 1회만(쌍 캐시).
+        m_topic.assert_called_once()
+        m_sel.assert_called_once()
         m_sub.assert_called_once()
-        # LLM/kNN/register/canonicalize_topic 은 백필에서 절대 호출 안 함(결정성·LLM 0)
-        m_knn.assert_not_called()
-        m_judge.assert_not_called()
-        m_reg.assert_not_called()
-        m_cano.assert_not_called()
+        self.assertEqual(stats["n_pairs"], 1)
 
-    def test_alias_miss_keeps_topic_via_db_resolver(self):
-        import src.relations.topic_canonicalize as tc
+    def test_subtopic_none_skips_canonicalize_subtopic(self):
+        import scripts.backfill_topic_canonical as bf
 
-        with mock.patch.object(tc, "lookup_alias", return_value=None), \
-             mock.patch.object(tc, "_lookup_topic_en", return_value=None), \
-             mock.patch.object(tc, "canonicalize_subtopic", return_value=None):
-            rt, _ = make_db_resolvers(conn=object())
-            canonical_ko, canonical_en, alias_miss = rt("양자컴퓨팅", "quantum")
-        self.assertEqual(canonical_ko, "양자컴퓨팅")  # 미스 → 원본 유지
-        self.assertEqual(canonical_en, "quantum")
-        self.assertTrue(alias_miss)
+        with mock.patch.object(
+            bf, "canonicalize_topic",
+            return_value={"canonical_ko": "스포츠·레저", "canonical_en": "sports_leisure",
+                          "decided_by": "classify"},
+        ), \
+            mock.patch.object(bf, "_llm_select_subtopic", return_value=None) as m_sel, \
+            mock.patch.object(bf, "canonicalize_subtopic") as m_sub:
+            resolve, _ = bf.make_pair_resolver(conn=object())
+            d = resolve("스포츠", "")
+
+        self.assertIsNone(d["new_subtopic_ko"])
+        # (스포츠,"") → 후보 1개(스포츠)라 LLM 선정은 호출되나 광의어 거부(None) →
+        # canonicalize_subtopic 은 건너뛴다(주제어 없음·불필요한 등록/kNN 방지).
+        m_sel.assert_called_once()
+        m_sub.assert_not_called()
 
 
 if __name__ == "__main__":

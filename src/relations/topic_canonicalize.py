@@ -5,7 +5,7 @@
     (요리/음식/식품)·계층 불일치·subtopic 충돌(김밥이 요리·식품 양쪽)·모달리티 누수를 낳았다.
     v1 의 "열린 어휘 + 쌍별 동의어 병합"은 실측 3연속 실패(광역 흡수↔충돌 잔존의 진동)로 폐기하고
     **2층 구조**로 전환한다:
-      - **topic 층 = 닫힌 27+기타**(``taxonomy_seed.json`` 정본·``source='taxonomy'``·parent NULL).
+      - **topic 층 = 닫힌 27+미분류**(``taxonomy_seed.json`` 정본·``source='taxonomy'``·parent NULL).
         신규 topic 을 만들지 않는다(고정 대분류) — 자유 라벨을 목록 중 하나로 **분류**할 뿐.
       - **subtopic 층 = 열린 성장 + 부모 스코프**(``parent_topic`` = 부모 topic_ko). 동의어 정리를
         부모 안에서만 수행해 동음이의(교통>사고 ≠ 사회>사고)를 보존하고, 오병합의 폭발 반경을
@@ -13,8 +13,8 @@
 
 topic 해소(``canonicalize_topic``) — 분류(classify)
     ① 빈/None → passthrough. ② 닫힌 정본 집합 정확일치 → 그대로. ③ alias 캐시(parent NULL) 히트
-    → 정본. ④ 미스 → ``classify_topic`` LLM 분류(후보=닫힌 27+기타 전체·temp=0): 목록 중 하나로
-    분류, 애매하면 ``기타``(+제안 라벨 로그) → alias 동결(``decided_by='classify'``). **신규 등록 없음**.
+    → 정본. ④ 미스 → ``classify_topic`` LLM 분류(후보=닫힌 27+미분류 전체·temp=0): 목록 중 하나로
+    분류, 애매하면 ``미분류``(+제안 라벨 로그) → alias 동결(``decided_by='classify'``). **신규 등록 없음**.
 
 subtopic 해소(``canonicalize_subtopic``) — 부모 스코프 retrieve-then-judge
     ⓪ 빈/None·모달리티어·부모 범주명 → None(C7). ① (부모, raw) alias 정확일치 → 정본. ② 미스 →
@@ -119,7 +119,7 @@ def _lookup_topic_en(conn, topic_ko: str) -> str | None:
 def _fetch_canonical_topics(conn) -> dict[str, str | None]:
     """닫힌 정본 topic 집합 조회 → ``{topic_ko: topic_en}`` (v2 topic 층).
 
-    - **스코프**: ``parent_topic IS NULL`` 이고 ``source='taxonomy'`` 인 행만 = 닫힌 27+기타 분류체계
+    - **스코프**: ``parent_topic IS NULL`` 이고 ``source='taxonomy'`` 인 행만 = 닫힌 27+미분류 분류체계
       (``taxonomy_seed.json`` 시드본). subtopic 층·auto 등록 잔재를 배제한다.
     - **결정적 정렬**: ``ORDER BY topic_ko`` — 분류 프롬프트에 넣는 후보 목록 순서를 재실행마다 고정
       (헌법 3조 재현성). dict 는 삽입 순서를 보존하므로 호출부가 그대로 후보 순서로 쓴다.
@@ -186,7 +186,7 @@ def register_topic(
 
     - **임베딩 불변식(plan)**: 비어있지 않은(0-노름 아님) 임베딩만 저장한다. 0-노름이면
       ``ValueError`` 로 차단(034 교훈: 0-노름 벡터는 NaN 코사인 → kNN 불가시 → 동의어 재난립).
-    - **부모 스코프(v297)**: ``parent_topic`` 이 None 이면 topic 층(닫힌 27+기타), 값이 있으면
+    - **부모 스코프(v297)**: ``parent_topic`` 이 None 이면 topic 층(닫힌 27+미분류), 값이 있으면
       subtopic 층(부모 스코프). ON CONFLICT 는 층별 **부분 유니크 인덱스**를 인덱스 술어(WHERE)로
       지정해 인퍼런스한다 — v297 이후 topic_ko 에 단일 유니크가 없으므로 술어가 필수다.
     - ``topic_en`` 은 None 허용(subtopic 층은 정본 en 을 추적하지 않음 → NULL 저장·후속 여지).
@@ -259,22 +259,22 @@ def _freeze_alias(
             )
 
 
-# topic 분류 프롬프트(v2·FR-201v2) — 자유 라벨을 닫힌 27+기타 중 하나로 **분류**한다.
+# topic 분류 프롬프트(v2·FR-201v2) — 자유 라벨을 닫힌 27+미분류 중 하나로 **분류**한다.
 #
 # judge(동의어 판정)와 다르다: judge 는 "원본과 후보가 서로 바꿔 써도 되는 같은 것인가"를 묻지만,
 # classify 는 "이 라벨이 어느 대분류에 속하는가(is-a·소속)"를 묻는다. 닫힌 대분류는 상호 배타 설계라
-# 상위분류 흡수(등산→스포츠·레저) 가 오히려 정답이다. 확신이 없으면 강제 배정하지 말고 '기타'로 파킹
-# (거버넌스 §4 가산 확장의 입력). 후보=닫힌 목록 전체를 주입(27+기타는 프롬프트에 충분히 작다).
+# 상위분류 흡수(등산→스포츠·레저) 가 오히려 정답이다. 확신이 없으면 강제 배정하지 말고 '미분류'로 파킹
+# (거버넌스 §4 가산 확장의 입력). 후보=닫힌 목록 전체를 주입(27+미분류는 프롬프트에 충분히 작다).
 _CLASSIFY_PROMPT = """너는 한국어 주제(topic) 라벨을 **닫힌 분류체계**로 분류하는 분류기다.
 아래 "분류할 라벨"을 "범주 목록"에 있는 범주 중 **정확히 하나**로 분류하라.
 
 핵심 기준: "이 라벨은 어느 대분류에 속하는가?"(소속·is-a). 동의어 판정이 아니라 **분류**다.
 - 라벨이 어느 범주의 한 종류·종목·장르·분야여도 그 범주로 분류한다(예: 등산 → 스포츠·레저).
-- 어느 범주에도 자신 있게 넣기 어려우면 **"기타"** 를 고른다(억지로 배정하지 마라).
+- 어느 범주에도 자신 있게 넣기 어려우면 **"미분류"** 를 고른다(억지로 배정하지 마라).
 
 규칙:
 - 반드시 "범주 목록"에 있는 라벨 하나만 고른다. 목록에 없는 라벨을 지어내지 않는다.
-- 확신이 없으면 "기타".
+- 확신이 없으면 "미분류".
 - JSON 객체 하나만 출력한다. 코드블록·설명 문장 금지.
 - 형식: {{"category": "<범주 목록 중 하나>"}}.
 
@@ -290,10 +290,10 @@ _CLASSIFY_PROMPT = """너는 한국어 주제(topic) 라벨을 **닫힌 분류�
 def classify_topic(
     raw_ko: str, raw_en: str | None, categories: list[str], *, client=None
 ) -> str:
-    """자유 topic 라벨을 닫힌 범주 목록 중 하나로 **분류**(동의어 판정 아님)·확신 없으면 '기타'.
+    """자유 topic 라벨을 닫힌 범주 목록 중 하나로 **분류**(동의어 판정 아님)·확신 없으면 '미분류'.
 
     - ``src.llm.client.complete_json`` 단일 seam·temp=0·``client=`` 주입. 후보=닫힌 목록 전체를 주입.
-    - LLM 이 목록 밖 라벨을 지어내거나 응답이 누락되면 안전하게 ``"기타"``(강제·오배정 방지·결정성).
+    - LLM 이 목록 밖 라벨을 지어내거나 응답이 누락되면 안전하게 ``"미분류"``(강제·오배정 방지·결정성).
     - 후보가 비면(레지스트리 미시드) 호출부(``canonicalize_topic``)가 분류 자체를 건너뛴다.
     """
     from src.llm.client import complete_json
@@ -307,7 +307,7 @@ def classify_topic(
     category = out.get("category")
     if isinstance(category, str) and category in categories:
         return category
-    return "기타"
+    return "미분류"
 
 
 # LLM 판정 프롬프트 — 후보 K개만 주입(전체 레지스트리 주입 금지·프롬프트 비대화 방지·FR-203).
@@ -375,7 +375,7 @@ def canonicalize_topic(
     3. 닫힌 정본 집합 정확일치 → 그대로(``decided_by="exact"``·LLM 0).
     4. alias 캐시(parent NULL) 히트 → 정본 + registry en(``decided_by="exact"``·LLM 0).
     5. 미스 → ``classify_topic`` LLM 분류(후보=닫힌 목록 전체·temp=0): 목록 중 하나로 분류, 애매하면
-       ``기타``(+제안 라벨 로그) → alias 동결(``decided_by="classify"``). **신규 topic 등록 없음**(고정 층).
+       ``미분류``(+제안 라벨 로그) → alias 동결(``decided_by="classify"``). **신규 topic 등록 없음**(고정 층).
     """
     # 1) 빈/None → passthrough(정규화 안 함·하위호환)
     if not raw_ko or not str(raw_ko).strip():
@@ -385,7 +385,7 @@ def canonicalize_topic(
             "decided_by": "passthrough",
         }
 
-    # 닫힌 정본 집합(27+기타·source taxonomy·parent NULL). {topic_ko: topic_en}·정렬됨.
+    # 닫힌 정본 집합(27+미분류·source taxonomy·parent NULL). {topic_ko: topic_en}·정렬됨.
     canonical = _fetch_canonical_topics(conn)
 
     # 2) 레지스트리 미시드 → 정본화 불가·원본 유지(동작 보존·플래그 시드 전 동치·G4 T401)
@@ -405,13 +405,13 @@ def canonicalize_topic(
     if hit is not None:
         return {"canonical_ko": hit, "canonical_en": canonical.get(hit), "decided_by": "exact"}
 
-    # 5) 미스 → LLM 분류(닫힌 목록 중 하나·애매하면 기타). dict 삽입순=정렬순이라 후보 순서 결정적.
+    # 5) 미스 → LLM 분류(닫힌 목록 중 하나·애매하면 미분류). dict 삽입순=정렬순이라 후보 순서 결정적.
     label = classify_topic(raw_ko, raw_en, list(canonical), client=client)
     _freeze_alias(conn, raw_ko, label, "classify")  # 결정 동결(재실행 캐시 히트·SC-04v2)
-    if label == "기타":
-        # 기타 파킹 = 가산 확장의 입력(거버넌스 §4). 제안 라벨(원본)을 로그로 남긴다(범주 추가 근거).
+    if label == "미분류":
+        # 미분류 파킹 = 가산 확장의 입력(거버넌스 §4). 제안 라벨(원본)을 로그로 남긴다(범주 추가 근거).
         logger.info(
-            "topic 분류 기타 폴백 — 제안 라벨: raw_ko=%r raw_en=%r", raw_ko, raw_en
+            "topic 분류 미분류 폴백 — 제안 라벨: raw_ko=%r raw_en=%r", raw_ko, raw_en
         )
     return {"canonical_ko": label, "canonical_en": canonical.get(label), "decided_by": "classify"}
 

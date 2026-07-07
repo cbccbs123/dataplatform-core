@@ -280,10 +280,10 @@ class TestFetchCanonicalTopics(unittest.TestCase):
         from src.relations.topic_canonicalize import _fetch_canonical_topics
 
         conn, cur = _mock_conn(
-            [{"topic_ko": "음식·요리", "topic_en": "food_cooking"}, {"topic_ko": "기타", "topic_en": "etc"}]
+            [{"topic_ko": "음식·요리", "topic_en": "food_cooking"}, {"topic_ko": "미분류", "topic_en": "unclassified"}]
         )
         out = _fetch_canonical_topics(conn)
-        self.assertEqual(out, {"음식·요리": "food_cooking", "기타": "etc"})
+        self.assertEqual(out, {"음식·요리": "food_cooking", "미분류": "unclassified"})
         sql = _compact_sql(cur)
         self.assertIn("topic_registry", sql)
         self.assertIn("parent_topic IS NULL", sql)   # 닫힌 topic 층만
@@ -298,9 +298,9 @@ class TestFetchCanonicalTopics(unittest.TestCase):
 
 
 class TestClassifyTopic(unittest.TestCase):
-    """자유 topic → 닫힌 범주 분류(동의어 판정 아님)·후보밖/누락 응답 → 기타·client 주입(v2)."""
+    """자유 topic → 닫힌 범주 분류(동의어 판정 아님)·후보밖/누락 응답 → 미분류·client 주입(v2)."""
 
-    _CATS = ["기타", "스포츠·레저", "음식·요리"]
+    _CATS = ["미분류", "스포츠·레저", "음식·요리"]
 
     def test_classifies_into_category_and_lists_all(self) -> None:
         from src.relations.topic_canonicalize import classify_topic
@@ -318,7 +318,7 @@ class TestClassifyTopic(unittest.TestCase):
         self.assertIn("kimchi stew", prompt)
 
     def test_hallucinated_or_missing_falls_back_to_etc(self) -> None:
-        # 목록 밖 라벨·NEW·누락(강제배정·오배정 방지) → 안전하게 '기타'(결정성).
+        # 목록 밖 라벨·NEW·누락(강제배정·오배정 방지) → 안전하게 '미분류'(결정성).
         from src.relations.topic_canonicalize import classify_topic
 
         for content in ('{"category": "우주"}', '{"category": "NEW"}', "{}"):
@@ -326,7 +326,7 @@ class TestClassifyTopic(unittest.TestCase):
             client.chat.completions.create.return_value = MagicMock(
                 choices=[MagicMock(message=MagicMock(content=content))]
             )
-            self.assertEqual(classify_topic("x", None, self._CATS, client=client), "기타")
+            self.assertEqual(classify_topic("x", None, self._CATS, client=client), "미분류")
 
 
 class TestClassifyPrompt(unittest.TestCase):
@@ -336,7 +336,7 @@ class TestClassifyPrompt(unittest.TestCase):
         from src.relations.topic_canonicalize import _CLASSIFY_PROMPT
 
         self.assertIn("분류", _CLASSIFY_PROMPT)    # 동의어 판정이 아니라 '분류'
-        self.assertIn("기타", _CLASSIFY_PROMPT)    # 확신 없으면 기타(강제배정 금지)
+        self.assertIn("미분류", _CLASSIFY_PROMPT)    # 확신 없으면 미분류(강제배정 금지)
 
     def test_prompt_forbids_inventing_labels(self) -> None:
         from src.relations.topic_canonicalize import _CLASSIFY_PROMPT
@@ -368,7 +368,7 @@ class TestCanonicalizeTopic(unittest.TestCase):
 
     @patch(f"{_MOD}.classify_topic")
     @patch(f"{_MOD}.lookup_alias")
-    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "기타": "etc"})
+    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "미분류": "unclassified"})
     def test_exact_match_to_closed_set_passes_through_no_llm(self, m_fetch, m_alias, m_classify) -> None:
         # 2) 닫힌 정본 집합 정확일치 → 그대로(exact)·분류 LLM 0·alias 룩업 이전 반환.
         from src.relations.topic_canonicalize import canonicalize_topic
@@ -381,7 +381,7 @@ class TestCanonicalizeTopic(unittest.TestCase):
     @patch(f"{_MOD}.register_topic")
     @patch(f"{_MOD}.classify_topic")
     @patch(f"{_MOD}.lookup_alias", return_value="음식·요리")
-    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "기타": "etc"})
+    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "미분류": "unclassified"})
     def test_alias_cache_hit_returns_canonical_no_llm(self, m_fetch, m_alias, m_classify, m_register) -> None:
         # 3) alias 캐시(parent NULL) 히트 → canonical + registry en·분류 LLM 0·신규등록 없음.
         from src.relations.topic_canonicalize import canonicalize_topic
@@ -397,7 +397,7 @@ class TestCanonicalizeTopic(unittest.TestCase):
     @patch(f"{_MOD}._freeze_alias")
     @patch(f"{_MOD}.classify_topic", return_value="음식·요리")
     @patch(f"{_MOD}.lookup_alias", return_value=None)
-    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "기타": "etc"})
+    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "미분류": "unclassified"})
     def test_offlist_miss_classifies_and_freezes_alias(
         self, m_fetch, m_alias, m_classify, m_freeze, m_register
     ) -> None:
@@ -412,16 +412,16 @@ class TestCanonicalizeTopic(unittest.TestCase):
         self.assertEqual(args[0], "김치찌개")
         self.assertEqual(args[1], "kimchi stew")
         self.assertIn("음식·요리", args[2])          # 후보 = 닫힌 목록 전체
-        self.assertIn("기타", args[2])
+        self.assertIn("미분류", args[2])
         self.assertEqual(kwargs.get("client"), client)
         m_freeze.assert_called_once_with(conn, "김치찌개", "음식·요리", "classify")
         m_register.assert_not_called()               # topic 층 신규 등록 없음(v2)
 
     @patch(f"{_MOD}.register_topic")
     @patch(f"{_MOD}._freeze_alias")
-    @patch(f"{_MOD}.classify_topic", return_value="기타")
+    @patch(f"{_MOD}.classify_topic", return_value="미분류")
     @patch(f"{_MOD}.lookup_alias", return_value=None)
-    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "기타": "etc"})
+    @patch(f"{_MOD}._fetch_canonical_topics", return_value={"음식·요리": "food_cooking", "미분류": "unclassified"})
     def test_ambiguous_falls_back_to_etc_and_logs(
         self, m_fetch, m_alias, m_classify, m_freeze, m_register
     ) -> None:
@@ -431,8 +431,8 @@ class TestCanonicalizeTopic(unittest.TestCase):
         conn = object()
         with self.assertLogs("src.relations.topic_canonicalize", level="INFO") as cm:
             out = canonicalize_topic(conn, "블록체인딜라이트", "blockchain delight")
-        self.assertEqual(out, {"canonical_ko": "기타", "canonical_en": "etc", "decided_by": "classify"})
-        m_freeze.assert_called_once_with(conn, "블록체인딜라이트", "기타", "classify")
+        self.assertEqual(out, {"canonical_ko": "미분류", "canonical_en": "unclassified", "decided_by": "classify"})
+        m_freeze.assert_called_once_with(conn, "블록체인딜라이트", "미분류", "classify")
         m_register.assert_not_called()
         self.assertTrue(any("블록체인딜라이트" in line for line in cm.output))
 
@@ -440,9 +440,9 @@ class TestCanonicalizeTopic(unittest.TestCase):
         # v2 불변: topic 층은 고정(닫힌 27+기타) — 어떤 경로에서도 register_topic 을 부르지 않는다(쌍별 등록 제거).
         from src.relations.topic_canonicalize import canonicalize_topic
 
-        with patch(f"{_MOD}._fetch_canonical_topics", return_value={"기타": "etc"}), \
+        with patch(f"{_MOD}._fetch_canonical_topics", return_value={"미분류": "unclassified"}), \
              patch(f"{_MOD}.lookup_alias", return_value=None), \
-             patch(f"{_MOD}.classify_topic", return_value="기타"), \
+             patch(f"{_MOD}.classify_topic", return_value="미분류"), \
              patch(f"{_MOD}._freeze_alias"), \
              patch(f"{_MOD}.register_topic") as m_register:
             canonicalize_topic(object(), "임의라벨", None)
@@ -452,7 +452,7 @@ class TestCanonicalizeTopic(unittest.TestCase):
         # 결정성(SC-04v2): 같은 raw 2회 → 2번째 alias 히트·분류 LLM 0·동일 정본.
         from src.relations.topic_canonicalize import canonicalize_topic
 
-        canonical = {"음식·요리": "food_cooking", "기타": "etc"}
+        canonical = {"음식·요리": "food_cooking", "미분류": "unclassified"}
         frozen: dict[str, str] = {}
 
         def fake_lookup_alias(conn, raw, *, parent_topic=None):

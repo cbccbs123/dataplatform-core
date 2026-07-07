@@ -3,7 +3,7 @@
 v2 개정(2026-07-07·닫힌 분류체계 전환·ADR `2026-07-07-topic-closed-taxonomy-pivot.md`)
     v1 은 현 코퍼스의 자유기입 topic 을 런타임 canonicalize 로 재생(replay)해 정본/alias 초안을
     산출하고 사람이 검수·적재했다. 그러나 "열린 어휘 + 쌍별 유사판정 + 전이 병합"은 안정해가
-    없음이 실측으로 확인돼(광역 흡수↔충돌 잔존의 진동), topic 층을 **닫힌 통제어휘 27+기타**
+    없음이 실측으로 확인돼(광역 흡수↔충돌 잔존의 진동), topic 층을 **닫힌 통제어휘 27+미분류**
     (`taxonomy_draft.md` §1 정본 → `taxonomy_seed.json`)로 전환했다. 이 스크립트는 그 시드 파일을
     **그대로** topic_registry 에 적재한다(replay/from-draft 로직 폐기).
 
@@ -40,12 +40,10 @@ from typing import Any
 
 # 시드 정본 경로(repo 내). spec 058 디렉터리의 taxonomy_seed.json.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_SEED_PATH = (
-    _REPO_ROOT
-    / "specs"
-    / "058-relation-topic-canonicalization"
-    / "taxonomy_seed.json"
-)
+_SPEC_DIR = _REPO_ROOT / "specs" / "058-relation-topic-canonicalization"
+_DEFAULT_SEED_PATH = _SPEC_DIR / "taxonomy_seed.json"
+# alias 선시드 정본(§3 커버리지 매핑·raw_ko→canonical). registry 시드 직후 topic 층 alias 로 적재.
+_DEFAULT_ALIAS_SEED_PATH = _SPEC_DIR / "taxonomy_alias_seed.json"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -65,6 +63,24 @@ def taxonomy_registry_entries(seed: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {"topic_ko": str(t["topic_ko"]), "topic_en": str(t["topic_en"])}
         for t in seed["topics"]
+    ]
+
+
+def load_alias_seed(path: Path | str = _DEFAULT_ALIAS_SEED_PATH) -> dict[str, Any]:
+    """taxonomy_alias_seed.json 을 읽어 dict 로 반환(순수 I/O·파싱만). ``{version, aliases:[...]}``."""
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def alias_seed_entries(alias_seed: dict[str, Any]) -> list[dict[str, str]]:
+    """alias 시드 → 적재 행 ``[{raw_ko, canonical_ko}]`` (파일 순서 보존·라벨 str() 강제).
+
+    §3 커버리지 매핑(raw 120 → 27+미분류)에서 자기참조(raw==canonical·음악/과학/동물)는 이미 제외됐다
+    (닫힌 집합 정확일치가 처리). 각 행은 topic 층(parent NULL) alias 로 동결된다.
+    """
+    return [
+        {"raw_ko": str(a["raw_ko"]), "canonical_ko": str(a["canonical_ko"])}
+        for a in alias_seed["aliases"]
     ]
 
 
@@ -95,6 +111,30 @@ def apply_taxonomy_seed(
     return {"n_registry": len(entries), "n_alias": 0}
 
 
+def apply_alias_seed(
+    conn, alias_seed: dict[str, Any], *, freeze_fn=None
+) -> dict[str, int]:
+    """§3 커버리지 매핑을 topic 층 alias(parent NULL·decided_by='seed')로 동결. 적재 수 ``{n_alias}``.
+
+    - 각 alias: ``_freeze_alias(conn, raw_ko, canonical_ko, 'seed', parent_topic=None)`` — 부분 유니크
+      ON CONFLICT 로 멱등. **registry(taxonomy 28) 적재 직후** 호출해야 한다(canonical 정본이 먼저 있어야
+      canonicalize_topic 의 alias 히트 경로가 registry en 을 조회할 수 있음).
+    - 효과: 백필 ``canonicalize_topic`` 이 off-list raw(에너지·천문 등)를 **LLM 재분류 없이** alias 히트로
+      결정적 해소(SC-04v2·헌법 3조). subtopic 층은 이 시드가 다루지 않는다(열린 성장·LLM).
+    - ``freeze_fn`` 주입 가능(단위 테스트용·기본은 topic_canonicalize seam).
+    """
+    if freeze_fn is None:
+        # 지연 import — alias 동결 seam(ON CONFLICT 스코프 로직)을 재사용해 중복 정의를 피한다.
+        from src.relations.topic_canonicalize import _freeze_alias
+
+        freeze_fn = _freeze_alias
+
+    entries = alias_seed_entries(alias_seed)
+    for e in entries:
+        freeze_fn(conn, e["raw_ko"], e["canonical_ko"], "seed", parent_topic=None)
+    return {"n_alias": len(entries)}
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 3) 콘솔 요약 (순수)
 # ────────────────────────────────────────────────────────────────────────────
@@ -123,18 +163,26 @@ def _truncate_topic_tables(conn) -> None:
         cur.execute("TRUNCATE topic_alias, topic_registry")
 
 
-def run_seed(db, seed: dict[str, Any], *, apply: bool = False) -> dict[str, int]:
-    """taxonomy 시드 적재(apply) 또는 dry-run(파싱만).
+def run_seed(
+    db, seed: dict[str, Any], alias_seed: dict[str, Any] | None = None, *, apply: bool = False
+) -> dict[str, int]:
+    """taxonomy 시드 + alias 선시드 적재(apply) 또는 dry-run(파싱만).
 
     - ``apply=False``: DB 미접촉(파싱·요약은 호출부). 카운트만 계산해 반환.
-    - ``apply=True``: 한 트랜잭션에서 ``TRUNCATE topic_alias, topic_registry`` → 28행 등록 → 커밋.
+    - ``apply=True``: 한 트랜잭션에서 ``TRUNCATE topic_alias, topic_registry`` → registry 28행 등록
+      → **직후 alias 선시드**(있으면·§3 매핑) → 커밋. registry→alias 순서를 지켜 alias 히트가
+      정본 en 을 조회할 수 있게 한다.
     """
     if not apply:
-        return {"n_registry": len(taxonomy_registry_entries(seed)), "n_alias": 0}
+        n_alias = len(alias_seed_entries(alias_seed)) if alias_seed is not None else 0
+        return {"n_registry": len(taxonomy_registry_entries(seed)), "n_alias": n_alias}
     with db.connection() as conn:
         _truncate_topic_tables(conn)
         counts = apply_taxonomy_seed(conn, seed)
-        conn.commit()  # taxonomy 실적재(T902)
+        if alias_seed is not None:
+            # registry 정본 적재 직후 alias 선시드(decided_by='seed'·parent NULL).
+            counts["n_alias"] = apply_alias_seed(conn, alias_seed)["n_alias"]
+        conn.commit()  # taxonomy + alias 실적재(T902·G12 driver)
     return counts
 
 
@@ -151,6 +199,16 @@ def main() -> int:
     p.add_argument(
         "--seed", default=str(_DEFAULT_SEED_PATH), help="taxonomy 시드 JSON 경로(정본)"
     )
+    p.add_argument(
+        "--alias-seed",
+        default=str(_DEFAULT_ALIAS_SEED_PATH),
+        help="alias 선시드 JSON 경로(§3 커버리지 매핑·raw_ko→canonical)",
+    )
+    p.add_argument(
+        "--no-alias-seed",
+        action="store_true",
+        help="alias 선시드를 건너뛴다(registry 만 적재·과거 동작).",
+    )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument(
         "--dry-run", action="store_true", help="파싱·요약만 출력(DB 미접촉·기본)."
@@ -158,7 +216,7 @@ def main() -> int:
     mode.add_argument(
         "--apply",
         action="store_true",
-        help="기존 시드 TRUNCATE 후 taxonomy 28행 적재·커밋(T902).",
+        help="기존 시드 TRUNCATE 후 taxonomy 28행 + alias 선시드 적재·커밋(T902·G12).",
     )
     args = p.parse_args()
 
@@ -168,21 +226,24 @@ def main() -> int:
     init_settings(args.env)
 
     seed = load_taxonomy_seed(Path(args.seed))
+    alias_seed = None if args.no_alias_seed else load_alias_seed(Path(args.alias_seed))
 
     if args.apply:
         db = PostgresUtil()
         with db:
-            counts = run_seed(db, seed, apply=True)
+            counts = run_seed(db, seed, alias_seed, apply=True)
         print(
             f"[APPLY] taxonomy 시드 적재 완료: {args.seed}\n"
             f"  정본(register_topic) {counts['n_registry']}개(parent_topic=NULL·source='taxonomy') · "
-            f"alias {counts['n_alias']}개 (TRUNCATE 후 재적재·커밋)."
+            f"alias(선시드·decided_by='seed') {counts['n_alias']}개 (TRUNCATE 후 재적재·커밋)."
         )
         return 0
 
     # dry-run(기본): DB 미접촉·파싱 요약만.
     print("\n".join(summarize_lines(seed)))
-    print(f"\n(dry-run·DB 미접촉) 적재하려면 --apply. 시드 파일: {args.seed}")
+    n_alias = len(alias_seed_entries(alias_seed)) if alias_seed is not None else 0
+    print(f"\n(dry-run·DB 미접촉) alias 선시드 {n_alias}개 대기. 적용하려면 --apply.")
+    print(f"  시드 파일: {args.seed}\n  alias 시드: {args.alias_seed if not args.no_alias_seed else '(생략)'}")
     return 0
 
 

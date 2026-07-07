@@ -291,9 +291,9 @@ class TestRelationProposalPromptTopicTaxonomy(unittest.TestCase):
             self.assertIn(t["topic_ko"], prompt, f"topic_ko 누락: {t['topic_ko']}")
 
     def test_etc_and_select_from_list_instruction(self) -> None:
-        # "목록에서 정확히 하나 선택" + 확신 없으면 "기타" 폴백 지시.
+        # "목록에서 정확히 하나 선택" + 확신 없으면 "미분류" 폴백 지시.
         prompt = self._build()
-        self.assertIn("기타", prompt)
+        self.assertIn("미분류", prompt)
         self.assertIn("목록", prompt)
         self.assertIn("하나", prompt)
 

@@ -6,7 +6,7 @@
     3. **활성 relation_kind 카탈로그** — ``relation_kinds_catalog`` (DB ``fetch_active_relation_kinds`` 결과).
        ``type_code`` 는 ``relation_kind.kind_code``. **관계 종류**(왜 연결되는지)만 여기서 고른다.
     4. **선택 가이드** — ``RELATION_KIND_HINTS_KO`` + 카탈로그에 없는 코드는 DB ``description`` 일부 표시.
-    5. **닫힌 topic 분류체계 목록** — ``topic_ko`` 는 ``taxonomy_seed.json`` 의 **27+기타**에서 하나 선택
+    5. **닫힌 topic 분류체계 목록** — ``topic_ko`` 는 ``taxonomy_seed.json`` 의 **27+미분류**에서 하나 선택
        (spec 058 v2·FR-401v2). subtopic 은 열린 층이라 자유 기입(구체 주제어).
 
 출력 규격
@@ -14,8 +14,8 @@
 
 topic 지시 변경(spec 058 v2·FR-401v2·2026-07-07 닫힌 분류체계 전환)
     과거에는 ``topic_ko`` 를 한 단어 카테고리로 **자유 기입**시켰으나(동의어 난립),
-    이제 ``taxonomy_seed.json`` 의 닫힌 27+기타 목록을 프롬프트에 통째로 주입하고 **그 중 하나를
-    선택**하게 한다(확신 없으면 ``기타``). 관계종류(kind)·후보·경로신호·JSON 출력 지시는 불변.
+    이제 ``taxonomy_seed.json`` 의 닫힌 27+미분류 목록을 프롬프트에 통째로 주입하고 **그 중 하나를
+    선택**하게 한다(확신 없으면 ``미분류``). 관계종류(kind)·후보·경로신호·JSON 출력 지시는 불변.
     중복 제거는 schema.parse_llm_edges 에서 처리.
 """
 
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 # ── topic 닫힌 분류체계(spec 058 v2·FR-401v2) ────────────────────────────────
-# topic_ko 는 자유 기입이 아니라 **닫힌 27+기타 목록에서 하나 선택**이다(ADR 2026-07-07).
+# topic_ko 는 자유 기입이 아니라 **닫힌 27+미분류 목록에서 하나 선택**이다(ADR 2026-07-07).
 # 목록의 **단일 출처는 taxonomy_seed.json**(seed_topic_registry·canonicalize 와 동일 파일) —
 # 프롬프트가 목록을 통째로 주입하므로(27개라 topic 층 kNN 불필요) 생성시부터 정본에 수렴시킨다.
 # subtopic 은 열린 층이라 여전히 자유 기입(구체 주제어)한다.
@@ -197,7 +197,7 @@ def build_relation_proposal_prompt(
             next(iter(sorted(example_codes)), "same_domain") if example_codes else "same_domain"
         )
 
-    # topic 지시부에 주입할 닫힌 27+기타 목록(taxonomy_seed.json 단일 출처·결정적).
+    # topic 지시부에 주입할 닫힌 27+미분류 목록(taxonomy_seed.json 단일 출처·결정적).
     topic_taxonomy_block = _build_topic_taxonomy_block()
 
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.
@@ -207,7 +207,7 @@ def build_relation_proposal_prompt(
 - 각 엣지의 ``relation_type_code`` 는 **관계 종류**(왜 연결되는지: same_domain, duplicate_near 등). 카탈로그의 ``type_code`` 와 **완전히 동일**해야 한다.
 {catalog_rules}
 - 기본은 카탈로그 코드 사용. 다만 목록에 정말 맞는 관계 종류가 없을 때만, 소문자 ``[a-z][a-z0-9_]*`` 새 코드를 제안할 수 있다. 서버는 이를 ``relation_kind`` 에 비활성으로 기록하고 검토 큐에 넣는다.
-- **토픽(주제 대분류):** ``topic_ko`` 는 아래 **범주 목록에서 정확히 하나**를 골라 **그대로** 적는다(자유 기입·신조어 금지). 확신이 없거나 어느 범주에도 맞지 않으면 ``기타`` 를 고른다(억지로 배정하지 말 것). ``topic_en`` 은 고른 범주의 짝 영어 코드를 그대로 쓴다.
+- **토픽(주제 대분류):** ``topic_ko`` 는 아래 **범주 목록에서 정확히 하나**를 골라 **그대로** 적는다(자유 기입·신조어 금지). 확신이 없거나 어느 범주에도 맞지 않으면 ``미분류`` 를 고른다(억지로 배정하지 말 것). ``topic_en`` 은 고른 범주의 짝 영어 코드를 그대로 쓴다.
 
 범주 목록(topic_ko · topic_en — 이 목록 밖 값은 쓰지 말 것):
 {topic_taxonomy_block}

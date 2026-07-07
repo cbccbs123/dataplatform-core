@@ -1,10 +1,14 @@
 """scripts/seed_topic_registry.py 순수 함수 단위 테스트 (spec 058 v2 T902 · taxonomy 시드).
 
 v2 개정(2026-07-07·닫힌 분류체계 전환): v1 replay/from-draft 로직은 폐기됐다(ADR
-`2026-07-07-topic-closed-taxonomy-pivot.md`). 시드는 이제 **taxonomy_seed.json**(27+기타 닫힌
+`2026-07-07-topic-closed-taxonomy-pivot.md`). 시드는 이제 **taxonomy_seed.json**(27+미분류 닫힌
 분류체계 정본)을 그대로 topic_registry(parent_topic=NULL·source='taxonomy')에 적재한다.
 
-LLM/DB 불필요 — 시드 파일 파싱·정본 행 추출·주입형 적재(register_fn)의 결정적 순수 함수만 검증한다.
+alias 선시드(2026-07-07·G12 driver 확정): registry 시드 직후 **taxonomy_alias_seed.json**(§3
+커버리지 매핑·raw_ko→canonical)을 topic 층 alias(parent NULL·decided_by='seed')로 적재해 백필
+topic 분류를 LLM 재분류 없이 결정적으로 만든다.
+
+LLM/DB 불필요 — 시드 파일 파싱·정본 행 추출·주입형 적재(register_fn/freeze_fn)의 결정적 순수 함수만 검증한다.
 (실제 TRUNCATE·실 DB 적재는 임퓨어 경로이며 여기서 다루지 않는다.)
 """
 from __future__ import annotations
@@ -12,8 +16,12 @@ from __future__ import annotations
 import unittest
 
 from scripts.seed_topic_registry import (
+    _DEFAULT_ALIAS_SEED_PATH,
     _DEFAULT_SEED_PATH,
+    alias_seed_entries,
+    apply_alias_seed,
     apply_taxonomy_seed,
+    load_alias_seed,
     load_taxonomy_seed,
     taxonomy_registry_entries,
 )
@@ -25,7 +33,7 @@ _EXPECTED_TOPIC_KOS = {
     "역사·문화유산", "생활·취미", "경제·산업", "정치·사회", "법·범죄",
     "군사·안보", "재난·안전", "교육·지식", "건강·의학", "사람·일상",
     "종교·신앙", "언어·어학", "문학·도서", "패션·뷰티", "가족·육아",
-    "직업·커리어", "기타",
+    "직업·커리어", "미분류",
 }
 
 
@@ -50,7 +58,7 @@ class TestTaxonomyRegistryEntries(unittest.TestCase):
     def test_has_28_rows_including_etc(self):
         self.assertEqual(len(self.entries), 28)
         kos = {e["topic_ko"] for e in self.entries}
-        self.assertIn("기타", kos)  # 탈출구(강제 배정 금지)
+        self.assertIn("미분류", kos)  # 탈출구(강제 배정 금지·en=unclassified)
 
     def test_matches_taxonomy_draft_topic_kos(self):
         kos = {e["topic_ko"] for e in self.entries}
@@ -65,9 +73,9 @@ class TestTaxonomyRegistryEntries(unittest.TestCase):
             self.assertTrue(str(e["topic_en"]).strip(), f"{e['topic_ko']} topic_en 비어있음")
 
     def test_preserves_draft_order_first_and_last(self):
-        # 표 순서 보존: 첫 행 음식·요리 → 마지막 행 기타(탈출구).
+        # 표 순서 보존: 첫 행 음식·요리 → 마지막 행 미분류(탈출구).
         self.assertEqual(self.entries[0]["topic_ko"], "음식·요리")
-        self.assertEqual(self.entries[-1]["topic_ko"], "기타")
+        self.assertEqual(self.entries[-1]["topic_ko"], "미분류")
 
 
 class TestApplyTaxonomySeed(unittest.TestCase):
@@ -78,7 +86,7 @@ class TestApplyTaxonomySeed(unittest.TestCase):
             "version": "v2",
             "topics": [
                 {"topic_ko": "음식·요리", "topic_en": "food_cooking"},
-                {"topic_ko": "기타", "topic_en": "etc"},
+                {"topic_ko": "미분류", "topic_en": "unclassified"},
             ],
         }
 
@@ -94,7 +102,7 @@ class TestApplyTaxonomySeed(unittest.TestCase):
             reg_calls,
             [
                 ("음식·요리", "food_cooking", "taxonomy", None),
-                ("기타", "etc", "taxonomy", None),
+                ("미분류", "unclassified", "taxonomy", None),
             ],
         )
         # alias 는 쓰지 않는다(닫힌 분류체계는 쌍별 병합 없음 — 결과 alias 0)
@@ -112,6 +120,92 @@ class TestApplyTaxonomySeed(unittest.TestCase):
         self.assertEqual(n, 28)
         self.assertEqual(counts["n_registry"], 28)
         self.assertEqual(counts["n_alias"], 0)
+
+
+class TestLoadAliasSeed(unittest.TestCase):
+    """taxonomy_alias_seed.json 파싱 — 버전 기록·aliases 배열(§3 커버리지 매핑)."""
+
+    def test_parses_version_and_aliases(self):
+        seed = load_alias_seed(_DEFAULT_ALIAS_SEED_PATH)
+        self.assertIn("version", seed)
+        self.assertTrue(str(seed["version"]).strip(), "버전 기록 누락")
+        self.assertIn("aliases", seed)
+        self.assertIsInstance(seed["aliases"], list)
+        self.assertGreater(len(seed["aliases"]), 100)  # §3 raw ~120 → 자기참조 제외 ~117
+
+
+class TestAliasSeedEntries(unittest.TestCase):
+    """alias 선시드 행 [{raw_ko, canonical_ko}] — 라벨 str()·raw_ko 유일·canonical 은 정본·자기참조 0."""
+
+    def setUp(self):
+        self.alias_seed = load_alias_seed(_DEFAULT_ALIAS_SEED_PATH)
+        self.entries = alias_seed_entries(self.alias_seed)
+        self.canon_kos = {e["topic_ko"] for e in taxonomy_registry_entries(load_taxonomy_seed(_DEFAULT_SEED_PATH))}
+
+    def test_shape_and_str(self):
+        for e in self.entries:
+            self.assertIsInstance(e["raw_ko"], str)
+            self.assertIsInstance(e["canonical_ko"], str)
+            self.assertTrue(e["raw_ko"].strip() and e["canonical_ko"].strip())
+
+    def test_raw_ko_unique(self):
+        raws = [e["raw_ko"] for e in self.entries]
+        self.assertEqual(len(raws), len(set(raws)), "raw_ko 중복 존재")
+
+    def test_all_canonicals_are_taxonomy_topics(self):
+        # 모든 canonical_ko 는 닫힌 정본(28)에 속해야 한다(alias 히트 → registry en 조회 성립).
+        for e in self.entries:
+            self.assertIn(e["canonical_ko"], self.canon_kos, f"정본 아님: {e}")
+
+    def test_no_self_referential(self):
+        # raw_ko == canonical_ko 는 닫힌 집합 정확일치가 처리하므로 alias 로 두지 않는다(음악/과학/동물).
+        for e in self.entries:
+            self.assertNotEqual(e["raw_ko"], e["canonical_ko"])
+
+    def test_energy_maps_to_economy_industry(self):
+        # §3 검토 확정(F3): 에너지 → 경제·산업(과거 LLM 이 과학으로 오분류하던 케이스를 결정적 고정).
+        m = {e["raw_ko"]: e["canonical_ko"] for e in self.entries}
+        self.assertEqual(m.get("에너지"), "경제·산업")
+        self.assertEqual(m.get("금융"), "경제·산업")
+
+
+class TestApplyAliasSeed(unittest.TestCase):
+    """alias 적재 — freeze_fn(raw, canonical, 'seed', parent_topic=None) 만 호출(topic 층·멱등)."""
+
+    def test_freezes_parent_null_decided_by_seed(self):
+        seed = {
+            "version": "v2",
+            "aliases": [
+                {"raw_ko": "에너지", "canonical_ko": "경제·산업"},
+                {"raw_ko": "천문", "canonical_ko": "과학"},
+            ],
+        }
+        calls: list[tuple] = []
+
+        def fake_freeze(conn, raw_ko, canonical_ko, decided_by, *, parent_topic):  # noqa: ANN001
+            calls.append((raw_ko, canonical_ko, decided_by, parent_topic))
+
+        counts = apply_alias_seed(None, seed, freeze_fn=fake_freeze)
+        self.assertEqual(
+            calls,
+            [
+                ("에너지", "경제·산업", "seed", None),
+                ("천문", "과학", "seed", None),
+            ],
+        )
+        self.assertEqual(counts, {"n_alias": 2})
+
+    def test_full_alias_seed_count(self):
+        seed = load_alias_seed(_DEFAULT_ALIAS_SEED_PATH)
+        n = 0
+
+        def fake_freeze(conn, raw_ko, canonical_ko, decided_by, *, parent_topic):  # noqa: ANN001
+            nonlocal n
+            n += 1
+
+        counts = apply_alias_seed(None, seed, freeze_fn=fake_freeze)
+        self.assertEqual(counts["n_alias"], len(seed["aliases"]))
+        self.assertEqual(n, len(seed["aliases"]))
 
 
 if __name__ == "__main__":
