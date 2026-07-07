@@ -298,14 +298,24 @@ def mapping_sample(plan: list[dict[str, Any]], n: int = 20, *, keywords: list[st
     return picked[:n]
 
 
-def summarize_plan(plan: list[dict[str, Any]]) -> dict[str, Any]:
-    """재작성 계획 → 리포트 dict(순수). 전/후 SC 지표·변경 통계·분포·미분류율·매핑 샘플."""
+def summarize_plan(
+    plan: list[dict[str, Any]], *, resolve_stats: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """재작성 계획 → 리포트 dict(순수). 전/후 SC 지표·변경 통계·분포·미분류율·매핑 샘플.
+
+    ``resolve_stats`` 가 주어지면(compute_plan 결선) 리졸버가 실제 해소한 distinct 쌍 수를
+    n_pairs 근거로 쓴다(엣지수 아닌 쌍수만 LLM 임을 리포트에 노출). 미전달(단위테스트 등)이면
+    계획에서 distinct (old_topic, old_subtopic) 을 세어 폴백한다(값은 동일 — 리졸버는 쌍당 1회).
+    """
     olds = [p["old"] for p in plan]
     news = [p["new"] for p in plan]
     changed = [p for p in plan if p["changed"]]
     n_etc, n_total = etc_rate(news)
     dist = topic_distribution(news)
-    n_pairs = len({(p["old"]["topic_ko"], p["old"]["subtopic_ko"]) for p in plan})
+    if resolve_stats is not None:
+        n_pairs = int(resolve_stats.get("n_pairs", 0))
+    else:
+        n_pairs = len({(p["old"]["topic_ko"], p["old"]["subtopic_ko"]) for p in plan})
     return {
         "n_edges": len(plan),
         "n_pairs": n_pairs,
@@ -440,11 +450,16 @@ def make_pair_resolver(conn, *, client=None) -> tuple[ResolvePairFn, dict[str, i
     return resolve_pair, stats
 
 
-def compute_plan(conn, *, client=None) -> list[dict[str, Any]]:
-    """DB 에서 active 엣지 읽고 쌍 캐시 결선으로 재작성 계획 산출(seam 결선 + 순수 build_plan)."""
+def compute_plan(conn, *, client=None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """DB 에서 active 엣지 읽고 쌍 캐시 결선으로 재작성 계획 산출(seam 결선 + 순수 build_plan).
+
+    반환은 ``(plan, resolve_stats)`` — resolve_stats["n_pairs"] 는 리졸버가 **실제로 해소한
+    distinct 쌍 수**(캐시 미스 수·엣지수 무관·LLM 대상). 리포트가 이를 근거로 쓴다(make_pair_resolver
+    docstring '리포트 근거'와 배선 일치). 이전에는 이 stats 를 버려(``_``) 죽은 계측이었다(PR #81).
+    """
     rows = fetch_active_edges(conn)
-    resolve_pair, _ = make_pair_resolver(conn, client=client)
-    return build_plan(rows, resolve_pair)
+    resolve_pair, resolve_stats = make_pair_resolver(conn, client=client)
+    return build_plan(rows, resolve_pair), resolve_stats
 
 
 def backup_row_count(conn) -> int | None:
@@ -539,9 +554,9 @@ def run_dry_run(db) -> dict[str, Any]:
     """재작성 계산만(graph_edge/OS 쓰기 0). LLM 호출은 실행되나 트랜잭션 롤백으로 DB 미오염."""
     with _LlmCallCounter() as counter:
         with db, db.connection() as conn:
-            plan = compute_plan(conn)
+            plan, resolve_stats = compute_plan(conn)
             conn.rollback()  # canonicalize_* 가 동결한 alias/subtopic 을 되돌려 DB 미오염(읽기 전용 보장)
-    report = summarize_plan(plan)
+    report = summarize_plan(plan, resolve_stats=resolve_stats)
     report["n_llm_calls"] = counter.n
     return report
 
@@ -560,8 +575,8 @@ def run_apply(db) -> dict[str, Any]:
                     f"  되돌리려면 --restore, 다시 백필하려면 먼저 백업 테이블을 삭제하라\n"
                     f"  (DROP TABLE {_BACKUP_TABLE};)."
                 )
-            plan = compute_plan(conn)
-            report = summarize_plan(plan)
+            plan, resolve_stats = compute_plan(conn)
+            report = summarize_plan(plan, resolve_stats=resolve_stats)
             n_backup = create_backup(conn)
             n_rewrite = apply_rewrite(conn, plan)
             conn.commit()

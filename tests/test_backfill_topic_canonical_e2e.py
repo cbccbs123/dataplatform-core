@@ -21,10 +21,11 @@ _RUN_DB = os.environ.get("RUN_DB_E2E") == "1"
 
 _MODALITY = ("텍스트", "오디오", "영상", "이미지", "text", "audio", "video", "image")
 
+# taxonomy 시드 정본은 src/relations 패키지 내부다(PR #81 이관·prompt.py·seed 스크립트와 동일 파일).
 _SEED_PATH = (
     Path(__file__).resolve().parents[1]
-    / "specs"
-    / "058-relation-topic-canonicalization"
+    / "src"
+    / "relations"
     / "taxonomy_seed.json"
 )
 

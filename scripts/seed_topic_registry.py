@@ -16,9 +16,15 @@ v2 개정(2026-07-07·닫힌 분류체계 전환·ADR `2026-07-07-topic-closed-t
 
 두 모드
     ``--dry-run``(기본): 파싱·요약만 출력(DB 미접촉).
-    ``--apply``: **기존 v1 시드 정리 후 재적재** — 닫힌 분류체계는 정본 집합이 통째로 갈리므로
-        ``TRUNCATE topic_alias, topic_registry``(alias 먼저·읽기 순서) 후 taxonomy 28행을 적재하고
-        커밋한다. register_topic 의 ``ON CONFLICT ... DO NOTHING`` 으로 재적용도 멱등(28행 유지).
+    ``--apply``: **기존 topic 층 시드 정리 후 재적재** — 닫힌 분류체계는 topic 정본 집합이 통째로
+        갈리므로 ``DELETE ... WHERE parent_topic IS NULL``(topic 층만·alias 먼저·읽기 순서) 후
+        taxonomy 28행을 적재하고 커밋한다. register_topic 의 ``ON CONFLICT ... DO NOTHING`` 으로
+        재적용도 멱등(28행 유지).
+
+재적용 멱등의 범위(🔴 PR #81 code-review)
+    멱등·재적재는 **topic 층(parent_topic IS NULL)에 한정**한다. v297 로 자란 **subtopic 층
+    (parent_topic IS NOT NULL·백필 성장 레이어·결정성 캐시)은 삭제하지 않고 보존**한다 —
+    과거 ``TRUNCATE`` 는 두 층을 모두 날려 governance §4('전역 재빌드 없음')와 상충했다.
 
 헌법·불변식
     - **학습 0(2조)**: 임베딩은 추론만(register_topic·st_bge). 규칙은 결정적.
@@ -29,7 +35,7 @@ v2 개정(2026-07-07·닫힌 분류체계 전환·ADR `2026-07-07-topic-closed-t
 실행
     conda activate AuroraFS
     python -m scripts.seed_topic_registry --env dev --dry-run     # 파싱·요약(DB 미접촉)
-    python -m scripts.seed_topic_registry --env dev --apply       # TRUNCATE→28행 적재·커밋
+    python -m scripts.seed_topic_registry --env dev --apply       # topic 층 스코프 삭제→28행 적재·커밋
 """
 from __future__ import annotations
 
@@ -38,10 +44,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-# 시드 정본 경로(repo 내). spec 058 디렉터리의 taxonomy_seed.json.
+# 시드 정본 경로. taxonomy 시드는 **src/relations 패키지 내부**가 단일 출처다(PR #81 이관·prompt.py
+# 와 동일 파일). src-only 패키징(pyproject include=["src*"]) 시에도 런타임 로드가 되도록 specs/ 가
+# 아닌 src/ 에 둔다. alias 선시드는 시드 전용(런타임 미참조)이라 specs/ 에 남는다.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SPEC_DIR = _REPO_ROOT / "specs" / "058-relation-topic-canonicalization"
-_DEFAULT_SEED_PATH = _SPEC_DIR / "taxonomy_seed.json"
+_DEFAULT_SEED_PATH = _REPO_ROOT / "src" / "relations" / "taxonomy_seed.json"
 # alias 선시드 정본(§3 커버리지 매핑·raw_ko→canonical). registry 시드 직후 topic 층 alias 로 적재.
 _DEFAULT_ALIAS_SEED_PATH = _SPEC_DIR / "taxonomy_alias_seed.json"
 
@@ -153,14 +161,19 @@ def summarize_lines(seed: dict[str, Any]) -> list[str]:
 # ────────────────────────────────────────────────────────────────────────────
 # 4) 실행 (dry-run 파싱만 / apply = TRUNCATE 후 재적재·커밋)
 # ────────────────────────────────────────────────────────────────────────────
-def _truncate_topic_tables(conn) -> None:
-    """기존 v1 시드 정리 — alias·registry 를 TRUNCATE(닫힌 분류체계 통째 재적재 전).
+def _delete_topic_layer(conn) -> None:
+    """기존 topic 층 시드 정리 — **parent_topic IS NULL(topic 층)만** 스코프 삭제.
+
+    🔴 (PR #81 code-review) 과거 ``TRUNCATE topic_alias, topic_registry`` 는 v297 로 자란
+    **subtopic 층(parent_topic IS NOT NULL·백필 성장 레이어·결정성 캐시)까지 통째로** 날려
+    governance §4 '전역 재빌드 없음'과 상충하고, 재실행 시 프로덕션 subtopic 을 소실시켰다.
+    → 삭제를 ``WHERE parent_topic IS NULL`` 로 스코프해 **subtopic 층은 보존**한다.
 
     FK 는 v297 에서 완화(드롭)됐으나, 읽기 순서(자식 alias → 부모 registry)를 유지해 명시한다.
-    한 문장 TRUNCATE 로 두 테이블을 함께 비운다(원자적).
     """
     with conn.cursor() as cur:
-        cur.execute("TRUNCATE topic_alias, topic_registry")
+        cur.execute("DELETE FROM topic_alias WHERE parent_topic IS NULL")
+        cur.execute("DELETE FROM topic_registry WHERE parent_topic IS NULL")
 
 
 def run_seed(
@@ -169,15 +182,16 @@ def run_seed(
     """taxonomy 시드 + alias 선시드 적재(apply) 또는 dry-run(파싱만).
 
     - ``apply=False``: DB 미접촉(파싱·요약은 호출부). 카운트만 계산해 반환.
-    - ``apply=True``: 한 트랜잭션에서 ``TRUNCATE topic_alias, topic_registry`` → registry 28행 등록
-      → **직후 alias 선시드**(있으면·§3 매핑) → 커밋. registry→alias 순서를 지켜 alias 히트가
-      정본 en 을 조회할 수 있게 한다.
+    - ``apply=True``: 한 트랜잭션에서 **topic 층만 스코프 삭제**(``_delete_topic_layer`` ·
+      parent_topic IS NULL) → registry 28행 등록 → **직후 alias 선시드**(있으면·§3 매핑) → 커밋.
+      registry→alias 순서를 지켜 alias 히트가 정본 en 을 조회할 수 있게 한다. subtopic 층
+      (parent NOT NULL)은 삭제하지 않고 **보존**한다(governance §4·재실행 시 subtopic 무사).
     """
     if not apply:
         n_alias = len(alias_seed_entries(alias_seed)) if alias_seed is not None else 0
         return {"n_registry": len(taxonomy_registry_entries(seed)), "n_alias": n_alias}
     with db.connection() as conn:
-        _truncate_topic_tables(conn)
+        _delete_topic_layer(conn)
         counts = apply_taxonomy_seed(conn, seed)
         if alias_seed is not None:
             # registry 정본 적재 직후 alias 선시드(decided_by='seed'·parent NULL).
@@ -216,7 +230,8 @@ def main() -> int:
     mode.add_argument(
         "--apply",
         action="store_true",
-        help="기존 시드 TRUNCATE 후 taxonomy 28행 + alias 선시드 적재·커밋(T902·G12).",
+        help="topic 층 스코프 삭제(parent NULL) 후 taxonomy 28행 + alias 선시드 적재·커밋"
+        "(T902·G12·subtopic 층 보존).",
     )
     args = p.parse_args()
 
@@ -235,7 +250,8 @@ def main() -> int:
         print(
             f"[APPLY] taxonomy 시드 적재 완료: {args.seed}\n"
             f"  정본(register_topic) {counts['n_registry']}개(parent_topic=NULL·source='taxonomy') · "
-            f"alias(선시드·decided_by='seed') {counts['n_alias']}개 (TRUNCATE 후 재적재·커밋)."
+            f"alias(선시드·decided_by='seed') {counts['n_alias']}개 "
+            "(topic 층 스코프 삭제 후 재적재·커밋·subtopic 층 보존)."
         )
         return 0
 

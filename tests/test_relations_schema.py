@@ -240,10 +240,11 @@ class TestRelationProposalPromptPathSignals(unittest.TestCase):
 
 
 # ── [058 G11] T1101: 제안 프롬프트 topic 지시부 = 닫힌 27+기타 목록 선택 ──────
+# taxonomy 시드 정본은 src/relations 패키지 내부다(PR #81 이관·prompt.py 로더와 동일 파일).
 _TAXONOMY_SEED_PATH = (
     Path(__file__).resolve().parents[1]
-    / "specs"
-    / "058-relation-topic-canonicalization"
+    / "src"
+    / "relations"
     / "taxonomy_seed.json"
 )
 
@@ -252,6 +253,32 @@ def _load_seed_topics() -> list[dict[str, str]]:
     """taxonomy_seed.json(닫힌 topic 분류체계 정본·단일 출처)의 topics 목록."""
     with open(_TAXONOMY_SEED_PATH, encoding="utf-8") as f:
         return json.load(f)["topics"]
+
+
+class TestTaxonomySeedRuntimePathInSrc(unittest.TestCase):
+    """🟡1 (PR #81 code-review) — 런타임 taxonomy 시드는 **src/ 패키지 내부**에서 로드된다.
+
+    과거 prompt.py 는 ``specs/058.../taxonomy_seed.json`` 을 참조해 src-only 패키징
+    (pyproject include=["src*"]) 시 run_relations 마다 FileNotFoundError 였다. 정본을
+    src/relations 로 이관했으므로 런타임 경로가 src/ 아래이고 specs/ 가 아님을 못박는다.
+    """
+
+    def test_prompt_taxonomy_path_is_under_src_not_specs(self) -> None:
+        from src.relations.prompt import _TAXONOMY_SEED_PATH
+
+        p = _TAXONOMY_SEED_PATH.resolve()
+        self.assertTrue(p.is_file(), f"src/ taxonomy 시드 부재: {p}")
+        parts = p.parts
+        self.assertIn("src", parts)
+        self.assertIn("relations", parts)
+        self.assertNotIn("specs", parts, "런타임 시드가 아직 specs/ 를 참조한다(패키징 위험)")
+
+    def test_prompt_loads_28_topics_from_src(self) -> None:
+        from src.relations.prompt import _load_taxonomy_topics
+
+        topics = _load_taxonomy_topics()
+        self.assertEqual(len(topics), 28)  # 27 + 미분류
+        self.assertEqual(topics[-1][0], "미분류")
 
 
 class TestRelationProposalPromptTopicTaxonomy(unittest.TestCase):

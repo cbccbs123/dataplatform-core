@@ -18,6 +18,7 @@ import unittest
 from scripts.seed_topic_registry import (
     _DEFAULT_ALIAS_SEED_PATH,
     _DEFAULT_SEED_PATH,
+    _delete_topic_layer,
     alias_seed_entries,
     apply_alias_seed,
     apply_taxonomy_seed,
@@ -206,6 +207,63 @@ class TestApplyAliasSeed(unittest.TestCase):
         counts = apply_alias_seed(None, seed, freeze_fn=fake_freeze)
         self.assertEqual(counts["n_alias"], len(seed["aliases"]))
         self.assertEqual(n, len(seed["aliases"]))
+
+
+class _FakeCursor:
+    """execute 된 SQL 을 로그에 기록하는 최소 커서(컨텍스트 매니저)."""
+
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):  # noqa: ANN001
+        self._log.append(sql)
+
+
+class _FakeConn:
+    """cursor() 만 제공하는 최소 커넥션(순수 단위 — 실 DB 없이 SQL 관측)."""
+
+    def __init__(self):
+        self.executed: list[str] = []
+
+    def cursor(self):
+        return _FakeCursor(self.executed)
+
+
+class TestDeleteTopicLayerScoped(unittest.TestCase):
+    """🔴 시드 정리는 **topic 층(parent_topic IS NULL)만** 스코프 삭제 — subtopic 층 보존.
+
+    과거 ``TRUNCATE topic_alias, topic_registry`` 는 v297 로 자란 subtopic 층(백필 성장
+    레이어·결정성 캐시·parent NOT NULL)까지 통째로 날려 governance §4 '전역 재빌드 없음'과
+    상충하고, 재실행 시 프로덕션 subtopic 을 소실시켰다. → 삭제를 parent_topic IS NULL 로 스코프.
+    """
+
+    def test_scoped_delete_parent_null_only_no_truncate(self):
+        conn = _FakeConn()
+        _delete_topic_layer(conn)
+        joined = " ".join(conn.executed)
+        # topic 층만: topic_alias·topic_registry 각각 parent_topic IS NULL 로 DELETE(2문).
+        self.assertIn("topic_alias", joined)
+        self.assertIn("topic_registry", joined)
+        self.assertEqual(joined.upper().count("DELETE"), 2, f"DELETE 2문 아님: {conn.executed}")
+        # 두 삭제 모두 subtopic 층(parent NOT NULL)을 건드리지 않게 parent_topic IS NULL 로 스코프.
+        for sql in conn.executed:
+            self.assertIn("parent_topic IS NULL", sql, f"스코프 없음(subtopic 위험): {sql}")
+        # TRUNCATE 는 subtopic 층까지 날리므로 절대 쓰지 않는다(회귀 방지).
+        self.assertNotIn("TRUNCATE", joined.upper())
+
+    def test_deletes_alias_before_registry(self):
+        # 읽기 순서(자식 alias → 부모 registry) 유지 — alias 를 먼저 지운다.
+        conn = _FakeConn()
+        _delete_topic_layer(conn)
+        first_alias = next(i for i, s in enumerate(conn.executed) if "topic_alias" in s)
+        first_registry = next(i for i, s in enumerate(conn.executed) if "topic_registry" in s)
+        self.assertLess(first_alias, first_registry)
 
 
 if __name__ == "__main__":

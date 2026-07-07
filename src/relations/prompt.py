@@ -33,12 +33,9 @@ from typing import Any
 # 목록의 **단일 출처는 taxonomy_seed.json**(seed_topic_registry·canonicalize 와 동일 파일) —
 # 프롬프트가 목록을 통째로 주입하므로(27개라 topic 층 kNN 불필요) 생성시부터 정본에 수렴시킨다.
 # subtopic 은 열린 층이라 여전히 자유 기입(구체 주제어)한다.
-_TAXONOMY_SEED_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "specs"
-    / "058-relation-topic-canonicalization"
-    / "taxonomy_seed.json"
-)
+# 경로는 **src/relations 패키지 내부**다(PR #81 이관). src-only 패키징(pyproject include=["src*"])
+# 시에도 run_relations 가 런타임에 접근할 수 있도록 specs/ 가 아닌 src/ 에 정본을 둔다.
+_TAXONOMY_SEED_PATH = Path(__file__).resolve().parent / "taxonomy_seed.json"
 
 
 @functools.lru_cache(maxsize=1)
@@ -47,9 +44,18 @@ def _load_taxonomy_topics() -> tuple[tuple[str, str], ...]:
 
     파일 I/O 는 ``lru_cache`` 로 1회만 수행한다(프롬프트 조립마다 재읽기 방지). 시드 파일이
     정본이므로 같은 파일 → 같은 목록(재현성). 라벨은 ``str()`` 강제(graph_query 관례).
+
+    시드 파일이 없으면(패키징 누락 등) 무엇이 빠졌는지 명확한 한국어 에러로 실패시킨다 —
+    조용한 빈 목록으로 프롬프트가 망가지지 않도록.
     """
-    with open(_TAXONOMY_SEED_PATH, encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(_TAXONOMY_SEED_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError as e:  # 패키징 누락·경로 오류 시 원인을 즉시 드러낸다.
+        raise FileNotFoundError(
+            f"topic 닫힌 분류체계 시드를 찾을 수 없습니다: {_TAXONOMY_SEED_PATH}. "
+            "이 파일은 src/relations 패키지에 포함돼야 한다(PR #81 이관·단일 출처)."
+        ) from e
     return tuple((str(t["topic_ko"]), str(t["topic_en"])) for t in data["topics"])
 
 
