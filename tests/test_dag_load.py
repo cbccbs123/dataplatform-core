@@ -55,9 +55,23 @@ _dagbag_cache: dict[str, object] = {}
 
 
 def _dagbag():
-    """임시 AIRFLOW_HOME·LOAD_EXAMPLES=False 로 DagBag 1회 파싱(메타DB 불요·캐시 재사용)."""
+    """임시 AIRFLOW_HOME·LOAD_EXAMPLES=False 로 DagBag 1회 파싱(메타DB 불요·캐시 재사용).
+
+    Airflow 3.0 은 ``DagBag.__init__`` 에서 ``include_examples``/``safe_mode`` 인자를 제거했다
+    (예제 로드는 ``AIRFLOW__CORE__LOAD_EXAMPLES`` env 로 제어 — 위 모듈 상단에서 False 설정).
+    ``requirements.txt`` 가 ``apache-airflow>=2.9.0`` 로 핀 없이 최신(3.x)을 당기므로, 2.x/3.x 양쪽
+    호환을 위해 **시그니처가 실제로 받는 kwarg 만** 전달한다(3.x 에서 사라진 인자는 자동 생략).
+    """
     if "bag" not in _dagbag_cache:
-        _dagbag_cache["bag"] = DagBag(dag_folder=_DAG_FOLDER, include_examples=False, safe_mode=False)
+        import inspect
+
+        params = inspect.signature(DagBag.__init__).parameters
+        kwargs: dict[str, object] = {"dag_folder": _DAG_FOLDER}
+        if "include_examples" in params:
+            kwargs["include_examples"] = False
+        if "safe_mode" in params:
+            kwargs["safe_mode"] = False
+        _dagbag_cache["bag"] = DagBag(**kwargs)
     return _dagbag_cache["bag"]
 
 
