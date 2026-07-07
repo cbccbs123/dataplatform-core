@@ -4,23 +4,58 @@
     1. **소스 요약·타입** — LLM이 소스 맥락을 알도록.
     2. **임베딩 후보 JSON** — ``target_media_item_id``, 요약, ``embedding_similarity`` (1에 가까울수록 유사).
     3. **활성 relation_kind 카탈로그** — ``relation_kinds_catalog`` (DB ``fetch_active_relation_kinds`` 결과).
-       ``type_code`` 는 ``relation_kind.kind_code``. 주제(topic)는 카탈로그가 아니라 엣지의 ``topic_ko``/``topic_en`` 으로 LLM이 자유 기입.
+       ``type_code`` 는 ``relation_kind.kind_code``. **관계 종류**(왜 연결되는지)만 여기서 고른다.
     4. **선택 가이드** — ``RELATION_KIND_HINTS_KO`` + 카탈로그에 없는 코드는 DB ``description`` 일부 표시.
+    5. **닫힌 topic 분류체계 목록** — ``topic_ko`` 는 ``taxonomy_seed.json`` 의 **27+기타**에서 하나 선택
+       (spec 058 v2·FR-401v2). subtopic 은 열린 층이라 자유 기입(구체 주제어).
 
 출력 규격
     LLM 은 **JSON 객체 하나**만 반환하도록 지시한다(코드 펜스 금지).
 
-C+ 변경사항 (dedup 블록·정규화 topic 필드 제거)
-    과거에는 dedup 블록과 카탈로그 정규화 topic 을 포함했으나, C+ 슬림화로 topic 은
-    엣지 jsonb 로 이동했고 LLM 이 자유 기입한다. 중복 제거는 schema.parse_llm_edges 에서 처리.
+topic 지시 변경(spec 058 v2·FR-401v2·2026-07-07 닫힌 분류체계 전환)
+    과거에는 ``topic_ko`` 를 한 단어 카테고리로 **자유 기입**시켰으나(동의어 난립),
+    이제 ``taxonomy_seed.json`` 의 닫힌 27+기타 목록을 프롬프트에 통째로 주입하고 **그 중 하나를
+    선택**하게 한다(확신 없으면 ``기타``). 관계종류(kind)·후보·경로신호·JSON 출력 지시는 불변.
+    중복 제거는 schema.parse_llm_edges 에서 처리.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import posixpath
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
+
+# ── topic 닫힌 분류체계(spec 058 v2·FR-401v2) ────────────────────────────────
+# topic_ko 는 자유 기입이 아니라 **닫힌 27+기타 목록에서 하나 선택**이다(ADR 2026-07-07).
+# 목록의 **단일 출처는 taxonomy_seed.json**(seed_topic_registry·canonicalize 와 동일 파일) —
+# 프롬프트가 목록을 통째로 주입하므로(27개라 topic 층 kNN 불필요) 생성시부터 정본에 수렴시킨다.
+# subtopic 은 열린 층이라 여전히 자유 기입(구체 주제어)한다.
+_TAXONOMY_SEED_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "specs"
+    / "058-relation-topic-canonicalization"
+    / "taxonomy_seed.json"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _load_taxonomy_topics() -> tuple[tuple[str, str], ...]:
+    """taxonomy_seed.json → ``((topic_ko, topic_en), ...)`` (파일 순서 보존·결정적).
+
+    파일 I/O 는 ``lru_cache`` 로 1회만 수행한다(프롬프트 조립마다 재읽기 방지). 시드 파일이
+    정본이므로 같은 파일 → 같은 목록(재현성). 라벨은 ``str()`` 강제(graph_query 관례).
+    """
+    with open(_TAXONOMY_SEED_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    return tuple((str(t["topic_ko"]), str(t["topic_en"])) for t in data["topics"])
+
+
+def _build_topic_taxonomy_block() -> str:
+    """topic 지시부에 주입할 닫힌 목록 Markdown 블록(``topic_ko`` · ``topic_en`` 병기)."""
+    return "\n".join(f"- ``{ko}`` ({en})" for ko, en in _load_taxonomy_topics())
 
 # 경로 패턴 가이드(레버 A, FR-009): 파일명·폴더 신호가 same_series/derived_from/references
 # 후보를 보강하지만(US2 path_signal), 그건 **보조 신호**일 뿐이다. 내용이 실제로 합치할 때만
@@ -162,6 +197,9 @@ def build_relation_proposal_prompt(
             next(iter(sorted(example_codes)), "same_domain") if example_codes else "same_domain"
         )
 
+    # topic 지시부에 주입할 닫힌 27+기타 목록(taxonomy_seed.json 단일 출처·결정적).
+    topic_taxonomy_block = _build_topic_taxonomy_block()
+
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.
 
 규칙:
@@ -169,8 +207,12 @@ def build_relation_proposal_prompt(
 - 각 엣지의 ``relation_type_code`` 는 **관계 종류**(왜 연결되는지: same_domain, duplicate_near 등). 카탈로그의 ``type_code`` 와 **완전히 동일**해야 한다.
 {catalog_rules}
 - 기본은 카탈로그 코드 사용. 다만 목록에 정말 맞는 관계 종류가 없을 때만, 소문자 ``[a-z][a-z0-9_]*`` 새 코드를 제안할 수 있다. 서버는 이를 ``relation_kind`` 에 비활성으로 기록하고 검토 큐에 넣는다.
-- **토피(주제·도메인):** ``topic_ko`` 는 한국어 **한 단어 카테고리**로 필수(예: ``의료``, ``교통``, ``여행``, ``반도체``, ``부동산``). ``topic_en`` 은 같은 의미의 짧은 영어 카테고리(예: ``medical``, ``traffic``).
-- **서브토픽(세부 주제, 선택):** ``subtopic_ko`` / ``subtopic_en`` 은 **토피와 같이 한 단어**로 쓴다(한국어는 **한 어절**·공백 금지, 영어는 **한 토큰**·소문자 권장). 맥락이 있으면 **비우지 말고** 한 단어로라도 채우는 것을 권장한다.
+- **토픽(주제 대분류):** ``topic_ko`` 는 아래 **범주 목록에서 정확히 하나**를 골라 **그대로** 적는다(자유 기입·신조어 금지). 확신이 없거나 어느 범주에도 맞지 않으면 ``기타`` 를 고른다(억지로 배정하지 말 것). ``topic_en`` 은 고른 범주의 짝 영어 코드를 그대로 쓴다.
+
+범주 목록(topic_ko · topic_en — 이 목록 밖 값은 쓰지 말 것):
+{topic_taxonomy_block}
+
+- **서브토픽(세부 주제, 자유):** ``subtopic_ko`` 는 고른 범주 **밑의 구체 주제어**를 자유롭게 적는다(한국어는 **한 어절**·공백 금지 권장, 예: 범주 ``음식·요리`` 밑 ``김밥`` / ``라면``). ``subtopic_en`` 은 같은 뜻의 짧은 영어(한 토큰·소문자 권장). 맥락이 있으면 **비우지 말고** 채우는 것을 권장한다.
   - **문서·파일·상품·인물 등 고유명**은 subtopic 에 넣지 말고 ``reason`` 등에 적는다.
 - ``reason``: 연결 근거 한 줄(한국어 권장). 고유명·세부 맥락은 여기에 둬도 된다.
 
@@ -185,7 +227,7 @@ def build_relation_proposal_prompt(
 출력 형식 예:
 {{"edges":[
   {{"target_media_item_id":123,"relation_type_code":"{example_relation_type}","confidence":0.75,
-    "topic_ko":"게임","subtopic_ko":"플랫폼","topic_en":"gaming","subtopic_en":"platform",
+    "topic_ko":"음식·요리","subtopic_ko":"김밥","topic_en":"food_cooking","subtopic_en":"gimbap",
     "reason":"유사 후보·주제 일치"
   }}
 ]}}

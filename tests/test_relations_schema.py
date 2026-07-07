@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from src.relations.prompt import build_relation_proposal_prompt
 from src.relations.schema import (
@@ -235,6 +237,112 @@ class TestRelationProposalPromptPathSignals(unittest.TestCase):
         # "경로 신호" 표식 문구가 프롬프트에 포함된다.
         prompt = self._build(emb_score=0.0)
         self.assertIn("경로 신호", prompt)
+
+
+# ── [058 G11] T1101: 제안 프롬프트 topic 지시부 = 닫힌 27+기타 목록 선택 ──────
+_TAXONOMY_SEED_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "specs"
+    / "058-relation-topic-canonicalization"
+    / "taxonomy_seed.json"
+)
+
+
+def _load_seed_topics() -> list[dict[str, str]]:
+    """taxonomy_seed.json(닫힌 topic 분류체계 정본·단일 출처)의 topics 목록."""
+    with open(_TAXONOMY_SEED_PATH, encoding="utf-8") as f:
+        return json.load(f)["topics"]
+
+
+class TestRelationProposalPromptTopicTaxonomy(unittest.TestCase):
+    """T1101 [FR-401v2] — topic 지시를 자유 기입 → 닫힌 목록 선택으로 교체.
+
+    프롬프트가 taxonomy_seed.json 의 27+기타 목록을 통째로 주입하고, "목록에서 하나 선택",
+    확신 없으면 "기타" 지시를 담으며, subtopic 은 자유(구체 주제어) 지시를 유지한다.
+    **관계종류(kind)·후보·경로신호·JSON 출력 형식 지시는 절대 불변**임을 함께 단언한다.
+    """
+
+    def _build(self) -> str:
+        return build_relation_proposal_prompt(
+            source_summary="소스 요약",
+            source_media_type="txt",
+            candidates=[
+                {
+                    "id": "018f0000-0000-7000-8000-000000000007",
+                    "file_uri": "/data/foo/bar.txt",
+                    "media_type": "txt",
+                    "emb_score": 0.42,
+                    "summary": "후보 요약",
+                }
+            ],
+            relation_kinds_catalog=[
+                {"type_code": "same_domain", "type_name": "같은 도메인", "description": "같은 분야"},
+                {"type_code": "duplicate_near", "type_name": "근접중복", "description": "유사"},
+                {"type_code": "references", "type_name": "참조", "description": "참조"},
+            ],
+        )
+
+    def test_all_27_plus_etc_topics_present(self) -> None:
+        # 닫힌 27+기타 목록(topic_ko)이 전부 프롬프트에 주입된다(kNN 불필요·통째로).
+        prompt = self._build()
+        topics = _load_seed_topics()
+        self.assertEqual(len(topics), 28)  # 27 + 기타
+        for t in topics:
+            self.assertIn(t["topic_ko"], prompt, f"topic_ko 누락: {t['topic_ko']}")
+
+    def test_etc_and_select_from_list_instruction(self) -> None:
+        # "목록에서 정확히 하나 선택" + 확신 없으면 "기타" 폴백 지시.
+        prompt = self._build()
+        self.assertIn("기타", prompt)
+        self.assertIn("목록", prompt)
+        self.assertIn("하나", prompt)
+
+    def test_topic_no_longer_free_form(self) -> None:
+        # 과거 자유 기입 예시(반도체·부동산)와 "한 단어 카테고리로 필수" 문구는 사라진다.
+        prompt = self._build()
+        self.assertNotIn("한 단어 카테고리로 필수", prompt)
+        self.assertNotIn("반도체", prompt)
+        self.assertNotIn("부동산", prompt)
+
+    def test_subtopic_remains_free(self) -> None:
+        # subtopic 은 여전히 자유(구체 주제어) — 열린 층. 고유명은 subtopic 금지 가드 유지.
+        prompt = self._build()
+        self.assertIn("subtopic_ko", prompt)
+        self.assertIn("자유", prompt)
+        self.assertIn("고유명", prompt)
+
+    def test_example_topic_in_list(self) -> None:
+        # 출력 예시(JSON)의 topic_ko 도 닫힌 목록 내 값이어야 한다(자유 예시 '게임' 금지).
+        prompt = self._build()
+        self.assertNotIn('"topic_ko":"게임"', prompt)
+        seed_ko = {t["topic_ko"] for t in _load_seed_topics()}
+        # 예시 라인에 등장하는 topic_ko 값이 목록 안에 있는지 확인.
+        self.assertTrue(
+            any(f'"topic_ko":"{ko}"' in prompt for ko in seed_ko),
+            "출력 예시의 topic_ko 가 닫힌 목록 값이 아니다",
+        )
+
+    def test_relation_kind_guide_unchanged(self) -> None:
+        # 관계종류(kind) 지시 불변 — 코드·구분 문구가 그대로 유지.
+        prompt = self._build()
+        self.assertIn("relation_type_code", prompt)
+        self.assertIn("same_domain", prompt)
+        self.assertIn("duplicate_near", prompt)
+        self.assertIn("관계 종류", prompt)
+
+    def test_candidate_and_path_signal_unchanged(self) -> None:
+        # 후보 블록·경로신호 가이드 지시 불변.
+        prompt = self._build()
+        self.assertIn("후보 목록", prompt)
+        self.assertIn("경로 신호", prompt)
+        self.assertIn("same_series", prompt)
+        self.assertIn("derived_from", prompt)
+
+    def test_json_output_format_unchanged(self) -> None:
+        # JSON 단일 객체 출력 지시 불변.
+        prompt = self._build()
+        self.assertIn("JSON 객체 하나만 출력", prompt)
+        self.assertIn("edges", prompt)
 
 
 if __name__ == "__main__":
