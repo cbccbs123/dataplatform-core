@@ -8,15 +8,15 @@
 -- 처방: labels 스키마를 실제 형식(object{label:string, score:number}·label 필수)으로 교정. objects(문자열
 --   배열)·keyframes(객체 배열)·keywords(문자열)는 데이터와 일치하므로 무변경.
 -- DDL 없음. 멱등 UPDATE(domain, meta_key). schema_registry(원 시드)·ext_meta_field_registry(런타임 정본) 둘 다.
--- 적용 순서: v297 이후.
+-- 적용 순서: v297 이후. domain 은 general·medical 명시(v280/v290 스코프와 대칭·타 도메인 labels 오염 방지).
 -- =============================================================================
 
 -- 런타임 정본(041) — validate_ext_meta 가 읽는 테이블. general·medical 둘 다.
 UPDATE ext_meta_field_registry
 SET json_schema = '{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"score":{"type":"number"}},"required":["label"]}}'::jsonb
-WHERE meta_key = 'labels';
+WHERE domain IN ('general', 'medical') AND meta_key = 'labels';
 
 -- 원 시드(039 v280) — 정합 유지.
 UPDATE schema_registry
 SET json_schema = '{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"score":{"type":"number"}},"required":["label"]}}'::jsonb
-WHERE meta_key = 'labels';
+WHERE domain IN ('general', 'medical') AND meta_key = 'labels';

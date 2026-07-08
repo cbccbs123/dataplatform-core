@@ -34,9 +34,11 @@ def downgrade() -> None:
     conn = op.get_bind()
     conn.exec_driver_sql(
         "UPDATE ext_meta_field_registry SET json_schema = "
-        "'{\"type\":\"array\",\"items\":{\"type\":\"string\"}}'::jsonb WHERE meta_key = 'labels'"
+        "'{\"type\":\"array\",\"items\":{\"type\":\"string\"}}'::jsonb "
+        "WHERE domain IN ('general', 'medical') AND meta_key = 'labels'"
     )
     conn.exec_driver_sql(
         "UPDATE schema_registry SET json_schema = "
-        "'{\"type\":\"array\",\"items\":{\"type\":\"string\"}}'::jsonb WHERE meta_key = 'labels'"
+        "'{\"type\":\"array\",\"items\":{\"type\":\"string\"}}'::jsonb "
+        "WHERE domain IN ('general', 'medical') AND meta_key = 'labels'"
     )
