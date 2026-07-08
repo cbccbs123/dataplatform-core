@@ -351,9 +351,9 @@ def _bulk_via_client(client, actions, **kwargs):
 
 
 def _no_topics(_conn, _asset_id):
-    """056 topics 투영 seam 주입 대역 — 관계 없는 자산(주제 0). 색인 경로 배선(project_asset_topics)은
+    """065 topics seam 주입 대역 — 주제 미부여 자산(주제 0). 색인 경로 기본 배선(fetch_asset_topic)은
     실 DB 를 타므로, 이 순수 색인 seam 테스트는 topics_fn 을 [] 로 주입해 기존 문서 형상을 유지한다.
-    주제 수록/투영 자체는 tests/test_opensearch_topics.py 가 별도로 덮는다(T401·T403)."""
+    주제 수록/정본 읽기 자체는 tests/test_opensearch_topics.py 가 별도로 덮는다(065 T402)."""
     return []
 
 

@@ -79,6 +79,8 @@ def parse_and_normalize_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
         tid = edge.get("target_media_item_id")
         if tid is None or str(tid).strip() == "":
             continue
+        # 065 FR-405: 아래 topic/subtopic 은 **관계 맥락 라벨(자산 주제 아님)** — 관계 LLM 이 이 쌍을
+        #   설명하려 붙이는 메타이며, 자산 주제는 asset_topic 정본이 결정한다(엣지 topic 소비 중단·065).
         tk, sk, ten, sen = extract_topic_fields_from_edge(edge)
         row = {
             "target_media_item_id": str(tid).strip(),

@@ -264,7 +264,7 @@ def _flatten_labels(raw: Any) -> list[str]:
 
 
 # 주제 필드 조립(056 FR-202) — asset_to_doc(전체문서)·update_asset_topics(부분문서) 단일 출처.
-# project_asset_topics 가 이미 (topic_ko,subtopic_ko) 그룹을 결정적으로 정렬해 주므로 여기서는
+# 065: 입력은 자기주제 정본(fetch_asset_topic) [{topic_ko, subtopic_ko, ...}] 이며 여기서는
 # 입력 순서를 보존한 채 dedup·빈값 스킵만 한다(재정렬 없음 → 순수·결정적, 헌법 3조).
 
 
@@ -309,8 +309,8 @@ def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
 
     ``topic_pairs``(059 FR-101)는 평면 ``topics``/``subtopics`` 가 잃어버리는 **부모-자식 짝**을
     한 문자열로 보존해, 프론트가 topic→subtopic 트리를 교차곱 오배치 없이 그리게 한다. 짝은 입력
-    (``project_asset_topics``)에 이미 있으므로 그대로 나르며(생성 아님), ``_dedup_in_order`` 로
-    순서 보존·중복 제거만 한다. **평면 ``topics``/``subtopics`` 반환값·로직은 불변**(짝 필드는
+    (``fetch_asset_topic`` 자기주제 정본·065)에 이미 있으므로 그대로 나르며(생성 아님),
+    ``_dedup_in_order`` 로 순서 보존·중복 제거만 한다. **평면 ``topics``/``subtopics`` 반환값·로직은 불변**(짝 필드는
     표시·패싯 전용·랭킹 미반영 — 검색 무회귀, C5).
 
     BM25 관련도 보강 필드(``topics_text``·한/영 토큰 공백결합)는 스코프 철회로 색인하지 않는다
@@ -342,10 +342,10 @@ def asset_to_doc(
     ``labels`` 는 ``_flatten_labels`` 로 dict→label 문자열만 추출한다(P0·FR-002). ext_meta 가 None/
     비-리스트(스키마 위반)여도 빈 값으로 안전 처리한다. ``noise_patterns`` 는 settings 정제 패턴(IO 층 주입).
 
-    ``topics``(056 FR-202) 는 관계 투영(``project_asset_topics``) 결과 리스트다. **주어지고 비어있지
+    ``topics``(065) 는 자기주제 정본(``fetch_asset_topic``) 결과 리스트다. **주어지고 비어있지
     않으면** ``topics``/``subtopics`` 두 필드(keyword)를 수록하고, ``None``/빈 리스트면 두 필드를
-    **넣지 않는다**(관계 없는 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다 현재
-    active 주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
+    **넣지 않는다**(주제 미부여 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다
+    자산 자기주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
     """
     _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
     ext = row.get("ext_meta") or {}
@@ -481,18 +481,21 @@ def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> s
 
 
 def _default_topics_fn(conn: Any, asset_id: Any) -> list[dict[str, Any]]:
-    """자산의 현재 active 관계 주제 투영(056 배선 seam 기본값 — 색인 경로 공용).
+    """자산의 자기주제 정본 읽기(065 배선 seam 기본값 — 색인 경로 공용).
 
-    ``project_asset_topics`` 는 ``psycopg``·``graph_query`` 를 모듈 상단에서 당기므로 **호출 시 지연
-    import** 한다 — 플래그 off(미도입) 환경의 순수 함수 게이트가 이 무거운 의존 없이 opensearch_sync
-    를 import 할 수 있게 하기 위함(모듈 상단 지연 import 원칙과 동일). 반환 [] 면 자산에 주제 없음.
+    065 전에는 이웃 엣지 topic 을 투영(``project_asset_topics``)했으나, 065 는 주제를 자산 자기
+    내용에서 확정한 정본(``asset_topic`` 테이블)에서 읽는다 — ``fetch_asset_topic`` 로 소스만 교체하고
+    출력 형상(``[{topic_ko, subtopic_ko, topic_en, subtopic_en, weight}]``)은 유지해 topics/subtopics/
+    topic_pairs 필드 계약(059)이 불변이다(FR-401). ``fetch_asset_topic`` 은 ``psycopg`` 를 모듈 상단에서
+    당기므로 **호출 시 지연 import** 한다 — 플래그 off(미도입) 환경의 순수 함수 게이트가 이 무거운
+    의존 없이 opensearch_sync 를 import 할 수 있게 하기 위함이다. 반환 [] 면 자산에 주제 미부여.
     """
-    from src.relations.topic_query import project_asset_topics
+    from src.classify.asset_topic import fetch_asset_topic
 
-    return project_asset_topics(conn, asset_id=str(asset_id))
+    return fetch_asset_topic(conn, asset_id=str(asset_id))
 
 
-# 색인 경로에 topic 투영을 잇는 seam(056 T403). 기본은 project_asset_topics(현재 active 주제).
+# 색인 경로에 topic 을 잇는 seam(065 T402). 기본은 fetch_asset_topic(자기주제 정본 읽기).
 # 단위 테스트/특수 경로는 topics_fn 을 주입해 실 DB 없이 색인 문서 조립을 검증한다(bulk_fn·sync_fn 동형).
 TopicsFn = Callable[[Any, Any], list[dict[str, Any]]]
 
@@ -540,10 +543,10 @@ def index_asset(
     ``client.index(_id=asset_id)`` 로 **upsert**(재실행 멱등) 한다. 자산/임베딩이 없으면(INNER
     JOIN 제외) 색인하지 않고 ``None`` 을 반환한다(no-op). 반환: 색인한 문서 또는 ``None``.
 
-    ``topics_fn``(056·기본 ``project_asset_topics``) 으로 그 자산의 **현재 active 관계 주제**를
-    계산해 전체문서에 함께 싣는다 — run_ingest 증분 훅이 재수집 자산을 이 경로로 재색인해도 앞서
+    ``topics_fn``(065·기본 ``fetch_asset_topic``) 으로 그 자산의 **자기주제 정본**을 읽어
+    전체문서에 함께 싣는다 — run_ingest 증분 훅이 재수집 자산을 이 경로로 재색인해도 앞서
     색인된 topics 를 지우지 않는다(C5·SC-03). ``_fetch_one`` 커서는 ``with`` 종료로 닫힌 뒤
-    ``topics_fn`` 이 conn 에 조회하므로 커서 충돌이 없다. 관계 없는 자산은 투영 [] → topics 필드 생략.
+    ``topics_fn`` 이 conn 에 조회하므로 커서 충돌이 없다. 주제 미부여 자산은 [] → topics 필드 생략.
     """
     row = _fetch_one(conn, _ASSET_ONE_SQL, (channel, asset_id))
     if row is None:

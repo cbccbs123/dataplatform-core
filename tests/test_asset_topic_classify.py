@@ -7,7 +7,7 @@
     - **LLM 단일 seam(헌법 6조)**: ``src.llm.client.complete_json``·``client=`` 주입.
     - **닫힌집합 검증(FR-203)**: LLM 이 후보 밖 topic 을 답하면 1회 재질의 후 실패 시 미부여(강제 매핑 금지).
 
-mock 패턴은 ``tests/test_topic_canonicalize.py``(cursor mock·_mock_conn)·``tests/test_topic_query.py`` 동형.
+mock 패턴은 ``tests/test_topic_canonicalize.py``(cursor mock·_mock_conn)·``tests/test_asset_topic_consumers.py`` 동형.
 classify_asset_topic 은 헬퍼(knn_topic_candidates·canonicalize_subtopic·_lookup_topic_en)를
 **asset_topic 모듈 위치에서** patch 해 분기만 순수 검증한다.
 """

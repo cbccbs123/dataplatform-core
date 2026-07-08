@@ -275,37 +275,10 @@ def run_relations(
             result["failed"].append((aid, str(exc)))
         # 자산 처리 결과를 큐에 반영(엣지0/예외/성공 모두). fresh 트랜잭션 격리.
         _record_resolution(db, aid, edges_u, error=err, max_attempts=max_attempts)
-    # 056 FR-301: 배치가 만든/변경한 관계를 OS topics 필드에 반영(커밋 후·best-effort·격리).
-    # 자산별 propose 트랜잭션이 모두 커밋된 뒤라, OS 재색인은 PG 와 분리된 후처리다 — 실패해도
-    # 배치 결과(result)·큐를 건드리지 않는다(격리·SC-003 결). CLI·Airflow 배치 모두 이 경로로 반영.
-    _reindex_topics_after_batch(db, result)
+    # 065 FR-404: 관계 배치 후 OS topics 재색인 훅(056 FR-301) 제거 — 065 는 주제를 자산 자기주제
+    # 정본(asset_topic)에서 부여하므로 관계 생성/변경이 자산 주제를 바꾸지 않는다(재색인 무의미).
+    # 관계 파이프라인(후보→LLM→confidence→active·큐)은 불변, 주제 결정권만 회수됐다.
     return result
-
-
-def _reindex_topics_after_batch(db: PostgresUtil, result: dict[str, list[Any]]) -> None:
-    """관계 배치가 성공 처리한 자산의 OS topics 를 재색인한다(056 T503·커밋 후·best-effort·격리).
-
-    ``result['done']`` 의 자산 id 를 기점으로 ``reindex_asset_topics`` 를 호출한다 — 그 함수가
-    각 자산의 active 이웃까지 함께 재색인한다(엣지가 양끝 자산 주제를 동시에 바꾸므로). OS 동기화가
-    꺼져 있으면(020/038 ``opensearch_sync_enabled`` 게이트) 스킵한다.
-
-    **격리**: 설정 미초기화·OS 미도달·재색인 오류 등 **어떤 예외도 삼킨다**(warning 로그). 재색인은
-    관계 write 커밋 뒤 부수 후처리라, 실패가 배치 성공/실패 판정이나 큐를 되돌리면 안 된다.
-    """
-    processed = [aid for aid, _edges_u, _edges_k in result.get("done", [])]
-    if not processed:
-        return  # 성공 자산 0 → 재색인 대상 없음(빈 호출 회피)
-    try:
-        from src.config.settings import get_current_settings
-
-        if not getattr(get_current_settings(), "opensearch_sync_enabled", False):
-            return  # OS 동기화 off(미도입/비활성) — 재색인 스킵(020/038 게이트와 정합)
-        from src.search.topic_reindex import reindex_asset_topics
-
-        stats = reindex_asset_topics(db, asset_ids=processed)
-        _LOG.info("topic reindex(관계 배치): %s (assets=%d)", stats, len(processed))
-    except Exception as exc:  # noqa: BLE001 — 재색인 실패가 배치를 깨지 않는다(best-effort 격리)
-        _LOG.warning("topic reindex(관계 배치) 실패(무시): %s", exc)
 
 
 # ── 초기 설정(부트스트랩) 절차 ────────────────────────────────────────────────

@@ -458,3 +458,105 @@ def find_same_topic_groups(
     # 결정성(헌법 3조): 주제 asset_count desc → topic_ko asc.
     out.sort(key=lambda o: (-o["asset_count"], o["topic_ko"]))
     return out[:max_topics]
+
+
+# ── 주제 패싯·브라우즈(FR-402) — 자기주제 정본 조인 ──────────────────────────────
+# 구 ``topic_query.list_topics``/``assets_in_topic`` 를 정본(``asset_topic``) 기준으로 이식한다.
+# 응답 계약(필드명·정렬)은 구 함수와 동일 → 포탈 /topics·/topics/{topic} 무변경 스왑(FR-402).
+# 정본은 자산당 1행(asset_id PK)이라 구 이웃-엣지 투영의 "양끝 자산 중복카운트" 문제가 원천 소거된다.
+# 의료(PHI) 제외(헌법 10조): 후보 자산 domain_label IS DISTINCT FROM 'medical'(NULL 도 노출 방지).
+
+# (topic_ko, subtopic_ko) 별 자산 집계용 — 빈 topic_ko 는 조회 단계에서 배제.
+_LIST_TOPICS_SQL = """
+SELECT at.topic_ko, at.subtopic_ko, at.asset_id
+FROM asset_topic at
+JOIN asset a ON a.asset_id = at.asset_id
+WHERE COALESCE(at.topic_ko, '') <> ''
+  AND a.domain_label IS DISTINCT FROM 'medical'
+"""
+
+# 주제별 자산 페이징용 — subtopic 필터는 호출 시 append.
+_ASSETS_IN_TOPIC_SQL = """
+SELECT at.asset_id, a.fs_uri, a.fs_path
+FROM asset_topic at
+JOIN asset a ON a.asset_id = at.asset_id
+WHERE a.domain_label IS DISTINCT FROM 'medical'
+  AND at.topic_ko = %s
+"""
+
+
+def list_topics(conn) -> list[dict]:
+    """자기주제 정본의 주제 패싯 목록(구 ``topic_query.list_topics`` 형상·FR-402).
+
+    Returns:
+        ``[{topic_ko, subtopic_ko|None, asset_count, topic_asset_count}]`` — ``(topic_ko,
+        subtopic_ko)`` 조합별 distinct 자산 수(``asset_count``). 빈 topic_ko 는 제외, 빈 subtopic_ko 는
+        ``None`` 으로 정규화. 정렬 ``topic_ko asc → subtopic_ko asc``(None 은 "" 로 최상단·결정적).
+        ``topic_asset_count`` = ``topic_ko`` 주제 전체의 distinct 자산 수(하위주제 합산 아님 —
+        프론트 중복카운트 방지, 057 FR-105). 같은 ``topic_ko`` 의 모든 행은 동일 값을 갖는다.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_LIST_TOPICS_SQL)
+        rows = cur.fetchall()
+
+    # (topic_ko, subtopic_ko) → distinct 자산 집합. topic_assets: topic_ko → 주제 전체 distinct 자산.
+    groups: dict[tuple[str, Any], set[str]] = {}
+    topic_assets: dict[str, set[str]] = {}
+    for r in rows:
+        topic_ko = r["topic_ko"]
+        if not topic_ko:  # COALESCE 로 조회 단계에서 걸러지지만 방어적 스킵.
+            continue
+        sub = r["subtopic_ko"] or None  # "" 또는 None → None 정규화
+        aid = str(r["asset_id"])
+        groups.setdefault((topic_ko, sub), set()).add(aid)
+        topic_assets.setdefault(topic_ko, set()).add(aid)
+
+    out = [
+        {"topic_ko": ko, "subtopic_ko": sub, "asset_count": len(assets),
+         "topic_asset_count": len(topic_assets[ko])}
+        for (ko, sub), assets in groups.items()
+    ]
+    out.sort(key=lambda o: (o["topic_ko"], o["subtopic_ko"] or ""))
+    return out
+
+
+def assets_in_topic(
+    conn, *, topic_ko: str, subtopic_ko: str | None = None, limit: int = 50, offset: int = 0
+) -> dict:
+    """특정 주제(자기주제 정본)에 속한 자산을 페이징 조회(구 ``topic_query.assets_in_topic`` 형상).
+
+    Args:
+        topic_ko: 대주제(정확 일치).
+        subtopic_ko: 세부주제(주면 추가 필터, None 이면 topic_ko 하위 전체).
+        limit/offset: 페이징.
+
+    Returns:
+        ``{rows:[{asset_id(str), fs_uri, file_name}], total}``. ``total`` 은 페이징 전 distinct
+        자산 수. ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 ``[offset:offset+limit]``.
+        ``file_name`` 은 ``fs_path`` basename(review.py 관례 일치).
+    """
+    sql = _ASSETS_IN_TOPIC_SQL
+    params: list[Any] = [topic_ko]
+    if subtopic_ko is not None:
+        sql = sql + "  AND at.subtopic_ko = %s\n"
+        params.append(subtopic_ko)
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+
+    # 정본은 자산당 1행이지만 관례상 asset_id → 식별 필드로 dedupe(멱등·결정적).
+    assets: dict[str, dict] = {}
+    for r in rows:
+        aid = str(r["asset_id"])
+        if aid not in assets:
+            assets[aid] = {
+                "asset_id": aid,
+                "fs_uri": r["fs_uri"],
+                "file_name": os.path.basename(r["fs_path"] or ""),
+            }
+
+    ordered = sorted(assets.values(), key=lambda a: a["asset_id"])  # asset_id asc 결정적
+    total = len(ordered)
+    page = ordered[offset : offset + limit]
+    return {"rows": page, "total": total}

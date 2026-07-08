@@ -51,6 +51,16 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+# 065 자산 자기주제 정본 — 자산상세 topics·same_topic_groups + 주제 브라우즈/패싯(FR-402). 전부
+# 순수 조회(asset_topic 조인·의료 제외)로 **신규 LLM 0**. 모듈 상단 import 로 두어 단위 테스트가
+# src.app.portal_api.<name> 을 patch 할 수 있게 한다(다른 조회 seam 과 동형). 구 이웃-엣지 투영
+# (topic_query.project_asset_topics·find_topic_neighbor_groups) 은퇴 — 주제 소스는 정본 하나(FR-403).
+from src.classify.asset_topic import (
+    assets_in_topic,
+    fetch_asset_topic,
+    find_same_topic_groups,
+    list_topics,
+)
 from src.config.settings import get_current_settings
 from src.portal._timeline_util import TIMELINE_INTERVALS
 
@@ -106,22 +116,12 @@ from src.relations.review import (
     promote_relation_kind,
     revise_edge,
 )
-
-# 056 포털 주제 표면 — 자산상세 same-topic·주제 브라우즈·검색 패싯(FR-501/502/503). 전부 순수 조회
-# (graph_query seam·active-only·의료 제외)로 **신규 LLM 호출 0**(FR-505). 모듈 상단 import 로 두어
-# 단위 테스트가 src.app.portal_api.<name> 을 patch 할 수 있게 한다(다른 조회 seam 과 동형).
-from src.relations.topic_query import (
-    assets_in_topic,
-    find_topic_neighbor_groups,
-    list_topics,
-    project_asset_topics,
-)
 from src.search.search_filters import parse_search_filters
 from src.search.search_service import search_hybrid
 
-# 056 재색인 훅 — 검토 결정(승인/반려/정정) 커밋 후 관계 주제 변화를 OS 에 반영한다.
-# 모듈 상단 import 로 두어 단위 테스트가 src.app.portal_api.reindex_asset_topics 를 patch 할 수 있게 한다.
-from src.search.topic_reindex import reindex_asset_topics
+# 065 FR-404: 검토 결정(승인/반려/정정) 후 관계발 주제 재색인 훅을 제거했다 — 065 는 주제를 자산
+# 자기주제 정본(asset_topic)에서 부여하므로 관계 승인/반려가 자산 주제를 바꾸지 않는다(재색인 무의미).
+# (구 import: from src.search.topic_reindex import reindex_asset_topics — topic_reindex 모듈 은퇴.)
 
 _ENV = os.getenv("PORTAL_API_ENV", "dev")
 _VALID_MODALITIES = ("text", "image", "video", "audio")
@@ -763,66 +763,9 @@ def relations_list(
     )
 
 
-# graph_edge → node 역조인으로 엣지 양끝 자산 id 를 해소(056 재색인 훅용·graph_query 조인 스타일).
-_EDGE_ENDPOINT_SQL = """
-SELECT sn.asset_id AS src_asset, dn.asset_id AS dst_asset
-FROM graph_edge ge
-JOIN node sn ON sn.node_id = ge.src_node AND sn.node_kind = 'asset'
-JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'
-WHERE ge.edge_id = ANY(%s)
-"""
-
-
-def _resolve_edge_endpoint_assets(edge_ids: list[str]) -> list[str]:
-    """엣지 id 들의 **양끝 자산 id(str)** 를 중복 없이 조회한다(읽기 seam·056 재색인 훅용).
-
-    조회 전용(``_run_in_db``·읽기 트랜잭션·헌법 6조). 값은 ``str()``·입력 순서 보존 dedup.
-    """
-    if not edge_ids:
-        return []
-
-    def _work(conn: Any) -> list[str]:
-        with conn.cursor() as cur:
-            cur.execute(_EDGE_ENDPOINT_SQL, (edge_ids,))
-            rows = cur.fetchall()
-        seen: dict[str, None] = {}
-        for r in rows:
-            for aid in (r[0], r[1]):  # 기본 커서(튜플 행) — src_asset·dst_asset 순
-                if aid is not None:
-                    seen[str(aid)] = None
-        return list(seen.keys())
-
-    return _run_in_db(_work)
-
-
-def _reindex_review_topics(results: list[dict[str, Any]]) -> None:
-    """검토 결정(승인/반려/정정)으로 status 가 바뀐 엣지 양끝 자산의 OS topics 를 재색인한다.
-
-    (056 FR-301~304) — ``_run_in_db_write`` 커밋 **후**에 호출한다. 관계 결정 트랜잭션 **밖**이라
-    재색인 실패가 결정을 롤백하거나 HTTP 응답/승인을 바꾸지 않는다(FR-304·승인 무손상). ``ok=True``
-    엣지만 대상으로 그 양끝 asset_id 를 해소(graph_edge→node)해 ``reindex_asset_topics`` 에 넘긴다
-    (그 함수가 각 자산의 active 이웃까지 함께 재색인). OS 동기화 off(020/038 게이트)면 스킵한다.
-
-    **격리**: 설정 미초기화·OS 미도달·재색인 오류 등 **어떤 예외도 삼킨다**(warning 로그).
-    """
-    edge_ids = [r["edge_id"] for r in results if r.get("ok")]
-    if not edge_ids:
-        return  # 실제 status 변경(ok=True)이 없으면 재색인 대상 없음
-    try:
-        if not getattr(get_current_settings(), "opensearch_sync_enabled", False):
-            return  # OS 동기화 off — 재색인 스킵(020/038 게이트와 정합)
-        asset_ids = _resolve_edge_endpoint_assets(edge_ids)
-        if not asset_ids:
-            return
-        # reindex 는 PG 읽기(이웃·투영)에 db.transaction() 을 쓴다 — _run_in_db 관례대로 새 풀 1개.
-        from src.database.postgres_util import PostgresUtil
-
-        db = PostgresUtil()
-        with db:
-            stats = reindex_asset_topics(db, asset_ids=asset_ids)
-        _LOG.info("topic reindex(검토 결정): %s (edges=%d)", stats, len(edge_ids))
-    except Exception as exc:  # noqa: BLE001 — 재색인 실패가 결정·응답을 깨지 않는다(FR-304)
-        _LOG.warning("topic reindex(검토 결정) 실패(무시): %s", exc)
+# 065 FR-404: 검토 결정 후 관계발 주제 재색인 헬퍼(_EDGE_ENDPOINT_SQL·_resolve_edge_endpoint_assets·
+# _reindex_review_topics)를 제거했다 — 주제는 자기주제 정본(asset_topic)에서만 나오므로 관계 결정이
+# 자산 주제를 바꾸지 않는다(재색인 무의미). 승인/반려·감사 기록 로직은 아래 _bulk_decide 에서 불변.
 
 
 def _bulk_decide(action: str, edge_ids: list[str], reviewer: str) -> dict[str, Any]:
@@ -844,8 +787,7 @@ def _bulk_decide(action: str, edge_ids: list[str], reviewer: str) -> dict[str, A
         return {"results": results}
 
     out = _run_in_db_write(_work)
-    # 커밋 후 재색인(056 FR-301·트랜잭션 밖·best-effort) — ok=True 엣지 양끝 자산 OS topics 갱신.
-    _reindex_review_topics(out["results"])
+    # 065 FR-404: 관계발 주제 재색인 훅 제거 — 결정이 자산 주제(자기주제 정본)를 바꾸지 않는다.
     return out
 
 
@@ -903,9 +845,8 @@ def relations_revise(
         return {"results": [{"edge_id": body.edge_id, "ok": ok}]}
 
     out = _run_in_db_write(_work)
-    # 커밋 후 재색인(056 FR-301·트랜잭션 밖·best-effort) — 정정으로 status 가 바뀌면(ok=True)
-    # active↔rejected 전이가 양끝 자산 주제 투영을 바꾸므로 그 자산 OS topics 를 갱신한다(SC-02).
-    _reindex_review_topics(out["results"])
+    # 065 FR-404: 관계발 주제 재색인 훅 제거 — 정정(active↔rejected)이 자산 주제를 바꾸지 않는다
+    # (주제는 자기주제 정본에서만 결정). 정정·감사 로직 자체는 불변.
     return out
 
 
@@ -1205,12 +1146,12 @@ def asset_detail(
     노출 게이트(FR-014)는 ``fetch_asset_detail`` 이 책임진다 — 없음/비registered/의료면 None →
     404(자산 데이터 노출 0).
 
-    056 FR-501 — 노출 통과 자산에 관계 주제 렌즈를 함께 싣는다(신규 LLM 0·FR-505):
-    - ``topics``: 이 자산의 active 관계 주제 투영(``project_asset_topics``).
+    065 FR-402 — 노출 통과 자산에 자기주제 정본 렌즈를 함께 싣는다(신규 LLM 0):
+    - ``topics``: 이 자산의 자기주제 정본(``fetch_asset_topic`` — ``asset_topic`` 테이블).
     - ``same_topic_groups``: 같은 주제를 공유하는 다른 자산을 **공유 주제(topic_ko)별로 묶은** 그룹
-      (``find_topic_neighbor_groups``·직접 관계 여부 ``already_linked`` 포함) — ego-network(``relations``)
-      옆의 두 번째 탐색 렌즈(US1·의료 제외). 057-후속: 평면 목록의 ``overlap_weight`` 오라벨 혼선을
-      "무슨 주제로 같은지" 그룹 구조로 대체.
+      (``find_same_topic_groups``·자기주제 정본 조인·직접 관계 여부 ``already_linked`` 포함) —
+      ego-network(``relations``) 옆의 두 번째 탐색 렌즈(US1·의료 제외). 구 이웃-엣지 투영 은퇴로
+      주제가 자산 자기 내용에서만 나오므로 관계 오염(농구→축구/배드민턴)이 사라진다.
     상세 조회와 **같은 읽기 트랜잭션**에서 계산한다(추가 풀 획득 없음). 게이트 미통과(None)면
     주제 seam 을 호출하지 않는다(불필요한 조회 없음).
     """
@@ -1219,8 +1160,8 @@ def asset_detail(
         detail = fetch_asset_detail(conn, asset_id=asset_id, clearance=principal.clearance)
         if detail is None:
             return None
-        detail["topics"] = project_asset_topics(conn, asset_id=asset_id)
-        detail["same_topic_groups"] = find_topic_neighbor_groups(conn, asset_id=asset_id)
+        detail["topics"] = fetch_asset_topic(conn, asset_id=asset_id)
+        detail["same_topic_groups"] = find_same_topic_groups(conn, asset_id=asset_id)
         return detail
 
     detail = _run_in_db(_work)
@@ -1233,10 +1174,11 @@ def asset_detail(
 def topics_list(
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """관계 주제 목록(topic→subtopic 2단계·주제별 자산 수)을 반환한다(056 FR-502·US2). 조회 전용·LLM 0.
+    """주제 목록(topic→subtopic 2단계·주제별 자산 수)을 반환한다(065 FR-402·US2). 조회 전용·LLM 0.
 
-    ``list_topics`` 가 active·의료 제외 엣지의 ``(topic_ko, subtopic_ko)`` 별 distinct 자산 수를
-    결정적 정렬(topic_ko asc→subtopic_ko asc)로 집계한다. 주제 브라우즈 진입점.
+    ``list_topics`` 가 자기주제 정본(``asset_topic``·의료 제외)의 ``(topic_ko, subtopic_ko)`` 별
+    distinct 자산 수를 결정적 정렬(topic_ko asc→subtopic_ko asc)로 집계한다. 주제 브라우즈 진입점 —
+    구 이웃-엣지 투영 은퇴로 패싯이 자산 자기주제 기준이라 관계 오염이 사라진다(FR-403).
 
     057 FR-105 — 각 행에 ``topic_asset_count``(주제 전체 distinct 자산 수)를 함께 싣는다(하위호환
     필드 추가). 프론트는 하위주제 ``asset_count`` 를 합산(중복카운트)하지 않고 이 값을 그대로 쓴다.
@@ -1252,10 +1194,11 @@ def topic_assets(
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
 ) -> dict[str, Any]:
-    """특정 주제에 속한 자산을 페이징 조회한다(056 FR-502·US2). 조회 전용·의료 제외·LLM 0.
+    """특정 주제에 속한 자산을 페이징 조회한다(065 FR-402·US2). 조회 전용·의료 제외·LLM 0.
 
-    ``assets_in_topic`` 이 그 주제(active 엣지) 양끝 자산을 distinct·``asset_id asc`` 결정적 정렬로
-    페이징한다. ``subtopic`` 미지정이면 topic 하위 전체. 반환 ``{rows:[{asset_id, fs_uri, file_name}], total}``.
+    ``assets_in_topic`` 이 그 주제의 자기주제 정본(``asset_topic``) 자산을 distinct·``asset_id asc``
+    결정적 정렬로 페이징한다. ``subtopic`` 미지정이면 topic 하위 전체. 반환
+    ``{rows:[{asset_id, fs_uri, file_name}], total}``.
     """
     return _run_in_db(
         lambda conn: assets_in_topic(

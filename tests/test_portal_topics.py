@@ -1,13 +1,14 @@
 """056 G7 — 포털 주제 표면 단위 테스트 (FR-501/502/503-facet/505).
 
 전략(test_portal_api.py 패턴 재사용)
-    FastAPI ``TestClient`` + auth bypass + ``_run_in_db`` passthrough. 주제 seam
-    (``project_asset_topics``/``find_topic_neighbor_groups``/``list_topics``/``assets_in_topic``)과
+    FastAPI ``TestClient`` + auth bypass + ``_run_in_db`` passthrough. 주제 seam(자기주제 정본·065:
+    ``fetch_asset_topic``/``find_same_topic_groups``/``list_topics``/``assets_in_topic``)과
     검색 seam(``search_hybrid``)을 ``patch`` 로 대체해 **DB·OS·LLM·네트워크 없이** 순수 단위로 돈다.
 
 검증 대상
-    - 자산상세(``GET /assets/{id}``): 응답에 ``topics``(project_asset_topics) + ``same_topic_groups``
-      (find_topic_neighbor_groups·공유 주제별 그룹·``already_linked`` 포함) 동반. 노출 게이트(None→404) 보존.
+    - 자산상세(``GET /assets/{id}``): 응답에 ``topics``(fetch_asset_topic 자기주제 정본) +
+      ``same_topic_groups``(find_same_topic_groups·공유 주제별 그룹·``already_linked`` 포함) 동반.
+      노출 게이트(None→404) 보존.
     - ``GET /topics`` → list_topics · ``GET /topics/{topic}`` → assets_in_topic 페이징(subtopic·limit·offset 전달).
     - ``GET /search`` → 응답 meta 에 주제 패싯 집계(``topic_facets``) · ``topic=``/``subtopic=`` 파라미터가
       parse_search_filters 를 거쳐 search_hybrid 의 ``search_filters`` 로 전달.
@@ -73,8 +74,8 @@ class TestAssetDetailTopics(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.find_topic_neighbor_groups")
-    @patch("src.app.portal_api.project_asset_topics")
+    @patch("src.app.portal_api.find_same_topic_groups")
+    @patch("src.app.portal_api.fetch_asset_topic")
     @patch("src.app.portal_api.fetch_asset_detail")
     def test_detail_includes_topics_and_same_topic(
         self, mock_detail, mock_project, mock_groups
@@ -85,7 +86,7 @@ class TestAssetDetailTopics(unittest.TestCase):
         }
         mock_project.return_value = [
             {"topic_ko": "요리", "subtopic_ko": "제빵", "topic_en": "cooking",
-             "subtopic_en": "baking", "weight": 3},
+             "subtopic_en": "baking", "weight": 1},
         ]
         # 057-후속: 공유 주제(topic_ko)→하위주제(subtopic_ko) 2단 중첩 — "무슨 주제·하위주제로 같은지".
         mock_groups.return_value = [
@@ -113,8 +114,8 @@ class TestAssetDetailTopics(unittest.TestCase):
         self.assertEqual(mock_project.call_args.kwargs["asset_id"], "a1")
         self.assertEqual(mock_groups.call_args.kwargs["asset_id"], "a1")
 
-    @patch("src.app.portal_api.find_topic_neighbor_groups")
-    @patch("src.app.portal_api.project_asset_topics")
+    @patch("src.app.portal_api.find_same_topic_groups")
+    @patch("src.app.portal_api.fetch_asset_topic")
     @patch("src.app.portal_api.fetch_asset_detail")
     def test_detail_none_returns_404_no_topic_calls(
         self, mock_detail, mock_project, mock_groups
@@ -295,9 +296,8 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
               "subtopics": [{"subtopic_ko": "제빵", "asset_count": 1}]}],
         )
 
-    @patch("src.app.portal_api.project_asset_topics", return_value=[])
     @patch("src.app.portal_api.search_hybrid")
-    def test_search_passes_topic_filter(self, mock_search, _mock_project) -> None:
+    def test_search_passes_topic_filter(self, mock_search) -> None:
         mock_search.return_value = _fake_search_result()
         resp = self.client.get(
             "/search", params={"q": "요리", "topic": "요리", "subtopic": "제빵"}

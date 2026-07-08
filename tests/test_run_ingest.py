@@ -193,5 +193,94 @@ class TestRunIngest(unittest.TestCase):
         self.assertEqual(res["failed"][0][0], 1)
 
 
+class TestRunIngestSelfTopicWiring(unittest.TestCase):
+    """T301(065) — 수집 배선: registered 직후·OS 색인 전 자기주제 분류(FR-301/302)·실패 격리(FR-204).
+
+    ``process_asset`` 이 finalize(등록) 커밋 뒤·``os_index`` 앞에서 ``classify_asset_topic`` 을
+    호출한다(색인 시점에 OS doc 이 topics 를 포함하도록 — FR-302). 자기 텍스트는 in-memory
+    ``record.ext_meta`` 에서 구성해 주입한다(DB 재조회 회피). 분류 실패는 완전 격리해 registered 를
+    유지하고 색인을 진행한다(FR-204). ``classify_asset_topic``·``_make_opensearch_indexer`` 를 patch 해
+    실 DB·LLM 없이 호출 순서·인자·격리만 검증한다.
+    """
+
+    def setUp(self) -> None:
+        self.settings = object()
+        self.db = mock.MagicMock()
+
+    def _run(self, *, extract_fn, classify_topic, os_recorder):
+        with contextlib.ExitStack() as stack:
+            m = _patch_all(stack, _route())
+            stack.enter_context(
+                mock.patch.object(ri, "classify_asset_topic", side_effect=classify_topic)
+            )
+            # os_index 배치기를 레코더로 대체 — 분류/색인 호출 순서를 관측한다.
+            stack.enter_context(
+                mock.patch.object(ri, "_make_opensearch_indexer", return_value=os_recorder)
+            )
+            res = ri.run_ingest(
+                ["/d/a.txt"], db=self.db, extract_fn=extract_fn,
+                classify_fn=lambda p, mod: _cls(), settings=self.settings,
+            )
+        return res, m
+
+    def test_classify_called_once_before_os_index(self) -> None:
+        order: list[str] = []
+
+        def classify_topic(conn, asset_id, *, self_text=None, settings=None, client=None):
+            order.append("classify")
+
+        def os_recorder(aid):
+            order.append("os_index")
+
+        res, _ = self._run(
+            extract_fn=lambda ctx: AssetRecord(ext_meta={"summary": "요약"}),
+            classify_topic=classify_topic, os_recorder=os_recorder,
+        )
+        self.assertEqual(res["registered"], [1])
+        # 색인 전 분류(FR-302) — 정확히 이 순서.
+        self.assertEqual(order, ["classify", "os_index"])
+        self.assertEqual(order.count("classify"), 1)  # 자산당 정확히 1회 분류
+
+    def test_self_text_built_from_inmemory_record(self) -> None:
+        seen: dict = {}
+
+        def classify_topic(conn, asset_id, *, self_text=None, settings=None, client=None):
+            seen["self_text"] = self_text
+            seen["settings"] = settings
+            seen["asset_id"] = asset_id
+
+        rec = AssetRecord(ext_meta={
+            "summary": "농구 경기", "keywords": ["농구"],
+            "labels": [{"label": "sport", "score": 0.9}],
+        })
+        self._run(extract_fn=lambda ctx: rec, classify_topic=classify_topic,
+                  os_recorder=lambda aid: None)
+        # in-memory ext_meta 로 구성된 자기 텍스트를 주입(DB 재조회 없이)·settings 전달.
+        self.assertIn("농구 경기", seen["self_text"])
+        self.assertIn("농구", seen["self_text"])
+        self.assertIn("sport", seen["self_text"])  # labels 상위 라벨도 자기 텍스트에 포함
+        self.assertIs(seen["settings"], self.settings)
+        self.assertEqual(seen["asset_id"], 1)
+
+    def test_classify_failure_isolated_registered_and_indexed(self) -> None:
+        called = {"os": False}
+
+        def classify_topic(conn, asset_id, *, self_text=None, settings=None, client=None):
+            raise RuntimeError("분류 실패")
+
+        def os_recorder(aid):
+            called["os"] = True
+
+        with self.assertLogs(ri._LOG, level="WARNING"):
+            res, _ = self._run(
+                extract_fn=lambda ctx: AssetRecord(ext_meta={"summary": "요약"}),
+                classify_topic=classify_topic, os_recorder=os_recorder,
+            )
+        # 분류 실패에도 registered 유지·os_index 진행(FR-204 완전 격리).
+        self.assertEqual(res["registered"], [1])
+        self.assertEqual(res["failed"], [])
+        self.assertTrue(called["os"])
+
+
 if __name__ == "__main__":
     unittest.main()

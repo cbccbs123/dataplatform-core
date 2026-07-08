@@ -8,8 +8,9 @@
       ``topics=None``(또는 생략)이면 두 필드를 **넣지 않는다**(관계 없는 자산·하위호환).
     - ``update_asset_topics(client,index,asset_id,topics)`` 는 OS ``update`` 부분문서
       (``body={"doc": {...}}``)로 주제 2필드만 갱신한다(전체 재색인 아님·G5 재색인 훅의 seam).
-    - T403 배선: ``index_asset``/``sync_all`` 전체문서 색인 경로가 ``project_asset_topics`` 로
-      **현재 active 주제를 항상 함께 실어**, 재수집/재색인이 topics 를 지우지 않게 한다(C5·SC-03).
+    - 065 T402 배선: ``index_asset``/``sync_all`` 전체문서 색인 경로가 자기주제 정본
+      (``fetch_asset_topic``·065)으로 **자산 자기 (topic, subtopic) 을 함께 실어**, 재수집/재색인이
+      topics 를 지우지 않게 한다(C5·SC-03). (구 이웃-엣지 투영 ``project_asset_topics`` 은퇴.)
 
 모든 검증은 순수 함수 + 가짜 client/conn 주입으로 수행한다 — 실 OS·DB 색인은 T404(사람 게이트).
 """
@@ -321,41 +322,42 @@ class _FakeClient:
         return (len(acts), [])
 
 
-_PROJECT = "src.relations.topic_query.project_asset_topics"
+_FETCH = "src.classify.asset_topic.fetch_asset_topic"
 
 
 class TestIndexAssetTopicWiring(unittest.TestCase):
-    """T403 — 전체문서 색인 경로(index_asset)가 현재 active 주제를 항상 실어야 한다(C5·SC-03).
+    """065 T402 — 전체문서 색인 경로(index_asset)가 자기주제 정본을 항상 실어야 한다(C5·SC-03).
 
-    ``index_asset`` 는 기본 topics_fn 으로 ``project_asset_topics(conn, asset_id)`` 를 계산해
-    ``asset_to_doc(..., topics=...)`` 에 주입한다. 관계가 있으면 재색인 문서가 topics 를 포함하므로
-    재수집/재색인이 이미 색인된 topics 를 지우지 않는다(self-heal).
+    ``index_asset`` 는 기본 topics_fn 으로 자기주제 정본 ``fetch_asset_topic(conn, asset_id)`` 를
+    읽어 ``asset_to_doc(..., topics=...)`` 에 주입한다. 주제가 있으면 재색인 문서가 topics 를
+    포함하므로 재수집/재색인이 이미 색인된 topics 를 지우지 않는다(self-heal). 구 이웃-엣지 투영
+    ``project_asset_topics`` 은퇴 — 소스만 교체하고 topics/subtopics 필드 계약은 불변(FR-401).
     """
 
-    @mock.patch(_PROJECT)
-    def test_index_asset_default_path_includes_current_topics(self, m_project) -> None:
+    @mock.patch(_FETCH)
+    def test_index_asset_default_path_includes_current_topics(self, m_fetch) -> None:
         from src.search.opensearch_sync import index_asset
 
-        m_project.return_value = [_topic("요리", "제빵", "cooking", "baking", weight=2)]
+        m_fetch.return_value = [_topic("요리", "제빵", "cooking", "baking", weight=1)]
         client = _FakeClient()
         conn = _FakeConn([_row()])
 
         doc = index_asset(client, conn, "a1", index="assets", channel="st")
 
-        # 색인 문서가 현재 active 주제를 포함(C5) — topics_fn 미주입 시 project_asset_topics 계산.
+        # 색인 문서가 자기주제 정본을 포함(C5) — topics_fn 미주입 시 fetch_asset_topic 읽기.
         self.assertEqual(doc["topics"], ["요리"])
         self.assertEqual(doc["subtopics"], ["제빵"])
         self.assertEqual(client.indexed[0]["body"]["topics"], ["요리"])
-        # project 는 conn + 해당 asset_id 로 호출(투영 seam 재사용)
-        m_project.assert_called_once()
-        self.assertEqual(m_project.call_args.kwargs.get("asset_id"), "a1")
+        # fetch 는 conn + 해당 asset_id 로 호출(정본 읽기 seam)
+        m_fetch.assert_called_once()
+        self.assertEqual(m_fetch.call_args.kwargs.get("asset_id"), "a1")
 
-    @mock.patch(_PROJECT)
-    def test_index_asset_no_relations_omits_topics(self, m_project) -> None:
-        # 관계 없는 자산 → 투영 [] → 문서에 topics 필드 부재(하위호환·기존 문서 형상 유지).
+    @mock.patch(_FETCH)
+    def test_index_asset_no_topic_omits_topics(self, m_fetch) -> None:
+        # 자기주제 미부여 자산 → fetch [] → 문서에 topics 필드 부재(하위호환·기존 문서 형상 유지).
         from src.search.opensearch_sync import index_asset
 
-        m_project.return_value = []
+        m_fetch.return_value = []
         client = _FakeClient()
         doc = index_asset(client, _FakeConn([_row()]), "a1", index="assets", channel="st")
         self.assertNotIn("topics", doc)
@@ -376,12 +378,12 @@ class TestIndexAssetTopicWiring(unittest.TestCase):
         )
         self.assertEqual(doc["topics"], ["음악"])
 
-    @mock.patch(_PROJECT)
-    def test_sync_all_bulk_docs_include_topics(self, m_project) -> None:
-        # 전체 재색인(백필·T801) 경로도 현재 주제를 실어야 한다 — full reindex self-heal(R3).
+    @mock.patch(_FETCH)
+    def test_sync_all_bulk_docs_include_topics(self, m_fetch) -> None:
+        # 전체 재색인(백필·T801) 경로도 자기주제 정본을 실어야 한다 — full reindex self-heal(R3).
         from src.search.opensearch_sync import sync_all
 
-        m_project.return_value = [_topic("요리", "제빵", "cooking", "baking")]
+        m_fetch.return_value = [_topic("요리", "제빵", "cooking", "baking")]
         client = _FakeClient()
         conn = _FakeConn([_row(asset_id="a1")])
 

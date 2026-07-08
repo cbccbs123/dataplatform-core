@@ -26,6 +26,7 @@ from typing import Any
 
 from psycopg import Connection
 
+from src.classify.asset_topic import build_self_text, classify_asset_topic
 from src.classify.types import ClassificationResult
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
@@ -267,6 +268,24 @@ def process_asset(
                                   "models": sorted({e.model_name for e in record.embeddings})})
 
     _LOG.info("registered: asset_id=%s %s", asset_id, fs_path)
+
+    # 자기주제 분류(065·FR-301/302) — registered 커밋 **직후·OS 색인 전**에 (topic, subtopic)
+    # 정본을 부여한다. 색인 전이라 신규 자산은 첫 OS doc 부터 topics 를 포함한다(관계 배치 대기 불요).
+    # 자기 텍스트는 in-memory ``record.ext_meta`` 에서 구성해 주입한다(방금 적재한 값 재조회 회피).
+    # **완전 격리(FR-204)**: 분류 실패는 warn 로그만 남기고 registered 를 유지하며 색인을 진행한다
+    # (자산은 등록됨·주제만 미부여·백필 재시도 대상). 별도 짧은 트랜잭션(finalize 와 분리).
+    try:
+        self_text = build_self_text(
+            record.ext_meta.get("summary"),
+            record.ext_meta.get("keywords"),
+            record.ext_meta.get("labels"),
+        )
+        with db.transaction() as conn:
+            classify_asset_topic(
+                conn, asset_id, self_text=self_text, settings=settings, client=None
+            )
+    except Exception as exc:  # noqa: BLE001 — 분류 실패가 적재(registered)를 막지 않는다(FR-204 격리)
+        _LOG.warning("자기주제 분류 실패(무시): asset_id=%s (%s)", asset_id, exc)
 
     # 증분 색인(opt-in·격리) — 위 finalize 트랜잭션이 **PG 커밋된 직후** 호출한다(FR-002).
     # off(기본)면 즉시 반환해 OpenSearch 코드를 전혀 건드리지 않으므로 기존 동작 불변(SC-001).
