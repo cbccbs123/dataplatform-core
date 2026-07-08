@@ -47,8 +47,10 @@ from src.relations.schema import normalize_subtopic_ko
 
 logger = logging.getLogger(__name__)
 
-# 임베딩 채널: 라벨 문자열을 검색·적재와 같은 벡터 공간(BGE-M3·1536D)에서 임베딩해 kNN 후보 회수.
-_EMBED_CHANNEL = "st_bge"
+# 임베딩 채널: 라벨 문자열을 **활성 임베딩 채널**(018 단일 출처·`active_embed_channel`)로 임베딩해 kNN
+# 후보 회수. 062 이후 st_api(온프레미스 API bge-m3)로 전환 가능 — 시드(register_topic)와 런타임
+# canonicalize 가 같은 활성 채널을 쓰므로 topic 임베딩 공간은 self-consistent(적재/검색 채널과도 일관).
+# 전환 시 topic_registry 재시드 필요(시드 임베딩도 활성 채널로 재생성).
 
 # 모달리티 블랙리스트(FR-302) — 매체어(텍스트/오디오/영상/이미지 + en)는 '주제'가 아니라 자산의
 # 매체 형태이므로 하위주제(subtopic) 자격이 없다. **단일 출처**(plan §계약): 다른 모듈이 필요하면
@@ -61,15 +63,18 @@ _MODALITY_BLACKLIST: frozenset[str] = frozenset(
 def _embed_label(raw_ko: str) -> list[float]:
     """라벨 문자열 → 1536D 임베딩(검색 질의 임베딩 seam 재사용).
 
-    ``src.search.query_embed.embed_query_for_media_search`` + ``model_for_channel('st_bge')``
-    를 **재사용**한다 — 임베딩 로직을 복제하지 않는다(037 이후 적재·검색 공유부). 무거운 임베더
-    의존은 함수 안에서 지연 import 해 모듈 기동을 가볍게 유지하고, 단위 테스트가 이 함수를
-    patch 로 대체할 수 있게 한다.
+    ``src.search.query_embed.embed_query_for_media_search`` 를 **활성 채널**(`active_embed_channel`)로
+    호출해 재사용한다 — 임베딩 로직을 복제하지 않는다(037 이후 적재·검색 공유부). ``channel`` 을 넘겨
+    백엔드까지 활성 채널을 따른다(st_api면 API·그외 로컬·062). 무거운 임베더 의존은 함수 안에서 지연
+    import 해 모듈 기동을 가볍게 유지하고, 단위 테스트가 이 함수를 patch 로 대체할 수 있게 한다.
     """
-    from src.config.settings import model_for_channel
+    from src.config.settings import active_embed_channel, model_for_channel
     from src.search.query_embed import embed_query_for_media_search
 
-    return embed_query_for_media_search(raw_ko, model_name=model_for_channel(_EMBED_CHANNEL))
+    channel = active_embed_channel()
+    return embed_query_for_media_search(
+        raw_ko, model_name=model_for_channel(channel), channel=channel
+    )
 
 
 def _l2_norm(vec: list[float]) -> float:
