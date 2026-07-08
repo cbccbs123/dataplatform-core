@@ -91,6 +91,13 @@ class TestEmbedTextsApi(unittest.TestCase):
         with self.assertRaises(ValueError):
             embed_texts_api(["a", "b"], base_url=_BASE, model="bge-m3")
 
+    @patch("requests.post")
+    def test_empty_embedding_raises(self, post) -> None:
+        # 빈 embedding → 조용한 0벡터 오염 방지(FR-105·SC-05). 정상 "빈 텍스트"와 구분해 즉시 오류.
+        post.return_value = _resp([{"embedding": [], "index": 0}])
+        with self.assertRaises(ValueError):
+            embed_texts_api(["a"], base_url=_BASE, model="bge-m3")
+
 
 if __name__ == "__main__":
     unittest.main()

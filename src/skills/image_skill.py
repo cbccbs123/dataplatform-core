@@ -70,19 +70,22 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     1536D 통일은 ``pad_embedding_to_storage_dim`` 이 담당한다(CLIP 벡터는 이미 1536D 패딩됨).
     """
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
-    from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
+    from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
     channel = active_embed_channel(cfg)
-    model = active_embed_model(cfg)
+    model = active_embed_model(cfg)  # EmbeddingItem.model_name 라벨(채널의 모델명)
     meta = dict(rec.core_meta) | dict(rec.ext_meta)
     chunk_content = build_image_vlm_text_for_embedding(meta)
     if not chunk_content.strip():
         chunk_content = " "
-    st_raw = embed_texts(
+    # 062: VLM 캡션 ST 임베딩도 채널 백엔드(로컬/API)로 라우팅 — st_api 활성 시 적재=질의 정합
+    #   (text/audio 와 동일). 기본 st/st_bge=로컬(동작 불변). embed_texts_for 가 model 해소를 담당.
+    st_raw = embed_texts_for(
         [chunk_content],
-        model_name=model,
+        channel=channel,
+        settings=cfg,
         normalize_embeddings=cfg.text_embedding_normalize,
     )[0]
     st_vec = pad_embedding_to_storage_dim(st_raw)

@@ -9,9 +9,12 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 from typing import Any
+
+_LOG = logging.getLogger("meta_extract.text_embedder_api")
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
@@ -33,13 +36,15 @@ def _post_embeddings(
     import requests  # 지연 import — 로컬 백엔드 환경 순수성 보존
 
     last_exc: Exception | None = None
-    for _attempt in range(max_retries + 1):
+    for attempt in range(max_retries + 1):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout_s)
             resp.raise_for_status()
             return resp.json()["data"]
-        except Exception as exc:  # noqa: BLE001 — 네트워크·형식 오류 재시도(마지막 실패는 전파)
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            # 네트워크·응답형식(JSONDecodeError=ValueError)·data 키 누락만 재시도(프로그래밍 오류는 전파).
             last_exc = exc
+            _LOG.warning("임베딩 API 호출 실패(재시도 %d/%d·url=%s): %r", attempt + 1, max_retries + 1, url, exc)
     raise RuntimeError(f"임베딩 API 호출 실패({max_retries + 1}회): {url}") from last_exc
 
 
@@ -80,6 +85,9 @@ def embed_texts_api(
                 f"임베딩 API 응답 개수 불일치: 입력 {len(batch)} != 응답 {len(rows)} (url={url})"
             )
         for r in rows:
-            vec = [float(x) for x in r["embedding"]]
+            emb = r.get("embedding")
+            if not emb:  # 빈/누락 임베딩 → 조용한 0벡터 오염 방지(FR-105·SC-05). 정상 "빈 텍스트"와 구분.
+                raise ValueError(f"임베딩 API 응답에 빈 embedding: index={r.get('index')} (url={url})")
+            vec = [float(x) for x in emb]
             out.append(_l2_normalize(vec) if normalize_embeddings else vec)
     return out

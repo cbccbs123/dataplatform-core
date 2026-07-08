@@ -275,6 +275,13 @@ def _validate_settings_consistency(settings: PipelineSettings) -> None:
             "OS 검색은 적재 시 OS 증분 색인이 필수입니다(037 이후 PG 폴백 없음 — 끄면 신규 자산이 "
             "검색에서 누락). OPENSEARCH_SYNC_ENABLED=true 로 설정하세요."
         )
+    # 062: API 임베딩 채널(st_api) 활성인데 base_url 미설정이면 파이프라인 한복판(/embeddings 호출)이
+    #   아니라 기동 시점에 즉시 차단한다(038 fail-fast 관례와 통일 — 채널만 켜는 사람 실수 방지).
+    if backend_for_channel(settings.active_embed_channel, settings) == "api" and not settings.embed_api_base_url:
+        raise ValueError(
+            "설정 불일치: EMBED_ACTIVE_CHANNEL=st_api(API 임베딩) 인데 EMBED_API_BASE_URL 이 비어 있습니다. "
+            "API 백엔드는 엔드포인트 주입이 필수입니다 — EMBED_API_BASE_URL 을 설정하세요(예: http://<host>:<port>/v1)."
+        )
 
 
 def _resolve_opensearch_fusion_weights() -> tuple[float, float]:

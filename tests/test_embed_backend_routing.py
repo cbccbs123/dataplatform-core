@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import unittest
 from unittest.mock import patch
 
-from src.config.settings import _build_settings
+from src.config.settings import _build_settings, _validate_settings_consistency
 from src.embedders import text_embedder
 from src.search import query_embed
 
@@ -90,6 +91,29 @@ class TestQueryEmbedRouting(unittest.TestCase):
             query_embed.embed_query_for_media_search("요리", channel="st")
         api.assert_not_called()
         local.assert_called_once()
+
+
+class TestApiChannelFailFast(unittest.TestCase):
+    """062: active=st_api 인데 base_url 비면 기동 시점 fail-fast(038 관례·파이프라인 중단 방지)."""
+
+    def test_st_api_without_base_url_raises(self) -> None:
+        base = _settings(EMBED_API_BASE_URL="http://x/v1")
+        bad = dataclasses.replace(base, active_embed_channel="st_api", embed_api_base_url="")
+        with self.assertRaises(ValueError):
+            _validate_settings_consistency(bad)
+
+    def test_st_api_with_base_url_ok(self) -> None:
+        base = _settings(EMBED_API_BASE_URL="http://x/v1")
+        ok = dataclasses.replace(
+            base, active_embed_channel="st_api", embed_api_base_url="http://x/v1"
+        )
+        _validate_settings_consistency(ok)  # 예외 없음
+
+    def test_local_channel_without_base_url_ok(self) -> None:
+        # 기본 로컬 채널은 base_url 없어도 정상(회귀 0).
+        base = _settings()
+        local = dataclasses.replace(base, active_embed_channel="st", embed_api_base_url="")
+        _validate_settings_consistency(local)
 
 
 if __name__ == "__main__":
