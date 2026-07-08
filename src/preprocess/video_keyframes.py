@@ -230,7 +230,8 @@ def _ffprobe_has_video_stream(src: Path) -> bool:
              "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(src)],
             capture_output=True, text=True, timeout=30, check=False,
         )
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
+        # FileNotFoundError(부재)·PermissionError·TimeoutExpired 등 전부 graceful False.
         return False
     return proc.returncode == 0 and "video" in proc.stdout
 
@@ -240,7 +241,9 @@ def _transcode_to_h264(src: Path) -> Path | None:
 
     cv2 번들 ffmpeg 가 못 푸는 코덱(AV1 등)을 시스템 ffmpeg(libdav1d/libaom 등 광범위 지원)로 정규화해
     이어서 cv2/scenedetect 로 재추출하게 한다. 키프레임만 필요하므로 오디오는 제외(``-an``). ffmpeg 미설치
-    (FileNotFoundError)·비정상 종료·타임아웃은 None(graceful) — 호출부가 원래 빈 결과를 유지한다.
+    (FileNotFoundError)·권한(PermissionError)·비정상 종료·타임아웃 등은 None(graceful) — 호출부가 원래
+    빈 결과를 유지한다. **재인코딩이라 프레임 경계/피처가 원본 native 디코드와 미세하게 다를 수 있다**
+    (동일 ffmpeg 빌드·입력에서 결정적·AV1 은 원래 0프레임이라 개선만). 실패/예외 무관 임시파일은 정리한다.
     """
     fd, tmp_name = tempfile.mkstemp(prefix="kf_transcode_", suffix=".mp4")
     os.close(fd)
@@ -251,7 +254,8 @@ def _transcode_to_h264(src: Path) -> Path | None:
              "-c:v", "libx264", "-preset", "veryfast", "-an", "-f", "mp4", str(tmp)],
             capture_output=True, text=True, timeout=600, check=False,
         )
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
+        # 부재·권한·타임아웃 등 전부 graceful — 임시파일 정리 후 None.
         logger.warning("키프레임 폴백 트랜스코딩 실패(%s): %r", src, exc)
         tmp.unlink(missing_ok=True)
         return None
@@ -293,5 +297,9 @@ def extract_video_representative_frame_bytes(
         return frames  # ffmpeg 부재/실패 → 기존 빈 결과 유지(graceful)
     try:
         return _extract_representative_core(tmp, **kwargs)  # type: ignore[arg-type]
+    except RuntimeError as exc:
+        # 트랜스코딩본 재추출도 실패(cap 열기 실패 등 극단) → 원래 빈 결과 유지(graceful·무크래시).
+        logger.warning("폴백 재추출 실패(%s): %r", src, exc)
+        return frames
     finally:
         tmp.unlink(missing_ok=True)

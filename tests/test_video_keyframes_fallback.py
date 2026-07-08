@@ -37,6 +37,8 @@ class TestKeyframeCodecFallback(unittest.TestCase):
         self.assertEqual(out, [_FRAME])
         trans.assert_called_once()
         self.assertEqual(core.call_count, 2)
+        # 재시도가 원 인자(threshold·max_frames·dedup 등)를 그대로 전달(드리프트 가드).
+        self.assertEqual(core.call_args_list[0].kwargs, core.call_args_list[1].kwargs)
 
     def test_no_video_stream_skips_fallback(self) -> None:
         # 빈 결과 + 비디오 스트림 없음(오디오전용 등) → 폴백 미진입·빈 결과(SC-03 일부).
