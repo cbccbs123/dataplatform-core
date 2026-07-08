@@ -9,26 +9,31 @@
 
 from __future__ import annotations
 
-from src.config.settings import get_current_settings
-from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
+from src.config.settings import backend_for_channel, get_current_settings
+from src.embedders.text_embedder import embed_texts, embed_texts_for, pad_embedding_to_storage_dim
 from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 
 
 def embed_query_for_media_search(
-    query: str, *, model_name: str | None = None
+    query: str, *, model_name: str | None = None, channel: str | None = None
 ) -> list[float]:
-    """질의 텍스트를 임베딩한다(017 A/B). ``model_name`` 미지정 시 기존대로 ``cfg.text_embedding_model``
-    (KoSimCSE)을 쓴다 — 기본 경로 완전 동치. ``model_name`` 을 주면 그 모델로 질의를 임베딩해
-    해당 채널의 문서 임베딩과 같은 벡터 공간에서 비교한다(FR-004 질의-문서 모델 일치)."""
+    """질의 텍스트를 임베딩한다(017 A/B·062). ``model_name`` 미지정 시 기존대로 ``cfg.text_embedding_model``
+    (KoSimCSE)을 쓴다 — 기본 경로 완전 동치. ``model_name`` 을 주면 그 모델로 질의를 임베딩해 해당 채널의
+    문서 임베딩과 같은 벡터 공간에서 비교한다(FR-004 질의-문서 모델 일치).
+
+    062: ``channel`` 을 주고 그 채널 백엔드가 API 면 ``embed_texts_for`` 로 API 임베딩한다(적재=질의 백엔드
+    일치). 로컬 채널·``channel`` 미지정이면 기존 로컬 경로 그대로(동작 불변). 적재와 동일하게 raw→패딩.
+    """
     cfg = get_current_settings()
-    mn = model_name if model_name is not None else cfg.text_embedding_model
     raw = query.strip() if query.strip() else " "
     q = normalize_text_for_embedding(raw)
     if not q.strip():
         q = " "
-    row = embed_texts(
-        [q],
-        model_name=mn,
-        normalize_embeddings=cfg.text_embedding_normalize,
-    )[0]
+    if channel is not None and backend_for_channel(channel, cfg) == "api":
+        row = embed_texts_for(
+            [q], channel=channel, settings=cfg, normalize_embeddings=cfg.text_embedding_normalize
+        )[0]
+    else:
+        mn = model_name if model_name is not None else cfg.text_embedding_model
+        row = embed_texts([q], model_name=mn, normalize_embeddings=cfg.text_embedding_normalize)[0]
     return pad_embedding_to_storage_dim(row)

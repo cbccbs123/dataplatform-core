@@ -118,12 +118,12 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     계약 위반(extract 없이 단독 호출) 시 RuntimeError 로 즉시 탐지된다.
     """
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
-    from src.embedders.text_embedder import embed_texts, pad_embedding_to_storage_dim
+    from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
     from src.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
     channel = active_embed_channel(cfg)
-    model = active_embed_model(cfg)
+    model = active_embed_model(cfg)  # EmbeddingItem.model_name 라벨(채널의 모델명)
     # 계약 위반 즉시 탐지: extract 없이 embed 만 단독 호출하면 RuntimeError.
     keyframes = ctx.scratch.get("keyframes")
     if keyframes is None:
@@ -134,9 +134,11 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         chunk_content = build_image_vlm_text_for_embedding(frame_meta)
         if not chunk_content.strip():
             chunk_content = " "
-        st_raw = embed_texts(
+        # 062: 키프레임 VLM 캡션 ST 임베딩도 채널 백엔드(로컬/API)로 라우팅(적재=질의 정합·st_api).
+        st_raw = embed_texts_for(
             [chunk_content],
-            model_name=model,
+            channel=channel,
+            settings=cfg,
             normalize_embeddings=cfg.text_embedding_normalize,
         )[0]
         st_vec = pad_embedding_to_storage_dim(st_raw)

@@ -565,7 +565,10 @@ def embed_query(query: str, *, channel: str) -> list[float]:
     from src.config.settings import model_for_channel
     from src.search.query_embed import embed_query_for_media_search
 
-    return embed_query_for_media_search(query, model_name=model_for_channel(channel))
+    # 062: channel 을 함께 넘겨 백엔드(로컬/API)까지 적재와 일치시킨다(st_api=API·그외 로컬).
+    return embed_query_for_media_search(
+        query, model_name=model_for_channel(channel), channel=channel
+    )
 
 
 _LOG = logging.getLogger(__name__)

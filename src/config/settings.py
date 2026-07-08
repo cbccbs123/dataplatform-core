@@ -37,6 +37,14 @@ class PipelineSettings:
     # 018: 운영 텍스트 임베딩 활성 채널. 적재·검색·관계가 'st' 하드코딩 대신 이 단일 출처를 참조해
     # 모델을 토글한다. _env_str_default 선택 필드 — 미설정 시 기본 'st'(KoSimCSE) → 동작 무변경.
     active_embed_channel: str
+    # 062: API 텍스트 임베딩 백엔드(온프레미스 bge-m3 서빙·채널 'st_api'). 기본 로컬(active='st')이라
+    # 미설정이어도 무영향 — 'st_api' 활성화 시에만 참조된다. 전부 선택 필드(_env_*_default).
+    embed_api_base_url: str
+    embed_api_model: str
+    embed_api_key: str
+    embed_api_timeout_s: float
+    embed_api_batch_size: int
+    embed_api_max_retries: int
     text_embedding_chunk_size: int
     text_embedding_normalize: bool
     video_max_keyframes: int
@@ -267,6 +275,13 @@ def _validate_settings_consistency(settings: PipelineSettings) -> None:
             "OS 검색은 적재 시 OS 증분 색인이 필수입니다(037 이후 PG 폴백 없음 — 끄면 신규 자산이 "
             "검색에서 누락). OPENSEARCH_SYNC_ENABLED=true 로 설정하세요."
         )
+    # 062: API 임베딩 채널(st_api) 활성인데 base_url 미설정이면 파이프라인 한복판(/embeddings 호출)이
+    #   아니라 기동 시점에 즉시 차단한다(038 fail-fast 관례와 통일 — 채널만 켜는 사람 실수 방지).
+    if backend_for_channel(settings.active_embed_channel, settings) == "api" and not settings.embed_api_base_url:
+        raise ValueError(
+            "설정 불일치: EMBED_ACTIVE_CHANNEL=st_api(API 임베딩) 인데 EMBED_API_BASE_URL 이 비어 있습니다. "
+            "API 백엔드는 엔드포인트 주입이 필수입니다 — EMBED_API_BASE_URL 을 설정하세요(예: http://<host>:<port>/v1)."
+        )
 
 
 def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
@@ -463,6 +478,14 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         text_embedding_model=_require_env("TEXT_EMBED_MODEL"),
         text_embedding_model_bge=_env_str_default("TEXT_EMBED_MODEL_BGE", "BAAI/bge-m3"),
         active_embed_channel=_env_str_default("EMBED_ACTIVE_CHANNEL", "st"),
+        # 062: API 임베딩 백엔드 설정(기본 로컬이라 미설정 무영향). base_url 미설정 시 'st_api' 활성화하면
+        #   backend 라우팅이 빈 base_url 로 실패 → 활성화는 base_url 주입과 함께(사람 게이트).
+        embed_api_base_url=_env_str_default("EMBED_API_BASE_URL", ""),
+        embed_api_model=_env_str_default("EMBED_API_MODEL", "BAAI/bge-m3"),
+        embed_api_key=_env_str_default("EMBED_API_KEY", ""),
+        embed_api_timeout_s=_env_float_default("EMBED_API_TIMEOUT_S", 30.0),
+        embed_api_batch_size=_env_int_default("EMBED_API_BATCH_SIZE", 32),
+        embed_api_max_retries=_env_int_default("EMBED_API_MAX_RETRIES", 2),
         text_embedding_chunk_size=_require_env_int("TEXT_EMBED_CHUNK_SIZE"),
         text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
         video_max_keyframes=(
@@ -588,6 +611,8 @@ def model_for_channel(channel: str, settings: PipelineSettings | None = None) ->
     mapping = {
         "st": cfg.text_embedding_model,
         "st_bge": cfg.text_embedding_model_bge,
+        # 062: API 서빙 bge-m3. 채널→모델(서버가 아는 모델명). 백엔드(local/api)는 backend_for_channel 담당.
+        "st_api": cfg.embed_api_model,
     }
     try:
         return mapping[channel]
@@ -595,6 +620,19 @@ def model_for_channel(channel: str, settings: PipelineSettings | None = None) ->
         raise ValueError(
             f"지원하지 않는 텍스트 임베딩 채널: {channel!r} (지원: {sorted(mapping)})"
         ) from None
+
+
+# 062: API 계산 백엔드를 쓰는 채널(직교 축). 그 외 채널은 로컬 SentenceTransformer.
+_API_EMBED_CHANNELS = frozenset({"st_api"})
+
+
+def backend_for_channel(channel: str, settings: PipelineSettings | None = None) -> str:
+    """텍스트 임베딩 채널 → 계산 백엔드 ``'local'`` | ``'api'`` (062).
+
+    ``'st_api'``=온프레미스 API 서빙(bge-m3·``/v1/embeddings``), 그 외(``'st'``·``'st_bge'``)=로컬
+    SentenceTransformer. 채널은 "무슨 모델(공간)", 백엔드는 "어떻게 계산" — 018 채널 위에 얹는 직교 축.
+    ``settings`` 인자는 시그니처 대칭용(현재 매핑은 채널만으로 결정·향후 확장 여지)."""
+    return "api" if channel in _API_EMBED_CHANNELS else "local"
 
 
 def active_embed_channel(settings: PipelineSettings | None = None) -> str:
