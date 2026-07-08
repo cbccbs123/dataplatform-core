@@ -9,6 +9,9 @@ OpenCV 로 읽어 JPEG bytes 로 인코딩한다. 파일로 저장하지 않고 
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
@@ -89,7 +92,7 @@ def _read_scene_mid_frame(
     return frame_sec, frame
 
 
-def extract_video_representative_frame_bytes(
+def _extract_representative_core(
     video_path: str | Path,
     *,
     threshold: float = 30.0,
@@ -213,3 +216,82 @@ def extract_video_representative_frame_bytes(
         return kept
 
     return results
+
+
+def _ffprobe_has_video_stream(src: Path) -> bool:
+    """ffprobe 로 파일에 **비디오 스트림**이 있는지(064·폴백 진입 판정). 부재/실패 시 False.
+
+    core 가 빈 결과일 때 '진짜 영상인데 cv2 코덱 미지원'과 '오디오전용/비영상'을 구분한다 —
+    후자에 트랜스코딩을 시도해봐야 헛일. ffprobe 미설치(FileNotFoundError)·비정상 종료·타임아웃은 False(graceful).
+    """
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and "video" in proc.stdout
+
+
+def _transcode_to_h264(src: Path) -> Path | None:
+    """시스템 ffmpeg 로 ``src`` 를 임시 h264 mp4 로 트랜스코딩하고 경로를 돌려준다(064·폴백).
+
+    cv2 번들 ffmpeg 가 못 푸는 코덱(AV1 등)을 시스템 ffmpeg(libdav1d/libaom 등 광범위 지원)로 정규화해
+    이어서 cv2/scenedetect 로 재추출하게 한다. 키프레임만 필요하므로 오디오는 제외(``-an``). ffmpeg 미설치
+    (FileNotFoundError)·비정상 종료·타임아웃은 None(graceful) — 호출부가 원래 빈 결과를 유지한다.
+    """
+    fd, tmp_name = tempfile.mkstemp(prefix="kf_transcode_", suffix=".mp4")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(src),
+             "-c:v", "libx264", "-preset", "veryfast", "-an", "-f", "mp4", str(tmp)],
+            capture_output=True, text=True, timeout=600, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        logger.warning("키프레임 폴백 트랜스코딩 실패(%s): %r", src, exc)
+        tmp.unlink(missing_ok=True)
+        return None
+    if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        logger.warning("키프레임 폴백 트랜스코딩 비정상(rc=%s·%s)", proc.returncode, src)
+        tmp.unlink(missing_ok=True)
+        return None
+    return tmp
+
+
+def extract_video_representative_frame_bytes(
+    video_path: str | Path,
+    *,
+    threshold: float = 30.0,
+    min_scene_len: int = 15,
+    jpeg_quality: int = 85,
+    max_frames: int | None = None,
+    dedup: KeyframeDedupConfig | None = None,
+) -> list[KeyframeBytesResult]:
+    """장면별 대표 키프레임(메모리 JPEG)을 추출한다 — cv2 실패 코덱은 시스템 ffmpeg 폴백(064).
+
+    대부분(h264 등)은 ``_extract_representative_core``(cv2/scenedetect)로 바로 성공 → **그대로 반환**
+    (happy-path·ffprobe/트랜스코딩 미진입·오버헤드 0·회귀 0). 결과가 **비어있고** ffprobe 상 비디오 스트림이
+    있으면(cv2 번들 ffmpeg 코덱 미지원 추정·AV1 등), 시스템 ffmpeg 로 임시 h264 트랜스코딩 후 재추출한다.
+    ffmpeg/ffprobe 부재·실패 시 graceful(원래 빈 결과·예외 없음). 임시파일은 finally 로 정리한다.
+    """
+    kwargs = {
+        "threshold": threshold, "min_scene_len": min_scene_len,
+        "jpeg_quality": jpeg_quality, "max_frames": max_frames, "dedup": dedup,
+    }
+    frames = _extract_representative_core(video_path, **kwargs)  # type: ignore[arg-type]
+    src = Path(video_path)
+    # happy-path: 프레임을 얻었거나(대부분) 애초에 비디오 스트림이 없으면(오디오전용) 폴백 불필요.
+    if frames or not _ffprobe_has_video_stream(src):
+        return frames
+    # 064 폴백: cv2 코덱 미지원 추정 → 시스템 ffmpeg h264 정규화 후 재추출.
+    tmp = _transcode_to_h264(src)
+    if tmp is None:
+        return frames  # ffmpeg 부재/실패 → 기존 빈 결과 유지(graceful)
+    try:
+        return _extract_representative_core(tmp, **kwargs)  # type: ignore[arg-type]
+    finally:
+        tmp.unlink(missing_ok=True)
