@@ -86,6 +86,8 @@ _BACKEND_KEYS = (
     # 058: 관계 topic 정본화 배선 토글. 기본 False(동작 불변·시드 전 동치) 단언을 실행 환경 잔존값이
     # 오염시키지 않게 비운다(049 키와 동형 격리).
     "TOPIC_CANONICALIZE_ENABLED",
+    # 063: CLIP 임베딩 토글. 기본 True(회귀 0) 단언을 실행 환경 잔존값이 오염시키지 않게 비운다.
+    "EMBED_ENABLE_CLIP",
 )
 
 
@@ -754,6 +756,35 @@ class TestTopicCanonicalizeEnabledSettings(unittest.TestCase):
 
     def test_invalid_bool_fail_fast(self) -> None:
         with _env(TOPIC_CANONICALIZE_ENABLED="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
+class TestEmbedEnableClipSettings(unittest.TestCase):
+    """063(FR-101): image/video CLIP 임베딩 토글 ``embed_enable_clip``.
+
+    ``_env_bool_default`` 선택 필드 — 미설정 시 기본 **True**(회귀 0·기존 동작 불변). 신규 셋업서만
+    false 로 opt-out. 순수 토글이라 불리언 형식 오류만 fail-fast.
+    """
+
+    def test_default_on_when_unset(self) -> None:
+        # 미설정 → 기본 True(회귀 0). _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.embed_enable_clip, True)
+
+    def test_env_override_false(self) -> None:
+        with _env(EMBED_ENABLE_CLIP="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.embed_enable_clip, False)
+
+    def test_env_override_true_explicit(self) -> None:
+        with _env(EMBED_ENABLE_CLIP="on"):
+            s = _build_settings("dev")
+        self.assertIs(s.embed_enable_clip, True)
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        with _env(EMBED_ENABLE_CLIP="maybe"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 

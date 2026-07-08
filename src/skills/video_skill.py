@@ -109,9 +109,9 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
-    """키프레임별 ST/CLIP 임베딩 쌍을 생성해 반환한다.
+    """키프레임별 임베딩을 생성해 반환한다 — 기본 ST/CLIP 쌍, 063 ``embed_enable_clip=False`` 시 ST만.
 
-    키프레임 n 개 → EmbeddingItem 2n 개(ST·CLIP 쌍). chunk_index 는 키프레임 순번(0-based).
+    키프레임 n 개 → EmbeddingItem 2n 개(ST·CLIP 쌍; clip off 시 n 개=ST만). chunk_index 는 키프레임 순번(0-based).
     같은 chunk_index 를 공유하는 ST/CLIP 쌍이 하이브리드 검색에서 동일 시점 프레임을 나타낸다.
     텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
     CLIP 벡터는 ctx.scratch["keyframes"] 에서 꺼내므로 CLIP 추론을 재실행하지 않는다(시각 채널은 무변경).
@@ -146,5 +146,8 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         embeddings.append(EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=i))
         # 063: clip 임베딩 토글(기본 True=기존 동치). off면 키프레임 clip 항목만 스킵.
         if cfg.embed_enable_clip:
-            embeddings.append(EmbeddingItem(channel=_CHANNEL_CLIP, vector=kf["clip_vec"], model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i))
+            embeddings.append(EmbeddingItem(
+                channel=_CHANNEL_CLIP, vector=kf["clip_vec"],
+                model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i,
+            ))
     return embeddings

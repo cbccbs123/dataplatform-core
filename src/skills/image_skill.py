@@ -60,11 +60,12 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
-    """이미지 임베딩 2채널(ST·CLIP)을 생성해 반환한다.
+    """이미지 임베딩을 생성해 반환한다 — 기본 2채널(ST·CLIP), 063 ``embed_enable_clip=False`` 시 ST 단일.
 
     ST(SentenceTransformer): VLM 이 생성한 캡션+키워드+라벨을 텍스트로 직렬화해 임베딩.
     텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
     CLIP: _extract_image_meta 에서 저장한 벡터를 ctx.scratch["clip_vec"] 로 재사용(시각 채널은 무변경).
+    063: CLIP 임베딩 항목은 ``cfg.embed_enable_clip``(기본 True) 일 때만 추가(off=ST 캡션만·라벨·계약 불변).
 
     ``chunk_content`` 가 공백뿐이면 " " 로 대체 — pad 후 영벡터에 가깝지만 DB 삽입은 성공한다.
     1536D 통일은 ``pad_embedding_to_storage_dim`` 이 담당한다(CLIP 벡터는 이미 1536D 패딩됨).
