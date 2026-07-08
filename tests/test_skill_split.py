@@ -45,11 +45,12 @@ class TestTextSplit(unittest.TestCase):
 
 
 class TestImageSplit(unittest.TestCase):
-    def _cfg(self):
+    def _cfg(self, embed_enable_clip=True):
         # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
+        # 063: embed_enable_clip(기본 True) — clip 임베딩 토글.
         return mock.Mock(labels_score_min=0.0, image_labels_meta_top_k=5,
                          text_embedding_model="m", text_embedding_normalize=True,
-                         active_embed_channel="st")
+                         active_embed_channel="st", embed_enable_clip=embed_enable_clip)
 
     def test_extract_stashes_clip_vec_and_embed_reuses(self) -> None:
         from src.skills import image_skill
@@ -75,6 +76,21 @@ class TestImageSplit(unittest.TestCase):
         self.assertEqual(chans, ["clip", "st"])
         clip = next(e for e in embs if e.channel == "clip")
         self.assertEqual(clip.vector, [0.5] * 4)
+
+    def test_embed_skips_clip_when_disabled(self) -> None:
+        # 063 SC-02: EMBED_ENABLE_CLIP off → clip 채널 항목 스킵·ST 캡션만(라벨·계약 불변).
+        from src.skills import image_skill
+        ctx = _ctx("image")
+        ctx.settings = self._cfg(embed_enable_clip=False)
+        ctx.scratch["clip_vec"] = [0.5] * 4  # extract 는 여전히 clip_vec 계산(라벨용)·계약 유지
+        rec = AssetRecord(core_meta={"summary": "s"})
+        with mock.patch.multiple("src.embedders.text_embedder",
+                                 embed_texts_for=mock.Mock(return_value=[[0.1, 0.2]]),
+                                 pad_embedding_to_storage_dim=mock.Mock(side_effect=lambda v: v)), \
+             mock.patch.multiple("src.preprocess.vlm_text_for_embedding",
+                                 build_image_vlm_text_for_embedding=mock.Mock(return_value="텍스트")):
+            embs = image_skill._embed_image(ctx, rec)
+        self.assertEqual([e.channel for e in embs], ["st"])  # clip 없음
 
 
 class TestAudioSplit(unittest.TestCase):
@@ -114,7 +130,8 @@ class TestVideoSplit(unittest.TestCase):
                                  video_keyframe_dedup_ssim_gray_lo=0.90,
                                  video_keyframe_dedup_hist_min=0.97,
                                  video_keyframe_dedup_compare_mode="recent",
-                                 video_keyframe_dedup_recent_window=4)
+                                 video_keyframe_dedup_recent_window=4,
+                                 embed_enable_clip=True)  # 063: 기본 True(기존 동치)
         frames = [{"scene_index": 0, "start_sec": 0, "end_sec": 1, "frame_sec": 0, "jpeg_bytes": b"x"}]
         clip_ve = {"keyframes": [{"clip_image_embedding": [0.7] * 4,
                                   "summary": {"summary": "s", "keywords": ["k"]},
@@ -139,6 +156,16 @@ class TestVideoSplit(unittest.TestCase):
             embs = video_skill._embed_video(ctx, rec)
         self.assertEqual(sorted(e.channel for e in embs), ["clip", "st"])
         self.assertTrue(all(e.chunk_index == 0 for e in embs))
+
+        # 063 SC-02: 토글 off → 키프레임 clip 항목 스킵·ST 캡션만(같은 scratch 재사용).
+        ctx.settings.embed_enable_clip = False
+        with mock.patch.multiple("src.embedders.text_embedder",
+                                 embed_texts=mock.Mock(return_value=[[0.1]]),
+                                 pad_embedding_to_storage_dim=mock.Mock(side_effect=lambda v: v)), \
+             mock.patch.multiple("src.preprocess.vlm_text_for_embedding",
+                                 build_image_vlm_text_for_embedding=mock.Mock(return_value="텍스트")):
+            embs_off = video_skill._embed_video(ctx, rec)
+        self.assertEqual([e.channel for e in embs_off], ["st"])  # clip 없음
 
 
 if __name__ == "__main__":

@@ -45,6 +45,9 @@ class PipelineSettings:
     embed_api_timeout_s: float
     embed_api_batch_size: int
     embed_api_max_retries: int
+    # 063: image/video CLIP 시각 임베딩(channel='clip') 생성 토글. 기본 True=기존 동작 불변(회귀 0).
+    # off면 스킬이 clip EmbeddingItem 만 스킵(ST 캡션·CLIP 라벨·검색·관계 불변). 신규 셋업 opt-in.
+    embed_enable_clip: bool
     text_embedding_chunk_size: int
     text_embedding_normalize: bool
     video_max_keyframes: int
@@ -486,6 +489,8 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         embed_api_timeout_s=_env_float_default("EMBED_API_TIMEOUT_S", 30.0),
         embed_api_batch_size=_env_int_default("EMBED_API_BATCH_SIZE", 32),
         embed_api_max_retries=_env_int_default("EMBED_API_MAX_RETRIES", 2),
+        # 063: clip 임베딩 토글(기본 True=회귀 0). 신규 셋업서 false 로 opt-out.
+        embed_enable_clip=_env_bool_default("EMBED_ENABLE_CLIP", True),
         text_embedding_chunk_size=_require_env_int("TEXT_EMBED_CHUNK_SIZE"),
         text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
         video_max_keyframes=(

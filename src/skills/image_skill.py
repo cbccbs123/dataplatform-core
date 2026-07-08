@@ -94,7 +94,10 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     if clip_vec is None:
         raise RuntimeError("_embed_image: ctx.scratch['clip_vec'] 없음 — _extract_image_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
-    return [
-        EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=0),
-        EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0),
-    ]
+    items = [EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=0)]
+    # 063: clip 임베딩 토글(기본 True=기존 동치). off면 clip 채널 항목만 스킵(라벨·계약·검색 불변).
+    if cfg.embed_enable_clip:
+        items.append(
+            EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0)
+        )
+    return items

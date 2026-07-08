@@ -142,7 +142,9 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
             normalize_embeddings=cfg.text_embedding_normalize,
         )[0]
         st_vec = pad_embedding_to_storage_dim(st_raw)
-        # 키프레임당 ST/CLIP 한 쌍(같은 chunk_index, 채널로 구분)
+        # 키프레임당 ST(+CLIP) 항목(같은 chunk_index, 채널로 구분)
         embeddings.append(EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=i))
-        embeddings.append(EmbeddingItem(channel=_CHANNEL_CLIP, vector=kf["clip_vec"], model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i))
+        # 063: clip 임베딩 토글(기본 True=기존 동치). off면 키프레임 clip 항목만 스킵.
+        if cfg.embed_enable_clip:
+            embeddings.append(EmbeddingItem(channel=_CHANNEL_CLIP, vector=kf["clip_vec"], model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i))
     return embeddings
