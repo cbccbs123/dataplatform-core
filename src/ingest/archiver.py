@@ -16,6 +16,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterable
 from datetime import date
+from typing import Any
 
 
 def is_under(path: str, root: str) -> bool:
@@ -86,6 +87,28 @@ def plan_archive_moves(
         dest = registered_dest(archive_root, str(asset_id), fs_path, when=created_at)
         moves.append((str(asset_id), fs_path, dest))
     return moves
+
+
+def archive_registered_assets(db: Any, *, inbox_root: str, archive_root: str) -> int:
+    """처리완료(registered) 자산의 **인입-잔류 파일**을 아카이브로 이동 + ``fs_path`` 갱신(DB-aware·멱등·C3/C4).
+
+    ``status='registered'`` 이면서 ``fs_path`` 가 인입 하위인 자산만 스윕한다(``plan_archive_moves`` 필터).
+    이동 후 fs_path 가 인입 밖이라 다음 스윕서 제외돼 자기수렴한다. **이동→fs_path 갱신 순**(C4: 크래시로
+    갱신 누락 시 dest 가 asset_id 키 결정적이라 다음 스윕이 같은 dest 재현→``execute_move`` no-op 후 갱신
+    재시도). DAG(``dag_process.archive_processed``)의 얇은 래퍼가 이 함수를 호출한다(FR-011·로직 0). 반환=이동 건수.
+    ``db`` 는 ``PostgresUtil`` 계약(``with db.transaction() as conn``·``conn.cursor()``)만 요구한다(주입·테스트 용이).
+    """
+    with db.transaction() as conn, conn.cursor() as cur:
+        # created_at 으로 아카이브 날짜 subdir 결정(재스윕 날짜 무관·복구 시 동일 경로).
+        cur.execute("SELECT asset_id, fs_path, created_at FROM asset WHERE status = 'registered'")
+        rows = [(str(a), p, ca.date()) for a, p, ca in cur.fetchall()]
+    moved = 0
+    for asset_id, src, dest in plan_archive_moves(rows, inbox_root=inbox_root, archive_root=archive_root):
+        execute_move(src, dest)  # 이동 먼저
+        with db.transaction() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE asset SET fs_path = %s WHERE asset_id = %s", (dest, asset_id))
+        moved += 1
+    return moved
 
 
 def execute_move(src: str, dest: str) -> None:
