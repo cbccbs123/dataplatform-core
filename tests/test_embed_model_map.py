@@ -15,7 +15,7 @@ import contextlib
 import os
 import unittest
 
-from src.config.settings import _build_settings, model_for_channel
+from src.config.settings import _build_settings, backend_for_channel, model_for_channel
 
 # _build_settings 가 _require_env* 로 읽는 필수 env 최소 집합(값은 형식만 맞으면 됨).
 # TEXT_EMBED_MODEL 은 매핑 검증을 위해 실제 KoSimCSE 값으로 고정한다.
@@ -113,6 +113,22 @@ class TestModelForChannel(unittest.TestCase):
                 self.assertEqual(model_for_channel("st"), _KOSIMCSE)
         finally:
             settings_mod._SETTINGS = saved_global
+
+
+class TestApiEmbedChannel(unittest.TestCase):
+    """062: st_api 채널 매핑 + backend_for_channel(로컬↔API 직교 축)."""
+
+    def test_st_api_maps_to_embed_api_model_default(self) -> None:
+        # 채널→모델: 'st_api' → embed_api_model(기본 'BAAI/bge-m3'·vLLM 서버 모델 id·GET /v1/models 실측).
+        with _env():
+            settings = _build_settings("dev")
+        self.assertEqual(model_for_channel("st_api", settings), "BAAI/bge-m3")
+
+    def test_backend_for_channel(self) -> None:
+        # 'st_api'만 API 백엔드, 나머지는 로컬(기본 st=로컬 → 동작 불변).
+        self.assertEqual(backend_for_channel("st_api"), "api")
+        self.assertEqual(backend_for_channel("st"), "local")
+        self.assertEqual(backend_for_channel("st_bge"), "local")
 
 
 if __name__ == "__main__":
