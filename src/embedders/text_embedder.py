@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -85,6 +85,63 @@ def embed_texts(
     return vectors.tolist()
 
 
+def embed_texts_for(
+    texts: Sequence[str],
+    *,
+    channel: str,
+    settings: Any = None,
+    normalize_embeddings: bool = True,
+) -> list[list[float]]:
+    """채널의 **백엔드**로 텍스트 배치를 임베딩한다(062·raw·패딩 없음 — ``embed_texts`` 대칭).
+
+    ``backend_for_channel(channel)=='api'`` → 온프레미스 API(``embed_texts_api``·bge-m3 서빙), 그 외
+    (``'st'``·``'st_bge'``) → 로컬 SentenceTransformer(``embed_texts``). 적재·질의·관계가 공유하는 단일
+    라우팅 지점(018 채널 위에 얹는 직교 백엔드 축). **로컬 채널은 기존 ``embed_texts`` 그대로**라 동작 불변.
+    순환 방지를 위해 settings/api 임베더는 함수 내부에서 지연 import 한다.
+    """
+    from src.config.settings import backend_for_channel, model_for_channel
+
+    model = model_for_channel(channel, settings)
+    if backend_for_channel(channel, settings) == "api":
+        from src.config.settings import get_current_settings
+        from src.embedders.text_embedder_api import embed_texts_api
+
+        cfg = settings if settings is not None else get_current_settings()
+        return embed_texts_api(
+            texts,
+            base_url=cfg.embed_api_base_url,
+            model=model,
+            api_key=(cfg.embed_api_key or None),
+            timeout_s=cfg.embed_api_timeout_s,
+            batch_size=cfg.embed_api_batch_size,
+            max_retries=cfg.embed_api_max_retries,
+            normalize_embeddings=normalize_embeddings,
+        )
+    return embed_texts(texts, model_name=model, normalize_embeddings=normalize_embeddings)
+
+
+def _embed_one(
+    clean: str,
+    *,
+    channel: str | None,
+    settings: Any,
+    embedding_model_name: str,
+    normalize_embeddings: bool,
+) -> list[float]:
+    """청크 1개 임베딩 — ``channel`` 있으면 백엔드 라우팅(``embed_texts_for``), 없으면 로컬 모델(기존 동치).
+
+    ※ 현재 청크마다 1회 호출한다(API 백엔드는 청크당 1 요청 — 정확하나 배치 최적화는 후속). 로컬 경로는
+    ``channel=None`` 기존 호출과 완전 동일(회귀 0).
+    """
+    if channel is not None:
+        return embed_texts_for(
+            [clean], channel=channel, settings=settings, normalize_embeddings=normalize_embeddings
+        )[0]
+    return embed_texts(
+        [clean], model_name=embedding_model_name, normalize_embeddings=normalize_embeddings
+    )[0]
+
+
 def _iter_nonempty_chunks(
     path: Path,
     *,
@@ -120,8 +177,14 @@ def embedding_text_chunks(
     chunk_size: int = 512,
     embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
     normalize_embeddings: bool = True,
+    channel: str | None = None,
+    settings: Any = None,
 ) -> list[TextChunkEmbedding]:
-    """문서를 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문 텍스트는 DB에 저장하지 않음)."""
+    """문서를 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문 텍스트는 DB에 저장하지 않음).
+
+    062: ``channel`` 이 주어지면 그 채널의 **백엔드**(로컬/API)로 임베딩한다(``embed_texts_for``). 미지정이면
+    기존대로 로컬 ``embed_texts(embedding_model_name)`` — 기존 호출 완전 동치(회귀 0).
+    """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -136,11 +199,13 @@ def embedding_text_chunks(
         clean = normalize_text_for_embedding(chunk)
         if not clean.strip():
             clean = " "
-        chunk_vector = embed_texts(
-            [clean],
-            model_name=embedding_model_name,
+        chunk_vector = _embed_one(
+            clean,
+            channel=channel,
+            settings=settings,
+            embedding_model_name=embedding_model_name,
             normalize_embeddings=normalize_embeddings,
-        )[0]
+        )
         out.append(
             {
                 "chunk_index": chunk_index,
@@ -165,8 +230,13 @@ def embedding_plain_text_chunks(
     normalize_embeddings: bool = True,
     overlap_size: int = 0,
     max_input_chars: int = MAX_INPUT_CHARS,
+    channel: str | None = None,
+    settings: Any = None,
 ) -> list[TextChunkEmbedding]:
-    """STT 등 단일 문자열을 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문은 DB 미저장)."""
+    """STT 등 단일 문자열을 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문은 DB 미저장).
+
+    062: ``channel`` 지정 시 그 채널 백엔드(로컬/API)로 임베딩(``embed_texts_for``). 미지정=기존 로컬(회귀 0).
+    """
     out: list[TextChunkEmbedding] = []
     chunk_index = 0
     for chunk in iter_plain_text_chunks(
@@ -180,11 +250,13 @@ def embedding_plain_text_chunks(
         clean = normalize_text_for_embedding(chunk)
         if not clean.strip():
             clean = " "
-        chunk_vector = embed_texts(
-            [clean],
-            model_name=embedding_model_name,
+        chunk_vector = _embed_one(
+            clean,
+            channel=channel,
+            settings=settings,
+            embedding_model_name=embedding_model_name,
             normalize_embeddings=normalize_embeddings,
-        )[0]
+        )
         out.append(
             {
                 "chunk_index": chunk_index,

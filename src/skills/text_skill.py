@@ -55,6 +55,8 @@ def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         chunk_size=cfg.text_embedding_chunk_size,
         embedding_model_name=model,
         normalize_embeddings=cfg.text_embedding_normalize,
+        channel=channel,   # 062: 채널 백엔드(로컬/API)로 라우팅. 기본 st=로컬(동작 불변).
+        settings=cfg,
     )
     return [
         EmbeddingItem(
