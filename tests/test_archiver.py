@@ -82,6 +82,23 @@ class TestPlanArchiveMoves(unittest.TestCase):
         ])
 
 
+class TestAssertArchiveSeparate(unittest.TestCase):
+    def test_raises_when_archive_under_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            inbox = os.path.join(d, "inbox")
+            os.makedirs(os.path.join(inbox, "arc"))
+            with self.assertRaises(ValueError):  # archive 가 inbox 하위 → 자기수렴 불변식 위반
+                archiver.assert_archive_separate(inbox, os.path.join(inbox, "arc"))
+
+    def test_ok_when_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            inbox = os.path.join(d, "inbox")
+            archive = os.path.join(d, "archive")
+            os.makedirs(inbox)
+            os.makedirs(archive)
+            archiver.assert_archive_separate(inbox, archive)  # 분리 → 예외 없음
+
+
 class TestExecuteMove(unittest.TestCase):
     def test_move_creates_parents(self) -> None:
         with tempfile.TemporaryDirectory() as d:

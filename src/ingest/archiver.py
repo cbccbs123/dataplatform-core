@@ -12,11 +12,25 @@ Airflow 감시 수집(030)에서 인입(``WATCHER_INBOX_DIR``) 파일을 수명�
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from collections.abc import Callable, Iterable
 from datetime import date
 from typing import Any
+
+
+def assert_archive_separate(inbox_root: str, archive_root: str) -> None:
+    """아카이브 루트가 인입 하위이면 fail-fast(061·오설정 방지).
+
+    이동 후 fs_path 가 인입 밖이라는 전제(멱등·자기수렴)가 archive_root⊂inbox_root 면 깨진다 —
+    이동된 파일이 여전히 인입 하위라 다음 스윕이 재대상으로 잡고 파일명이 계속 자란다. 진입 시 차단.
+    """
+    if is_under(archive_root, inbox_root):
+        raise ValueError(
+            f"WATCHER_ARCHIVE_DIR({archive_root}) 가 WATCHER_INBOX_DIR({inbox_root}) 하위입니다 — "
+            "아카이브는 인입 밖이어야 합니다(자기수렴 불변식). 분리된 경로로 설정하세요."
+        )
 
 
 def is_under(path: str, root: str) -> bool:
@@ -98,9 +112,16 @@ def archive_registered_assets(db: Any, *, inbox_root: str, archive_root: str) ->
     재시도). DAG(``dag_process.archive_processed``)의 얇은 래퍼가 이 함수를 호출한다(FR-011·로직 0). 반환=이동 건수.
     ``db`` 는 ``PostgresUtil`` 계약(``with db.transaction() as conn``·``conn.cursor()``)만 요구한다(주입·테스트 용이).
     """
+    assert_archive_separate(inbox_root, archive_root)
+    # 인입 하위 파일만 프리필터(registered 는 종착 상태라 계속 커짐 — 이미 아카이브된 건 LIKE 로 제외).
+    # LIKE 는 coarse 프리필터일 뿐, 정밀 판정은 아래 plan_archive_moves 의 is_under(realpath)가 담당.
+    like_prefix = os.path.join(inbox_root, "%")
     with db.transaction() as conn, conn.cursor() as cur:
         # created_at 으로 아카이브 날짜 subdir 결정(재스윕 날짜 무관·복구 시 동일 경로).
-        cur.execute("SELECT asset_id, fs_path, created_at FROM asset WHERE status = 'registered'")
+        cur.execute(
+            "SELECT asset_id, fs_path, created_at FROM asset WHERE status = 'registered' AND fs_path LIKE %s",
+            (like_prefix,),
+        )
         rows = [(str(a), p, ca.date()) for a, p, ca in cur.fetchall()]
     moved = 0
     for asset_id, src, dest in plan_archive_moves(rows, inbox_root=inbox_root, archive_root=archive_root):
@@ -125,5 +146,7 @@ def execute_move(src: str, dest: str) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
         os.replace(src, dest)  # 동일 fs 원자 이동
-    except OSError:
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:  # 크로스-파일시스템(EXDEV)만 폴백, 그 외 OSError(권한·디스크)는 전파
+            raise
         shutil.move(src, dest)  # 크로스-fs 폴백
