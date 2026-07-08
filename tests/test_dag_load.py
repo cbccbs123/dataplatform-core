@@ -130,8 +130,9 @@ class TestDagBagIntegrity(unittest.TestCase):
         #     relations 는 종단이라 단일 태스크. 게이트는 신규 산출이 있을 때만 트리거를 통과시킨다(빈 처리 회피).
         bag = _dagbag()
         expected_tasks = {
-            "dag_collect": {_COLLECT_TASK, "gate_new_received", "trigger_process"},
-            "dag_process": {_PROCESS_TASK, "gate_new_registered", "trigger_relations"},
+            # 061: dag_collect +gate_inbox_nonempty(인입 게이트), dag_process +archive_processed(꼬리 아카이브).
+            "dag_collect": {"gate_inbox_nonempty", _COLLECT_TASK, "gate_new_received", "trigger_process"},
+            "dag_process": {_PROCESS_TASK, "gate_new_registered", "trigger_relations", "archive_processed"},
             "dag_relations": {_RELATIONS_TASK},
         }
         for dag_id, tasks in expected_tasks.items():
@@ -159,6 +160,16 @@ class TestDagBagIntegrity(unittest.TestCase):
         self.assertIn("trigger_relations", proc.get_task("gate_new_registered").downstream_task_ids)
         # relations 는 종단 — 하위 트리거 없음.
         self.assertEqual(bag.dags["dag_relations"].get_task(_RELATIONS_TASK).downstream_task_ids, set())
+
+    def test_archive_wiring(self) -> None:
+        # 061: 인입 게이트 → collect_inbox(빈 인입서 collect 스킵), process_batch → archive_processed(꼬리·병렬).
+        bag = _dagbag()
+        coll = bag.dags["dag_collect"]
+        self.assertIn(_COLLECT_TASK, coll.get_task("gate_inbox_nonempty").downstream_task_ids)
+        proc = bag.dags["dag_process"]
+        self.assertIn("archive_processed", proc.get_task(_PROCESS_TASK).downstream_task_ids)
+        # archive_processed 는 GPU pool 미부착(파일 이동·UPDATE 뿐).
+        self.assertNotEqual(proc.get_task("archive_processed").pool, "gpu")
 
     def test_process_dag_pins_gpu_pool(self) -> None:
         # 단일 GPU OOM 차단 — dag_process 태스크는 크기 1 Pool('gpu')에 묶인다(FR-010).
@@ -193,7 +204,7 @@ class TestThinWrappers(unittest.TestCase):
     def test_collect_callable_calls_collect_file_per_inbox_file(self) -> None:
         cb = _callable("dag_collect", _COLLECT_TASK)
         db, _conn, _cur = _fake_db(fetchone=None)  # fs_path 미존재 → 두 파일 모두 수집 진행
-        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "META_ENV": "dev"}), \
+        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "WATCHER_ARCHIVE_DIR": "/archive", "META_ENV": "dev"}), \
                 mock.patch("src.config.settings.init_settings") as m_init, \
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files",
@@ -210,7 +221,7 @@ class TestThinWrappers(unittest.TestCase):
     def test_collect_callable_skips_already_collected(self) -> None:
         cb = _callable("dag_collect", _COLLECT_TASK)
         db, _conn, _cur = _fake_db(fetchone=(1,))  # fs_path 이미 존재 → 멱등 스킵(FR-008)
-        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "META_ENV": "dev"}), \
+        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "WATCHER_ARCHIVE_DIR": "/archive", "META_ENV": "dev"}), \
                 mock.patch("src.config.settings.init_settings"), \
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files",
@@ -223,16 +234,44 @@ class TestThinWrappers(unittest.TestCase):
         # 해시 dup·누락(collect_file → asset_id=None)은 collected 에 세지 않는다 → 게이트가 헛 트리거 안 함.
         cb = _callable("dag_collect", _COLLECT_TASK)
         db, _conn, _cur = _fake_db(fetchone=None)  # fs_path 미존재 → collect_file 까지 진행
-        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "META_ENV": "dev"}), \
+        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "WATCHER_ARCHIVE_DIR": "/archive", "META_ENV": "dev"}), \
                 mock.patch("src.config.settings.init_settings"), \
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files",
                            return_value=["/inbox/a.txt", "/inbox/b.txt"]), \
                 mock.patch("src.app.run_ingest.collect_file",
-                           return_value=mock.Mock(asset_id=None)) as m_collect:
+                           return_value=mock.Mock(asset_id=None, skip_reason=None)) as m_collect:
             collected = cb()
         self.assertEqual(m_collect.call_count, 2)   # 두 파일 다 시도는 함
         self.assertEqual(collected, 0)              # 생성 0(전부 dup/누락) → 트리거 게이트 False
+
+    def test_collect_archives_duplicate_to_dup_dir(self) -> None:
+        # 061(C2): 중복(skip_reason=duplicate:...)은 archive/dup 로 즉시 이동(재해싱 churn 제거).
+        cb = _callable("dag_collect", _COLLECT_TASK)
+        db, _c, _cur = _fake_db(fetchone=None)
+        with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": "/inbox", "WATCHER_ARCHIVE_DIR": "/archive", "META_ENV": "dev"}), \
+                mock.patch("src.config.settings.init_settings"), \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("src.ingest.collector.collect_files", return_value=["/inbox/dup.txt"]), \
+                mock.patch("src.app.run_ingest.collect_file",
+                           return_value=mock.Mock(asset_id=None, skip_reason="duplicate:abc")), \
+                mock.patch("src.ingest.archiver.execute_move") as m_move:
+            cb()
+        m_move.assert_called_once()
+        self.assertEqual(m_move.call_args.args[0], "/inbox/dup.txt")     # src=인입 파일
+        self.assertIn("/archive/dup/", m_move.call_args.args[1])         # dest=archive/dup/
+        self.assertTrue(m_move.call_args.args[1].endswith("dup.txt"))
+
+    def test_inbox_gate_true_with_files_false_when_empty(self) -> None:
+        # 061(C5): gate_inbox_nonempty 는 인입에 파일이 있을 때만 True(빈 인입서 collect 스킵).
+        gate = _callable("dag_collect", "gate_inbox_nonempty")
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": d}):
+                self.assertFalse(gate())                                 # 빈 인입 → False
+            with open(os.path.join(d, "x.txt"), "w") as f:
+                f.write("x")
+            with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": d}):
+                self.assertTrue(gate())                                  # 파일 존재 → True
 
     def test_process_callable_calls_process_received_batch(self) -> None:
         from src.ingest.batch_runner import BatchReport
