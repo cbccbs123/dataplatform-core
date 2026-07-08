@@ -256,6 +256,45 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
             [{"topic_ko": "요리", "asset_count": 1, "subtopics": []}],
         )
 
+    @patch("src.app.portal_api.search_hybrid")
+    def test_facet_pair_splits_on_first_gt(self, mock_search) -> None:
+        # 060/059 계약(PR #85 리뷰 🟡): 첫 '>' 로만 분할 — subtopic 에 '>' 가 섞여도 부모(topic)는
+        # 항상 정확(topic 층은 닫힌 통제어휘·'>' 미포함)·부모 오배치 없음. subtopic 표기는 그대로 보존.
+        mock_search.return_value = {
+            "query": "요리", "meta": {},
+            "results": {"text_documents": [
+                {"id": "g1", "similarity": 0.9, "file_uri": "/x/g1.txt", "summary": "s",
+                 "topics": ["요리"], "subtopics": ["제빵>홈베이킹"],
+                 "topic_pairs": ["요리>제빵>홈베이킹"]},
+            ]},
+        }
+        resp = self.client.get("/search", params={"q": "요리", "size": 10})
+        self.assertEqual(
+            resp.json()["meta"]["topic_facets"],
+            [{"topic_ko": "요리", "asset_count": 1,
+              "subtopics": [{"subtopic_ko": "제빵>홈베이킹", "asset_count": 1}]}],
+        )
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_facet_mixed_index_pairs_and_fallback(self, mock_search) -> None:
+        # 060(PR #85 리뷰 🟡): 재색인 도중 신/구 인덱스 혼합 — 같은 topic 이 한 행은 짝 기준(제빵 nested),
+        # 다른 행은 topic_pairs 부재(폴백·nested 미기여). topic 카운트는 두 자산 합산, nested 는 짝 있는 자산만.
+        mock_search.return_value = {
+            "query": "요리", "meta": {},
+            "results": {"text_documents": [
+                {"id": "x1", "similarity": 0.9, "file_uri": "/x/x1.txt", "summary": "s",
+                 "topics": ["요리"], "subtopics": ["제빵"], "topic_pairs": ["요리>제빵"]},
+                {"id": "x2", "similarity": 0.8, "file_uri": "/x/x2.txt", "summary": "s",
+                 "topics": ["요리"], "subtopics": ["제빵"]},  # topic_pairs 없음(구 인덱스)
+            ]},
+        }
+        resp = self.client.get("/search", params={"q": "요리", "size": 10})
+        self.assertEqual(
+            resp.json()["meta"]["topic_facets"],
+            [{"topic_ko": "요리", "asset_count": 2,
+              "subtopics": [{"subtopic_ko": "제빵", "asset_count": 1}]}],
+        )
+
     @patch("src.app.portal_api.project_asset_topics", return_value=[])
     @patch("src.app.portal_api.search_hybrid")
     def test_search_passes_topic_filter(self, mock_search, _mock_project) -> None:
