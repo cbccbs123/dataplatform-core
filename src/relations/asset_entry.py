@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.classify.asset_topic import fetch_asset_topic
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
 from src.registry.lineage_persist import record_lineage
@@ -34,6 +36,8 @@ from src.relations.path_signal import find_path_signal_candidates
 from src.relations.persist import register_new_relation_kinds
 from src.relations.prompt import build_relation_proposal_prompt
 from src.relations.relation_type_catalog import fetch_active_relation_kinds
+
+_LOG = logging.getLogger(__name__)
 
 
 def _fetch_source_row(conn: Connection[Any], asset_id: str) -> dict[str, Any] | None:
@@ -115,6 +119,19 @@ def propose_relations_for_asset(
         if src is None:
             # asset 테이블에 없는 ID — 조용히 (0,0,0,0) 반환(호출자 로그에서 확인).
             return 0, 0, 0, 0
+        # 066 FR-102/103: 소스가 미부여(asset_topic 행 없음·무내용)면 관계 생성을 스킵한다.
+        #   후보검색·LLM 을 아예 호출하지 않고 (0,0,0,0) 을 반환 → 상위 run_relations 의
+        #   _record_resolution 이 기존 decide_resolution_status(0엣지·무예외→isolated)로 종결한다.
+        #   (스캔·상태기계는 불변 — 여기선 0엣지 반환만 보장해 재시도·LLM 낭비를 없앤다.)
+        #   FR-201 재사용: 부여됐으면 이 조회 결과에서 소스 주제(topic_ko/subtopic_ko)를 얻어 프롬프트에 싣는다.
+        source_topics = fetch_asset_topic(conn, source_asset_id)
+        if not source_topics:
+            _LOG.info("미부여 소스 관계 스킵: %s", source_asset_id)
+            return 0, 0, 0, 0
+        source_topic = {
+            "topic_ko": source_topics[0].get("topic_ko"),
+            "subtopic_ko": source_topics[0].get("subtopic_ko"),
+        }
         summary = str(src.get("summary") or "")
         emb_candidates = find_embedding_candidates(
             conn, source_asset_id=source_asset_id, top_k=k,
@@ -136,6 +153,7 @@ def propose_relations_for_asset(
             source_media_type=str(src.get("modality") or ""),
             candidates=candidates,
             relation_kinds_catalog=kinds,
+            source_topic=source_topic,  # 066 FR-202: 소스 자기주제를 soft 신호로 전달.
         )
         raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)

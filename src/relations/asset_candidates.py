@@ -30,13 +30,20 @@ EmbeddingKindFilter = Literal["st", "clip", "both"]
 
 
 class EmbeddingCandidate(TypedDict):
-    """LLM 프롬프트에 실릴 후보 한 건(자산 메타 + 임베딩 유사도). id 는 asset_id(UUID str)."""
+    """LLM 프롬프트에 실릴 후보 한 건(자산 메타 + 임베딩 유사도). id 는 asset_id(UUID str).
+
+    066 FR-201: 후보의 자기주제(``asset_topic``)를 동반한다 — ``topic_ko``/``subtopic_ko``.
+    FR-101 의 EXISTS 배제로 미부여 후보는 이미 빠지므로 ``topic_ko`` 는 사실상 항상 존재하나,
+    LEFT JOIN 특성상 방어적으로 ``None`` 을 허용한다(호출부가 None 을 견딜 것).
+    """
 
     id: str
     file_uri: str
     media_type: str
     emb_score: float
     summary: str
+    topic_ko: str | None
+    subtopic_ko: str | None
 
 
 def _channels_param(kind: EmbeddingKindFilter) -> list[str]:
@@ -117,12 +124,22 @@ def find_embedding_candidates(
                a.fs_path  AS file_uri,
                a.modality AS media_type,
                p.best_sim::float8 AS emb_score,
-               COALESCE(m.ext_meta->>'summary', '') AS summary
+               COALESCE(m.ext_meta->>'summary', '') AS summary,
+               -- 066 FR-201: 후보의 자기주제(asset_topic) 정본을 동반 → 관계 LLM 이 주제 정합을
+               --   맥락(soft)으로 보게 한다. asset_id PK 라 1:1(행 중복 없음).
+               t.topic_ko    AS topic_ko,
+               t.subtopic_ko AS subtopic_ko
         FROM per_item p
         INNER JOIN asset a ON a.asset_id = p.id
         LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
+        -- 066 FR-201: 후보 주제 동반(값 로드용 LEFT JOIN). 미부여 배제는 아래 EXISTS 가 담당.
+        LEFT JOIN asset_topic t ON t.asset_id = a.asset_id
         -- registered 상태만 포함 — received/deferred 자산은 관계 대상에서 제외.
         WHERE a.status = 'registered'
+          -- 066 FR-101: 미부여(asset_topic 행 없음·무내용) 후보를 관계 대상에서 배제한다.
+          --   내용 없는 자산의 엉터리 임베딩이 남의 후보를 오염(헛매칭)시키는 것을 원천 차단.
+          --   결정적 필터(존재 여부)라 정렬·파라미터·재현성 불변.
+          AND EXISTS (SELECT 1 FROM asset_topic at WHERE at.asset_id = a.asset_id)
         -- best_sim 동률 시 후보 id(asset_id) ASC 를 보조 정렬로 둬 순서를 결정적으로 고정.
         -- tiebreaker 가 없으면 동률 후보 순서가 PG 실행 계획에 따라 흔들려 헌법 3조(재현성)를 깬다.
         ORDER BY p.best_sim DESC, p.id ASC
@@ -135,6 +152,9 @@ def find_embedding_candidates(
         rows = cur.fetchall()
     out: list[EmbeddingCandidate] = []
     for r in rows:
+        # 066 FR-201: 주제는 방어적으로 None 허용(LEFT JOIN — EXISTS 배제로 사실상 항상 존재).
+        topic_ko = r.get("topic_ko")
+        subtopic_ko = r.get("subtopic_ko")
         out.append(
             {
                 "id": str(r["id"]),
@@ -142,6 +162,8 @@ def find_embedding_candidates(
                 "media_type": str(r["media_type"]),
                 "emb_score": float(r["emb_score"] or 0.0),
                 "summary": str(r["summary"] or ""),
+                "topic_ko": str(topic_ko) if topic_ko is not None else None,
+                "subtopic_ko": str(subtopic_ko) if subtopic_ko is not None else None,
             }
         )
     return out

@@ -602,6 +602,8 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
              mock.patch.object(ae, "_fetch_source_row",
                                return_value={"fs_path": "/d/a.txt", "modality": "txt", "summary": ""}), \
+             mock.patch.object(ae, "fetch_asset_topic",
+                               return_value=[{"topic_ko": "음식·요리", "subtopic_ko": "라면"}]), \
              mock.patch.object(ae, "find_embedding_candidates", return_value=emb_rows), \
              mock.patch.object(ae, "find_path_signal_candidates", return_value=path_rows), \
              mock.patch.object(ae, "fetch_active_relation_kinds", return_value=[]), \
@@ -634,13 +636,17 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         ]
         captured: dict = {}
 
-        def _fake_prompt(*, source_summary, source_media_type, candidates, relation_kinds_catalog):
+        # 066: build_relation_proposal_prompt 가 source_topic 키워드를 받게 되어 fake 시그니처도 확장.
+        def _fake_prompt(*, source_summary, source_media_type, candidates,
+                         relation_kinds_catalog, source_topic=None):
             captured["candidates"] = list(candidates)
             return "PROMPT"
 
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
              mock.patch.object(ae, "_fetch_source_row",
                                return_value={"fs_path": "/d/a.txt", "modality": "txt", "summary": ""}), \
+             mock.patch.object(ae, "fetch_asset_topic",
+                               return_value=[{"topic_ko": "음식·요리", "subtopic_ko": "라면"}]), \
              mock.patch.object(ae, "find_embedding_candidates", return_value=emb_rows), \
              mock.patch.object(ae, "find_path_signal_candidates", return_value=path_rows), \
              mock.patch.object(ae, "fetch_active_relation_kinds", return_value=[]), \
@@ -771,6 +777,8 @@ class TestLineageRecordsEdgePairs(unittest.TestCase):
         with mock.patch.object(asset_entry, "get_current_settings", return_value=cfg), \
              mock.patch.object(asset_entry, "_fetch_source_row",
                                return_value={"summary": "s", "modality": "text"}), \
+             mock.patch.object(asset_entry, "fetch_asset_topic",
+                               return_value=[{"topic_ko": "음식·요리", "subtopic_ko": "라면"}]), \
              mock.patch.object(asset_entry, "find_embedding_candidates", return_value=[]), \
              mock.patch.object(asset_entry, "find_path_signal_candidates", return_value=[]), \
              mock.patch.object(asset_entry, "union_candidates", return_value=[]), \

@@ -127,12 +127,39 @@ def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
 """
 
 
+def _fmt_topic(topic: Mapping[str, Any] | None) -> str:
+    """(topic_ko / subtopic_ko) 를 사람이 읽는 한 줄 표기로 — 미부여/부분값도 견고하게.
+
+    066 FR-202: 관계 LLM 에 주제를 **참고 신호**로 보여줄 문자열. subtopic 이 있으면
+    ``topic_ko / subtopic_ko`` 로, 없으면 ``topic_ko`` 만. 둘 다 없으면 ``(주제 없음)``.
+    """
+    if not topic:
+        return "(주제 없음)"
+    topic_ko = str(topic.get("topic_ko") or "").strip()
+    subtopic_ko = str(topic.get("subtopic_ko") or "").strip()
+    if topic_ko and subtopic_ko:
+        return f"{topic_ko} / {subtopic_ko}"
+    return topic_ko or subtopic_ko or "(주제 없음)"
+
+
+# 066 FR-202: 자기주제를 관계 LLM 에 넣되 **soft 신호**로만 쓰게 하는 지시.
+# 하드 배제(주제 다르면 무조건 컷)를 금지한다 — 정상 크로스-주제 관계(레시피↔주방도구)를 죽이지 않도록.
+# 판단 우선순위는 항상 **내용**이며, 주제는 same_domain 오매칭을 줄이는 참고 신호일 뿐이다.
+_TOPIC_SOFT_GUIDE_KO = """### 자기주제(topic) 참고 가이드 (soft·보조)
+소스와 각 후보에는 **자기주제(topic_ko / subtopic_ko)** 가 함께 제공된다(자산이 자기 내용에서 확정한 주제).
+- 소스와 후보의 **주제(topic)가 다르면** 같은 도메인(``same_domain``)으로 보지 마라.
+- **단** 주제가 달라도 후보 요약·내용이 **실제로 관련**되면, 판단은 **내용을 우선**한다(주제는 **참고 신호**일 뿐, 하드 배제 금지).
+- 정상적인 크로스-주제 관계(예: 레시피 ↔ 주방도구)는 내용이 합치하면 그대로 연결한다.
+"""
+
+
 def build_relation_proposal_prompt(
     *,
     source_summary: str,
     source_media_type: str,
     candidates: Sequence[Mapping[str, Any]],
     relation_kinds_catalog: Sequence[Mapping[str, Any]],
+    source_topic: Mapping[str, Any] | None = None,
 ) -> str:
     """
     관계 제안 전체 프롬프트(단일 문자열)를 조립한다.
@@ -140,8 +167,10 @@ def build_relation_proposal_prompt(
     Args:
         source_summary: 소스 자산 요약(길이 상한은 본문에서 잘라 씀).
         source_media_type: 매체 타입 구분용 문자열.
-        candidates: ``find_embedding_candidates`` 결과 행들.
+        candidates: ``find_embedding_candidates`` 결과 행들(066: topic_ko/subtopic_ko 동반 가능).
         relation_kinds_catalog: **active** ``relation_kind`` 목록(``type_code``/``type_name``/``description``/``is_symmetric``).
+        source_topic: 소스 자산의 자기주제 ``{"topic_ko","subtopic_ko"}`` (066 FR-202·soft 신호).
+            ``None`` 이면 주제 표기를 생략(하위호환 — 기존 호출부·미부여 경로).
     """
     cand_lines: list[str] = []
     for c in candidates:
@@ -152,6 +181,9 @@ def build_relation_proposal_prompt(
         # C-3: emb_score=0.0 인 후보는 경로 신호(파일명·폴더 매칭)로 추가된 것 — LLM 이 0.0 을
         # "비유사"로 오해하지 않게 ``signal`` 표식을 붙인다(가이드 문구와 호응).
         signal = "경로 신호" if emb_score == 0.0 else "임베딩"
+        # 066 FR-202: 후보의 자기주제(topic_ko/subtopic_ko)를 후보 표기에 실어 주제 정합을 보게 한다.
+        cand_topic_ko = c.get("topic_ko")
+        cand_subtopic_ko = c.get("subtopic_ko")
         cand_lines.append(
             json.dumps(
                 {
@@ -161,6 +193,8 @@ def build_relation_proposal_prompt(
                     "summary": (c["summary"] or "")[:500],
                     "embedding_similarity": emb_score,
                     "signal": signal,
+                    "topic_ko": cand_topic_ko,
+                    "subtopic_ko": cand_subtopic_ko,
                 },
                 ensure_ascii=False,
             )
@@ -206,6 +240,9 @@ def build_relation_proposal_prompt(
     # topic 지시부에 주입할 닫힌 27+미분류 목록(taxonomy_seed.json 단일 출처·결정적).
     topic_taxonomy_block = _build_topic_taxonomy_block()
 
+    # 066 FR-202: 소스 자기주제를 한 줄로 표기(soft 신호). None(미부여·구 호출부)이면 (주제 없음).
+    source_topic_line = _fmt_topic(source_topic)
+
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.
 
 규칙:
@@ -224,9 +261,12 @@ def build_relation_proposal_prompt(
 
 소스 요약: {source_summary[:1200]}
 소스 매체 타입: {source_media_type}
+소스 주제(topic): {source_topic_line}
 
-후보 목록(embedding_similarity 는 1에 가까울수록 유사. ``signal`` 이 ``경로 신호`` 면 파일명·폴더로 추가된 후보):
+후보 목록(embedding_similarity 는 1에 가까울수록 유사. ``signal`` 이 ``경로 신호`` 면 파일명·폴더로 추가된 후보. ``topic_ko`` / ``subtopic_ko`` 는 후보의 자기주제):
 {candidates_block}
+
+{_TOPIC_SOFT_GUIDE_KO}
 
 {_PATH_SIGNAL_GUIDE_KO}
 
