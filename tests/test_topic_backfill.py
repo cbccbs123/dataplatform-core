@@ -166,6 +166,86 @@ class TestBackfillLoop(unittest.TestCase):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# 2b) 품질 재백필 모드(--reclassify · T604 · FR-704)
+# ────────────────────────────────────────────────────────────────────────────
+class TestReclassifyMode(unittest.TestCase):
+    """T604 — ``--reclassify``: 기존 asset_topic 행도 재분류 대상. None→행 삭제(미부여 전이)·dict→upsert.
+
+    재수집 검증서 드러난 3결함(placeholder 미분류·미분류 catch-all·과편화) 반영 후, 고정 레지스트리로
+    전 자산을 동일 기준으로 재분류해 기존 저장분을 정리한다. 스캔은 미부여 필터를 풀어(only_missing=
+    False) 이미 부여된 행도 포함하고, 재분류 결과가 None(미부여)이면 기존 행을 삭제한다.
+    """
+
+    def _run(self, *, ids, classify_fn, delete_fn=None, reclassify=True):
+        db = _FakeDB()
+        return backfill_assets(
+            db, ids, classify_fn=classify_fn,
+            reclassify=reclassify, delete_fn=delete_fn,
+            skip_existing=False, has_topic_fn=lambda conn, aid: False,
+            log_every=0,
+        )
+
+    def test_reclassify_scan_includes_existing_rows(self):
+        # 재분류는 미부여 필터를 풀어 기존 행도 대상에 포함한다(only_missing=False = --all 스캔).
+        conn, cur = _mock_conn(fetchall_val=[("a1",), ("a2",)])
+        _fetch_target_asset_ids(conn, only_missing=False)
+        sql = cur.execute.call_args.args[0].lower()
+        self.assertNotIn("left join asset_topic", sql)  # IS NULL 미부여 필터 없음
+        self.assertIn("status = 'registered'", sql)
+
+    def test_none_result_deletes_existing_row_and_counts(self):
+        # 재분류 결과 미부여(None) → delete_fn 으로 기존 행 삭제·삭제 카운트.
+        def classify(conn, aid, *, settings=None, client=None):
+            return None  # 재분류 결과 미부여(예: 미분류/무내용으로 전이)
+
+        deleted_ids: list = []
+
+        def delete_fn(conn, aid):
+            deleted_ids.append(aid)
+            return 1  # rowcount(실제 행 삭제됨)
+
+        s = self._run(ids=["a1", "a2"], classify_fn=classify, delete_fn=delete_fn)
+        self.assertEqual(deleted_ids, ["a1", "a2"])  # 두 자산 모두 삭제 시도
+        self.assertEqual(s["deleted"], 2)
+        self.assertEqual(s["classified"], 0)
+
+    def test_none_result_no_existing_row_no_delete_count(self):
+        # 재분류 None 인데 삭제할 행이 없으면(rowcount 0) deleted 카운트 증가 없음.
+        def classify(conn, aid, *, settings=None, client=None):
+            return None
+
+        def delete_fn(conn, aid):
+            return 0  # 삭제할 행 없음(원래 미부여)
+
+        s = self._run(ids=["a1"], classify_fn=classify, delete_fn=delete_fn)
+        self.assertEqual(s["deleted"], 0)
+
+    def test_dict_result_upserts_no_delete(self):
+        # 재분류 결과 부여(dict) → classify_fn 이 upsert(정본 갱신). delete 미호출.
+        def classify(conn, aid, *, settings=None, client=None):
+            return {"topic_ko": "과학"}
+
+        delete_fn = MagicMock()
+        s = self._run(ids=["a1"], classify_fn=classify, delete_fn=delete_fn)
+        self.assertEqual(s["classified"], 1)
+        self.assertEqual(s["deleted"], 0)
+        delete_fn.assert_not_called()
+
+    def test_default_mode_none_does_not_delete(self):
+        # 기본(비-reclassify): None 은 미부여로 두고 삭제하지 않는다(기존 동작 보존).
+        def classify(conn, aid, *, settings=None, client=None):
+            return None
+
+        delete_fn = MagicMock()
+        s = self._run(
+            ids=["a1"], classify_fn=classify, delete_fn=delete_fn, reclassify=False
+        )
+        self.assertEqual(s["no_text"], 1)
+        self.assertEqual(s["deleted"], 0)
+        delete_fn.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 3) 현황 리포트(--report) — 순수 집계
 # ────────────────────────────────────────────────────────────────────────────
 class TestStatusReport(unittest.TestCase):
