@@ -171,6 +171,307 @@ def group_label_rows(flat_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(by_asset.values())
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 1b) 분포 가드 지표 (068 FR-301·T401 — 순수 계산 · 집단 통계 불변식)
+# ────────────────────────────────────────────────────────────────────────────
+# 회귀는 **개별 자산 정답표(수동 학습化)를 늘리는 방식이 아니라 집단 통계 불변식**으로 잡는다
+# (spec 068 Non-Goals·헌법 학습 0). 가드는 계통 붕괴(미부여 급증·소분류 과병합·"기타" 과다)만
+# 감지하고, 개별 1건의 애매(경계 topic 등)는 수용한다.
+#
+# 임계는 상수로 두되 **dev 실측(068 G6 재백필 리포트) 후 확정**한다 — 아래 값은 spec 진단치
+# (여행>관광지 64%·음식>음식 53%·내용있는 미부여 13%)를 근거로 한 초기치이며 캘리브레이션 대상.
+# 레벨: "hard"(게이트 실패·계통 붕괴) / "warn"(주의·게이트는 통과).
+_UNASSIGNED_RATE_HARD = 0.12  # 미부여 자산/registered 상한(무내용 정상 미부여 여유 포함·dev 실측 후 확정)
+_SUBTOPIC_MAX_SHARE_WARN = 0.5   # topic별 최대 subtopic 점유율 경보(dev 실측 후 확정)
+_SUBTOPIC_MAX_SHARE_HARD = 0.7   # topic별 최대 subtopic 점유율 하드(과병합·dev 실측 후 확정)
+_MISC_SUBTOPIC_RATE_WARN = 0.35  # subtopic None/"기타" 비율 경보(시드 커버 공백·dev 실측 후 확정)
+_MISC_SUBTOPIC_RATE_HARD = 0.60  # subtopic None/"기타" 비율 하드(dev 실측 후 확정)
+# 점유율 지표를 적용할 topic 최소 자산 수 — 표본 과소 topic 의 점유율은 노이즈라 게이트 제외.
+_MIN_TOPIC_ASSETS_FOR_SHARE = 10
+# "기타"류 subtopic 라벨(닫힌 시드 커버 공백의 탈출구). None 도 미세분류 없음으로 함께 계산.
+_MISC_SUBTOPIC_LABELS = {"기타", "기타·미분류", "미분류"}
+
+
+def _norm_subtopic(sub: Any) -> str | None:
+    """subtopic 정규화(빈/공백 → None). 순수."""
+    if sub is None:
+        return None
+    s = str(sub).strip()
+    return s or None
+
+
+def _is_real_subtopic(sub: Any) -> bool:
+    """실 subtopic 여부 — None/"기타"류가 아닌 구체 소분류만 True(순수)."""
+    s = _norm_subtopic(sub)
+    return s is not None and s not in _MISC_SUBTOPIC_LABELS
+
+
+def subtopic_concentration(topic_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """topic별 소분류 집중도(순수·과병합 감지용).
+
+    각 topic 에 대해 **실 subtopic**(None/"기타" 제외)의 최대 점유율을 topic 전체 자산 대비로 계산.
+    여행>관광지 64% 같은 과코스닝(한 subtopic 이 topic 을 흡수)을 지표화한다.
+
+    Returns:
+        ``{topic_ko: {n_assets, dominant_subtopic, max_share, n_subtopics}}``.
+        max_share = 최대 실 subtopic 자산수 / topic 전체 자산수(실 subtopic 없으면 0.0·dominant None).
+    """
+    by_topic: dict[str, dict[str, Any]] = {}
+    for r in topic_rows:
+        tk = str(r.get("topic_ko") or "").strip()
+        if not tk:
+            continue
+        entry = by_topic.setdefault(tk, {"n_assets": 0, "real": Counter()})
+        entry["n_assets"] += 1
+        if _is_real_subtopic(r.get("subtopic_ko")):
+            entry["real"][_norm_subtopic(r.get("subtopic_ko"))] += 1
+    out: dict[str, dict[str, Any]] = {}
+    for tk, e in by_topic.items():
+        real: Counter = e["real"]
+        if real:
+            dom, dom_n = real.most_common(1)[0]  # 동수는 첫 등장 우선(결정적)
+            max_share = round(dom_n / e["n_assets"], 4)
+        else:
+            dom, max_share = None, 0.0
+        out[tk] = {
+            "n_assets": e["n_assets"],
+            "dominant_subtopic": dom,
+            "max_share": max_share,
+            "n_subtopics": len(real),
+        }
+    return out
+
+
+def topic_count_drift(before: dict[str, int], after: dict[str, int]) -> dict[str, Any]:
+    """백필 전후 topic 건수 변동(순수·옵션 드리프트·FR-301 ④).
+
+    Returns:
+        ``{per_topic: {topic: {before, after, delta}}, total_churn, total_before, total_after}``.
+        ``total_churn`` = Σ|delta|(전체 이동량). topic 정렬 결정적(sorted).
+    """
+    keys = sorted(set(before) | set(after))
+    per_topic: dict[str, dict[str, int]] = {}
+    churn = 0
+    for k in keys:
+        b = int(before.get(k, 0))
+        a = int(after.get(k, 0))
+        per_topic[k] = {"before": b, "after": a, "delta": a - b}
+        churn += abs(a - b)
+    return {
+        "per_topic": per_topic,
+        "total_churn": churn,
+        "total_before": sum(int(v) for v in before.values()),
+        "total_after": sum(int(v) for v in after.values()),
+    }
+
+
+def build_guard_report(
+    *,
+    topic_rows: list[dict[str, Any]],
+    n_registered: int,
+    before_topic_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """분포 가드 리포트(순수·집단 통계·FR-301·T401).
+
+    입력은 **정본 asset_topic**(자산당 1행) 가정. 실 DB 집계와 분리(순수 함수) — DB 조회는 얇은 래퍼.
+
+    Args:
+        topic_rows: ``[{asset_id, topic_ko, subtopic_ko}]``(주제 부여 자산).
+        n_registered: registered 자산 총수(미부여율 분모).
+        before_topic_counts: (옵션) 백필 전 topic별 건수 — 있으면 드리프트 포함.
+
+    Returns:
+        ``{metrics, violations, level, [drift]}``. ``violations`` 항목은
+        ``{metric, scope, value, threshold, level}``(+concentration 은 dominant_subtopic).
+        ``level`` = "hard"/"warn"/"ok"(하드>경보>정상).
+    """
+    rows_with_topic = [r for r in topic_rows if str(r.get("topic_ko") or "").strip()]
+    topic_ids = {str(r["asset_id"]) for r in rows_with_topic}
+    n_with_topic = len(topic_ids)
+    n_unassigned = max(n_registered - n_with_topic, 0)
+    unassigned_rate = round(n_unassigned / n_registered, 4) if n_registered else 0.0
+
+    # "기타"/None subtopic 비율(주제 보유 자산 대비) — 닫힌 시드 커버 공백 신호.
+    n_misc = sum(1 for r in rows_with_topic if not _is_real_subtopic(r.get("subtopic_ko")))
+    misc_rate = round(n_misc / len(rows_with_topic), 4) if rows_with_topic else 0.0
+
+    # 실 (topic, subtopic) pair 싱글턴 비율 — 소분류 파편화 참고 지표.
+    real_pairs: Counter = Counter()
+    for r in rows_with_topic:
+        if _is_real_subtopic(r.get("subtopic_ko")):
+            real_pairs[(str(r["topic_ko"]).strip(), _norm_subtopic(r.get("subtopic_ko")))] += 1
+    n_real_pairs = len(real_pairs)
+    n_singleton = sum(1 for c in real_pairs.values() if c == 1)
+    singleton_rate = round(n_singleton / n_real_pairs, 4) if n_real_pairs else 0.0
+
+    concentration = subtopic_concentration(rows_with_topic)
+
+    violations: list[dict[str, Any]] = []
+    if unassigned_rate >= _UNASSIGNED_RATE_HARD:
+        violations.append({
+            "metric": "unassigned_rate", "scope": "corpus",
+            "value": unassigned_rate, "threshold": _UNASSIGNED_RATE_HARD, "level": "hard",
+        })
+    if misc_rate >= _MISC_SUBTOPIC_RATE_HARD:
+        violations.append({
+            "metric": "misc_subtopic_rate", "scope": "corpus",
+            "value": misc_rate, "threshold": _MISC_SUBTOPIC_RATE_HARD, "level": "hard",
+        })
+    elif misc_rate >= _MISC_SUBTOPIC_RATE_WARN:
+        violations.append({
+            "metric": "misc_subtopic_rate", "scope": "corpus",
+            "value": misc_rate, "threshold": _MISC_SUBTOPIC_RATE_WARN, "level": "warn",
+        })
+    # topic별 소분류 집중도 — 표본 충분한 topic 만(정렬로 결정적 출력).
+    for tk in sorted(concentration):
+        c = concentration[tk]
+        if c["n_assets"] < _MIN_TOPIC_ASSETS_FOR_SHARE:
+            continue
+        share = c["max_share"]
+        lvl = "hard" if share >= _SUBTOPIC_MAX_SHARE_HARD else (
+            "warn" if share >= _SUBTOPIC_MAX_SHARE_WARN else None)
+        if lvl:
+            thr = _SUBTOPIC_MAX_SHARE_HARD if lvl == "hard" else _SUBTOPIC_MAX_SHARE_WARN
+            violations.append({
+                "metric": "subtopic_max_share", "scope": tk,
+                "value": share, "threshold": thr, "level": lvl,
+                "dominant_subtopic": c["dominant_subtopic"],
+            })
+
+    levels = {v["level"] for v in violations}
+    overall = "hard" if "hard" in levels else ("warn" if "warn" in levels else "ok")
+
+    report: dict[str, Any] = {
+        "metrics": {
+            "n_registered": n_registered,
+            "n_with_topic": n_with_topic,
+            "n_unassigned": n_unassigned,
+            "unassigned_rate": unassigned_rate,
+            "n_misc_subtopic": n_misc,
+            "misc_subtopic_rate": misc_rate,
+            "n_real_pairs": n_real_pairs,
+            "n_singleton_pairs": n_singleton,
+            "singleton_pair_rate": singleton_rate,
+            "subtopic_concentration": concentration,
+        },
+        "violations": violations,
+        "level": overall,
+    }
+    if before_topic_counts is not None:
+        after_counts = dict(topic_distribution(rows_with_topic))
+        report["drift"] = topic_count_drift(before_topic_counts, after_counts)
+    return report
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 1c) 고정 스모크셋 (068 FR-302·T402 — 늘리지 않음·재백필 후 대조)
+# ────────────────────────────────────────────────────────────────────────────
+_DEFAULT_SMOKE_PATH = _REPO_ROOT / "tests" / "golden" / "topic_smoke.json"
+
+
+def load_topic_smoke(path: Path | str = _DEFAULT_SMOKE_PATH) -> list[dict[str, Any]]:
+    """고정 스모크 앵커 목록 로드(순수 I/O). ``anchors`` 배열만 반환."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return list(data.get("anchors", []))
+
+
+def validate_topic_smoke(golden: list[dict[str, Any]], valid_topics: set[str]) -> list[str]:
+    """스모크 골든 무결성 검증(순수) — 문제 문자열 목록(빈 목록=정상).
+
+    검사: expected_topic 이 None 이거나 27집합 소속 · hint 고유 · distinct_from 참조 존재.
+    """
+    problems: list[str] = []
+    hints = [e.get("hint") for e in golden]
+    seen: set[Any] = set()
+    for h in hints:
+        if h in seen:
+            problems.append(f"hint 중복: {h!r}")
+        seen.add(h)
+    hint_set = set(hints)
+    for e in golden:
+        et = e.get("expected_topic")
+        if et is not None and et not in valid_topics:
+            problems.append(f"미지의 expected_topic: {et!r}(hint={e.get('hint')!r})")
+        for ref in e.get("distinct_from", []) or []:
+            if ref not in hint_set:
+                problems.append(f"distinct_from 참조 없음: {ref!r}(hint={e.get('hint')!r})")
+    return problems
+
+
+def compare_topic_smoke(
+    golden: list[dict[str, Any]], actual: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """스모크 골든 vs 실제 분류 결과 대조(순수·재백필 후 실행용).
+
+    Args:
+        golden: ``load_topic_smoke()`` 결과.
+        actual: ``{hint: {"topic_ko": str|None, "subtopic_ko": str|None}}``(실제 재분류 결과).
+
+    규칙:
+        · topic: expected_topic 과 정확 일치(둘 다 None 도 일치). None 기대인데 부여되면 미부여 회귀.
+        · subtopic: expected_subtopic 가 문자열이면 정확 일치, None 이면 와일드카드(대조 안 함).
+        · distinct_from: 같은 topic 내에서 서로 다른 subtopic 이어야 함(둘 다 None/동일이면 과병합 위반).
+
+    Returns:
+        ``{n, n_topic_ok, n_subtopic_checked, n_subtopic_ok, topic_mismatches,
+        subtopic_mismatches, separation_violations, passed}``.
+    """
+    def _act(hint: Any) -> tuple[Any, Any]:
+        a = actual.get(hint) or {}
+        return a.get("topic_ko"), _norm_subtopic(a.get("subtopic_ko"))
+
+    topic_mismatches: list[dict[str, Any]] = []
+    subtopic_mismatches: list[dict[str, Any]] = []
+    separation_violations: list[dict[str, Any]] = []
+    n_topic_ok = n_sub_checked = n_sub_ok = 0
+
+    for e in golden:
+        hint = e.get("hint")
+        exp_t = e.get("expected_topic")
+        exp_s = e.get("expected_subtopic")
+        act_t, act_s = _act(hint)
+        # 정규화: 빈 문자열 topic 은 None 취급.
+        act_t = act_t if (act_t is not None and str(act_t).strip()) else None
+        if exp_t == act_t:
+            n_topic_ok += 1
+        else:
+            topic_mismatches.append({"hint": hint, "expected": exp_t, "actual": act_t})
+        if exp_s is not None:  # None 은 와일드카드(닫힌 시드 확정 전) — 대조 생략
+            n_sub_checked += 1
+            if exp_s == act_s:
+                n_sub_ok += 1
+            else:
+                subtopic_mismatches.append({"hint": hint, "expected": exp_s, "actual": act_s})
+
+    # 분리 제약: distinct_from 앵커끼리 subtopic 이 달라야 함(중복 위반 1회만 기록).
+    recorded: set[frozenset] = set()
+    for e in golden:
+        hint = e.get("hint")
+        _, s_a = _act(hint)
+        for ref in e.get("distinct_from", []) or []:
+            key = frozenset({hint, ref})
+            if key in recorded:
+                continue
+            recorded.add(key)
+            _, s_b = _act(ref)
+            if s_a == s_b:  # 둘 다 None 이거나 같은 라벨 → 변별 실패(과병합)
+                separation_violations.append(
+                    {"pair": [hint, ref], "shared_subtopic": s_a}
+                )
+
+    passed = not (topic_mismatches or subtopic_mismatches or separation_violations)
+    return {
+        "n": len(golden),
+        "n_topic_ok": n_topic_ok,
+        "n_subtopic_checked": n_sub_checked,
+        "n_subtopic_ok": n_sub_ok,
+        "topic_mismatches": topic_mismatches,
+        "subtopic_mismatches": subtopic_mismatches,
+        "separation_violations": separation_violations,
+        "passed": passed,
+    }
+
+
 def format_report_lines(report: dict[str, Any]) -> list[str]:
     """리포트 dict → 콘솔 줄(순수·사람 검수용)."""
     dist = report["distribution"]
@@ -202,6 +503,41 @@ def format_report_lines(report: dict[str, Any]) -> list[str]:
             f"  투영 주제 보유 {proj['n_assets']} · 오염율: {pj_pct:.1f}%"
             f"  (정본 {p_pct:.1f}% 와 비교)",
         ]
+    guard = report.get("guard")
+    if guard is not None:
+        lines += format_guard_lines(guard)
+    return lines
+
+
+_GUARD_LEVEL_MARK = {"ok": "✅", "warn": "🟡", "hard": "🔴"}
+
+
+def format_guard_lines(guard: dict[str, Any]) -> list[str]:
+    """분포 가드 리포트 dict → 콘솔 줄(순수·068 FR-301·집단 통계)."""
+    m = guard["metrics"]
+    lines = [
+        f"  — 분포 가드(068 FR-301 · 집단 통계 · 임계 dev 실측 후 확정) {_GUARD_LEVEL_MARK.get(guard['level'], '')} —",
+        f"  미부여율: {100.0 * m['unassigned_rate']:.1f}%  "
+        f"(미부여 {m['n_unassigned']}/{m['n_registered']} · 하드 <{100 * _UNASSIGNED_RATE_HARD:.0f}%)",
+        f"  '기타'/None subtopic 비율: {100.0 * m['misc_subtopic_rate']:.1f}%  "
+        f"(경보 {100 * _MISC_SUBTOPIC_RATE_WARN:.0f}%·하드 {100 * _MISC_SUBTOPIC_RATE_HARD:.0f}%)",
+        f"  실 소분류 싱글턴 비율: {100.0 * m['singleton_pair_rate']:.1f}%  "
+        f"({m['n_singleton_pairs']}/{m['n_real_pairs']} pair)",
+    ]
+    if guard["violations"]:
+        lines.append("  위반:")
+        for v in guard["violations"]:
+            mark = _GUARD_LEVEL_MARK.get(v["level"], "")
+            extra = f" [{v['dominant_subtopic']}]" if v.get("dominant_subtopic") else ""
+            lines.append(
+                f"      {mark} {v['metric']} @ {v['scope']}{extra}: "
+                f"{v['value']:.3f} (임계 {v['threshold']})"
+            )
+    else:
+        lines.append("  위반 없음(정상).")
+    drift = guard.get("drift")
+    if drift is not None:
+        lines.append(f"  드리프트 총 이동량(백필 전후): {drift['total_churn']}")
     return lines
 
 
@@ -313,7 +649,18 @@ def fetch_projection_rows(conn) -> list[dict[str, Any]]:
     ]
 
 
-def run_report(*, env: str, compare_projection: bool = False) -> dict[str, Any]:
+def _load_before_topic_counts(before_json: str | None) -> dict[str, int] | None:
+    """이전 리포트 JSON 에서 백필 전 topic 건수(distribution.topic_distribution) 로드(드리프트용)."""
+    if not before_json:
+        return None
+    prev = json.loads(Path(before_json).read_text(encoding="utf-8"))
+    dist = prev.get("distribution", {})
+    return {str(k): int(v) for k, v in (dist.get("topic_distribution") or {}).items()}
+
+
+def run_report(
+    *, env: str, compare_projection: bool = False, before_json: str | None = None
+) -> dict[str, Any]:
     """리포트 실행(읽기전용 DB·LLM 0). .env.{env} 로드 → init_settings → 집계."""
     from dotenv import load_dotenv
 
@@ -343,6 +690,11 @@ def run_report(*, env: str, compare_projection: bool = False) -> dict[str, Any]:
             topic_rows=topic_rows, text_asset_ids=text_ids, n_registered=n_reg
         ),
         "grounding": build_grounding_report(group_label_rows(grounding_flat)),
+        # 068 FR-301 분포 가드(순수 build_guard_report 의 얇은 실DB 래퍼).
+        "guard": build_guard_report(
+            topic_rows=topic_rows, n_registered=n_reg,
+            before_topic_counts=_load_before_topic_counts(before_json),
+        ),
     }
     if proj_flat is not None:
         report["projection_grounding"] = build_grounding_report(group_label_rows(proj_flat))
@@ -359,15 +711,28 @@ def main() -> int:
         help="(참고) 옛 이웃-엣지 투영 방식이었다면 오염율이 얼마였을지 비교",
     )
     p.add_argument("--json", dest="json_out", default=None, help="리포트 JSON 저장 경로(선택)")
+    p.add_argument(
+        "--before-json", dest="before_json", default=None,
+        help="(068 드리프트) 백필 전 리포트 JSON 경로 — topic 건수 변동 비교",
+    )
+    p.add_argument(
+        "--fail-on-hard", dest="fail_on_hard", action="store_true",
+        help="(068 게이트) 분포 가드가 하드 임계 위반이면 비정상 종료코드(1) 반환",
+    )
     args = p.parse_args()
 
-    report = run_report(env=args.env, compare_projection=args.compare_projection)
+    report = run_report(
+        env=args.env, compare_projection=args.compare_projection, before_json=args.before_json
+    )
     print("\n".join(format_report_lines(report)))
     if args.json_out:
         Path(args.json_out).write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"  리포트 JSON 저장: {args.json_out}")
+    if args.fail_on_hard and report.get("guard", {}).get("level") == "hard":
+        print("🔴 분포 가드 하드 임계 위반 — 재백필/시드 점검 필요(068 FR-301).")
+        return 1
     return 0
 
 

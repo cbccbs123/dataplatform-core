@@ -1,14 +1,14 @@
 """065 자산 자기주제(aboutness) 정본화 — 분류 코어 단위 테스트 (mock, DB·LLM 불필요).
 
-검증 의도 (FR-101/102·FR-201~204)
-    자산 스스로의 (topic, subtopic) 정본을 하이브리드(임베딩 kNN → LLM 닫힌 확정 → 058 canonicalize)로
-    부여하는 seam. DB/LLM 없이 mock conn·mock client 로 분기·SQL 형상·결정성만 검증한다.
+검증 의도 (FR-101/102·FR-201~204·068 G1)
+    자산 스스로의 (topic, subtopic) 정본을 하이브리드(레지스트리 전체-27 후보 → LLM 닫힌 확정 → 058
+    canonicalize)로 부여하는 seam. DB/LLM 없이 mock conn·mock client 로 분기·SQL 형상·결정성만 검증한다.
     - **결정성(헌법 3조)**: temp=0 + 닫힌 topic 후보 + 멱등 upsert → 같은 입력 같은 출력.
     - **LLM 단일 seam(헌법 6조)**: ``src.llm.client.complete_json``·``client=`` 주입.
     - **닫힌집합 검증(FR-203)**: LLM 이 후보 밖 topic 을 답하면 1회 재질의 후 실패 시 미부여(강제 매핑 금지).
 
 mock 패턴은 ``tests/test_topic_canonicalize.py``(cursor mock·_mock_conn)·``tests/test_asset_topic_consumers.py`` 동형.
-classify_asset_topic 은 헬퍼(knn_topic_candidates·canonicalize_subtopic·_lookup_topic_en)를
+classify_asset_topic 은 헬퍼(topic_candidates_for_self_text·canonicalize_subtopic·_lookup_topic_en)를
 **asset_topic 모듈 위치에서** patch 해 분기만 순수 검증한다.
 """
 from __future__ import annotations
@@ -143,38 +143,54 @@ class TestBuildSelfText(unittest.TestCase):
 
 
 class TestTopicCandidatesForSelfText(unittest.TestCase):
-    """T202 — kNN 재사용 어댑터(058 topic 층 kNN)·빈 텍스트/후보 [] 처리."""
+    """T101(068 G1) — topic 후보를 kNN 축소→레지스트리 전체-27 로 교체.
 
-    def test_empty_text_returns_empty_no_knn(self) -> None:
+    닫힌 27집합에서 kNN top-k 축소가 정답 topic 을 후보에서 누락시켜(양궁·구형컴퓨터) LLM none →
+    미부여·경계흡수를 낳았다(068 이슈1). 후보는 27개로 작아 전부 프롬프트에 담을 수 있으므로 임베딩 kNN
+    대신 레지스트리 조회(parent NULL·taxonomy·미분류 배제·결정적 정렬)로 전체를 제공한다.
+    """
+
+    def test_empty_text_returns_empty_no_query(self) -> None:
         from src.classify import asset_topic
 
-        with patch.object(asset_topic, "knn_topic_candidates") as m_knn:
-            out = asset_topic.topic_candidates_for_self_text(object(), "")
-            self.assertEqual(out, [])
-            m_knn.assert_not_called()  # 빈 텍스트면 임베딩·kNN 자체를 건너뜀
+        conn = MagicMock()
+        out = asset_topic.topic_candidates_for_self_text(conn, "")
+        self.assertEqual(out, [])
+        conn.cursor.assert_not_called()  # 빈 텍스트면 DB 조회 자체를 건너뜀(비용 0)
 
-    def test_delegates_to_058_knn_topic_layer(self) -> None:
+    def test_returns_full_registry_topics_deterministic_order(self) -> None:
         from src.classify import asset_topic
 
-        conn = object()
-        with patch.object(
-            asset_topic, "knn_topic_candidates", return_value=["스포츠·레저", "예술"]
-        ) as m_knn:
-            out = asset_topic.topic_candidates_for_self_text(conn, "농구 경기", k=5)
-            self.assertEqual(out, ["스포츠·레저", "예술"])
-            # topic 층 kNN = parent_topic=None(058 프리미티브 재사용).
-            args, kwargs = m_knn.call_args
-            self.assertIs(args[0], conn)
-            self.assertEqual(args[1], "농구 경기")
-            self.assertEqual(kwargs.get("parent_topic"), None)
+        # 레지스트리 전체-27(여기선 대표 행)을 topic_ko 오름차순으로 반환한다고 가정.
+        rows = [{"topic_ko": "과학·기술"}, {"topic_ko": "스포츠·레저"}, {"topic_ko": "예술·문화"}]
+        conn, cur = _mock_conn_seq(fetchall_val=rows)
+        out = asset_topic.topic_candidates_for_self_text(conn, "농구 경기", k=5)
+        self.assertEqual(out, ["과학·기술", "스포츠·레저", "예술·문화"])
+        # SQL 형상: 닫힌 대분류 전체(parent NULL·taxonomy)·결정적 정렬. 임베딩 kNN(<=>)·LIMIT 아님.
+        sql = " ".join(cur.execute.call_args[0][0].split()).lower()
+        self.assertIn("from topic_registry", sql)
+        self.assertIn("parent_topic is null", sql)
+        self.assertIn("source = 'taxonomy'", sql)
+        self.assertIn("order by topic_ko", sql)
+        self.assertNotIn("<=>", sql)   # 임베딩 kNN 이 아님(레지스트리 직접 조회)
+        self.assertNotIn("limit", sql)  # 전체 반환(top-k 축소 없음)
 
-    def test_empty_candidates_passthrough(self) -> None:
+    def test_k_param_ignored_returns_full(self) -> None:
         from src.classify import asset_topic
 
-        with patch.object(asset_topic, "knn_topic_candidates", return_value=[]):
-            self.assertEqual(
-                asset_topic.topic_candidates_for_self_text(object(), "미시드"), []
-            )
+        # k 는 하위호환 위해 시그니처만 유지·무시(전체 반환) — top-k 축소 개념 자체가 없다.
+        rows = [{"topic_ko": "A"}, {"topic_ko": "B"}, {"topic_ko": "C"}]
+        conn, _ = _mock_conn_seq(fetchall_val=rows)
+        out = asset_topic.topic_candidates_for_self_text(conn, "텍스트", k=1)
+        self.assertEqual(out, ["A", "B", "C"])  # k=1 이어도 전체 반환
+
+    def test_empty_registry_returns_empty(self) -> None:
+        from src.classify import asset_topic
+
+        conn, _ = _mock_conn_seq(fetchall_val=[])  # 레지스트리 미시드 가드
+        self.assertEqual(
+            asset_topic.topic_candidates_for_self_text(conn, "미시드"), []
+        )
 
 
 _TOPIC_JSON = (
@@ -184,47 +200,64 @@ _TOPIC_JSON = (
 
 
 class TestClassifyAssetTopic(unittest.TestCase):
-    """T203 — 하이브리드 판정: 후보 검증·재질의·미부여·결정성·canonicalize 인자."""
+    """T203/T302 — 하이브리드 판정: topic 후보 검증·재질의·미부여·결정성 + 068 G4 닫힌 subtopic 선택 배선."""
 
-    def _patched(self, candidates, sub_return="농구", en_return="sports_leisure"):
-        """knn·canonicalize_subtopic·_lookup_topic_en 을 asset_topic 위치에서 patch 하는 컨텍스트 묶음."""
+    def _patched(
+        self,
+        candidates,
+        *,
+        subcands=("농구",),
+        picked_sub="농구",
+        suben="basketball",
+        en_return="sports_leisure",
+    ):
+        """068 G4 배선을 asset_topic 위치에서 patch 하는 컨텍스트 묶음.
+
+        topic 후보(topic_candidates_for_self_text)·닫힌 subtopic 조회(fetch_closed_subtopics)·subtopic
+        LLM 선택(_pick_subtopic_via_llm)·subtopic 정본 en(_lookup_subtopic_en)·topic 정본 en
+        (_lookup_topic_en)을 함께 patch 해 분기만 순수 검증한다(058 canonicalize_subtopic 은 배선에서 제거됨).
+        """
         from src.classify import asset_topic
 
         p_knn = patch.object(
             asset_topic, "topic_candidates_for_self_text", return_value=candidates
         )
-        p_sub = patch.object(
-            asset_topic, "canonicalize_subtopic", return_value=sub_return
+        p_subcands = patch.object(
+            asset_topic, "fetch_closed_subtopics", return_value=list(subcands)
         )
+        p_picksub = patch.object(
+            asset_topic, "_pick_subtopic_via_llm", return_value=picked_sub
+        )
+        p_suben = patch.object(asset_topic, "_lookup_subtopic_en", return_value=suben)
         p_en = patch.object(asset_topic, "_lookup_topic_en", return_value=en_return)
-        return p_knn, p_sub, p_en
+        return p_knn, p_subcands, p_picksub, p_suben, p_en
 
     def test_candidate_topic_returns_dict(self) -> None:
         from src.classify import asset_topic
 
-        p_knn, p_sub, p_en = self._patched(["스포츠·레저", "예술"])
+        p_knn, p_subcands, p_picksub, p_suben, p_en = self._patched(["스포츠·레저", "예술"])
         client = _client_once(_TOPIC_JSON)
-        with p_knn, p_sub, p_en:
+        with p_knn, p_subcands, p_picksub, p_suben, p_en:
             out = asset_topic.classify_asset_topic(
                 MagicMock(), "A1", self_text="농구 경기 영상", client=client
             )
         self.assertEqual(out["topic_ko"], "스포츠·레저")
         self.assertEqual(out["topic_en"], "sports_leisure")
         self.assertEqual(out["subtopic_ko"], "농구")
-        self.assertEqual(out["subtopic_en"], "basketball")
+        self.assertEqual(out["subtopic_en"], "basketball")  # 정본(registry) 조회 결과
         self.assertEqual(out["confidence"], 0.9)
         self.assertEqual(out["decided_by"], "hybrid")
-        # 후보 내 topic → 재질의 없음(LLM 1회).
+        # 후보 내 topic → topic 재질의 없음(topic LLM 1회). subtopic 선택은 patch 로 LLM 미호출.
         self.assertEqual(client.chat.completions.create.call_count, 1)
 
     def test_out_of_candidate_then_requery_success(self) -> None:
         from src.classify import asset_topic
 
-        p_knn, p_sub, p_en = self._patched(["스포츠·레저"])
+        p_knn, p_subcands, p_picksub, p_suben, p_en = self._patched(["스포츠·레저"])
         # 1차: 후보 밖('정치') → 2차 재질의: 후보 내('스포츠·레저').
         bad = '{"topic_ko": "정치", "subtopic_ko": "선거", "confidence": 0.7}'
         client = _client_seq(bad, _TOPIC_JSON)
-        with p_knn, p_sub, p_en:
+        with p_knn, p_subcands, p_picksub, p_suben, p_en:
             out = asset_topic.classify_asset_topic(
                 MagicMock(), "A2", self_text="농구", client=client
             )
@@ -234,17 +267,17 @@ class TestClassifyAssetTopic(unittest.TestCase):
     def test_two_failures_return_none(self) -> None:
         from src.classify import asset_topic
 
-        p_knn, p_sub, p_en = self._patched(["스포츠·레저"])
+        p_knn, p_subcands, p_picksub, p_suben, p_en = self._patched(["스포츠·레저"])
         bad = '{"topic_ko": "정치", "confidence": 0.7}'
         client = _client_seq(bad, bad)
-        with p_knn, p_sub, p_en:
-            # canonicalize·upsert 가 호출되지 않아야 함(강제 매핑 금지).
-            with patch.object(asset_topic, "canonicalize_subtopic") as m_sub:
-                out = asset_topic.classify_asset_topic(
-                    MagicMock(), "A3", self_text="농구", client=client
-                )
-                self.assertIsNone(out)
-                m_sub.assert_not_called()
+        with p_knn, p_subcands, p_picksub, p_suben, p_en:
+            out = asset_topic.classify_asset_topic(
+                MagicMock(), "A3", self_text="농구", client=client
+            )
+            self.assertIsNone(out)
+            # topic 미확정 → subtopic 조회·선택 자체를 하지 않는다(강제 매핑 금지).
+            asset_topic.fetch_closed_subtopics.assert_not_called()
+            asset_topic._pick_subtopic_via_llm.assert_not_called()
         self.assertEqual(client.chat.completions.create.call_count, 2)  # 2회 실패 후 중단
 
     def test_no_text_returns_none_no_llm(self) -> None:
@@ -262,9 +295,9 @@ class TestClassifyAssetTopic(unittest.TestCase):
     def test_empty_candidates_returns_none_no_llm(self) -> None:
         from src.classify import asset_topic
 
-        p_knn, p_sub, p_en = self._patched([])  # 레지스트리 미시드 가드
+        p_knn, p_subcands, p_picksub, p_suben, p_en = self._patched([])  # 레지스트리 미시드 가드
         client = _client_once(_TOPIC_JSON)
-        with p_knn, p_sub, p_en:
+        with p_knn, p_subcands, p_picksub, p_suben, p_en:
             out = asset_topic.classify_asset_topic(
                 MagicMock(), "A5", self_text="농구", client=client
             )
@@ -274,8 +307,8 @@ class TestClassifyAssetTopic(unittest.TestCase):
     def test_same_input_deterministic_output(self) -> None:
         from src.classify import asset_topic
 
-        p_knn, p_sub, p_en = self._patched(["스포츠·레저"])
-        with p_knn, p_sub, p_en:
+        p_knn, p_subcands, p_picksub, p_suben, p_en = self._patched(["스포츠·레저"])
+        with p_knn, p_subcands, p_picksub, p_suben, p_en:
             out1 = asset_topic.classify_asset_topic(
                 MagicMock(), "A6", self_text="농구", client=_client_once(_TOPIC_JSON)
             )
@@ -284,29 +317,69 @@ class TestClassifyAssetTopic(unittest.TestCase):
             )
         self.assertEqual(out1, out2)  # temp=0·닫힌 후보 → 결정적
 
-    def test_canonicalize_subtopic_called_with_confirmed_topic(self) -> None:
+    def test_closed_subtopic_selection_wired(self) -> None:
+        """068 G4/T302 — subtopic 은 부모 topic 의 닫힌 시드에서 LLM 이 선택(canonicalize 우회)."""
         from src.classify import asset_topic
 
-        p_knn, _p_sub, p_en = self._patched(["스포츠·레저"])
+        p_knn = patch.object(
+            asset_topic, "topic_candidates_for_self_text", return_value=["스포츠·레저"]
+        )
+        p_en = patch.object(asset_topic, "_lookup_topic_en", return_value="sports_leisure")
         client = _client_once(_TOPIC_JSON)
+        conn = MagicMock()
         with p_knn, p_en, patch.object(
-            asset_topic, "canonicalize_subtopic", return_value="농구"
-        ) as m_sub:
-            conn = MagicMock()
-            asset_topic.classify_asset_topic(conn, "A7", self_text="농구", client=client)
-            # (conn, 확정 topic_ko, LLM raw subtopic, client=client) 로 058 정본화 호출.
-            args, kwargs = m_sub.call_args
-            self.assertIs(args[0], conn)
-            self.assertEqual(args[1], "스포츠·레저")
-            self.assertEqual(args[2], "농구")
-            self.assertIs(kwargs.get("client"), client)
+            asset_topic, "fetch_closed_subtopics", return_value=["농구", "축구"]
+        ) as m_subcands, patch.object(
+            asset_topic, "_pick_subtopic_via_llm", return_value="농구"
+        ) as m_picksub, patch.object(
+            asset_topic, "_lookup_subtopic_en", return_value="basketball"
+        ) as m_suben:
+            out = asset_topic.classify_asset_topic(conn, "A7", self_text="농구", client=client)
+        # 닫힌 subtopic 조회는 (conn, 확정 topic_ko) 로 호출.
+        m_subcands.assert_called_once_with(conn, "스포츠·레저")
+        # LLM 선택은 (self_text, 확정 topic_ko, 닫힌 후보목록, client=client).
+        args, kwargs = m_picksub.call_args
+        self.assertEqual(args[0], "농구")  # self_text
+        self.assertEqual(args[1], "스포츠·레저")  # 확정 topic
+        self.assertEqual(args[2], ["농구", "축구"])  # 닫힌 후보(부모 스코프 시드)
+        self.assertIs(kwargs.get("client"), client)
+        # subtopic_en 은 registry 정본(부모 스코프) 조회로 얻는다 — LLM subtopic_en 아님.
+        m_suben.assert_called_once_with(conn, "스포츠·레저", "농구")
+        self.assertEqual(out["subtopic_ko"], "농구")
+        self.assertEqual(out["subtopic_en"], "basketball")
+        # 058 canonicalize_subtopic 은 classify 경로에서 더 이상 존재하지 않는다(import 제거·관계 경로 무영향).
+        self.assertFalse(hasattr(asset_topic, "canonicalize_subtopic"))
+
+    def test_unseeded_parent_yields_none_subtopic(self) -> None:
+        """068 G4/T302 — 부모 subtopic 미시드(빈 후보)면 subtopic 미부여·LLM 선택/en 조회 안 함."""
+        from src.classify import asset_topic
+
+        p_knn = patch.object(
+            asset_topic, "topic_candidates_for_self_text", return_value=["스포츠·레저"]
+        )
+        p_en = patch.object(asset_topic, "_lookup_topic_en", return_value="sports_leisure")
+        client = _client_once(_TOPIC_JSON)
+        conn = MagicMock()
+        with p_knn, p_en, patch.object(
+            asset_topic, "fetch_closed_subtopics", return_value=[]
+        ), patch.object(
+            asset_topic, "_pick_subtopic_via_llm"
+        ) as m_picksub, patch.object(
+            asset_topic, "_lookup_subtopic_en"
+        ) as m_suben:
+            out = asset_topic.classify_asset_topic(conn, "U1", self_text="농구", client=client)
+        # 시드 미존재 → subtopic 미부여(강제 생성 금지)·선택/en 조회 스킵.
+        self.assertIsNone(out["subtopic_ko"])
+        self.assertIsNone(out["subtopic_en"])
+        m_picksub.assert_not_called()
+        m_suben.assert_not_called()
 
     def test_upsert_sql_shape_on_conflict(self) -> None:
         from src.classify import asset_topic
 
-        p_knn, p_sub, p_en = self._patched(["스포츠·레저"])
+        p_knn, p_subcands, p_picksub, p_suben, p_en = self._patched(["스포츠·레저"])
         conn, cur = _mock_conn_seq()
-        with p_knn, p_sub, p_en:
+        with p_knn, p_subcands, p_picksub, p_suben, p_en:
             asset_topic.classify_asset_topic(
                 conn, "A8", self_text="농구", client=_client_once(_TOPIC_JSON)
             )
@@ -323,22 +396,25 @@ class TestUnclassifiedExclusion(unittest.TestCase):
     """T602 — 미분류 자기주제 배제(065-한정·FR-702·SC-07): 후보 필터 + none 도피처 → 미부여.
 
     taxonomy_seed.json·058 은 불변(관계 공유). 065 분류 경로에서만 '미분류'를 배제한다:
-      ① ``topic_candidates_for_self_text`` 가 공유 kNN 결과에서 '미분류' 를 후처리로 제거.
+      ① ``topic_candidates_for_self_text`` 의 레지스트리 전체-27 조회가 SQL 단계에서 '미분류' 를 배제.
       ② 프롬프트에 "어느 후보도 안 맞으면 none" 도피처 + none/후보밖(미분류 포함) → None(미부여).
     강제 최근접 배정 금지(FR-203 계승): 억지로 27개 중 하나로 매핑하지 않는다.
     """
 
-    def test_candidates_filter_out_unclassified(self) -> None:
+    def test_candidates_exclude_unclassified(self) -> None:
         from src.classify import asset_topic
 
-        # 공유 058 kNN 이 '미분류' 를 후보로 돌려줘도 065 래퍼가 후처리로 제거한다(seed 무변경).
-        with patch.object(
-            asset_topic, "knn_topic_candidates",
-            return_value=["스포츠·레저", "미분류", "예술"],
-        ):
-            out = asset_topic.topic_candidates_for_self_text(object(), "농구 경기", k=5)
+        # 레지스트리 전체-27 조회가 SQL/파라미터 단계에서 '미분류'(catch-all)를 배제한다(seed·058 불변).
+        conn, cur = _mock_conn_seq(
+            fetchall_val=[{"topic_ko": "스포츠·레저"}, {"topic_ko": "예술·문화"}]
+        )
+        out = asset_topic.topic_candidates_for_self_text(conn, "농구 경기", k=5)
         self.assertNotIn("미분류", out)
-        self.assertEqual(out, ["스포츠·레저", "예술"])
+        # 배제가 조회 단계에서 이뤄지는지 — SQL 텍스트 또는 바인딩 파라미터에 '미분류' 가 등장.
+        call = cur.execute.call_args[0]
+        sql = " ".join(call[0].split())
+        params = tuple(call[1]) if len(call) > 1 else ()
+        self.assertTrue("미분류" in sql or "미분류" in params)
 
     def test_prompt_has_none_escape_hatch(self) -> None:
         from src.classify import asset_topic
@@ -356,12 +432,12 @@ class TestUnclassifiedExclusion(unittest.TestCase):
         )
         # LLM 이 "none"(어느 것도 안 맞음)으로 답 → 재질의 후에도 none → 미부여(강제 매핑 금지).
         client = _client_once('{"topic_ko": "none", "confidence": 0.1}')
-        with p_knn, patch.object(asset_topic, "canonicalize_subtopic") as m_sub:
+        with p_knn, patch.object(asset_topic, "fetch_closed_subtopics") as m_subcands:
             out = asset_topic.classify_asset_topic(
                 MagicMock(), "N1", self_text="정체불명 콘텐츠", client=client
             )
         self.assertIsNone(out)
-        m_sub.assert_not_called()  # 미부여 → subtopic 정규화·upsert 없음
+        m_subcands.assert_not_called()  # 미부여 → 닫힌 subtopic 조회·선택·upsert 없음
 
     def test_llm_unclassified_response_treated_out_of_candidate(self) -> None:
         from src.classify import asset_topic
@@ -371,53 +447,61 @@ class TestUnclassifiedExclusion(unittest.TestCase):
             asset_topic, "topic_candidates_for_self_text", return_value=["스포츠·레저"]
         )
         client = _client_once('{"topic_ko": "미분류", "confidence": 0.2}')
-        with p_knn, patch.object(asset_topic, "canonicalize_subtopic") as m_sub:
+        with p_knn, patch.object(asset_topic, "fetch_closed_subtopics") as m_subcands:
             out = asset_topic.classify_asset_topic(
                 MagicMock(), "N2", self_text="애매한 내용", client=client
             )
         self.assertIsNone(out)
-        m_sub.assert_not_called()
+        m_subcands.assert_not_called()
 
 
 class TestSubtopicCoarsening(unittest.TestCase):
-    """T603 — 소분류 코스닝(FR-703·SC-09): 개체 금지·카테고리 생성 + 부모 스코프 재사용 우선.
+    """T603/T302 — 소분류 과코스닝 대응: 068 G4 는 subtopic 을 부모의 **닫힌 시드 선택**으로 바꾼다.
 
-    subtopic 이 개체 수준(파리·남산타워·양자역학)으로 생성돼 (topic>subtopic) 짝의 86% 가 싱글턴이라
-    프론트 트리에서 큰 topic 도 통째로 숨었다. ① 생성 프롬프트를 "특정 개체·고유명사 금지, 일반
-    카테고리(도시여행·전통건축) 수준" 으로 유도 + ② 부모 topic 의 기존 subtopic 을 재사용하도록
-    ``canonicalize_subtopic(prefer_reuse=True)`` 로 완화한다.
+    종전 065 는 subtopic 을 058 ``canonicalize_subtopic(prefer_reuse=True)``(열린 어휘 생성 + 부모 스코프
+    재사용)으로 정했는데, 이게 과병합·과코스닝(여행>관광지 64%)을 낳았다. 068 은 topic 처럼 부모의 닫힌
+    시드 목록에서 LLM 이 고르게 해 변별력을 회복한다 — topic 콜(_CLASSIFY_PROMPT)이 곁들여 만드는
+    raw subtopic 은 무시하고, ``fetch_closed_subtopics`` 후보에서 ``_pick_subtopic_via_llm`` 이 고른 값을 쓴다.
+    (_CLASSIFY_PROMPT 의 subtopic 생성 지시 제거는 후속으로 이연 — G4 는 배선만 교체.)
     """
 
-    def test_prompt_forbids_entities_and_prefers_categories(self) -> None:
+    def test_prompt_still_generates_subtopic_but_ignored(self) -> None:
         from src.classify import asset_topic
 
+        # G4 는 _CLASSIFY_PROMPT(topic 콜)를 손대지 않는다(subtopic 생성 지시 제거는 후속 이연).
+        # topic 콜은 여전히 subtopic_ko 를 함께 생성하나 classify 는 그 값을 subtopic 결정에 쓰지 않는다.
         prompt = asset_topic._CLASSIFY_PROMPT
-        # 개체·고유명사 금지 지시(예시 개체 최소 1개 포함).
-        self.assertIn("고유명사", prompt)
-        self.assertTrue(any(e in prompt for e in ("파리", "남산타워", "양자역학")))
-        # 재사용 가능한 일반 카테고리 유도(예시 카테고리 최소 1개 포함).
-        self.assertIn("카테고리", prompt)
-        self.assertTrue(any(c in prompt for c in ("도시여행", "전통건축")))
+        self.assertIn("subtopic_ko", prompt)  # topic 콜의 JSON 형식에 subtopic 잔존(무해·무시)
+        self.assertIn("고유명사", prompt)  # 잔존 지시(후속 제거 대상)
 
-    def test_classify_passes_prefer_reuse_to_canonicalize(self) -> None:
+    def test_raw_subtopic_from_topic_call_ignored_uses_closed_selection(self) -> None:
+        """068 G4 — topic 콜 raw subtopic("도시여행")을 무시하고 닫힌 시드 선택 결과를 쓴다."""
         from src.classify import asset_topic
 
         p_knn = patch.object(
-            asset_topic, "topic_candidates_for_self_text", return_value=["여행"]
+            asset_topic, "topic_candidates_for_self_text", return_value=["여행·지역"]
         )
         p_en = patch.object(asset_topic, "_lookup_topic_en", return_value="travel")
+        # topic 콜이 subtopic_ko="도시여행" 을 곁들여 생성 → 무시되어야 한다.
         client = _client_once(
-            '{"topic_ko": "여행", "topic_en": "travel", '
+            '{"topic_ko": "여행·지역", "topic_en": "travel", '
             '"subtopic_ko": "도시여행", "subtopic_en": "city_travel", "confidence": 0.8}'
         )
-        conn, _ = _mock_conn_seq()
+        conn = MagicMock()
         with p_knn, p_en, patch.object(
-            asset_topic, "canonicalize_subtopic", return_value="도시여행"
-        ) as m_sub:
-            asset_topic.classify_asset_topic(conn, "C1", self_text="파리 에펠탑 여행", client=client)
-        # 재사용 우선(부모 스코프 기존 subtopic 재사용) — prefer_reuse=True 로 완화 위임.
-        _args, kwargs = m_sub.call_args
-        self.assertTrue(kwargs.get("prefer_reuse"))
+            asset_topic, "fetch_closed_subtopics", return_value=["국내여행·지역탐방", "해외여행"]
+        ) as m_subcands, patch.object(
+            asset_topic, "_pick_subtopic_via_llm", return_value="국내여행·지역탐방"
+        ) as m_picksub, patch.object(
+            asset_topic, "_lookup_subtopic_en", return_value="domestic_travel"
+        ):
+            out = asset_topic.classify_asset_topic(conn, "C1", self_text="파리 여행", client=client)
+        # raw subtopic("도시여행") 이 아니라 닫힌 시드 선택 결과를 쓴다.
+        self.assertEqual(out["subtopic_ko"], "국내여행·지역탐방")
+        self.assertEqual(out["subtopic_en"], "domestic_travel")
+        m_subcands.assert_called_once_with(conn, "여행·지역")
+        # 닫힌 후보(부모 스코프 시드)가 그대로 선택 함수에 전달된다.
+        self.assertEqual(m_picksub.call_args[0][2], ["국내여행·지역탐방", "해외여행"])
 
 
 class TestFetchAssetTopic(unittest.TestCase):
@@ -522,6 +606,133 @@ class TestFindSameTopicGroups(unittest.TestCase):
         # 대상 subtopic 이 None → 후보 쿼리에 subtopic 필터가 없어야(topic 단독).
         cand_sql = " ".join(cur.execute.call_args_list[1][0][0].split())
         self.assertNotIn("at.subtopic_ko = %s", cand_sql)
+
+
+# ── 068 G4: 닫힌 subtopic 조회 + LLM 선택 (T301) ──────────────────────────────
+# subtopic 도 topic 처럼 부모 topic 의 **닫힌 시드 목록**에서 LLM 이 고른다(058 열린 어휘 canonicalize
+# 폐기·과병합/과코스닝 차단). 아래는 조회·선택·정본 en 조회 3개 신설 함수의 단위 검증(mock·DB/LLM 불요).
+_SUB_JSON_OK = '{"subtopic_ko": "국내여행·지역탐방"}'
+
+
+class TestFetchClosedSubtopics(unittest.TestCase):
+    """T301(068 G4) — 부모 topic 의 닫힌 소분류(subtopic) 시드 목록 조회.
+
+    subtopic 후보 공급 = 부모 topic 스코프의 taxonomy 시드(닫힌 소분류). 미시드면 [](→ classify 는
+    subtopic 미부여). 결정적 정렬(topic_ko asc)로 프롬프트 후보 순서를 재실행마다 고정한다(헌법 3조).
+    """
+
+    def test_returns_closed_subtopics_deterministic_order(self) -> None:
+        from src.classify import asset_topic
+
+        rows = [{"topic_ko": "국내여행·지역탐방"}, {"topic_ko": "해외여행"}]
+        conn, cur = _mock_conn_seq(fetchall_val=rows)
+        out = asset_topic.fetch_closed_subtopics(conn, "여행·지역")
+        self.assertEqual(out, ["국내여행·지역탐방", "해외여행"])
+        # SQL 형상: 부모 스코프(parent_topic=%s)·taxonomy 시드·결정적 정렬. 임베딩 kNN 아님.
+        sql = " ".join(cur.execute.call_args[0][0].split()).lower()
+        self.assertIn("from topic_registry", sql)
+        self.assertIn("parent_topic = %s", sql)
+        self.assertIn("source = 'taxonomy'", sql)
+        self.assertIn("order by topic_ko", sql)
+        self.assertNotIn("<=>", sql)  # 닫힌 시드 조회(임베딩 kNN 축소 아님)
+        # 부모 topic 이 파라미터로 바인딩(부모 스코프 조회).
+        self.assertEqual(cur.execute.call_args[0][1], ("여행·지역",))
+
+    def test_unseeded_parent_returns_empty(self) -> None:
+        from src.classify import asset_topic
+
+        conn, _ = _mock_conn_seq(fetchall_val=[])  # 부모 미시드 가드
+        self.assertEqual(asset_topic.fetch_closed_subtopics(conn, "미시드"), [])
+
+
+class TestPickSubtopicViaLlm(unittest.TestCase):
+    """T301(068 G4) — 닫힌 subtopic 후보 중 LLM 선택(_pick_topic_via_llm 대칭).
+
+    부모 topic 명시 + 후보 subtopic 목록 → 후보 내 정확히 1개 또는 none. 후보 밖이면 1회 재질의,
+    재실패/none → None(FR-203/205·환각 차단·강제 매핑 금지). temp=0·단일 seam(complete_json).
+    """
+
+    def test_in_candidate_returns_subtopic_str(self) -> None:
+        from src.classify import asset_topic
+
+        client = _client_once(_SUB_JSON_OK)
+        out = asset_topic._pick_subtopic_via_llm(
+            "부산 여행 영상", "여행·지역", ["국내여행·지역탐방", "해외여행"], client=client
+        )
+        self.assertEqual(out, "국내여행·지역탐방")
+        self.assertEqual(client.chat.completions.create.call_count, 1)  # 후보 내 → 재질의 없음
+
+    def test_out_of_candidate_then_requery_success(self) -> None:
+        from src.classify import asset_topic
+
+        bad = '{"subtopic_ko": "우주여행"}'  # 후보 밖
+        client = _client_seq(bad, _SUB_JSON_OK)
+        out = asset_topic._pick_subtopic_via_llm(
+            "부산 여행", "여행·지역", ["국내여행·지역탐방"], client=client
+        )
+        self.assertEqual(out, "국내여행·지역탐방")
+        self.assertEqual(client.chat.completions.create.call_count, 2)  # 정확히 1회 재질의
+
+    def test_two_failures_return_none(self) -> None:
+        from src.classify import asset_topic
+
+        bad = '{"subtopic_ko": "우주여행"}'
+        client = _client_seq(bad, bad)
+        out = asset_topic._pick_subtopic_via_llm(
+            "부산 여행", "여행·지역", ["국내여행·지역탐방"], client=client
+        )
+        self.assertIsNone(out)  # 2회 후보 밖 → 미부여(강제 매핑 금지)
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+
+    def test_none_response_returns_none(self) -> None:
+        from src.classify import asset_topic
+
+        # 어느 후보도 안 맞음 → LLM 이 "none" → 재질의 후에도 none 처리 → None.
+        client = _client_once('{"subtopic_ko": "none"}')
+        out = asset_topic._pick_subtopic_via_llm(
+            "정체불명", "여행·지역", ["국내여행·지역탐방"], client=client
+        )
+        self.assertIsNone(out)
+
+    def test_prompt_includes_parent_topic_and_candidates(self) -> None:
+        from src.classify import asset_topic
+
+        client = _client_once(_SUB_JSON_OK)
+        asset_topic._pick_subtopic_via_llm(
+            "부산 여행", "여행·지역", ["국내여행·지역탐방", "해외여행"], client=client
+        )
+        # 프롬프트에 부모 topic 명시 + 후보 subtopic 제시 + none 도피처(억지 배정 금지)가 있어야 한다.
+        content = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("여행·지역", content)  # 부모 topic 명시
+        self.assertIn("국내여행·지역탐방", content)  # 후보 subtopic
+        self.assertIn("해외여행", content)
+        self.assertIn("none", content)  # 닫힌집합 none 도피처
+
+
+class TestLookupSubtopicEn(unittest.TestCase):
+    """T301(068 G4) — 부모 스코프 subtopic 정본 영문 조회(닫힌 시드 en).
+
+    subtopic 층은 (parent_topic, topic_ko) 부분 유니크라 부모 스코프로 조여 조회한다(동음이의 보존).
+    """
+
+    def test_present_returns_en(self) -> None:
+        from src.classify import asset_topic
+
+        conn, cur = _mock_conn_seq(fetchone_val={"topic_en": "domestic_travel"})
+        out = asset_topic._lookup_subtopic_en(conn, "여행·지역", "국내여행·지역탐방")
+        self.assertEqual(out, "domestic_travel")
+        sql = " ".join(cur.execute.call_args[0][0].split()).lower()
+        self.assertIn("select topic_en from topic_registry", sql)
+        self.assertIn("parent_topic = %s", sql)
+        self.assertIn("topic_ko = %s", sql)
+        # 부모 topic·subtopic 이 순서대로 바인딩(부모 스코프 정확 조회).
+        self.assertEqual(cur.execute.call_args[0][1], ("여행·지역", "국내여행·지역탐방"))
+
+    def test_absent_returns_none(self) -> None:
+        from src.classify import asset_topic
+
+        conn, _ = _mock_conn_seq(fetchone_val=None)
+        self.assertIsNone(asset_topic._lookup_subtopic_en(conn, "여행·지역", "없음"))
 
 
 if __name__ == "__main__":

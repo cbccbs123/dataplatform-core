@@ -52,6 +52,9 @@ _SPEC_DIR = _REPO_ROOT / "specs" / "058-relation-topic-canonicalization"
 _DEFAULT_SEED_PATH = _REPO_ROOT / "src" / "relations" / "taxonomy_seed.json"
 # alias 선시드 정본(§3 커버리지 매핑·raw_ko→canonical). registry 시드 직후 topic 층 alias 로 적재.
 _DEFAULT_ALIAS_SEED_PATH = _SPEC_DIR / "taxonomy_alias_seed.json"
+# subtopic 시드 정본(spec 068 G2·G3). topic 시드와 동거(src/relations)해 src-only 패키징에서도
+# 런타임 로드된다. 각 subtopic 은 부모 topic 스코프(parent_topic=<topic_ko>)로 가산 적재된다.
+_DEFAULT_SUBTOPIC_SEED_PATH = _REPO_ROOT / "src" / "relations" / "subtopic_seed.json"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -90,6 +93,67 @@ def alias_seed_entries(alias_seed: dict[str, Any]) -> list[dict[str, str]]:
         {"raw_ko": str(a["raw_ko"]), "canonical_ko": str(a["canonical_ko"])}
         for a in alias_seed["aliases"]
     ]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 1b) subtopic 시드 파싱·정본 행 추출 (spec 068 G2 · FR-201/204 · 결정적 순수 함수)
+# ────────────────────────────────────────────────────────────────────────────
+def load_subtopic_seed(path: Path | str = _DEFAULT_SUBTOPIC_SEED_PATH) -> dict[str, Any]:
+    """subtopic_seed.json 을 읽어 dict 로 반환(순수 I/O·파싱만). ``{version, source, subtopics:[...]}``.
+
+    topic 시드(``load_taxonomy_seed``)와 대칭. 정본은 src/relations/subtopic_seed.json 단일 출처다.
+    """
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _valid_parent_topics() -> set[str]:
+    """유효 부모 topic 집합 — taxonomy 27 정본(**미분류 제외**).
+
+    subtopic 은 실제 topic 아래에만 달린다. catch-all '미분류' 에는 subtopic 을 두지 않으므로
+    부모 검증에서 제외한다(미분류 부모 → ValueError). taxonomy_seed.json 이 단일 출처(정합 보장).
+    """
+    return {
+        e["topic_ko"]
+        for e in taxonomy_registry_entries(load_taxonomy_seed())
+        if e["topic_ko"] != "미분류"
+    }
+
+
+def subtopic_registry_entries(seed: dict[str, Any]) -> list[dict[str, Any]]:
+    """subtopic 시드 → 적재 행 ``[{parent_topic, subtopic_ko, subtopic_en}]`` (파일 순서 보존).
+
+    닫힌 시드이므로 각 행이 곧 정본 subtopic(런타임 성장 없음·재발 불가). 두 가지 기계적 규칙을
+    적용한다(FR-204 — 무의미 소분류 원천 차단):
+      ① **부모 검증**: parent_topic 이 27 정본(미분류 제외) 밖이면 ``ValueError`` (오탈자·오소속 차단).
+      ② **부모명 반복 배제**: subtopic_ko 가 부모 topic 명과 동일하거나 그 부분문자열이면 제외한다
+         (예: '음식·요리' 밑 '음식'). 닫힌 목록이라 런타임 재발이 없고, 부모명과 겹치는 소분류는
+         변별력이 없으므로 시드 단계에서 걸러낸다.
+    라벨은 ``str()`` 강제(graph_query 관례). ``subtopic_en`` 은 None 을 그대로 보존한다(정본
+    미확정 여지 — register_topic 이 topic_en=None 허용). str('None') 로 오염시키지 않는다.
+    """
+    valid_parents = _valid_parent_topics()
+    entries: list[dict[str, Any]] = []
+    for s in seed["subtopics"]:
+        parent = str(s["topic_ko"])
+        if parent not in valid_parents:
+            raise ValueError(
+                f"subtopic 부모 topic 이 27 정본(미분류 제외) 밖: {parent!r} (subtopic={s.get('subtopic_ko')!r})"
+            )
+        sub_ko = str(s["subtopic_ko"])
+        # ② 부모명 반복(동일/부분문자열) 배제 — 부모명이 subtopic 을 포함하는 방향만 검사한다.
+        #    (역방향 '부모 ⊂ subtopic' 은 정상 소분류 '동물행동·생태' 등을 오배제하므로 검사 안 함.)
+        if sub_ko in parent:
+            continue
+        sub_en = s.get("subtopic_en")
+        entries.append(
+            {
+                "parent_topic": parent,
+                "subtopic_ko": sub_ko,
+                "subtopic_en": str(sub_en) if sub_en is not None else None,
+            }
+        )
+    return entries
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -143,6 +207,37 @@ def apply_alias_seed(
     return {"n_alias": len(entries)}
 
 
+def apply_subtopic_seed(
+    conn, seed: dict[str, Any], *, register_fn=None
+) -> dict[str, int]:
+    """subtopic 시드의 각 행을 **부모 topic 스코프**(parent_topic=<topic_ko>)로 registry 등록.
+
+    - 각 subtopic: ``register_topic(conn, subtopic_ko, subtopic_en, source='taxonomy',
+      parent_topic=parent_topic)`` — 라벨 임베딩 1536D 계산·부분 유니크 인덱스
+      (parent_topic, topic_ko) WHERE parent_topic IS NOT NULL 로 ON CONFLICT 멱등.
+    - topic 층(parent NULL) 시드와 **독립**이며 subtopic 층을 삭제하지 않는다(가산 적재·
+      governance §4 '전역 재빌드 없음'). 커밋은 호출부 책임.
+    - ``register_fn`` 주입 가능(단위 테스트용·기본은 topic_canonicalize seam).
+    Returns ``{"n_subtopic": N}``.
+    """
+    if register_fn is None:
+        # 지연 import(모듈 기동 경량 유지). 무거운 임베더는 register_topic 내부에서만 로드.
+        from src.relations.topic_canonicalize import register_topic
+
+        register_fn = register_topic
+
+    entries = subtopic_registry_entries(seed)
+    for e in entries:
+        register_fn(
+            conn,
+            e["subtopic_ko"],
+            e["subtopic_en"],
+            source="taxonomy",
+            parent_topic=e["parent_topic"],
+        )
+    return {"n_subtopic": len(entries)}
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 3) 콘솔 요약 (순수)
 # ────────────────────────────────────────────────────────────────────────────
@@ -155,6 +250,21 @@ def summarize_lines(seed: dict[str, Any]) -> list[str]:
         "── topic_ko [topic_en] ──",
     ]
     lines += [f"  {e['topic_ko']} [{e['topic_en']}]" for e in entries]
+    return lines
+
+
+def summarize_subtopic_lines(seed: dict[str, Any]) -> list[str]:
+    """subtopic 시드 콘솔 요약 — 버전·출처·총 subtopic 수·부모별 개수(결정적 순서)."""
+    entries = subtopic_registry_entries(seed)
+    per_parent: dict[str, int] = {}
+    for e in entries:  # 파일 순서 보존(부모 첫 등장 순).
+        per_parent[e["parent_topic"]] = per_parent.get(e["parent_topic"], 0) + 1
+    lines = [
+        f"[subtopic 시드] version={seed.get('version')} · source={seed.get('source')}",
+        f"  총 subtopic {len(entries)}개(parent_topic=<topic>·source='taxonomy'·부모 {len(per_parent)}개 커버)",
+        "── parent_topic: subtopic 수 ──",
+    ]
+    lines += [f"  {p}: {n}" for p, n in per_parent.items()]
     return lines
 
 
@@ -200,6 +310,25 @@ def run_seed(
     return counts
 
 
+def run_subtopic_seed(
+    db, subtopic_seed: dict[str, Any], *, apply: bool = False, register_fn=None
+) -> dict[str, int]:
+    """subtopic 시드 적재(apply) 또는 dry-run(카운트만) — **topic 시드와 독립**(spec 068 G3).
+
+    - ``apply=False``: DB 미접촉(파싱·요약은 호출부). subtopic 행 수만 계산해 반환.
+    - ``apply=True``: 한 트랜잭션에서 ``apply_subtopic_seed`` 로 subtopic 층에 **가산 적재** 후 커밋.
+      topic 층 정리(``_delete_topic_layer``)를 호출하지 않는다 — subtopic 층은 삭제 없이 ON CONFLICT
+      멱등으로만 재적용된다(governance §4 전역 재빌드 없음). 기존 topic 시드 경로는 불변.
+    - ``register_fn`` 주입 가능(단위 테스트용 — 실 register_topic 임베딩 없이 배선 검증).
+    """
+    if not apply:
+        return {"n_subtopic": len(subtopic_registry_entries(subtopic_seed))}
+    with db.connection() as conn:
+        counts = apply_subtopic_seed(conn, subtopic_seed, register_fn=register_fn)
+        conn.commit()  # subtopic 층 가산 적재(G6 driver)
+    return counts
+
+
 def main() -> int:
     from dotenv import load_dotenv
 
@@ -223,6 +352,17 @@ def main() -> int:
         action="store_true",
         help="alias 선시드를 건너뛴다(registry 만 적재·과거 동작).",
     )
+    p.add_argument(
+        "--subtopics",
+        action="store_true",
+        help="subtopic 시드도 함께 처리(spec 068·부모 topic 스코프 가산 적재·topic 층과 독립·"
+        "subtopic 층 삭제 안 함). --apply 와 함께면 실적재, 아니면 dry-run 요약.",
+    )
+    p.add_argument(
+        "--subtopic-seed",
+        default=str(_DEFAULT_SUBTOPIC_SEED_PATH),
+        help="subtopic 시드 JSON 경로(정본·src/relations/subtopic_seed.json).",
+    )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument(
         "--dry-run", action="store_true", help="파싱·요약만 출력(DB 미접촉·기본)."
@@ -242,17 +382,31 @@ def main() -> int:
 
     seed = load_taxonomy_seed(Path(args.seed))
     alias_seed = None if args.no_alias_seed else load_alias_seed(Path(args.alias_seed))
+    # subtopic 시드는 --subtopics 일 때만 로드(기존 topic 시드 경로에 영향 없음·독립).
+    subtopic_seed = load_subtopic_seed(Path(args.subtopic_seed)) if args.subtopics else None
 
     if args.apply:
         db = PostgresUtil()
         with db:
             counts = run_seed(db, seed, alias_seed, apply=True)
+            # subtopic 층 가산 적재(topic 층 삭제·재적재와 독립·같은 db 풀 재사용).
+            sub_counts = (
+                run_subtopic_seed(db, subtopic_seed, apply=True)
+                if args.subtopics
+                else None
+            )
         print(
             f"[APPLY] taxonomy 시드 적재 완료: {args.seed}\n"
             f"  정본(register_topic) {counts['n_registry']}개(parent_topic=NULL·source='taxonomy') · "
             f"alias(선시드·decided_by='seed') {counts['n_alias']}개 "
             "(topic 층 스코프 삭제 후 재적재·커밋·subtopic 층 보존)."
         )
+        if sub_counts is not None:
+            print(
+                f"[APPLY] subtopic 시드 적재 완료: {args.subtopic_seed}\n"
+                f"  subtopic {sub_counts['n_subtopic']}개(parent_topic=<topic>·source='taxonomy'·"
+                "가산 적재·ON CONFLICT 멱등·subtopic 층 삭제 안 함)."
+            )
         return 0
 
     # dry-run(기본): DB 미접촉·파싱 요약만.
@@ -260,6 +414,10 @@ def main() -> int:
     n_alias = len(alias_seed_entries(alias_seed)) if alias_seed is not None else 0
     print(f"\n(dry-run·DB 미접촉) alias 선시드 {n_alias}개 대기. 적용하려면 --apply.")
     print(f"  시드 파일: {args.seed}\n  alias 시드: {args.alias_seed if not args.no_alias_seed else '(생략)'}")
+    if subtopic_seed is not None:
+        print()
+        print("\n".join(summarize_subtopic_lines(subtopic_seed)))
+        print(f"\n(dry-run·DB 미접촉) subtopic 적용하려면 --apply --subtopics. 시드 파일: {args.subtopic_seed}")
     return 0
 
 

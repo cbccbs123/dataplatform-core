@@ -1,0 +1,46 @@
+{
+  "_주의": "고정 스모크셋(spec 068 FR-302). 이 앵커 목록은 늘리지 않는다 — 개별 자산 정답표를 코퍼스 크기만큼 증식하는 것은 수동 학습化이며 헌법(학습 0)·spec Non-Goals 위반이다. 회귀는 집단 통계(분포 가드)로 잡고, 여기 6~8개 앵커는 계통 붕괴만 재백필 후 대조한다.",
+  "_형식": "anchors[]: {hint(설명), expected_topic(27 대분류 정확값 또는 null=미부여), expected_subtopic(정확값 또는 null=와일드카드), distinct_from?(같은 topic 내 반드시 다른 subtopic 이어야 하는 앵커 hint 목록)}. topic 은 닫힌 27집합이라 정확 대조, subtopic 은 닫힌 시드가 G6에서 확정되므로 현재 null(와일드카드)이고 분리 제약(distinct_from)으로만 검증한다.",
+  "source": "spec 068 §FR-302 예시 앵커(양궁·구형컴퓨터·검은배경·베네치아≠풍차·초콜릿≠전통디저트)",
+  "anchors": [
+    {
+      "hint": "양궁 세계랭킹·올림픽 리커브 결승 기사",
+      "expected_topic": "스포츠·레저",
+      "expected_subtopic": null
+    },
+    {
+      "hint": "IBM 구형 메인프레임·천공카드 등 초기 컴퓨터 하드웨어 소개",
+      "expected_topic": "IT·기술",
+      "expected_subtopic": null
+    },
+    {
+      "hint": "검은 배경만 있고 음성·자막·자막외 내용이 전혀 없는 무내용 클립",
+      "expected_topic": null,
+      "expected_subtopic": null
+    },
+    {
+      "hint": "베네치아 운하·곤돌라 도시 관광",
+      "expected_topic": "여행·지역",
+      "expected_subtopic": null,
+      "distinct_from": ["네덜란드 킨더다이크 풍차 마을 전원 풍경"]
+    },
+    {
+      "hint": "네덜란드 킨더다이크 풍차 마을 전원 풍경",
+      "expected_topic": "여행·지역",
+      "expected_subtopic": null,
+      "distinct_from": ["베네치아 운하·곤돌라 도시 관광"]
+    },
+    {
+      "hint": "벨기에 초콜릿·프랄린 만들기 레시피",
+      "expected_topic": "음식·요리",
+      "expected_subtopic": null,
+      "distinct_from": ["약과·한과 등 한국 전통 디저트"]
+    },
+    {
+      "hint": "약과·한과 등 한국 전통 디저트",
+      "expected_topic": "음식·요리",
+      "expected_subtopic": null,
+      "distinct_from": ["벨기에 초콜릿·프랄린 만들기 레시피"]
+    }
+  ]
+}
