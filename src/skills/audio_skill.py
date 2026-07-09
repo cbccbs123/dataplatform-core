@@ -26,6 +26,8 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
     file = ctx.file_path
     stt_result = transcribe_audio_local(file_path=file)
     meta = extract_audio_meta(file_path=file)
+    # 무내용 가드(spec 065 FR-701): STT 전사가 비었거나 얇으면 요약기가 LLM 을 호출하지 않고
+    # summary='' 를 돌려준다(기악 오디오 등 placeholder 요약 원천 차단). 빈 summary → 자기주제 미부여.
     meta = meta | summarize_and_extract_keywords_from_audio(text=stt_result["text"])
 
     ctx.scratch["stt_text"] = stt_result["text"]  # 임베딩 슬롯 재사용(whisper 재실행 방지)

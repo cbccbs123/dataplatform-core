@@ -10,6 +10,7 @@ LLM 호출은 전부 단일 seam ``src.llm.client.complete_json`` 경유(tempera
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TypedDict
 
@@ -20,6 +21,28 @@ from src.file.data_loader import (
     normalize_file_kind,
 )
 from src.llm.client import complete_json
+
+# 무내용 가드 임계(spec 065 FR-701·SC-08) — trim 후 이 글자 수 미만인 전사(STT)/텍스트는 "요약할
+# 내용 없음"으로 보고 요약기 LLM 을 아예 호출하지 않는다(placeholder 요약 "제시된 텍스트 내용 없음"
+# 원천 차단 → OS·관계·자기주제 분류 동시 정화). env TOPIC_MIN_SELF_TEXT 로 조정, 기본 15자.
+_DEFAULT_MIN_SELF_TEXT_CHARS = 15
+
+
+def _min_self_text_chars() -> int:
+    """무내용 가드 임계(글자 수). env ``TOPIC_MIN_SELF_TEXT`` 우선, 파싱 실패·음수면 기본 15."""
+    raw = os.getenv("TOPIC_MIN_SELF_TEXT")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_MIN_SELF_TEXT_CHARS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_MIN_SELF_TEXT_CHARS
+    return value if value >= 0 else _DEFAULT_MIN_SELF_TEXT_CHARS
+
+
+def _is_contentful(text: str | None) -> bool:
+    """무내용 가드 — trim 후 길이가 임계 이상이어야 "요약할 내용 있음"으로 본다(FR-701)."""
+    return bool(text and len(str(text).strip()) >= _min_self_text_chars())
 
 
 class SummaryKeywords(TypedDict):
@@ -169,6 +192,12 @@ def summarize_and_extract_keywords_from_audio(
     하나의 프롬프트로 처리된다(청크 분할 없음 — 긴 STT 의 경우 max_input_chars 주의).
     ``stt`` 필드에는 원본 전사 텍스트를 그대로 보존해 embed 슬롯이 재사용할 수 있도록 한다.
     """
+    # 무내용 가드(FR-701·SC-08): 전사(STT)가 비었거나 임계 미만으로 얇으면 요약기 LLM 을 호출하지
+    # 않고 빈 요약을 돌려준다(기악 오디오 등 → placeholder 요약 원천 차단). stt 원문은 얇더라도 그대로
+    # 보존해 임베딩 슬롯(_embed_audio) 이 재사용할 수 있게 한다(빈 self_text → 자기주제 미부여).
+    if not _is_contentful(text):
+        return {"summary": "", "keywords": [], "stt": text}
+
     cfg = get_current_settings()
 
     final_prompt = _build_audio_prompt(
