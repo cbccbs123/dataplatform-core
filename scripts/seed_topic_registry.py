@@ -129,6 +129,9 @@ def subtopic_registry_entries(seed: dict[str, Any]) -> list[dict[str, Any]]:
       ② **부모명 반복 배제**: subtopic_ko 가 부모 topic 명과 동일하거나 그 부분문자열이면 제외한다
          (예: '음식·요리' 밑 '음식'). 닫힌 목록이라 런타임 재발이 없고, 부모명과 겹치는 소분류는
          변별력이 없으므로 시드 단계에서 걸러낸다.
+      ③ **부모-소분류 '·' 토큰 겹침 차단(068 강화)**: subtopic 이 부모 topic 과 '·' 토큰을 하나라도
+         공유하면(예: '음식·요리' 밑 '요리·레시피') 부모를 되풀이한 약한 소분류이므로 ``ValueError``.
+         부분문자열(②)은 '요리·레시피 ⊄ 음식·요리' 라 못 잡으므로 정확 토큰 교집합을 별도 검사한다.
     라벨은 ``str()`` 강제(graph_query 관례). ``subtopic_en`` 은 None 을 그대로 보존한다(정본
     미확정 여지 — register_topic 이 topic_en=None 허용). str('None') 로 오염시키지 않는다.
     """
@@ -145,6 +148,14 @@ def subtopic_registry_entries(seed: dict[str, Any]) -> list[dict[str, Any]]:
         #    (역방향 '부모 ⊂ subtopic' 은 정상 소분류 '동물행동·생태' 등을 오배제하므로 검사 안 함.)
         if sub_ko in parent:
             continue
+        # ③ '·' 토큰 겹침 차단(068 강화) — 부모 토큰을 그대로 되풀이한 약한 소분류(요리·레시피 등)를
+        #    조용히 드롭하지 않고 ValueError 로 노출한다(닫힌 큐레이션 시드라 이름을 고쳐야 하므로).
+        #    정상 합성어('학교교육'·'동물원')는 '·' 토큰이 아니라 부분문자열 관계라 여기 안 걸린다.
+        shared = set(parent.split("·")) & set(sub_ko.split("·"))
+        if shared:
+            raise ValueError(
+                f"subtopic 이 부모 topic 과 '·' 토큰 겹침(약한 소분류): {parent!r} > {sub_ko!r} (겹침: {shared})"
+            )
         sub_en = s.get("subtopic_en")
         entries.append(
             {

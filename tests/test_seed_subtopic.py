@@ -133,18 +133,42 @@ class TestSubtopicRegistryEntriesRules(unittest.TestCase):
             subtopic_registry_entries(seed)
 
     def test_subtopic_substring_of_parent_excluded(self):
-        # 부모명 부분문자열(음식 ⊂ 음식·요리)·동일 라벨은 무의미 소분류 → 원천 배제.
+        # 부모명 부분문자열(음식 ⊂ 음식·요리)·동일 라벨은 무의미 소분류 → 원천 배제(drop).
         seed = {
             "version": "vtest",
             "subtopics": [
-                {"topic_ko": "음식·요리", "subtopic_ko": "요리·레시피", "subtopic_en": "cooking_recipes"},
+                {"topic_ko": "음식·요리", "subtopic_ko": "제과·제빵·디저트", "subtopic_en": "baking"},
                 {"topic_ko": "음식·요리", "subtopic_ko": "음식", "subtopic_en": "food"},
                 {"topic_ko": "음식·요리", "subtopic_ko": "음식·요리", "subtopic_en": "same"},
             ],
         }
         entries = subtopic_registry_entries(seed)
         kos = [e["subtopic_ko"] for e in entries]
-        self.assertEqual(kos, ["요리·레시피"], "부모명 부분문자열/동일 배제 실패")
+        self.assertEqual(kos, ["제과·제빵·디저트"], "부모명 부분문자열/동일 배제 실패")
+
+    def test_subtopic_token_overlap_raises(self):
+        # ③ 부모-소분류 '·' 토큰 겹침(요리·레시피 의 '요리' = 음식·요리 의 '요리')은 부모를 되풀이한
+        #    약한 소분류 → ValueError(조용히 드롭하지 않고 이름을 고치게 노출). 부분문자열(②)이 못 잡는 유형.
+        seed = {
+            "version": "vtest",
+            "subtopics": [
+                {"topic_ko": "음식·요리", "subtopic_ko": "요리·레시피", "subtopic_en": "x"},
+            ],
+        }
+        with self.assertRaises(ValueError):
+            subtopic_registry_entries(seed)
+
+    def test_natural_compound_not_flagged(self):
+        # 정상 합성어(학교교육 ⊃ 교육·부분문자열이나 '·' 토큰 겹침 아님)는 통과해야 한다(오배제 방지).
+        seed = {
+            "version": "vtest",
+            "subtopics": [
+                {"topic_ko": "교육·지식", "subtopic_ko": "학교교육", "subtopic_en": "school"},
+                {"topic_ko": "동물", "subtopic_ko": "동물원·수족관", "subtopic_en": "zoo"},
+            ],
+        }
+        kos = [e["subtopic_ko"] for e in subtopic_registry_entries(seed)]
+        self.assertEqual(kos, ["학교교육", "동물원·수족관"])
 
     def test_str_coercion_on_non_str_fields(self):
         # 라벨 str() 강제(graph_query 관례) — 숫자 등이 들어와도 str 로.
