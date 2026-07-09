@@ -62,6 +62,9 @@ from src.classify.asset_topic import (
     list_topics,
 )
 from src.config.settings import get_current_settings
+from src.ingest.archiver import (
+    display_file_name,  # 다운로드 파일명 asset_id 프리픽스 제거(065 T605)
+)
 from src.portal._timeline_util import TIMELINE_INTERVALS
 
 # 소비 서비스 함수들은 모듈 최상위에서 import 한다(테스트가 src.app.portal_api.<name> 으로 patch).
@@ -1264,7 +1267,7 @@ def download(
         raise HTTPException(status_code=410, detail="원본 파일이 존재하지 않거나 접근할 수 없음")
 
     file_size = os.path.getsize(fs_path)
-    file_name = target.get("file_name") or os.path.basename(fs_path)
+    file_name = target.get("file_name") or display_file_name(fs_path)
     content_type = _guess_content_type(file_name, target.get("modality"))
 
     headers = {

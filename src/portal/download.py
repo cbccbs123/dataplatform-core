@@ -24,6 +24,9 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 # 묶음 이웃은 반드시 graph_query seam 경유(대칭 엣지 양방향·status 필터). 직접 graph_edge 쿼리 금지.
+from src.ingest.archiver import (
+    display_file_name,  # 표시/다운로드 파일명 asset_id 프리픽스 제거(065 T605)
+)
 from src.relations.graph_query import fetch_active_relations_for_asset
 
 logger = logging.getLogger(__name__)
@@ -133,7 +136,7 @@ def resolve_download_target(
         "fs_uri": row["fs_uri"],
         "file_size": row["file_size"],
         "modality": row["modality"],
-        "file_name": os.path.basename(fs_path) if fs_path else "",
+        "file_name": display_file_name(fs_path),
     }
 
 
@@ -204,7 +207,7 @@ def collect_bundle_assets(
         if fs_path is None:
             continue  # asset 행 없음(파일 경로 미상) → 묶음 제외
         targets.append(
-            {"asset_id": aid, "fs_path": fs_path, "file_name": os.path.basename(fs_path)}
+            {"asset_id": aid, "fs_path": fs_path, "file_name": display_file_name(fs_path)}
         )
     return targets
 
@@ -242,7 +245,7 @@ def build_bundle_zip(targets: list[dict[str, Any]]) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for t in targets:
             fs_path = t.get("fs_path")
-            file_name = t.get("file_name") or (os.path.basename(fs_path) if fs_path else "")
+            file_name = t.get("file_name") or display_file_name(fs_path)
             try:
                 with open(fs_path, "rb") as fh:  # type: ignore[arg-type]
                     data = fh.read()

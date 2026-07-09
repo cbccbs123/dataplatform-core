@@ -22,7 +22,15 @@ DB·네트워크·파일 IO 없음. 표준 라이브러리만 import(완전 순�
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
+
+# 아카이브 asset_id 프리픽스(``{asset_id}__``) 역패턴 — 표시용 파일명서 벗긴다(065 T605).
+# 정본은 ``src/ingest/archiver.py::_ASSET_ID_PREFIX`` 이나, 본 모듈은 "표준 라이브러리만 import"
+# 순수 계약이라 heavy 의존을 끌지 않도록 같은 UUIDv7 패턴을 작은 사본으로 둔다(포맷 변경 시 동기).
+_ASSET_ID_PREFIX = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}__"
+)
 
 # 결과 버킷 키 → 모달리티 라벨. search_service._MODALITY_BUCKETS 의 역매핑과 같은 표를 포탈
 # 계층에 작은 사본으로 둔다(검색 서비스에 묶이지 않도록). 미지정 버킷은 키 그대로 노출.
@@ -49,11 +57,15 @@ def _row_similarity(row: dict[str, Any]) -> float:
 
 
 def _basename(uri: str) -> str:
-    """file_uri(전체 경로/URI)에서 파일명만 뽑는다(결정적·순수)."""
+    """file_uri(전체 경로/URI)에서 표시용 파일명을 뽑는다(결정적·순수).
+
+    쿼리/프래그먼트 제거 후 아카이브 asset_id 프리픽스(``{asset_id}__``)도 벗긴다(065 T605·단일 출처).
+    """
     if not uri:
         return ""
     tail = uri.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    return tail.split("?", 1)[0].split("#", 1)[0] or tail
+    tail = tail.split("?", 1)[0].split("#", 1)[0] or tail
+    return _ASSET_ID_PREFIX.sub("", tail)
 
 
 def _sort_key(item: dict[str, Any]) -> tuple[float, str]:

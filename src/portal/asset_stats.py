@@ -5,9 +5,9 @@
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from src.ingest.archiver import display_file_name  # 표시 파일명 asset_id 프리픽스 제거(065 T605)
 from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
 _EXCLUDE_MEDICAL = "domain_label <> 'medical'"  # 고정 SQL(사용자 입력 아님)·검색/상세와 일관
@@ -227,7 +227,7 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
                 [*params, limit, offset])
             rows = [
                 {"asset_id": str(aid), "status": st, "modality": mod, "domain_label": dl,
-                 "file_name": os.path.basename(fp) if fp else None,
+                 "file_name": display_file_name(fp) if fp else None,
                  "created_at": ts.isoformat() if ts is not None else None,
                  "summary": summary, "keywords": kw, "file_ext": fx}
                 for aid, st, mod, dl, fp, ts, summary, kw, fx in cur.fetchall()]
@@ -239,7 +239,7 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
                 [*params, limit, offset])
             rows = [
                 {"asset_id": str(aid), "status": st, "modality": mod, "domain_label": dl,
-                 "file_name": os.path.basename(fp) if fp else None,
+                 "file_name": display_file_name(fp) if fp else None,
                  "created_at": ts.isoformat() if ts is not None else None, "file_ext": fx}
                 for aid, st, mod, dl, fp, ts, fx in cur.fetchall()]
     # FR-701: 페이징 봉투 통일({rows,total,limit,offset}) — 프론트 전체 목록 페이지/맨앞·맨끝 이동 계약.

@@ -35,10 +35,12 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from psycopg.rows import dict_row
+
+# 표시용 파일명(아카이브 asset_id 프리픽스 제거) 단일 출처 — archiver 프리픽스 생성부와 대칭(065 T605).
+from src.ingest.archiver import display_file_name
 
 # 058 정본 프리미티브 재사용(모듈 상단 import = 테스트 patch 지점). 중복 구현 금지.
 from src.relations.topic_canonicalize import (
@@ -438,7 +440,7 @@ def find_same_topic_groups(
         bucket.setdefault(
             aid,
             {
-                "file_name": os.path.basename(r.get("fs_path") or ""),
+                "file_name": display_file_name(r.get("fs_path")),
                 "modality": r.get("modality"),
                 "already_linked": bool(r.get("already_linked")),
             },
@@ -570,7 +572,7 @@ def assets_in_topic(
             assets[aid] = {
                 "asset_id": aid,
                 "fs_uri": r["fs_uri"],
-                "file_name": os.path.basename(r["fs_path"] or ""),
+                "file_name": display_file_name(r["fs_path"]),
             }
 
     ordered = sorted(assets.values(), key=lambda a: a["asset_id"])  # asset_id asc 결정적
