@@ -55,6 +55,11 @@ POLICY_VERSION = "asset_topic.v1"
 # kNN topic 후보 기본 개수(닫힌 28 중 상위 k). 프롬프트에 넣을 후보 목록 크기.
 _DEFAULT_TOPIC_K = 5
 
+# catch-all 파킹 라벨(058 관계가 공유·taxonomy_seed.json 에 존치). 065 자기주제 분류에서는 이 라벨을
+# **배제**한다(FR-702·SC-07): 후보에서 제거 + LLM none 도피처 → 미부여. seed·058 은 불변(066 에서
+# 058 과 함께 완전 제거 예정). 여기서 배제하지 않으면 무내용/미적합 자산이 미분류 폴더로 몰린다.
+_UNCLASSIFIED_LABEL = "미분류"
+
 
 def build_self_text(
     summary: str | None, keywords: list | None, labels: list | None = None
@@ -98,10 +103,16 @@ def topic_candidates_for_self_text(
     빈 텍스트면 임베딩·kNN 자체를 건너뛴다(``[]``·비용 0). 그 외에는 058
     ``knn_topic_candidates(parent_topic=None)`` 에 위임 — 활성 채널 임베딩·결정적 정렬(거리 asc →
     topic_ko asc)·0-노름/NaN 가드가 그 안에 이미 있다. 후보가 비면 ``[]``(레지스트리 미시드 가드).
+
+    **065-한정 후처리(FR-702)**: 공유 058 kNN 결과에서 catch-all ``미분류`` 를 제거한다(seed·058 은
+    불변). 미분류가 후보에 남으면 무내용/미적합 자산이 미분류로 몰리므로, 065 자기주제는 후보 단계에서
+    배제하고 어느 것도 안 맞으면 LLM none 도피처로 미부여시킨다(억지 최근접 금지).
     """
     if not self_text or not str(self_text).strip():
         return []
-    return knn_topic_candidates(conn, self_text, k, parent_topic=None)
+    candidates = knn_topic_candidates(conn, self_text, k, parent_topic=None)
+    # 065 분류 경로에서만 미분류 배제(공유 프리미티브·058 은 불변). 나머지 순서는 그대로 보존.
+    return [c for c in candidates if c != _UNCLASSIFIED_LABEL]
 
 
 # LLM 판정 프롬프트(FR-202·temp=0) — 자기 텍스트 + 후보 topic 목록 제시 → 닫힌 후보 중 하나 확정 +
@@ -112,11 +123,13 @@ _CLASSIFY_PROMPT = """너는 자산의 자기 내용(요약·키워드·라벨)�
 
 규칙:
 - topic 은 반드시 "후보 주제 목록"에 있는 라벨 하나만 고른다. 목록에 없는 라벨을 지어내지 않는다.
-- subtopic 은 자산이 실제로 다루는 구체 주제어를 짧게(한 어절 위주) 생성한다. 자신이 없으면 null.
+- 어느 후보 주제도 이 자산에 맞지 않으면(억지로 고르지 말고) topic_ko 를 정확히 "none" 으로 출력한다.
+- subtopic_ko 는 **특정 개체·고유명사(예: 파리, 남산타워, 양자역학) 금지**. 여러 자산이 공유할 수 있는
+  재사용 가능한 **일반 카테고리(예: 도시여행, 전통건축, 물리학)** 수준으로 만든다. 자신이 없으면 null.
 - topic_en/subtopic_en 은 대응 영문(없으면 null).
 - confidence 는 판정 확신도 0~1 실수.
 - JSON 객체 하나만 출력한다. 코드블록·설명 문장 금지.
-- 형식: {{"topic_ko":"<후보 중 하나>","topic_en":"...","subtopic_ko":"...","subtopic_en":"...","confidence":0.0}}
+- 형식: {{"topic_ko":"<후보 중 하나 또는 none>","topic_en":"...","subtopic_ko":"...","subtopic_en":"...","confidence":0.0}}
 
 자산 자기 내용:
 {self_text}
@@ -126,10 +139,11 @@ _CLASSIFY_PROMPT = """너는 자산의 자기 내용(요약·키워드·라벨)�
 
 출력: {{"topic_ko":"...","topic_en":"...","subtopic_ko":"...","subtopic_en":"...","confidence":0.0}}"""
 
-# 재질의 경고(후보 밖 응답 1회 재시도·FR-203) — 원 프롬프트 뒤에 덧붙인다.
+# 재질의 경고(후보 밖 응답 1회 재시도·FR-203) — 원 프롬프트 뒤에 덧붙인다. none 도피처를 재질의에도
+# 유지해 "억지 최근접 배정"(강제 매핑)을 유발하지 않는다(FR-203·FR-702): 정말 안 맞으면 none 으로.
 _RETRY_SUFFIX = """
 
-경고: 직전 응답의 topic_ko 가 후보 목록에 없었다. 반드시 아래 후보 중 하나의 정확한 라벨만 고르라: {candidates}"""
+경고: 직전 응답의 topic_ko 가 후보 목록에 없었다. 아래 후보 중 하나의 정확한 라벨만 고르되, 정말 어느 후보도 맞지 않으면 "none" 으로 답하라(억지로 고르지 마라): {candidates}"""
 
 
 def _pick_topic_via_llm(self_text: str, candidates: list[str], *, client) -> dict | None:
@@ -275,7 +289,10 @@ def classify_asset_topic(
     raw_sub = picked.get("subtopic_ko")
 
     # ④ subtopic 정규화(058 부모 스코프 canonicalize·alias 캐시 동결 재사용).
-    subtopic_ko = canonicalize_subtopic(conn, topic_ko, raw_sub, client=client)
+    #    prefer_reuse=True(065·T603): 부모 topic 의 기존 subtopic 을 우선 재사용해 과편화(싱글턴)를
+    #    줄인다 — 코스닝된 카테고리(도시여행 등)를 같은 부모 안에서 수렴시킨다(058 관계는 기본 False 로
+    #    strict 동의어 판정 불변). 부모 스코프 기존 subtopic 후보는 canonicalize 내부 kNN 이 회수한다.
+    subtopic_ko = canonicalize_subtopic(conn, topic_ko, raw_sub, client=client, prefer_reuse=True)
     # subtopic_en 은 canonicalize 가 추적하지 않으므로(058 은 subtopic en 미보유) LLM 값을 쓴다.
     # subtopic_ko 가 비면(모달리티어·중복 등으로 드롭) en 도 비운다. subtopic_en 정본화는 후속 여지.
     subtopic_en = picked.get("subtopic_en") if subtopic_ko else None

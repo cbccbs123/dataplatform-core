@@ -319,6 +319,107 @@ class TestClassifyAssetTopic(unittest.TestCase):
         self.assertIn(asset_topic.POLICY_VERSION, params)
 
 
+class TestUnclassifiedExclusion(unittest.TestCase):
+    """T602 — 미분류 자기주제 배제(065-한정·FR-702·SC-07): 후보 필터 + none 도피처 → 미부여.
+
+    taxonomy_seed.json·058 은 불변(관계 공유). 065 분류 경로에서만 '미분류'를 배제한다:
+      ① ``topic_candidates_for_self_text`` 가 공유 kNN 결과에서 '미분류' 를 후처리로 제거.
+      ② 프롬프트에 "어느 후보도 안 맞으면 none" 도피처 + none/후보밖(미분류 포함) → None(미부여).
+    강제 최근접 배정 금지(FR-203 계승): 억지로 27개 중 하나로 매핑하지 않는다.
+    """
+
+    def test_candidates_filter_out_unclassified(self) -> None:
+        from src.classify import asset_topic
+
+        # 공유 058 kNN 이 '미분류' 를 후보로 돌려줘도 065 래퍼가 후처리로 제거한다(seed 무변경).
+        with patch.object(
+            asset_topic, "knn_topic_candidates",
+            return_value=["스포츠·레저", "미분류", "예술"],
+        ):
+            out = asset_topic.topic_candidates_for_self_text(object(), "농구 경기", k=5)
+        self.assertNotIn("미분류", out)
+        self.assertEqual(out, ["스포츠·레저", "예술"])
+
+    def test_prompt_has_none_escape_hatch(self) -> None:
+        from src.classify import asset_topic
+
+        # 프롬프트에 "none" 도피처 지시(어느 후보도 안 맞으면 none)가 있어야 억지 배정을 막는다.
+        self.assertIn("none", asset_topic._CLASSIFY_PROMPT)
+        # 재질의(후보 밖 응답) 시에도 none 도피처를 유지해 강제 최근접을 유발하지 않아야 한다.
+        self.assertIn("none", asset_topic._RETRY_SUFFIX)
+
+    def test_llm_none_response_returns_none_unassigned(self) -> None:
+        from src.classify import asset_topic
+
+        p_knn = patch.object(
+            asset_topic, "topic_candidates_for_self_text", return_value=["스포츠·레저"]
+        )
+        # LLM 이 "none"(어느 것도 안 맞음)으로 답 → 재질의 후에도 none → 미부여(강제 매핑 금지).
+        client = _client_once('{"topic_ko": "none", "confidence": 0.1}')
+        with p_knn, patch.object(asset_topic, "canonicalize_subtopic") as m_sub:
+            out = asset_topic.classify_asset_topic(
+                MagicMock(), "N1", self_text="정체불명 콘텐츠", client=client
+            )
+        self.assertIsNone(out)
+        m_sub.assert_not_called()  # 미부여 → subtopic 정규화·upsert 없음
+
+    def test_llm_unclassified_response_treated_out_of_candidate(self) -> None:
+        from src.classify import asset_topic
+
+        # 후보에서 '미분류' 가 제거됐으므로 LLM 이 '미분류' 로 답하면 후보 밖 → 재질의 → 미부여.
+        p_knn = patch.object(
+            asset_topic, "topic_candidates_for_self_text", return_value=["스포츠·레저"]
+        )
+        client = _client_once('{"topic_ko": "미분류", "confidence": 0.2}')
+        with p_knn, patch.object(asset_topic, "canonicalize_subtopic") as m_sub:
+            out = asset_topic.classify_asset_topic(
+                MagicMock(), "N2", self_text="애매한 내용", client=client
+            )
+        self.assertIsNone(out)
+        m_sub.assert_not_called()
+
+
+class TestSubtopicCoarsening(unittest.TestCase):
+    """T603 — 소분류 코스닝(FR-703·SC-09): 개체 금지·카테고리 생성 + 부모 스코프 재사용 우선.
+
+    subtopic 이 개체 수준(파리·남산타워·양자역학)으로 생성돼 (topic>subtopic) 짝의 86% 가 싱글턴이라
+    프론트 트리에서 큰 topic 도 통째로 숨었다. ① 생성 프롬프트를 "특정 개체·고유명사 금지, 일반
+    카테고리(도시여행·전통건축) 수준" 으로 유도 + ② 부모 topic 의 기존 subtopic 을 재사용하도록
+    ``canonicalize_subtopic(prefer_reuse=True)`` 로 완화한다.
+    """
+
+    def test_prompt_forbids_entities_and_prefers_categories(self) -> None:
+        from src.classify import asset_topic
+
+        prompt = asset_topic._CLASSIFY_PROMPT
+        # 개체·고유명사 금지 지시(예시 개체 최소 1개 포함).
+        self.assertIn("고유명사", prompt)
+        self.assertTrue(any(e in prompt for e in ("파리", "남산타워", "양자역학")))
+        # 재사용 가능한 일반 카테고리 유도(예시 카테고리 최소 1개 포함).
+        self.assertIn("카테고리", prompt)
+        self.assertTrue(any(c in prompt for c in ("도시여행", "전통건축")))
+
+    def test_classify_passes_prefer_reuse_to_canonicalize(self) -> None:
+        from src.classify import asset_topic
+
+        p_knn = patch.object(
+            asset_topic, "topic_candidates_for_self_text", return_value=["여행"]
+        )
+        p_en = patch.object(asset_topic, "_lookup_topic_en", return_value="travel")
+        client = _client_once(
+            '{"topic_ko": "여행", "topic_en": "travel", '
+            '"subtopic_ko": "도시여행", "subtopic_en": "city_travel", "confidence": 0.8}'
+        )
+        conn, _ = _mock_conn_seq()
+        with p_knn, p_en, patch.object(
+            asset_topic, "canonicalize_subtopic", return_value="도시여행"
+        ) as m_sub:
+            asset_topic.classify_asset_topic(conn, "C1", self_text="파리 에펠탑 여행", client=client)
+        # 재사용 우선(부모 스코프 기존 subtopic 재사용) — prefer_reuse=True 로 완화 위임.
+        _args, kwargs = m_sub.call_args
+        self.assertTrue(kwargs.get("prefer_reuse"))
+
+
 class TestFetchAssetTopic(unittest.TestCase):
     """T204 — 정본 읽기(구 project_asset_topics 형상)·부재 []."""
 
