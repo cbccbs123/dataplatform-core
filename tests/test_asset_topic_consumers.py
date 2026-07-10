@@ -118,9 +118,12 @@ class TestAssetsInTopic(unittest.TestCase):
 
     def _rows(self):
         return [
-            {"asset_id": "a3", "fs_uri": "/x/a3.txt", "fs_path": "/data/a3__요리.txt"},
-            {"asset_id": "a1", "fs_uri": "/x/a1.txt", "fs_path": "/data/a1__빵.jpg"},
-            {"asset_id": "a2", "fs_uri": "/x/a2.txt", "fs_path": "/data/a2__국.mp4"},
+            {"asset_id": "a3", "fs_uri": "/x/a3.txt", "fs_path": "/data/a3__요리.txt",
+             "modality": "text", "keywords": ["요리", "레시피"], "labels": None},
+            {"asset_id": "a1", "fs_uri": "/x/a1.txt", "fs_path": "/data/a1__빵.jpg",
+             "modality": "image", "keywords": ["빵"], "labels": [{"label": "bread", "score": 0.9}]},
+            {"asset_id": "a2", "fs_uri": "/x/a2.txt", "fs_path": "/data/a2__국.mp4",
+             "modality": "video", "keywords": None, "labels": None},
         ]
 
     def test_shape_sorted_and_basename(self) -> None:
@@ -130,10 +133,26 @@ class TestAssetsInTopic(unittest.TestCase):
         out = assets_in_topic(conn, topic_ko="요리")
         self.assertEqual(out["total"], 3)
         self.assertEqual([r["asset_id"] for r in out["rows"]], ["a1", "a2", "a3"])  # asc
-        r0 = out["rows"][0]
-        self.assertEqual(set(r0.keys()), {"asset_id", "fs_uri", "file_name"})
+        r0 = out["rows"][0]  # a1
+        self.assertEqual(set(r0.keys()),
+                         {"asset_id", "fs_uri", "file_name", "modality", "keywords", "labels"})
         self.assertEqual(r0["file_name"], "a1__빵.jpg")  # fs_path basename
         self.assertIsInstance(r0["asset_id"], str)
+        self.assertEqual(r0["modality"], "image")
+        self.assertEqual(r0["keywords"], ["빵"])
+        self.assertEqual(r0["labels"], ["bread"])   # [{label,score}] → label 만
+        # modality_counts = 필터 전 전체 분포(모달리티 폴더 카운트)
+        self.assertEqual(out["modality_counts"], {"text": 1, "image": 1, "video": 1})
+
+    def test_modality_filter_counts_stay_full(self) -> None:
+        from src.classify.asset_topic import assets_in_topic
+
+        conn, _ = _mock_conn(self._rows())
+        out = assets_in_topic(conn, topic_ko="요리", modality="image")
+        self.assertEqual(out["total"], 1)                     # rows 는 image 만
+        self.assertEqual([r["asset_id"] for r in out["rows"]], ["a1"])
+        # counts 는 modality 필터와 무관하게 전체(폴더 카운트가 클릭으로 줄면 안 됨)
+        self.assertEqual(out["modality_counts"], {"text": 1, "image": 1, "video": 1})
 
     def test_paging(self) -> None:
         from src.classify.asset_topic import assets_in_topic
@@ -194,7 +213,8 @@ class TestAssetsInTopic(unittest.TestCase):
         from src.classify.asset_topic import assets_in_topic
 
         conn, _ = _mock_conn([])
-        self.assertEqual(assets_in_topic(conn, topic_ko="없음"), {"rows": [], "total": 0})
+        self.assertEqual(assets_in_topic(conn, topic_ko="없음"),
+                         {"rows": [], "total": 0, "modality_counts": {}})
 
     def test_offset_beyond_total(self) -> None:
         from src.classify.asset_topic import assets_in_topic
@@ -218,7 +238,7 @@ class TestAssetsInTopic(unittest.TestCase):
     def test_null_fs_path_safe_basename(self) -> None:
         from src.classify.asset_topic import assets_in_topic
 
-        conn, _ = _mock_conn([{"asset_id": "z1", "fs_uri": None, "fs_path": None}])
+        conn, _ = _mock_conn([{"asset_id": "z1", "fs_uri": None, "fs_path": None, "modality": "text"}])
         out = assets_in_topic(conn, topic_ko="요리")
         self.assertEqual(out["total"], 1)
         self.assertEqual(out["rows"][0]["file_name"], "")  # None fs_path → 빈 basename(안전)
@@ -249,8 +269,10 @@ class TestAssetsUnclassified(unittest.TestCase):
         out = assets_unclassified(conn)
         self.assertEqual(out["total"], 2)
         self.assertEqual([r["asset_id"] for r in out["rows"]], ["a1", "a2"])  # asset_id asc
-        self.assertEqual(set(out["rows"][0].keys()), {"asset_id", "fs_uri", "file_name", "modality"})
+        self.assertEqual(set(out["rows"][0].keys()),
+                         {"asset_id", "fs_uri", "file_name", "modality", "keywords", "labels"})
         self.assertEqual(out["rows"][0]["modality"], "image")  # 파일 아이콘용 modality 포함
+        self.assertEqual(out["modality_counts"], {"audio": 1, "image": 1})  # 모달리티 폴더 카운트
 
 
 if __name__ == "__main__":

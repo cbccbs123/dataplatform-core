@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -648,9 +649,11 @@ WHERE COALESCE(at.topic_ko, '') <> ''
 
 # 주제별 자산 페이징용 — subtopic 필터는 호출 시 append.
 _ASSETS_IN_TOPIC_SQL = """
-SELECT at.asset_id, a.fs_uri, a.fs_path
+SELECT at.asset_id, a.fs_uri, a.fs_path, a.modality,
+       m.ext_meta->'keywords' AS keywords, m.ext_meta->'labels' AS labels
 FROM asset_topic at
 JOIN asset a ON a.asset_id = at.asset_id
+LEFT JOIN asset_metadata m ON m.asset_id = at.asset_id
 WHERE a.domain_label IS DISTINCT FROM 'medical'
   AND at.topic_ko = %s
 """
@@ -691,12 +694,32 @@ def list_topics(conn) -> list[dict]:
     return out
 
 
+def _asset_list_item(r: dict) -> dict:
+    """조회 행 → 파일 목록 항목(공용·assets_in_topic/assets_unclassified 공유). 파일탐색기 목록에서
+    파일명·모달리티와 함께 **키워드·라벨을 미리보기**로 표시하도록 상위 일부만 담는다(응답 비대화 방지).
+    labels 는 ``[{label,score}]`` 에서 label 만 추출(문자열 원소도 방어적 허용). keywords 상위 8·labels 상위 5.
+    """
+    return {
+        "asset_id": str(r["asset_id"]),
+        "fs_uri": r["fs_uri"],
+        "file_name": display_file_name(r["fs_path"]),
+        "modality": r["modality"],
+        "keywords": [str(k) for k in (r.get("keywords") or []) if k][:8],
+        "labels": [
+            (it.get("label") if isinstance(it, dict) else it)
+            for it in (r.get("labels") or [])
+            if it
+        ][:5],
+    }
+
+
 def assets_in_topic(
     conn,
     *,
     topic_ko: str,
     subtopic_ko: str | None = None,
     unassigned_only: bool = False,
+    modality: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
@@ -706,20 +729,22 @@ def assets_in_topic(
         topic_ko: 대주제(정확 일치).
         subtopic_ko: 세부주제(주면 추가 필터, None 이면 topic_ko 하위 전체).
         unassigned_only: True 면 **'기타'(subtopic 미부여)만** — ``subtopic_ko IS NULL`` 필터.
-            ``subtopic_ko=None``(=필터 없음·topic 전체)과 구분하기 위한 명시 플래그다. 프론트 주제
-            트리의 '기타' 항목(카운트=``list_topics`` 의 subtopic None 버킷)을 클릭했을 때, None 을
-            "전체"로 해석해 topic 전량을 돌려주던 정합 결함을 막는다. True 면 subtopic_ko 지정보다 우선.
+            ``subtopic_ko=None``(=필터 없음·topic 전체)과 구분하는 명시 플래그. True 면 subtopic_ko 지정보다 우선.
+        modality: 주면 그 모달리티(text/image/video/audio) 자산만 반환(파일탐색기 모달리티 폴더 진입).
+            None 이면 전체. ``modality_counts`` 는 **modality 필터와 무관하게** 이 주제/하위의 전체 모달리티
+            분포다(모달리티 폴더 카운트 — 폴더를 그린 뒤 클릭 시 modality 로 좁힌다).
         limit/offset: 페이징.
 
     Returns:
-        ``{rows:[{asset_id(str), fs_uri, file_name}], total}``. ``total`` 은 페이징 전 distinct
-        자산 수. ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 ``[offset:offset+limit]``.
-        ``file_name`` 은 ``fs_path`` basename(review.py 관례 일치).
+        ``{rows:[{asset_id(str), fs_uri, file_name, modality}], total, modality_counts:{<modality>:n}}``.
+        ``total`` 은 (modality 필터 적용 후) 페이징 전 distinct 자산 수, ``modality_counts`` 는 필터 전
+        전체 분포, ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 페이징. ``file_name`` 은 ``fs_path`` basename.
     """
     sql = _ASSETS_IN_TOPIC_SQL
     params: list[Any] = [topic_ko]
     # subtopic_ko=None 은 '필터 없음(topic 전체)'이라 '기타'(미부여)만 좁힐 수 없다 → unassigned_only 로
-    # IS NULL 을 명시 필터(list_topics 의 None 버킷과 카운트 정합). unassigned_only 가 subtopic 지정보다 우선.
+    # IS NULL 명시 필터. unassigned_only 가 subtopic 지정보다 우선. (modality 는 아래 파이썬에서 필터 —
+    # modality_counts 를 필터 전 전체 분포로 먼저 세기 위함.)
     if unassigned_only:
         sql = sql + "  AND at.subtopic_ko IS NULL\n"
     elif subtopic_ko is not None:
@@ -735,16 +760,15 @@ def assets_in_topic(
     for r in rows:
         aid = str(r["asset_id"])
         if aid not in assets:
-            assets[aid] = {
-                "asset_id": aid,
-                "fs_uri": r["fs_uri"],
-                "file_name": display_file_name(r["fs_path"]),
-            }
+            assets[aid] = _asset_list_item(r)
 
     ordered = sorted(assets.values(), key=lambda a: a["asset_id"])  # asset_id asc 결정적
+    # modality_counts = 필터 전 전체 분포(모달리티 폴더 카운트). 그 뒤 modality 로 rows 만 좁힌다.
+    modality_counts = dict(Counter(a["modality"] for a in ordered))
+    if modality is not None:
+        ordered = [a for a in ordered if a["modality"] == modality]
     total = len(ordered)
-    page = ordered[offset : offset + limit]
-    return {"rows": page, "total": total}
+    return {"rows": ordered[offset : offset + limit], "total": total, "modality_counts": modality_counts}
 
 
 # ── 미분류(주제 미부여) 조회 — 파일탐색기 '미분류' 폴더(전수 포함) ──────────────────────
@@ -752,25 +776,32 @@ def assets_in_topic(
 # 누락한다. 자산목록을 파일시스템처럼 '빠짐없이' 보이려면 이들을 별도 회수해야 한다(주제 트리의 최상위
 # '미분류' 폴더). 의료(PHI) 제외 상속·registered 만(수집 중/실패 제외).
 _ASSETS_UNCLASSIFIED_SQL = """
-SELECT a.asset_id, a.fs_uri, a.fs_path, a.modality
+SELECT a.asset_id, a.fs_uri, a.fs_path, a.modality,
+       m.ext_meta->'keywords' AS keywords, m.ext_meta->'labels' AS labels
 FROM asset a
 LEFT JOIN asset_topic at ON at.asset_id = a.asset_id
+LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
 WHERE a.status = 'registered'
   AND a.domain_label IS DISTINCT FROM 'medical'
   AND at.asset_id IS NULL
 """
 
 
-def assets_unclassified(conn, *, limit: int = 50, offset: int = 0) -> dict:
+def assets_unclassified(conn, *, modality: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     """주제 미부여(자기주제 정본 없음) 자산을 페이징 조회 — 파일탐색기의 '미분류' 폴더용.
 
     ``asset_topic`` 행이 없는 registered 비의료 자산. 주제 트리(``list_topics``)는 asset_topic 조인이라
-    이들을 누락하므로, 전수 조회(빠짐없이)를 위해 별도로 회수한다. ``assets_in_topic`` 과 동형 반환에
-    파일 아이콘 표시용 ``modality`` 를 더한다.
+    이들을 누락하므로, 전수 조회(빠짐없이)를 위해 별도로 회수한다.
+
+    Args:
+        modality: 주면 그 모달리티만 반환(미분류 폴더 안 모달리티 폴더 진입). ``modality_counts`` 는 필터
+            무관 전체 분포(모달리티 폴더 카운트). None 이면 전체.
+        limit/offset: 페이징.
 
     Returns:
-        ``{rows:[{asset_id(str), fs_uri, file_name, modality}], total}`` — ``total`` 은 페이징 전
-        distinct 자산 수(= '미분류' 폴더 카운트), ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 페이징.
+        ``{rows:[{asset_id(str), fs_uri, file_name, modality}], total, modality_counts:{<modality>:n}}``
+        — ``total`` 은 (modality 필터 후) 미분류 자산 수, ``modality_counts`` 는 필터 전 전체 분포,
+        ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 페이징.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_ASSETS_UNCLASSIFIED_SQL)
@@ -779,12 +810,10 @@ def assets_unclassified(conn, *, limit: int = 50, offset: int = 0) -> dict:
     for r in rows:
         aid = str(r["asset_id"])
         if aid not in assets:
-            assets[aid] = {
-                "asset_id": aid,
-                "fs_uri": r["fs_uri"],
-                "file_name": display_file_name(r["fs_path"]),
-                "modality": r["modality"],
-            }
+            assets[aid] = _asset_list_item(r)
     ordered = sorted(assets.values(), key=lambda a: a["asset_id"])  # asset_id asc 결정적
+    modality_counts = dict(Counter(a["modality"] for a in ordered))  # 필터 전 전체 분포(모달리티 폴더)
+    if modality is not None:
+        ordered = [a for a in ordered if a["modality"] == modality]
     total = len(ordered)
-    return {"rows": ordered[offset : offset + limit], "total": total}
+    return {"rows": ordered[offset : offset + limit], "total": total, "modality_counts": modality_counts}
