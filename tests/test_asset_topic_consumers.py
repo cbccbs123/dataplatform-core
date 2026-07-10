@@ -160,6 +160,27 @@ class TestAssetsInTopic(unittest.TestCase):
         sql = " ".join(cur.execute.call_args[0][0].split())
         self.assertNotIn("at.subtopic_ko = %s", sql)
 
+    def test_unassigned_only_filters_null(self) -> None:
+        """unassigned_only=True 면 '기타'(subtopic 미부여)만 — subtopic_ko IS NULL(값 매칭 아님)."""
+        from src.classify.asset_topic import assets_in_topic
+
+        conn, cur = _mock_conn([])
+        assets_in_topic(conn, topic_ko="요리", unassigned_only=True)
+        sql = " ".join(cur.execute.call_args[0][0].split())
+        self.assertIn("at.subtopic_ko IS NULL", sql)
+        self.assertNotIn("at.subtopic_ko = %s", sql)  # 값 바인딩이 아니라 NULL 필터
+        self.assertEqual(list(cur.execute.call_args[0][1]), ["요리"])  # subtopic 값 파라미터 없음
+
+    def test_unassigned_only_overrides_subtopic(self) -> None:
+        """unassigned_only=True 는 subtopic_ko 지정보다 우선(둘 다 오면 IS NULL)."""
+        from src.classify.asset_topic import assets_in_topic
+
+        conn, cur = _mock_conn([])
+        assets_in_topic(conn, topic_ko="요리", subtopic_ko="제빵", unassigned_only=True)
+        sql = " ".join(cur.execute.call_args[0][0].split())
+        self.assertIn("at.subtopic_ko IS NULL", sql)
+        self.assertNotIn("at.subtopic_ko = %s", sql)
+
     def test_sql_excludes_medical(self) -> None:
         from src.classify.asset_topic import assets_in_topic
 

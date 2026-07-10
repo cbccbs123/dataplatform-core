@@ -1193,6 +1193,9 @@ def topics_list(
 def topic_assets(
     topic: str,
     subtopic: str | None = Query(None, description="세부주제(주면 topic 하위로 좁힘·정확 일치)"),
+    unassigned: bool = Query(
+        False, description="'기타'(subtopic 미부여)만 — 값 매칭이 아닌 subtopic IS NULL"
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     principal: Annotated[Principal, Depends(require_principal)] = ...,
@@ -1200,12 +1203,18 @@ def topic_assets(
     """특정 주제에 속한 자산을 페이징 조회한다(065 FR-402·US2). 조회 전용·의료 제외·LLM 0.
 
     ``assets_in_topic`` 이 그 주제의 자기주제 정본(``asset_topic``) 자산을 distinct·``asset_id asc``
-    결정적 정렬로 페이징한다. ``subtopic`` 미지정이면 topic 하위 전체. 반환
-    ``{rows:[{asset_id, fs_uri, file_name}], total}``.
+    결정적 정렬로 페이징한다. ``subtopic`` 미지정이면 topic 하위 전체. ``unassigned=true`` 면 주제
+    트리의 '기타'(subtopic 미부여)만 — ``subtopic`` 값 매칭이 아니라 IS NULL 이라, '기타 N건'인데
+    클릭 시 topic 전체가 나오던 정합 결함을 막는다. 반환 ``{rows:[{asset_id, fs_uri, file_name}], total}``.
     """
     return _run_in_db(
         lambda conn: assets_in_topic(
-            conn, topic_ko=topic, subtopic_ko=subtopic, limit=limit, offset=offset
+            conn,
+            topic_ko=topic,
+            subtopic_ko=subtopic,
+            unassigned_only=unassigned,
+            limit=limit,
+            offset=offset,
         )
     )
 

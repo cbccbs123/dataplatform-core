@@ -692,13 +692,23 @@ def list_topics(conn) -> list[dict]:
 
 
 def assets_in_topic(
-    conn, *, topic_ko: str, subtopic_ko: str | None = None, limit: int = 50, offset: int = 0
+    conn,
+    *,
+    topic_ko: str,
+    subtopic_ko: str | None = None,
+    unassigned_only: bool = False,
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     """특정 주제(자기주제 정본)에 속한 자산을 페이징 조회(구 ``topic_query.assets_in_topic`` 형상).
 
     Args:
         topic_ko: 대주제(정확 일치).
         subtopic_ko: 세부주제(주면 추가 필터, None 이면 topic_ko 하위 전체).
+        unassigned_only: True 면 **'기타'(subtopic 미부여)만** — ``subtopic_ko IS NULL`` 필터.
+            ``subtopic_ko=None``(=필터 없음·topic 전체)과 구분하기 위한 명시 플래그다. 프론트 주제
+            트리의 '기타' 항목(카운트=``list_topics`` 의 subtopic None 버킷)을 클릭했을 때, None 을
+            "전체"로 해석해 topic 전량을 돌려주던 정합 결함을 막는다. True 면 subtopic_ko 지정보다 우선.
         limit/offset: 페이징.
 
     Returns:
@@ -708,7 +718,11 @@ def assets_in_topic(
     """
     sql = _ASSETS_IN_TOPIC_SQL
     params: list[Any] = [topic_ko]
-    if subtopic_ko is not None:
+    # subtopic_ko=None 은 '필터 없음(topic 전체)'이라 '기타'(미부여)만 좁힐 수 없다 → unassigned_only 로
+    # IS NULL 을 명시 필터(list_topics 의 None 버킷과 카운트 정합). unassigned_only 가 subtopic 지정보다 우선.
+    if unassigned_only:
+        sql = sql + "  AND at.subtopic_ko IS NULL\n"
+    elif subtopic_ko is not None:
         sql = sql + "  AND at.subtopic_ko = %s\n"
         params.append(subtopic_ko)
 
