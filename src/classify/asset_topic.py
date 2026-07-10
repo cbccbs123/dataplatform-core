@@ -745,3 +745,46 @@ def assets_in_topic(
     total = len(ordered)
     page = ordered[offset : offset + limit]
     return {"rows": page, "total": total}
+
+
+# ── 미분류(주제 미부여) 조회 — 파일탐색기 '미분류' 폴더(전수 포함) ──────────────────────
+# list_topics/assets_in_topic 은 asset_topic 조인이라 **주제 정본이 없는** 자산(분류 실패·무내용 등)을
+# 누락한다. 자산목록을 파일시스템처럼 '빠짐없이' 보이려면 이들을 별도 회수해야 한다(주제 트리의 최상위
+# '미분류' 폴더). 의료(PHI) 제외 상속·registered 만(수집 중/실패 제외).
+_ASSETS_UNCLASSIFIED_SQL = """
+SELECT a.asset_id, a.fs_uri, a.fs_path, a.modality
+FROM asset a
+LEFT JOIN asset_topic at ON at.asset_id = a.asset_id
+WHERE a.status = 'registered'
+  AND a.domain_label IS DISTINCT FROM 'medical'
+  AND at.asset_id IS NULL
+"""
+
+
+def assets_unclassified(conn, *, limit: int = 50, offset: int = 0) -> dict:
+    """주제 미부여(자기주제 정본 없음) 자산을 페이징 조회 — 파일탐색기의 '미분류' 폴더용.
+
+    ``asset_topic`` 행이 없는 registered 비의료 자산. 주제 트리(``list_topics``)는 asset_topic 조인이라
+    이들을 누락하므로, 전수 조회(빠짐없이)를 위해 별도로 회수한다. ``assets_in_topic`` 과 동형 반환에
+    파일 아이콘 표시용 ``modality`` 를 더한다.
+
+    Returns:
+        ``{rows:[{asset_id(str), fs_uri, file_name, modality}], total}`` — ``total`` 은 페이징 전
+        distinct 자산 수(= '미분류' 폴더 카운트), ``rows`` 는 ``asset_id asc`` 결정적 정렬 후 페이징.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_ASSETS_UNCLASSIFIED_SQL)
+        rows = cur.fetchall()
+    assets: dict[str, dict] = {}
+    for r in rows:
+        aid = str(r["asset_id"])
+        if aid not in assets:
+            assets[aid] = {
+                "asset_id": aid,
+                "fs_uri": r["fs_uri"],
+                "file_name": display_file_name(r["fs_path"]),
+                "modality": r["modality"],
+            }
+    ordered = sorted(assets.values(), key=lambda a: a["asset_id"])  # asset_id asc 결정적
+    total = len(ordered)
+    return {"rows": ordered[offset : offset + limit], "total": total}

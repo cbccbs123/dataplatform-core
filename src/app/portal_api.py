@@ -57,6 +57,7 @@ from starlette.concurrency import run_in_threadpool
 # (topic_query.project_asset_topics·find_topic_neighbor_groups) 은퇴 — 주제 소스는 정본 하나(FR-403).
 from src.classify.asset_topic import (
     assets_in_topic,
+    assets_unclassified,
     fetch_asset_topic,
     find_same_topic_groups,
     list_topics,
@@ -1137,6 +1138,23 @@ def search(
         "results": grouped,
         "meta": meta,
     }
+
+
+@app.get("/assets/unclassified")
+def unclassified_assets(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Annotated[Principal, Depends(require_principal)] = ...,
+) -> dict[str, Any]:
+    """주제 미부여('미분류') 자산 페이징 — 자산목록 파일탐색기의 최상위 '미분류' 폴더(070).
+
+    주제 트리(``/topics``)는 ``asset_topic`` 조인이라 주제 정본이 없는 자산(분류 실패·무내용)을 누락한다.
+    자산을 '빠짐없이' 보이려면 이 엔드포인트로 미분류를 회수한다. 반환 ``{rows:[{asset_id, fs_uri,
+    file_name, modality}], total}`` — ``total`` 이 '미분류' 폴더 카운트. 조회 전용·의료 제외·LLM 0.
+    **라우트 순서**: ``/assets/{asset_id}`` catch-all 보다 먼저 등록해야 'unclassified' 가 asset_id 로
+    오매칭되지 않는다(이 위치 유지).
+    """
+    return _run_in_db(lambda conn: assets_unclassified(conn, limit=limit, offset=offset))
 
 
 @app.get("/assets/{asset_id}")

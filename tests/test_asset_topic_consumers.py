@@ -225,5 +225,33 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertIsNone(out["rows"][0]["fs_uri"])
 
 
+class TestAssetsUnclassified(unittest.TestCase):
+    """assets_unclassified — 주제 미부여 자산(파일탐색기 '미분류' 폴더·전수 포함)."""
+
+    def test_sql_left_join_null_registered_nonmedical(self) -> None:
+        from src.classify.asset_topic import assets_unclassified
+
+        conn, cur = _mock_conn([])
+        assets_unclassified(conn, limit=50, offset=0)
+        sql = " ".join(cur.execute.call_args[0][0].split()).lower()
+        self.assertIn("left join asset_topic", sql)          # 미부여 회수(부여된 것 제외)
+        self.assertIn("at.asset_id is null", sql)            # 주제 정본 없음만
+        self.assertIn("a.status = 'registered'", sql)        # 수집 중/실패 제외
+        self.assertIn("domain_label is distinct from 'medical'", sql)  # PHI 제외 상속
+
+    def test_shape_sorted_with_modality(self) -> None:
+        from src.classify.asset_topic import assets_unclassified
+
+        conn, _ = _mock_conn([
+            {"asset_id": "a2", "fs_uri": "/x/a2", "fs_path": "/d/a2__x.mp3", "modality": "audio"},
+            {"asset_id": "a1", "fs_uri": "/x/a1", "fs_path": "/d/a1__y.jpg", "modality": "image"},
+        ])
+        out = assets_unclassified(conn)
+        self.assertEqual(out["total"], 2)
+        self.assertEqual([r["asset_id"] for r in out["rows"]], ["a1", "a2"])  # asset_id asc
+        self.assertEqual(set(out["rows"][0].keys()), {"asset_id", "fs_uri", "file_name", "modality"})
+        self.assertEqual(out["rows"][0]["modality"], "image")  # 파일 아이콘용 modality 포함
+
+
 if __name__ == "__main__":
     unittest.main()
