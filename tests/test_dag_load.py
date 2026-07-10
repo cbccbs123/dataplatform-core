@@ -126,14 +126,17 @@ class TestDagBagIntegrity(unittest.TestCase):
             self.assertIsNotNone(dag.schedule, msg=f"{dag_id} schedule")
 
     def test_dag_task_structure(self) -> None:
-        # (a) push 체이닝 — collect/process 는 [래퍼 → 게이트(ShortCircuit) → 다음 DAG 트리거] 3태스크,
-        #     relations 는 종단이라 단일 태스크. 게이트는 신규 산출이 있을 때만 트리거를 통과시킨다(빈 처리 회피).
+        # (a) push 체이닝 — collect/process/relations 는 [래퍼 → 게이트(ShortCircuit) → 다음/자기 DAG 트리거].
+        #     067: 연속 드레인 self-retrigger — process/relations 는 처리분이 남으면 자기 자신을 재트리거
+        #     (gate_more_*→trigger_more). 게이트는 신규 산출이 있을 때만 트리거를 통과시킨다(빈 처리 회피).
         bag = _dagbag()
         expected_tasks = {
             # 061: dag_collect +gate_inbox_nonempty(인입 게이트), dag_process +archive_processed(꼬리 아카이브).
+            # 067: dag_process +gate_more_received/trigger_more · dag_relations +gate_more_unresolved/trigger_more(self-retrigger).
             "dag_collect": {"gate_inbox_nonempty", _COLLECT_TASK, "gate_new_received", "trigger_process"},
-            "dag_process": {_PROCESS_TASK, "gate_new_registered", "trigger_relations", "archive_processed"},
-            "dag_relations": {_RELATIONS_TASK},
+            "dag_process": {_PROCESS_TASK, "gate_new_registered", "trigger_relations", "archive_processed",
+                            "gate_more_received", "trigger_more"},
+            "dag_relations": {_RELATIONS_TASK, "gate_more_unresolved", "trigger_more"},
         }
         for dag_id, tasks in expected_tasks.items():
             self.assertEqual({t.task_id for t in bag.dags[dag_id].tasks}, tasks,
@@ -158,8 +161,15 @@ class TestDagBagIntegrity(unittest.TestCase):
         self.assertEqual(proc.get_task("trigger_relations").trigger_dag_id, "dag_relations")
         self.assertIn("gate_new_registered", proc.get_task(_PROCESS_TASK).downstream_task_ids)
         self.assertIn("trigger_relations", proc.get_task("gate_new_registered").downstream_task_ids)
-        # relations 는 종단 — 하위 트리거 없음.
-        self.assertEqual(bag.dags["dag_relations"].get_task(_RELATIONS_TASK).downstream_task_ids, set())
+        # 067 self-retrigger — process → gate_more_received → trigger_more(dag_process 자기 재트리거).
+        self.assertEqual(proc.get_task("trigger_more").trigger_dag_id, "dag_process")
+        self.assertIn("gate_more_received", proc.get_task(_PROCESS_TASK).downstream_task_ids)
+        self.assertIn("trigger_more", proc.get_task("gate_more_received").downstream_task_ids)
+        # 067 self-retrigger — relations 는 종단이 아니라 propose → gate_more_unresolved → trigger_more(dag_relations 자기 재트리거).
+        rel = bag.dags["dag_relations"]
+        self.assertEqual(rel.get_task("trigger_more").trigger_dag_id, "dag_relations")
+        self.assertIn("gate_more_unresolved", rel.get_task(_RELATIONS_TASK).downstream_task_ids)
+        self.assertIn("trigger_more", rel.get_task("gate_more_unresolved").downstream_task_ids)
 
     def test_archive_wiring(self) -> None:
         # 061: 인입 게이트 → collect_inbox(빈 인입서 collect 스킵), process_batch → archive_processed(꼬리·병렬).
