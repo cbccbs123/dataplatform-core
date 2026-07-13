@@ -9,7 +9,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-from src.search.query_preprocess import noun_phrase_query, structure_user_query
+from src.search.query_preprocess import (
+    morph_noun_phrase_query,
+    noun_phrase_query,
+    structure_user_query,
+)
 
 
 def _client_returning(content: str) -> MagicMock:
@@ -121,6 +125,76 @@ class TestNounPhraseQuery(unittest.TestCase):
         c = _client_returning('{"query_norm": "X"}')
         self.assertEqual(noun_phrase_query("", client=c), "")
         c.chat.completions.create.assert_not_called()
+
+
+class TestMorphNounPhraseQuery(unittest.TestCase):
+    """072: 형태소 명사 정규화(analyze_fn 주입 seam·OS 없이 순수 검증). FR-001~004.
+
+    실제 배선(nori _analyze·client)이 아니라 가짜 ``analyze_fn`` 을 주입해 판별 게이트·명사 추출·
+    스톱워드 제거·폴백을 결정적으로 검증한다(헌법 3조 — 순수 함수).
+    """
+
+    NOUN = frozenset({"NNG", "NNP", "SL", "SH", "SN"})
+    STOP = frozenset({"영상", "사진", "추천", "방법", "법"})
+
+    def _analyze(self, mapping: dict[str, list[tuple[str, str]]]):
+        calls: list[str] = []
+
+        def fn(text: str) -> list[tuple[str, str]]:
+            calls.append(text)
+            return mapping.get(text, [])
+
+        fn.calls = calls  # type: ignore[attr-defined]
+        return fn
+
+    def _norm(self, query, fn, min_word_tokens=3):
+        return morph_noun_phrase_query(
+            query, analyze_fn=fn, stopwords=self.STOP, noun_pos=self.NOUN,
+            min_word_tokens=min_word_tokens,
+        )
+
+    def test_extracts_nouns_and_removes_stopwords(self) -> None:
+        # 명사(NNG…)만 남기고 조사·어미(비명사)·스톱워드(법·영상·추천) 제거 → 핵심어만.
+        q = "김밥 만드는 법 영상 추천"
+        fn = self._analyze({q: [
+            ("김밥", "NNG"), ("만들", "VV"), ("는", "ETM"),
+            ("법", "NNG"), ("영상", "NNG"), ("추천", "NNG"),
+        ]})
+        self.assertEqual(self._norm(q, fn), "김밥")
+
+    def test_preserves_order_and_dedupes(self) -> None:
+        q = "서울 서울 여행 명소 추천"  # 서울 중복·추천 스톱워드
+        fn = self._analyze({q: [
+            ("서울", "NNP"), ("서울", "NNP"), ("여행", "NNG"), ("명소", "NNG"), ("추천", "NNG"),
+        ]})
+        self.assertEqual(self._norm(q, fn), "서울 여행 명소")
+
+    def test_word_query_below_min_tokens_passthrough_no_analyze(self) -> None:
+        # FR-001: 어절<min 이면 단어 질의 → 원문 그대로·analyze 미호출(IO·지연 0).
+        fn = self._analyze({})
+        self.assertEqual(self._norm("양궁", fn), "양궁")           # 1어절
+        self.assertEqual(self._norm("케이팝 댄스", fn), "케이팝 댄스")  # 2어절 < 3
+        self.assertEqual(fn.calls, [])  # analyze 한 번도 호출 안 됨
+
+    def test_empty_result_falls_back_to_original(self) -> None:
+        # FR-004: 남은 명사가 없으면(전부 스톱워드) 원문 폴백.
+        q = "사진 영상 추천 방법"
+        fn = self._analyze({q: [
+            ("사진", "NNG"), ("영상", "NNG"), ("추천", "NNG"), ("방법", "NNG"),
+        ]})
+        self.assertEqual(self._norm(q, fn), q)
+
+    def test_blank_query_passthrough_no_analyze(self) -> None:
+        fn = self._analyze({})
+        self.assertEqual(self._norm("", fn), "")
+        self.assertEqual(self._norm("   ", fn), "   ")
+        self.assertEqual(fn.calls, [])
+
+    def test_deterministic_same_query_same_result(self) -> None:
+        q = "겨울 한라산 설경 사진 추천"
+        toks = [("겨울", "NNG"), ("한라산", "NNP"), ("설경", "NNG"), ("사진", "NNG"), ("추천", "NNG")]
+        outs = [self._norm(q, self._analyze({q: toks})) for _ in range(3)]
+        self.assertEqual(outs, ["겨울 한라산 설경"] * 3)
 
 
 if __name__ == "__main__":

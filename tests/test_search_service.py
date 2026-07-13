@@ -163,6 +163,71 @@ class TestBackendOpenSearchBuckets(unittest.TestCase):
         self.assertIn("os_gate", out["meta"])  # 027 게이트 관측성 합류(F4)
 
 
+class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
+    """072 — query-norm 토글 on 이면 검색 직전 질의를 **nori 형태소 명사(client _analyze)**로 정규화해
+    ``os_search_fn`` 에 전달한다. off·단어 질의(어절<3)는 원문 그대로·``_analyze`` 미호출."""
+
+    def _analyze_client(self, tokens: list[dict]) -> object:
+        from unittest.mock import MagicMock
+
+        c = MagicMock()
+        c.indices.analyze.return_value = {"detail": {"tokenizer": {"tokens": tokens}}}
+        return c
+
+    def test_morph_norm_applied_when_enabled(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch", search_os_query_norm_enabled=True, opensearch_index="assets",
+        )
+        client = self._analyze_client([
+            {"token": "김밥", "leftPOS": "NNG(General Noun)"},
+            {"token": "만들", "leftPOS": "VV(Verb)"},        # 비명사 → 제거
+            {"token": "법", "leftPOS": "NNG(General Noun)"},   # 스톱워드 → 제거
+            {"token": "영상", "leftPOS": "NNG(General Noun)"},  # 스톱워드 → 제거
+        ])
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "김밥 만드는 법 영상", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: client,
+            )
+        self.assertEqual(cap["query"], "김밥")  # 명사만·스톱워드 제거된 정규화 질의가 OS seam 에 감
+        client.indices.analyze.assert_called()  # nori _analyze 경유(형태소 정규화)
+
+    def test_word_query_passthrough_no_analyze(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch", search_os_query_norm_enabled=True, opensearch_index="assets",
+        )
+        client = self._analyze_client([])
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "양궁", modalities=["text"],  # 1어절 단어 질의
+                _os_search_fn=fake_os, _os_client_fn=lambda: client,
+            )
+        self.assertEqual(cap["query"], "양궁")  # 어절<3 → 원문 그대로
+        client.indices.analyze.assert_not_called()  # 단어 질의는 _analyze IO 스킵
+
+    def test_off_passthrough_no_analyze(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch", search_os_query_norm_enabled=False,
+        )
+        client = self._analyze_client([])
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "김밥 만드는 법 영상", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: client,
+            )
+        self.assertEqual(cap["query"], "김밥 만드는 법 영상")  # off → 원문 바이트 동일(회귀 0·SC-002)
+        client.indices.analyze.assert_not_called()
+
+
 class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
     """027 — OS 경로가 cfg 의 게이트·컷 임계를 ``os_search_fn`` 에 전달한다.
 

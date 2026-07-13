@@ -36,6 +36,7 @@ from src.config.search_constants import (
     OS_CUTOFF_FLOOR_DEFAULT,
     OS_FUSION_WEIGHTS_DEFAULT,
     OS_KNN_SAMPLE_K,
+    OS_QUERY_NORM_DECOMPOUND,
     OS_QUERY_NORM_ENABLED_DEFAULT,
     OS_RERANK_ENABLED_DEFAULT,
     OS_RERANK_MODEL_DEFAULT,
@@ -421,6 +422,9 @@ def normalize_query(
     오컷 직격)를 **설정 토글**로 들인다. 021 FR-004(검색시점 LLM 금지)를 거버넌스 절차로 개정한
     뒤에만 켜며(G2), 본 함수는 그 토글의 **순수 잎**이다 — ``llm_fn`` 주입 seam·네트워크 0·결정적.
 
+    072: ``llm_fn`` 은 LLM 전용이 아니라 **임의의 정규화 콜백**(nori 형태소 명사추출 등)을 받는다 —
+    파라미터명은 하위호환으로 유지하나 실제 주입체는 형태소 정규화(검색시점 LLM 0·결정적)일 수 있다.
+
     - ``enabled=False``(기본): 원문 그대로 반환한다 — **바이트 동일 passthrough**(027 회귀 0의 봉인
       지점). 빈/``None`` 질의도 정규화할 내용이 없으므로 그대로 반환한다(llm_fn 미호출 안전).
     - ``enabled=True``: ``llm_fn(query)`` 가 돌려준 명사구를 반환한다. ``llm_fn`` 의 결정성(temp=0·
@@ -569,6 +573,36 @@ def embed_query(query: str, *, channel: str) -> list[float]:
     return embed_query_for_media_search(
         query, model_name=model_for_channel(channel), channel=channel
     )
+
+
+def nori_analyze_tokens(
+    client: Any, text: str, *, index: str, decompound: str = OS_QUERY_NORM_DECOMPOUND
+) -> list[tuple[str, str]]:
+    """OS nori ``_analyze`` 로 텍스트를 ``(token, pos)`` 리스트로 분석한다(072 IO seam — 형태소 정규화 잎).
+
+    ``morph_noun_phrase_query`` 의 ``analyze_fn`` 실체다. ``decompound_mode`` 를 즉석 지정한 nori_tokenizer
+    + ``explain=True`` 로 각 토큰의 품사(``leftPOS`` 앞 코드, 예 'NNG(General Noun)'→'NNG')를 얻는다.
+    **색인 재색인 없이 질의 분석만** 모드를 정할 수 있고, 인덱스는 **읽기 전용**으로만 만진다(헌법 6조·
+    운영 인덱스 무접촉). OS 미도달 예외는 그대로 전파(FR-007 동형 — silent 폴백 금지). 빈/공백 텍스트는
+    OS 미접촉·빈 리스트. 응답 누락 키도 안전 처리(None → 빈).
+    """
+    if not text or not text.strip():
+        return []
+    body = {
+        "tokenizer": {"type": "nori_tokenizer", "decompound_mode": decompound},
+        "explain": True,
+        "text": text,
+    }
+    resp = client.indices.analyze(index=index, body=body)  # OS 미도달 예외 전파(FR-007)
+    tokenizer = ((resp or {}).get("detail") or {}).get("tokenizer") or {}
+    out: list[tuple[str, str]] = []
+    for t in tokenizer.get("tokens") or []:
+        tok = t.get("token")
+        if tok is None:
+            continue
+        pos = str(t.get("leftPOS") or "").split("(")[0]
+        out.append((str(tok), pos))
+    return out
 
 
 _LOG = logging.getLogger(__name__)

@@ -114,12 +114,13 @@ def _grouped_via_opensearch(
     - **LLM 미접촉(FR-002·SC-004)**: ``structure_user_query``(검색 질의 구조화 LLM)를 호출하지 않는다
       — 멀티모달 LLM 0·ms. 037 PG 검색 제거로 PG 전용 파라미터(structured·alpha·fusion·query_model_name·
       chunk_agg·grouped_fn)는 search_hybrid 시그니처에만 하위호환으로 남고 이 경로에서는 쓰이지 않는다.
-    - **query-norm 토글(029 FR-004·021 개정)**: ``search_os_query_norm_enabled`` on(기본 off)이면 검색
-      직전 질의를 **명사구 정규화**(``noun_phrase_query``·gemma·temp=0·env 입력 0·src/llm/client 단일
-      seam)한 뒤 그 질의를 OS 에 넘긴다 — 정규화를 service 레벨에서 1회만 수행해(중복 LLM 0) 정규화된
-      질의가 OS seam 안에서 임베딩·BM25·rerank 채점에 동일 적용되게 한다. 관측성은 top-level
-      ``meta["query_norm"]`` 로 노출(os_gate 미오염). off 면 원문 passthrough(바이트 동일·noun_phrase
-      미호출 — 021 FR-004 기본 동작 보존, SC-001). ``query_norm_fn`` 은 테스트 주입 seam.
+    - **query-norm 토글(072 — 029 seam 재사용, gemma 대체)**: ``search_os_query_norm_enabled`` on 이면
+      검색 직전 **자연어 질의(어절≥3)**를 **nori 형태소 명사추출 + 모달리티어 스톱워드 제거**로 정규화
+      (검색시점 LLM 0·결정적·``_analyze`` 사전 기반)한 뒤 OS 에 넘긴다 — 정규화를 service 레벨에서 1회만
+      수행해 정규화된 질의가 OS seam 안에서 임베딩·BM25·rerank 채점에 동일 적용되게 한다. 단어 질의
+      (어절<3)는 원문 그대로(정규화·_analyze 스킵·지연 0). 관측성은 top-level ``meta["query_norm"]`` 로
+      노출(os_gate 미오염). off 면 원문 passthrough(바이트 동일·정규화 미호출, SC-002). ``query_norm_fn``
+      은 테스트/커스텀 정규화 주입 seam(주입 시 형태소 대신 사용).
     - **(buckets, gate_meta) 튜플 수신(027)**: ``os_search_fn``(search_assets_os)은 클라이언트 융합
       전환으로 버킷과 함께 게이트 메타(모달리티별 top·baseline·gate_passed·cut_count)를 돌려준다 →
       ``meta["os_gate"]`` 로 합류시켜 빈 버킷이 no-match 판정인지 즉시 관측 가능하게 한다(F4 관측성).
@@ -158,22 +159,41 @@ def _grouped_via_opensearch(
         else getattr(cfg, "search_os_cutoff_enabled", search_constants.OS_CUTOFF_ENABLED_DEFAULT)
     )
 
-    # 029 query-norm(021 FR-004 토글 개정): cfg 토글(getattr 폴백=search_constants 단일 출처·기본 off)을
-    # 읽어, on 이면 검색 직전 질의를 **service 레벨에서 1회** 명사구 정규화한다. 정규화를 여기 한 곳에서
-    # 끝내는 이유: ① LLM 호출을 1회로(중복 0), ② 관측성(FR-007)을 top-level meta["query_norm"] 로 노출해
-    # 모달리티 키 dict 인 os_gate(gate_meta)를 오염시키지 않음(골든 하니스 등 gate_meta 순회 소비자 보호 —
-    # search_assets_os 는 별도 반환·gate_meta 오염 없이 정규화된 질의만 받음). off(기본)면 normalize_query
-    # 가 원문 그대로 돌려줘 noun_phrase_query 미호출·바이트 동일(SC-001·FR-008). 정규화된 질의가 OS seam
-    # 안에서 임베딩·BM25·rerank 채점에 동일 적용된다(query_norm_fn 미주입+enabled 면 noun_phrase_query 지연 import).
+    # 072 query-norm(029 seam 재사용): cfg 토글(getattr 폴백=search_constants 단일 출처)을 읽어, on 이면
+    # 검색 직전 질의를 **service 레벨에서 1회** 형태소 정규화한다. 정규화를 여기 한 곳에서 끝내는 이유:
+    # ① 정규화 1회(중복 0), ② 관측성(FR-007)을 top-level meta["query_norm"] 로 노출해 모달리티 키 dict 인
+    # os_gate(gate_meta)를 오염시키지 않음(골든 하니스 등 gate_meta 순회 소비자 보호 — search_assets_os 는
+    # 별도 반환·gate_meta 오염 없이 정규화된 질의만 받음). off(기본)면 normalize_query 가 원문 그대로
+    # 돌려줘 정규화 미호출·바이트 동일(SC-002). 정규화된 질의가 OS seam 안에서 임베딩·BM25·rerank 채점에
+    # 동일 적용된다(query_norm_fn 미주입+enabled 면 아래 morph_noun_phrase_query 클로저를 배선).
     qn_enabled = getattr(
         cfg, "search_os_query_norm_enabled", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
     )
+    # 072: 형태소 정규화가 nori _analyze(client)를 쓰므로 client 를 정규화 앞에서 획득한다(아래
+    # os_search_fn 도 이 동일 client 를 재사용 — 생성 1회). OS 생성 실패 예외는 그대로 전파(FR-007).
+    client = os_client_fn()
     norm_fn = query_norm_fn
     if qn_enabled and norm_fn is None:
-        from src.search.query_preprocess import noun_phrase_query as norm_fn
+        # 072: 검색시점 질의 정규화를 gemma(LLM) → **nori 형태소 명사추출+스톱워드**로 교체(측정 2026-07-13:
+        # 자연어 nDCG 0.490→0.591 로 LLM 정규화 0.575 상회·검색시점 LLM 0·결정적). client·index 를 클로저로
+        # 바인딩해 morph_noun_phrase_query 의 analyze_fn(nori _analyze IO)을 배선한다. query_norm_fn 주입
+        # (테스트 seam) 시엔 그것을 우선한다(위 norm_fn = query_norm_fn).
+        from src.search.opensearch_search import nori_analyze_tokens
+        from src.search.query_preprocess import morph_noun_phrase_query
+
+        _norm_index = getattr(cfg, "opensearch_index", "assets")
+
+        def norm_fn(q: str, _client: Any = client, _index: str = _norm_index) -> str:
+            return morph_noun_phrase_query(
+                q,
+                analyze_fn=lambda text: nori_analyze_tokens(_client, text, index=_index),
+                stopwords=search_constants.OS_QUERY_NORM_STOPWORDS,
+                noun_pos=search_constants.OS_QUERY_NORM_NOUN_POS,
+                min_word_tokens=search_constants.OS_QUERY_NORM_MIN_WORD_TOKENS,
+            )
+
     os_query = os_normalize_query(query, enabled=qn_enabled, llm_fn=norm_fn)
 
-    client = os_client_fn()  # OS 클라이언트 생성 실패 시 예외 전파(FR-007)
     os_buckets, gate_meta = os_search_fn(
         client,
         os_query,  # 029: 정규화된 질의(off 면 원문 그대로) — 임베딩·BM25·rerank 채점에 동일 적용
@@ -271,9 +291,9 @@ def search_hybrid(
 
     ``disable_os_cutoff`` 는 OS 경로의 **게이트·per-result 컷을 모두 끄는 디버그 우회**다(기본 False).
     True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(sample_search_api ``no_cutoff`` 배선).
-    **029 query-norm 토글**(``search_os_query_norm_enabled``, 기본 off)이 on 이면 검색 직전 질의를
-    명사구 정규화(단일 seam·temp=0·env 입력 0)한 뒤 임베딩·BM25·rerank 채점에 동일 적용한다 — off 면
-    원문 ``query`` 그대로(바이트 동일).
+    **072 query-norm 토글**(``search_os_query_norm_enabled``, 029 seam 재사용)이 on 이면 검색 직전
+    자연어 질의(어절≥3)를 **nori 형태소 명사추출+스톱워드 제거**(검색시점 LLM 0·결정적)한 뒤 임베딩·
+    BM25·rerank 채점에 동일 적용한다 — 단어 질의(어절<3)·off 는 원문 ``query`` 그대로(바이트 동일).
 
     ``text_channel`` 은 텍스트 임베딩 채널 선택이다(텍스트 채널 한정). **미지정(None)** 이면 운영 활성
     프로파일(018, 적재·검색·관계 단일 출처)로 해소한다 — ``active_embed_channel()``. 017 A/B 하니스처럼
@@ -282,7 +302,8 @@ def search_hybrid(
     (순수 단위 등)에서는 활성 해소가 ``RuntimeError`` 이므로 기존 기본 채널 ``'st'`` 로 보수적 폴백한다.
 
     ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/
-    ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 ``noun_phrase_query`` 지연 import).
+    ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 072 ``morph_noun_phrase_query``
+    형태소 클로저를 client·index 로 배선).
 
     **057 FR-202 서버 lexical 필터**: ``must_include``/``must_exclude`` 를 OS seam 에 그대로 넘겨 BM25
     본문의 must(전토큰 AND)/must_not 로 **전체 코퍼스**에 적용한다(프론트 페이지-only 필터의 서버 진실

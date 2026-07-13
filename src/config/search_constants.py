@@ -56,6 +56,25 @@ OS_RERANK_TAU_DEFAULT: float = 0.0  # augment 기본 = 재정렬만(드롭 0). �
 # 021 FR-004 정식 개정 동반). 단일 출처(F1)이므로 settings resolver·search_service 배선이 이 값을 공유한다.
 OS_QUERY_NORM_ENABLED_DEFAULT: bool = False
 
+# ── 072: 검색 질의 형태소 정규화 상수 (단일 출처 F1) ──────────────────────────
+# 029 query-norm seam 의 정규화기를 gemma(LLM)에서 **nori 형태소 명사 추출 + 스톱워드 제거**로 교체한다
+# (측정 2026-07-13: 자연어 nDCG@10 baseline 0.490 → 형태소 0.591 > LLM 0.575, 검색시점 LLM 0·결정적).
+# 형태소가 효과 낸 본질 = kNN 입력 문장의 껍데기어 제거(복합어 토큰정확도·사전등록·재색인은 측정상 무효).
+#
+# 자연어 vs 단어 판별: 어절 수(공백 분리) < MIN 이면 원문 그대로(단어 검색은 정규화·_analyze IO 스킵·지연 0).
+OS_QUERY_NORM_MIN_WORD_TOKENS: int = 3
+# nori decompound_mode. none=복합명사 보존("김밥"을 "김 밥"으로 안 쪼갬 — discard 대비 근소 우위).
+OS_QUERY_NORM_DECOMPOUND: str = "none"
+# 추출 대상 명사류 품사(nori leftPOS 앞 코드): 일반/고유명사·외래어(SL)·한자(SH)·숫자(SN).
+# 조사·어미·동사·부사는 자동 탈락(품사 필터). 의존명사(NNB)·대명사(NP)는 제외(검색 변별력 낮음).
+OS_QUERY_NORM_NOUN_POS: frozenset[str] = frozenset({"NNG", "NNP", "SL", "SH", "SN"})
+# 명사지만 검색 변별력 없는 모달리티어·지시성 명사(스톱워드). 이 제거가 개선의 최대 레버(+0.075).
+# 닫힌·안정적 집합(매체 종류 + 검색 지시어)이라 자산 증가와 무관하게 거의 불변(유지보수 소).
+OS_QUERY_NORM_STOPWORDS: frozenset[str] = frozenset({
+    "영상", "사진", "이미지", "동영상", "그림", "문서", "자료", "정보", "추천",
+    "소개", "방법", "법", "모습", "관련", "내용", "종류", "장면", "클립",
+})
+
 # ── 044 evidence · lexical rescue (단일 출처 — G0) ───────────────────────────
 # OpenSearch BM25를 필드별 named query(`hit_keywords` 등 `_name`)로 쪼갠 뒤, 게이트 실패 버킷에서
 # ``matched_queries`` 로 **어느 필드에서 hit 됐는지** 관측한다. ``query_evidence.evidence_score`` 가
@@ -134,6 +153,10 @@ __all__ = [
     "OS_FUSION_WEIGHTS_DEFAULT",
     "OS_KNN_SAMPLE_K",
     "OS_QUERY_NORM_ENABLED_DEFAULT",
+    "OS_QUERY_NORM_MIN_WORD_TOKENS",
+    "OS_QUERY_NORM_DECOMPOUND",
+    "OS_QUERY_NORM_NOUN_POS",
+    "OS_QUERY_NORM_STOPWORDS",
     "OS_RESULT_FLOOR_DEFAULT",
     "OS_RERANK_ENABLED_DEFAULT",
     "OS_RERANK_MODEL_DEFAULT",

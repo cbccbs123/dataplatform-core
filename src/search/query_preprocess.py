@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Collection
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -155,4 +156,42 @@ def noun_phrase_query(query: str, *, client: Any | None = None) -> str:
     if isinstance(norm, str) and norm.strip():
         return norm.strip()
     return query  # fail-safe: 빈/스키마 위반 응답 → 원문 폴백(027 경로 — 결정성·회귀 0 보존)
+
+
+# ── 072: 검색 질의 형태소 명사 정규화(029 LLM 정규화 대체 — nori _analyze·LLM 0·결정적) ──────────
+def morph_noun_phrase_query(
+    query: str,
+    *,
+    analyze_fn: Callable[[str], list[tuple[str, str]]],
+    stopwords: Collection[str],
+    noun_pos: Collection[str],
+    min_word_tokens: int,
+) -> str:
+    """검색 질의를 nori 형태소 **명사구**로 정규화한다(072 FR-001~004·헌법 §3 결정성).
+
+    029 ``noun_phrase_query``(gemma·LLM)를 대체하는 **LLM-free 정규화**다 — 측정(2026-07-13)에서 형태소
+    명사추출+스톱워드가 자연어 nDCG@10 0.490→0.591 로 LLM 정규화(0.575)를 웃돌고, 검색시점 LLM 0·
+    결정적(``_analyze`` 사전 기반)이라 지연도 없앤다. 효과의 본질은 kNN 입력 문장에서 껍데기어(영상·추천·
+    방법) 제거이며, 복합어 토큰정확도·사전등록·재색인은 측정상 무효(범위 밖·072 spec).
+
+    - ``analyze_fn``: ``text → [(token, pos)]`` **주입 seam**. 실제는 nori ``_analyze``(OS IO·
+      ``opensearch_search.nori_analyze_tokens``) 래퍼이고, 단위 테스트는 가짜 함수를 주입해 OS 없이
+      순수 검증한다(헌법 3조 — 결정적 순수 함수).
+    - **판별(FR-001)**: 어절 수(공백 분리) < ``min_word_tokens`` 면 **단어 질의**로 보고 원문 그대로
+      반환한다 — analyze_fn 미호출(단어 검색은 IO·지연 0). 빈/공백 질의도 원문 그대로.
+    - **명사 추출(FR-002)**: ``noun_pos`` 품사만 남기고 **순서 보존·중복 제거**.
+    - **스톱워드(FR-003)**: ``stopwords`` 의 모달리티어·지시성 명사 제거.
+    - **폴백(FR-004)**: 남은 명사가 없으면 **원문 질의 그대로** 반환(정규화가 검색을 깨지 않게 — SC-001).
+    """
+    if not query or not query.strip():
+        return query
+    if len(query.split()) < min_word_tokens:
+        return query  # 단어 질의 — 정규화 불요(analyze 미호출·지연 0)
+    seen: set[str] = set()
+    nouns: list[str] = []
+    for token, pos in analyze_fn(query):
+        if pos in noun_pos and token not in stopwords and token not in seen:
+            seen.add(token)
+            nouns.append(token)
+    return " ".join(nouns) if nouns else query  # 빈결과 → 원문 폴백
 

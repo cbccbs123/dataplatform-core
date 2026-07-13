@@ -34,6 +34,7 @@ from src.search.opensearch_search import (
     gate_signal,
     knn_score_to_cosine,
     minmax_normalize,
+    nori_analyze_tokens,
     normalize_query,
     os_hit_to_row,
     passes_cutoff,
@@ -238,6 +239,52 @@ class ImageVideoSubqueryBodyTest(unittest.TestCase):
 
     def test_video_subquery_bodies(self) -> None:
         self._check_modality("video")
+
+
+class NoriAnalyzeTokensTest(unittest.TestCase):
+    """072 — nori ``_analyze`` 응답을 (token, pos) 로 파싱하는 IO seam(가짜 client·OS 불필요)."""
+
+    def _client(self, tokens: list[dict]) -> object:
+        from unittest.mock import MagicMock
+
+        c = MagicMock()
+        c.indices.analyze.return_value = {"detail": {"tokenizer": {"tokens": tokens}}}
+        return c
+
+    def test_parses_token_and_pos_code(self) -> None:
+        c = self._client([
+            {"token": "김밥", "leftPOS": "NNG(General Noun)"},
+            {"token": "는", "leftPOS": "ETM(Adnominal form)"},
+        ])
+        self.assertEqual(
+            nori_analyze_tokens(c, "김밥는", index="x"),
+            [("김밥", "NNG"), ("는", "ETM")],
+        )
+
+    def test_blank_text_no_os_call(self) -> None:
+        c = self._client([])
+        self.assertEqual(nori_analyze_tokens(c, "", index="x"), [])
+        self.assertEqual(nori_analyze_tokens(c, "   ", index="x"), [])
+        c.indices.analyze.assert_not_called()
+
+    def test_missing_keys_safe_empty(self) -> None:
+        from unittest.mock import MagicMock
+
+        c = MagicMock()
+        c.indices.analyze.return_value = {}  # detail 누락 → 빈 리스트(방어)
+        self.assertEqual(nori_analyze_tokens(c, "질의 문장 하나", index="x"), [])
+
+    def test_request_body_nori_explain_decompound(self) -> None:
+        # 요청 바디가 nori_tokenizer·explain·decompound_mode·index·text 를 정확히 구성하는지(오타 방어).
+        c = self._client([])
+        nori_analyze_tokens(c, "질의 문장", index="myidx", decompound="mixed")
+        kwargs = c.indices.analyze.call_args.kwargs
+        self.assertEqual(kwargs["index"], "myidx")
+        body = kwargs["body"]
+        self.assertEqual(body["tokenizer"]["type"], "nori_tokenizer")
+        self.assertEqual(body["tokenizer"]["decompound_mode"], "mixed")
+        self.assertTrue(body["explain"])
+        self.assertEqual(body["text"], "질의 문장")
 
 
 class KnnScoreToCosineTest(unittest.TestCase):
