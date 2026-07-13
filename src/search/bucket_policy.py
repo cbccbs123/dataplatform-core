@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from src.search.about_filter import about_or_filter
 from src.search.query_evidence import evidence_score, lexical_rescue_keep, strong_evidence_score
 from src.search.query_plan import SearchPolicy
 
@@ -46,6 +47,7 @@ def apply_bucket_policy(
     policy: SearchPolicy,
     evidence_rescue_enabled: bool,
     evidence_debug: bool,
+    about_filter_enabled: bool = False,
     passes_cutoff_fn: Callable[..., bool],
     cut_rows_fn: Callable[..., list[dict[str, Any]]],
     rerank_reorder_fn: Callable[..., tuple[list[dict[str, Any]], list[float]]],
@@ -102,12 +104,19 @@ def apply_bucket_policy(
             kept = []
             cut_count = len(fused) - len(kept)
 
+    # 073: aboutness OR-증거 필터 — 게이트·컷·rescue 생존 행에서 질의 개체와 증거(about∪keywords)가
+    # 전혀 없는 행을 걸러낸다(드롭만·순서 보존·fail-safe 는 about_or_filter 내부: 전멸 시 원행 유지).
+    # cut_count 를 재계산해 관측(gate_meta.cut_count)이 실제 제거 총량을 반영한다. 토글 off 면 무접촉.
+    if about_filter_enabled and kept:
+        kept = about_or_filter(kept, query)
+        cut_count = len(fused) - len(kept)
+
     clean: list[dict[str, Any]] = []
     for row in kept[: int(k)]:
         out_row = {
             key: val
             for key, val in row.items()
-            if key not in ("_cos", "_bm25", "_rrtext", "_keep_reason")
+            if key not in ("_cos", "_bm25", "_rrtext", "_keep_reason", "_about", "_kwtext")
         }
         if evidence_debug:
             mq = out_row.get("matched_queries")

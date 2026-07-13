@@ -16,7 +16,9 @@ from src.search.opensearch_sync import (
     asset_to_doc,
     build_index_body,
     clean_file_name,
+    ensure_about_mapping,
     parse_vector,
+    update_asset_about,
 )
 
 
@@ -570,6 +572,52 @@ class TestSyncAll(unittest.TestCase):
         )
         self.assertEqual(status, "recreated")
         self.assertEqual(client.indices.deleted, ["assets"])
+
+
+class TestAboutField(unittest.TestCase):
+    """073 — aboutness 개체의 색인 표면(매핑·doc 수록·부분 갱신)."""
+
+    def test_mapping_has_about_keyword(self) -> None:
+        body = build_index_body()
+        self.assertEqual(
+            body["mappings"]["properties"]["about"], {"type": "keyword"}
+        )
+
+    def test_asset_to_doc_includes_about(self) -> None:
+        row = {
+            "asset_id": "a1", "modality": "text", "domain_label": "general",
+            "fs_path": "/data/씨름_(씨름).txt",
+            "ext_meta": {"summary": "씨름의 역사", "keywords": ["씨름"], "about": ["씨름"]},
+            "emb": "[0.1,0.2]",
+        }
+        doc = asset_to_doc(row, channel="st")
+        self.assertEqual(doc["about"], ["씨름"])
+
+    def test_asset_to_doc_about_missing_is_empty_list(self) -> None:
+        # 백필 전 자산(about 키 부재) — 빈 리스트(필터 amatch 만 비활성·안전).
+        row = {
+            "asset_id": "a2", "modality": "text", "domain_label": "general",
+            "fs_path": "/x.txt", "ext_meta": {"summary": "s"}, "emb": "[0.1]",
+        }
+        self.assertEqual(asset_to_doc(row, channel="st")["about"], [])
+
+    def test_update_asset_about_partial_doc(self) -> None:
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        update_asset_about(client, "assets", "aid-1", ["씨름", "민속"])
+        client.update.assert_called_once_with(
+            index="assets", id="aid-1", body={"doc": {"about": ["씨름", "민속"]}}
+        )
+
+    def test_ensure_about_mapping_put_mapping(self) -> None:
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        ensure_about_mapping(client, "assets")
+        client.indices.put_mapping.assert_called_once_with(
+            index="assets", body={"properties": {"about": {"type": "keyword"}}}
+        )
 
 
 if __name__ == "__main__":

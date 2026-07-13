@@ -228,6 +228,26 @@ class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
         client.indices.analyze.assert_not_called()
 
 
+class TestBackendOsAboutFilterWiring(unittest.TestCase):
+    """073 — cfg 의 aboutness 필터 토글이 OS seam(``about_filter_enabled``)에 전달된다."""
+
+    def test_toggle_forwarded_from_cfg(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch", search_about_filter_enabled=True)
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid("질의", modalities=["text"], _os_search_fn=fake_os, _os_client_fn=lambda: "C")
+        self.assertIs(cap["about_filter_enabled"], True)
+
+    def test_default_falls_back_to_constant_false(self) -> None:
+        # settings 미초기화(순수 단위) → search_constants 기본 False 폴백(회귀 0).
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        search_hybrid("질의", modalities=["text"], _os_search_fn=fake_os, _os_client_fn=lambda: "C")
+        self.assertIs(cap["about_filter_enabled"], search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT)
+        self.assertIs(cap["about_filter_enabled"], False)
+
+
 class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
     """027 — OS 경로가 cfg 의 게이트·컷 임계를 ``os_search_fn`` 에 전달한다.
 

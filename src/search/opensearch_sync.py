@@ -219,6 +219,9 @@ def build_index_body(
                 # keyword. 평면 topics/subtopics 는 부모-자식 짝을 잃어 프론트 트리가 교차곱으로
                 # 오배치되는 문제를 해소한다(표시·패싯 전용·랭킹 미반영). topics/subtopics 옆 동형 keyword.
                 "topic_pairs": {"type": "keyword"},
+                # 073 aboutness 개체 — 적재시 LLM 1회로 확정한 "이 자산이 무엇에 관한 것인가" 명사
+                # 1~3개(ext_meta['about']). 검색 OR-증거 필터(about_or_filter)의 매칭 소스(랭킹 미반영).
+                "about": {"type": "keyword"},
                 "filter_kw": {
                     "properties": {
                         "file_ext": {"type": "keyword"},
@@ -365,6 +368,9 @@ def asset_to_doc(
         "summary": summary,
         "keywords": [str(k) for k in keywords],
         "labels": labels,
+        # 073: aboutness 개체(ext_meta['about']·적재시 확정). 미추출 자산은 빈 리스트 — 검색 필터의
+        # amatch 만 비활성(kmatch·fail-safe 는 동작)이라 백필 전에도 안전.
+        "about": [str(a) for a in (ext.get("about") or [])],
     }
     # 영벡터(퇴화 임베딩 — 빈 STT 등)는 cosinesimil knn 이 거부하므로 embedding 필드를 **생략**한다.
     # 해당 자산은 텍스트(BM25)로만 검색되고 벡터 검색 대상에서만 빠진다(색인 실패 대신 우아한 처리).
@@ -570,6 +576,24 @@ def update_asset_topics(
     비어도 필드를 실어 보낸다(전체문서 색인과 의도적으로 다른 대칭). ``_id`` 는 ``index`` 색인과 동형으로 str.
     """
     client.update(index=index, id=str(asset_id), body={"doc": _topics_doc_fields(topics)})
+
+
+def update_asset_about(client: Any, index: str, asset_id: Any, about: list[str]) -> None:
+    """자산 문서의 ``about`` 필드만 부분 갱신한다(073 백필용 — 전체 재색인 아님).
+
+    ``update_asset_topics`` 동형: OS ``update`` 부분문서로 aboutness 개체만 덮어쓴다. 빈 리스트도
+    실어 보내 stale 값을 지운다(--refresh 재추출 대칭). ``_id`` 는 색인과 동형으로 str.
+    """
+    client.update(index=index, id=str(asset_id), body={"doc": {"about": [str(a) for a in about]}})
+
+
+def ensure_about_mapping(client: Any, index: str) -> None:
+    """기존 인덱스에 ``about``(keyword) 매핑을 추가한다(073 — put_mapping 은 멱등·재색인 불요).
+
+    새 인덱스는 ``build_index_body`` 가 이미 포함하므로 이 함수는 **백필이 구 인덱스에 1회** 호출한다.
+    이미 있으면 OS 가 no-op 처리한다(동일 타입 재선언 허용).
+    """
+    client.indices.put_mapping(index=index, body={"properties": {"about": {"type": "keyword"}}})
 
 
 def _bulk_actions(index: str, docs: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:

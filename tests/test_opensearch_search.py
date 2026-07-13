@@ -773,7 +773,7 @@ class FuseHybridTest(unittest.TestCase):
         self.assertAlmostEqual(out["knn_only"]["_cos"], 0.4)
 
     def test_row_shape_homogeneous_with_media_search(self) -> None:
-        # SC-005: 행은 os_hit_to_row 동형 키 + 내부키(_cos·_bm25·_rrtext — 응답 전 전부 제거).
+        # SC-005: 행은 os_hit_to_row 동형 키 + 내부키(_cos·_bm25·_rrtext·_about·_kwtext — 응답 전 전부 제거).
         out = fuse_hybrid([self._bm25_hit("a", 1.0)], [], weights=(0.5, 0.5))
         row = out[0]
         self.assertEqual(
@@ -781,7 +781,8 @@ class FuseHybridTest(unittest.TestCase):
             {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
              "topics", "subtopics",  # 057-후속: topics/subtopics 통과
              "topic_pairs",  # 059: 부모>자식 짝 통과
-             "_cos", "_bm25", "_rrtext"},
+             "_cos", "_bm25", "_rrtext",
+             "_about", "_kwtext"},  # 073: aboutness OR-증거 필터 내부키(bucket_policy clean 제거)
         )
         self.assertEqual(row["modality"], "text")
 

@@ -217,6 +217,10 @@ def _grouped_via_opensearch(
         rerank_top_r=getattr(cfg, "search_os_rerank_top_r", search_constants.OS_RERANK_TOP_R_DEFAULT),
         rerank_tau=getattr(cfg, "search_os_rerank_tau", search_constants.OS_RERANK_TAU_DEFAULT),
         rerank_model=getattr(cfg, "search_os_rerank_model", search_constants.OS_RERANK_MODEL_DEFAULT),
+        # 073: aboutness OR-증거 필터(기본 off 상수 폴백 — settings 미초기화 순수 단위 방어).
+        about_filter_enabled=getattr(
+            cfg, "search_about_filter_enabled", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT
+        ),
         search_mode=search_mode,
         search_policy=plan.policy,
         evidence_rescue_enabled=getattr(

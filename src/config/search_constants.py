@@ -75,6 +75,15 @@ OS_QUERY_NORM_STOPWORDS: frozenset[str] = frozenset({
     "소개", "방법", "법", "모습", "관련", "내용", "종류", "장면", "클립",
 })
 
+# ── 073: aboutness OR-증거 필터 상수(단일 출처 F1) ─────────────────────────────
+# 적재시 확정한 about 개체 + keywords 를 증거로, 질의 개체와 무증거 행을 버킷에서 걸러낸다
+# (검색시점 LLM 0·전체 노출 깊이 적용). 측정(2026-07-13): @10 무관 −4~7%p·연관 무손실.
+# 기본 off — dev 는 aboutness 백필 완료 후 .env opt-in(백필 전엔 about 부재로 실효 없음·fail-safe 는 동작).
+SEARCH_ABOUT_FILTER_ENABLED_DEFAULT: bool = False
+# 판별력 명사 선별 임계(질의별 상대 DF): 질의 명사가 후보 행의 이 비율을 초과해 keywords 에 등장하면
+# 흔한 명사('기술'·'풍경')로 보고 kmatch 에서 제외한다. 정적 불용어 사전 불요(자산 증가 자가적응).
+ABOUT_FILTER_NOUN_MAX_MATCH_RATIO: float = 0.5
+
 # ── 044 evidence · lexical rescue (단일 출처 — G0) ───────────────────────────
 # OpenSearch BM25를 필드별 named query(`hit_keywords` 등 `_name`)로 쪼갠 뒤, 게이트 실패 버킷에서
 # ``matched_queries`` 로 **어느 필드에서 hit 됐는지** 관측한다. ``query_evidence.evidence_score`` 가
@@ -136,6 +145,8 @@ SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT: bool = True
 # ``.env`` 로 0 강제 가능. flip 전후 025 골든(recall@20·p@3): gate-on 시 weak-only precision ↑·recall 소폭 ↓.
 
 __all__ = [
+    "ABOUT_FILTER_NOUN_MAX_MATCH_RATIO",
+    "SEARCH_ABOUT_FILTER_ENABLED_DEFAULT",
     "EVIDENCE_HIT_FILE_NAME_WEIGHT",
     "EVIDENCE_HIT_KEYWORDS_WEIGHT",
     "EVIDENCE_HIT_LABELS_WEIGHT",

@@ -398,5 +398,43 @@ class BucketPolicyLegacyInlineParityTest(unittest.TestCase):
         self._assert_parity(fused, rerank_enabled=True)
 
 
+class AboutFilterPolicyTest(unittest.TestCase):
+    """073 — apply_bucket_policy 의 aboutness OR-증거 필터 배선(토글·드롭·내부키 제거)."""
+
+    # ApplyBucketPolicyTest._call 과 동일 기본값(상속하면 부모 테스트가 중복 실행되므로 복제).
+    _call = ApplyBucketPolicyTest._call
+
+    def _about_rows(self) -> list[dict[str, Any]]:
+        a = _row("guitar", cos=0.80, similarity=0.8, bm25=True)
+        a["_about"] = ["기타"]
+        a["_kwtext"] = "기타 연주법 guitar.txt"
+        b = _row("violin", cos=0.70, similarity=0.7, bm25=True)
+        b["_about"] = ["바이올린"]
+        b["_kwtext"] = "바이올린 연주 현악기 violin.txt"
+        return [a, b]
+
+    def test_enabled_drops_no_evidence_row_and_strips_keys(self) -> None:
+        # '기타 연주' 질의 — 바이올린(무증거)은 필터로 드롭, cut_count 반영, 내부키는 응답 전 제거.
+        out = self._call(self._about_rows(), query="기타 연주", about_filter_enabled=True)
+        self.assertEqual([r["id"] for r in out.rows], ["guitar"])
+        self.assertEqual(out.cut_count, 1)
+        for r in out.rows:
+            self.assertNotIn("_about", r)
+            self.assertNotIn("_kwtext", r)
+
+    def test_disabled_passthrough(self) -> None:
+        # 토글 off(기본) — 필터 무접촉·두 행 유지(회귀 0·SC-002). 내부키 제거는 동일.
+        out = self._call(self._about_rows(), query="기타 연주")
+        self.assertEqual([r["id"] for r in out.rows], ["guitar", "violin"])
+        for r in out.rows:
+            self.assertNotIn("_about", r)
+            self.assertNotIn("_kwtext", r)
+
+    def test_enabled_failsafe_when_no_match(self) -> None:
+        # 어휘가 전혀 안 겹치는 질의 — fail-safe 로 원 행 유지(필터가 검색을 비우지 않는다).
+        out = self._call(self._about_rows(), query="우주 신비", about_filter_enabled=True)
+        self.assertEqual([r["id"] for r in out.rows], ["guitar", "violin"])
+
+
 if __name__ == "__main__":
     unittest.main()

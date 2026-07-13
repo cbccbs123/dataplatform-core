@@ -113,6 +113,12 @@ class PipelineSettings:
     # (027 바이트 동일·회귀 0). on 이면 검색 직전 질의를 gemma 명사구로 정규화(temp=0·env 입력 0·단일
     # seam)해 임베딩·BM25 양쪽에 동일 적용한다. 순수 토글이라 범위검증 불필요(_env_bool_default·cutoff 동형).
     search_os_query_norm_enabled: bool
+    # 073: aboutness OR-증거 필터 토글. 기본 off(회귀 0). on 이면 적재시 확정한 about 개체+keywords 를
+    # 증거로 질의 개체와 무증거 행을 버킷에서 걸러낸다(검색시점 LLM 0·전체 노출 깊이). 백필 후 opt-in.
+    # ⚠️ 운영 전제(리뷰 지적): 필터는 질의가 **명사구**라고 가정한다(query.split()=명사 리스트) —
+    # 072 query-norm(search_os_query_norm_enabled) on 과 함께 켜는 것을 전제로 측정·채택됐다.
+    # norm off + filter on 이면 조사 포함 어절로 kmatch 실효가 떨어진다(fail-safe 로 안전하나 비권장).
+    search_about_filter_enabled: bool
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
@@ -548,6 +554,10 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 잘못된 불리언 문자열은 _env_bool_default 가 _build_settings 시점에 즉시 ValueError(fail-fast).
         search_os_query_norm_enabled=_env_bool_default(
             "SEARCH_OS_QUERY_NORM_ENABLED", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
+        ),
+        # 073: aboutness OR-증거 필터(기본 off — 회귀 0). _env_bool_default 패턴(query_norm 동형).
+        search_about_filter_enabled=_env_bool_default(
+            "SEARCH_ABOUT_FILTER_ENABLED", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT
         ),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),

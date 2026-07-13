@@ -43,6 +43,7 @@ from src.config.search_constants import (
     OS_RERANK_TAU_DEFAULT,
     OS_RERANK_TOP_R_DEFAULT,
     OS_RESULT_FLOOR_DEFAULT,
+    SEARCH_ABOUT_FILTER_ENABLED_DEFAULT,
     SEARCH_EVIDENCE_DEBUG_DEFAULT,
     SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
 )
@@ -480,6 +481,12 @@ def fuse_hybrid(
         row["_rrtext"] = (
             f"요약: {_summ}\n키워드: {' '.join(str(x) for x in _kw)}" if _kw else _summ
         )
+        # 073: aboutness OR-증거 필터 내부키 — _about(적재시 확정 개체)·_kwtext(keywords+파일명 합본).
+        # bucket_policy 의 about_or_filter 가 증거 매칭에 쓰고, clean 이 응답 전 제거한다(_rrtext 동형).
+        row["_about"] = [str(a) for a in (src_.get("about") or [])]
+        row["_kwtext"] = " ".join(
+            [*(str(x) for x in _kw), str(src_.get("fs_uri") or "").split("/")[-1]]
+        )
         aid = row["id"]
         e = merged.get(aid)
         if e is None:
@@ -645,6 +652,7 @@ def search_assets_os(
     rerank_fn: Callable[..., list[float]] | None = None,
     query_norm_enabled: bool = OS_QUERY_NORM_ENABLED_DEFAULT,
     query_norm_fn: Callable[[str], str] | None = None,
+    about_filter_enabled: bool = SEARCH_ABOUT_FILTER_ENABLED_DEFAULT,
     search_mode: str = "auto",
     search_policy: SearchPolicy | None = None,
     evidence_rescue_enabled: bool = SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
@@ -771,6 +779,7 @@ def search_assets_os(
             rerank_top_r=rerank_top_r,
             rerank_tau=rerank_tau,
             rerank_model=rerank_model,
+            about_filter_enabled=about_filter_enabled,
             policy=policy,
             evidence_rescue_enabled=evidence_rescue_enabled,
             evidence_debug=evidence_debug,
