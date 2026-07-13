@@ -96,6 +96,7 @@ def _grouped_via_opensearch(
     os_search_fn: Callable[..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]],
     os_client_fn: Callable[..., Any],
     query_norm_fn: Callable[[str], str] | None = None,
+    llm_verify_judge_fn: Callable[[str, str, str], bool] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
     must_include: list[str] | None = None,
@@ -235,6 +236,21 @@ def _grouped_via_opensearch(
         must_include=list(must_include or []),
         must_exclude=list(must_exclude or []),
     )  # client.msearch 미도달 예외도 전파(FR-007)
+
+    # 074: 검색시점 top-3 개별 LLM 검증(L2) — 토글 on AND 자연어(어절≥3·072 판별과 동일 기준)일 때만.
+    # 판정 질의=**사용자 원문**(의도 정보 보존·측정과 동일), 캐시 키=정규화 질의(표현 변형 흡수).
+    # 단어 질의·off 는 검증 경로 무접촉(호출 0·응답 바이트 동일 — FR-001·005). 폴백은 모듈 내부(FR-003).
+    lv_enabled = getattr(
+        cfg, "search_llm_verify_enabled", search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT
+    )
+    llm_verify_meta: dict[str, Any] | None = None
+    if lv_enabled and len((query or "").split()) >= search_constants.OS_QUERY_NORM_MIN_WORD_TOKENS:
+        from src.search.llm_verify import verify_top_assets
+
+        os_buckets, llm_verify_meta = verify_top_assets(
+            os_buckets, query, norm_query=os_query, judge_fn=llm_verify_judge_fn
+        )
+
     # meta 에 게이트 관측성(os_gate) + search_plan(044 FR-303) 합류.
     grouped: dict[str, Any] = {
         "meta": {
@@ -243,6 +259,9 @@ def _grouped_via_opensearch(
             "search_plan": search_plan_to_meta(plan),
         },
     }
+    # 074 관측성(FR-006): 검증 실행 시에만 meta["llm_verify"] 노출(query_norm 관례 동형 — off 면 키 부재).
+    if llm_verify_meta is not None:
+        grouped["meta"]["llm_verify"] = llm_verify_meta
     # 029 query-norm 관측성(FR-007): on 일 때만 top-level meta["query_norm"] 로 원문→정규화 매핑을 노출
     # 한다(os_gate 는 모달리티 키 dict 이라 오염 금지). off(기본)면 키 자체를 두지 않아 027 meta 와 바이트
     # 동일(SC-001 — 기존 meta 형태 봉인 테스트 무영향).
@@ -277,6 +296,7 @@ def search_hybrid(
     ] = os_search_assets,
     _os_client_fn: Callable[..., Any] = os_get_client,
     _query_norm_fn: Callable[[str], str] | None = None,
+    _llm_verify_judge_fn: Callable[[str, str, str], bool] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
     must_include: list[str] | None = None,
@@ -368,6 +388,7 @@ def search_hybrid(
         os_search_fn=_os_search_fn,
         os_client_fn=_os_client_fn,
         query_norm_fn=_query_norm_fn,
+        llm_verify_judge_fn=_llm_verify_judge_fn,
         search_mode=search_mode,
         search_filters=search_filters,
         # 057 FR-202: 서버 lexical 필터를 OS 경로로 배선(랭킹 융합·컷오프 불변 — 필터 절만 추가).

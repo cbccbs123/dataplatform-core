@@ -84,6 +84,20 @@ SEARCH_ABOUT_FILTER_ENABLED_DEFAULT: bool = False
 # 흔한 명사('기술'·'풍경')로 보고 kmatch 에서 제외한다. 정적 불용어 사전 불요(자산 증가 자가적응).
 ABOUT_FILTER_NOUN_MAX_MATCH_RATIO: float = 0.5
 
+# ── 074: 검색시점 top-3 개별 LLM 검증(L2) 상수(단일 출처 F1) ──────────────────
+# 073(L1) 후 잔존 자연어 상위3 무관을, 노출 직전 상위 3 자산만 gemma **개별** 병렬 판정해 제거한다
+# (측정 2026-07-13: 개별=무관 44.7→0%·연관 1.36→1.60 / 배치는 판정 흔들림(일치율 66~77%)으로 기각).
+# 검색시점 LLM 은 021 FR-004 의 029 거버넌스 토글 개정 선례를 따른다 — 기본 off·opt-in·단일 seam·temp=0.
+SEARCH_LLM_VERIFY_ENABLED_DEFAULT: bool = False
+# 검증 대상 상위 자산 수. 3=측정 실용점(동시 30검색 p95 1.06s) — 전수 검증은 동시 4~5검색 포화(기각).
+SEARCH_LLM_VERIFY_TOP_N: int = 3
+# 전체 데드라인(초). 초과·오류 시 **전량 폴백**(미검증 결과 그대로 — 부분 적용은 타이밍 의존
+# 비결정이라 금지·헌법 §3). 실측 e2e 0.31s 라 정상 부하에선 미발동.
+SEARCH_LLM_VERIFY_DEADLINE_S: float = 1.5
+# (정규화 질의, asset_id)→판정 프로세스 내 캐시 상한(초과 시 오래된 항목부터 제거). temp=0 결정적이라
+# TTL 불요 — 같은 쌍은 첫 판정으로 고정(라이브 경로 near-tie 섭동 완화·029 ADR 논점).
+SEARCH_LLM_VERIFY_CACHE_MAX: int = 50_000
+
 # ── 044 evidence · lexical rescue (단일 출처 — G0) ───────────────────────────
 # OpenSearch BM25를 필드별 named query(`hit_keywords` 등 `_name`)로 쪼갠 뒤, 게이트 실패 버킷에서
 # ``matched_queries`` 로 **어느 필드에서 hit 됐는지** 관측한다. ``query_evidence.evidence_score`` 가
@@ -147,6 +161,10 @@ SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT: bool = True
 __all__ = [
     "ABOUT_FILTER_NOUN_MAX_MATCH_RATIO",
     "SEARCH_ABOUT_FILTER_ENABLED_DEFAULT",
+    "SEARCH_LLM_VERIFY_ENABLED_DEFAULT",
+    "SEARCH_LLM_VERIFY_TOP_N",
+    "SEARCH_LLM_VERIFY_DEADLINE_S",
+    "SEARCH_LLM_VERIFY_CACHE_MAX",
     "EVIDENCE_HIT_FILE_NAME_WEIGHT",
     "EVIDENCE_HIT_KEYWORDS_WEIGHT",
     "EVIDENCE_HIT_LABELS_WEIGHT",

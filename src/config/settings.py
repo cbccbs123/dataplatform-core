@@ -119,6 +119,9 @@ class PipelineSettings:
     # 072 query-norm(search_os_query_norm_enabled) on 과 함께 켜는 것을 전제로 측정·채택됐다.
     # norm off + filter on 이면 조사 포함 어절로 kmatch 실효가 떨어진다(fail-safe 로 안전하나 비권장).
     search_about_filter_enabled: bool
+    # 074: 검색시점 top-3 개별 LLM 검증(L2) 토글. 기본 off(회귀 0). on 이면 자연어(어절≥3) 질의의
+    # 상위 3 자산을 gemma 개별 병렬 판정해 무관 제거(데드라인 1.5s 전량 폴백·판정 캐시). 029 선례.
+    search_llm_verify_enabled: bool
     # 025: OS BM25 multi_match operator. 기본 'or'(현행 본문 불변·회귀 0), 'and'=질의 전 토큰 매칭
     # 요구(복합어 부분토큰 가짜매칭 F2 차단 — 의미 매칭은 kNN 보완). 화이트리스트 밖은 즉시 ValueError.
     search_os_bm25_operator: str
@@ -558,6 +561,10 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 073: aboutness OR-증거 필터(기본 off — 회귀 0). _env_bool_default 패턴(query_norm 동형).
         search_about_filter_enabled=_env_bool_default(
             "SEARCH_ABOUT_FILTER_ENABLED", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT
+        ),
+        # 074: 검색시점 top-3 개별 LLM 검증(기본 off — 회귀 0). 029 거버넌스 토글 선례 동형.
+        search_llm_verify_enabled=_env_bool_default(
+            "SEARCH_LLM_VERIFY_ENABLED", search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT
         ),
         # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
         search_os_bm25_operator=_resolve_os_bm25_operator(),

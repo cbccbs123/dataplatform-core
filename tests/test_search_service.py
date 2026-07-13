@@ -248,6 +248,67 @@ class TestBackendOsAboutFilterWiring(unittest.TestCase):
         self.assertIs(cap["about_filter_enabled"], False)
 
 
+class TestBackendOsLlmVerifyWiring(unittest.TestCase):
+    """074 — 검색시점 top-3 개별 LLM 검증 배선(토글·어절≥3 게이트·드롭·meta·off 무접촉)."""
+
+    def _buckets(self) -> dict[str, list[dict[str, object]]]:
+        return {"text": [
+            {"id": "good", "similarity": 0.9, "summary": "관련 요약"},
+            {"id": "bad", "similarity": 0.8, "summary": "무관 요약"},
+        ]}
+
+    def test_enabled_nl_query_drops_judged_irrelevant(self) -> None:
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch", search_llm_verify_enabled=True)
+        fake_os, _ = _recording_os(self._buckets())
+        calls: list[str] = []
+
+        def judge(q: str, aid: str, s: str) -> bool:
+            calls.append(f"{q}|{aid}")
+            return aid != "bad"
+
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "씨름 기술 종류 알려줘", modalities=["text"],  # 어절 4 ≥ 3 → 검증 실행
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C", _llm_verify_judge_fn=judge,
+            )
+        self.assertEqual([r["id"] for r in out["results"]["text_documents"]], ["good"])
+        self.assertEqual(out["meta"]["llm_verify"]["dropped"], 1)
+        # 판정 질의는 사용자 원문(FR-002 — 의도 정보 보존).
+        self.assertTrue(all(c.startswith("씨름 기술 종류 알려줘|") for c in calls))
+
+    def test_word_query_skips_verify(self) -> None:
+        # 어절<3(단어 질의) → 검증 경로 무접촉(judge 미호출·meta 키 부재·FR-001).
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(search_backend="opensearch", search_llm_verify_enabled=True)
+        fake_os, _ = _recording_os(self._buckets())
+        calls: list[str] = []
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "씨름", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+                _llm_verify_judge_fn=lambda q, a, s: calls.append(a) or True,
+            )
+        self.assertEqual(calls, [])
+        self.assertNotIn("llm_verify", out["meta"])
+        self.assertEqual(len(out["results"]["text_documents"]), 2)
+
+    def test_disabled_passthrough(self) -> None:
+        # 토글 off(기본) → 검증 무접촉·응답 동일(FR-005·회귀 0).
+        fake_os, _ = _recording_os(self._buckets())
+        calls: list[str] = []
+        out = search_hybrid(
+            "씨름 기술 종류 알려줘", modalities=["text"],
+            _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+            _llm_verify_judge_fn=lambda q, a, s: calls.append(a) or True,
+        )
+        self.assertEqual(calls, [])
+        self.assertNotIn("llm_verify", out["meta"])
+        self.assertEqual(len(out["results"]["text_documents"]), 2)
+
+
 class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
     """027 — OS 경로가 cfg 의 게이트·컷 임계를 ``os_search_fn`` 에 전달한다.
 
