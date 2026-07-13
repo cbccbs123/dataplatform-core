@@ -129,6 +129,29 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(body["meta"]["size"], 10)
 
     @patch("src.app.portal_api.search_hybrid")
+    def test_search_limit_per_bucket_param_and_default(self, mock_search) -> None:
+        # 후보 풀(limit_per_bucket) 요청 파라미터화: 미지정=기본 50, 지정 시 그 값이 search_hybrid 에 전달.
+        mock_search.return_value = _fake_search_result()
+        self.client.get("/search", params={"q": "회식", "size": 10})
+        self.assertEqual(mock_search.call_args.kwargs["limit_per_bucket"], 50)  # 기본값
+        self.client.get("/search", params={"q": "회식", "size": 10, "limit_per_bucket": 200})
+        self.assertEqual(mock_search.call_args.kwargs["limit_per_bucket"], 200)  # 요청 지정
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_pool_floored_to_size(self, mock_search) -> None:
+        # size 계약 보장: 요청 풀이 size 보다 얕으면 max(풀, size) 로 끌어올린다(풀<size 회귀 방지).
+        mock_search.return_value = _fake_search_result()
+        self.client.get("/search", params={"q": "회식", "size": 80, "limit_per_bucket": 20})
+        self.assertEqual(mock_search.call_args.kwargs["limit_per_bucket"], 80)
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_limit_per_bucket_bounds(self, mock_search) -> None:
+        # 상한(500) 초과·하한(1) 미만은 422(Query ge/le 계약).
+        mock_search.return_value = _fake_search_result()
+        self.assertEqual(self.client.get("/search", params={"q": "x", "limit_per_bucket": 501}).status_code, 422)
+        self.assertEqual(self.client.get("/search", params={"q": "x", "limit_per_bucket": 0}).status_code, 422)
+
+    @patch("src.app.portal_api.search_hybrid")
     def test_search_response_rows_include_topic_pairs(self, mock_search) -> None:
         # 059 FR-104: /search 응답 행에 topic_pairs(부모>자식 짝) 포함(하위호환 필드·프론트 트리용).
         # 짝 없는 행은 [] 폴백. os_hit_to_row→_shape→_project_grouped_search 경유로 전달된다.

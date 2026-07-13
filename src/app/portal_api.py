@@ -133,10 +133,13 @@ _VALID_MODALITIES = ("text", "image", "video", "audio")
 # 의료(PHI) 배제 도메인 집합(FR-014). group_ranked 가 각 모달리티 버킷에서 이 도메인 행을 제거한다.
 _EXCLUDE_DOMAINS = frozenset({"medical"})
 
-# search_hybrid 의 버킷당 후보 풀 한도. 응답은 모달리티별 top-N(size)으로 자르지만, 2단계 시각
-# 후보 풀·랭킹 품질을 위해 풀을 넉넉히 받은 뒤 group_ranked 에서 size 로 캡한다(의료 배제로 줄어도
-# 충분한 잔여 확보). 전체 코퍼스 keyset 페이징은 006 재설계 후속.
-_SEARCH_LIMIT_PER_BUCKET = 200
+# search_hybrid 의 버킷당 후보 풀 **기본값**. /search 의 `limit_per_bucket` 쿼리 파라미터로 요청마다
+# 덮어쓴다(자유 조절). 응답은 모달리티별 top-N(size)으로 자르지만, 풀은 그보다 깊게 받아야 (a)의료
+# 배제 잔여 확보 (b)074 검증 드롭 후 하위 관련 승격 여지가 생긴다 — 그래서 핸들러가 max(풀, size)로
+# 하한을 걸어 풀 < size 회귀를 막는다. 전체 코퍼스 keyset 페이징은 006 재설계 후속.
+_SEARCH_LIMIT_PER_BUCKET_DEFAULT = 50
+# 풀 상한(요청 남용·OS 부하 방어). size 상한(100)보다 넉넉히 둬 승격 여지를 남긴다.
+_SEARCH_LIMIT_PER_BUCKET_MAX = 500
 
 # 다운로드 스트리밍 청크 크기(64KiB) — 대용량 멀티모달 자산을 메모리에 다 올리지 않는다.
 _STREAM_CHUNK = 64 * 1024
@@ -1038,6 +1041,15 @@ def search(
         None, description="콤마 구분: text,image,video,audio (미지정=전체)"
     ),
     size: int = Query(20, ge=1, le=100, description="모달리티별 최대 결과 수(top-N)"),
+    limit_per_bucket: int = Query(
+        _SEARCH_LIMIT_PER_BUCKET_DEFAULT,
+        ge=1,
+        le=_SEARCH_LIMIT_PER_BUCKET_MAX,
+        description=(
+            "버킷당 후보 풀 깊이(top-N=size 캡 이전). 크게 줄수록 의료배제 잔여·074 승격 여지↑, "
+            "OS 부하↑. 실제 풀 = max(이 값, size)"
+        ),
+    ),
     mode: str = Query("auto", description="검색 모드: auto(기본) | keyword(단어 포함 문서)"),
     file_ext: list[str] | None = Query(None, description="파일 확장자 필터(반복 가능, 예: txt,pdf)"),
     source_dataset: list[str] | None = Query(
@@ -1084,10 +1096,12 @@ def search(
 
     # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
     # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
+    # 풀 하한: 요청 풀이 노출 size 보다 얕으면 size 로 끌어올린다(size 계약 보장 + 승격 여지 확보).
+    effective_pool = max(limit_per_bucket, size)
     result = search_hybrid(
         q,
         modalities=mods,
-        limit_per_bucket=_SEARCH_LIMIT_PER_BUCKET,
+        limit_per_bucket=effective_pool,
         min_scores=_search_min_scores(),
         search_mode=search_mode,
         search_filters=search_filters,
