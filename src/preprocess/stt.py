@@ -11,6 +11,7 @@ audio_skill 이 이 전체 텍스트를 받아 요약·임베딩(media_chunks �
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
 
@@ -21,6 +22,16 @@ class TranscriptionResult(TypedDict):
     """전사 결과 — 세그먼트를 이어 붙인 전체 텍스트만 담는다."""
 
     text: str
+
+
+@lru_cache(maxsize=2)
+def _get_whisper(model_size: str, device: str, compute_type: str) -> WhisperModel:
+    """Whisper 모델 프로세스 캐시(069 P1-5) — 파일마다 재로드(수 GB 가중치·수 초)를 제거한다.
+
+    같은 (model_size, device, compute_type) 조합은 1회만 로드해 재사용한다. maxsize=2 는
+    CPU/GPU 조합 전환 여지만 남긴 보수값(배치는 사실상 단일 조합). 추론 전용이라 상태 오염 없음.
+    """
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
 def transcribe_audio_local(
@@ -35,7 +46,7 @@ def transcribe_audio_local(
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    model = _get_whisper(model_size, device, compute_type)
     segments_iter, _info = model.transcribe(
         str(path),
         language=language,
