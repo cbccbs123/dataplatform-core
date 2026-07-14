@@ -30,6 +30,8 @@ def _get_whisper(model_size: str, device: str, compute_type: str) -> WhisperMode
 
     같은 (model_size, device, compute_type) 조합은 1회만 로드해 재사용한다. maxsize=2 는
     CPU/GPU 조합 전환 여지만 남긴 보수값(배치는 사실상 단일 조합). 추론 전용이라 상태 오염 없음.
+    트레이드오프(리뷰 🟡6): 로드된 모델은 명시 해제 API 가 없어 프로세스 종료까지 메모리 상주 —
+    배치 프로세스(현 용도)엔 무해하나 장기 상주 서버로 재사용 시 상주 메모리를 감안할 것.
     """
     return WhisperModel(model_size, device=device, compute_type=compute_type)
 

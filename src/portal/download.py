@@ -250,26 +250,36 @@ def build_bundle_zip_stream(targets: list[dict[str, Any]]) -> tempfile.SpooledTe
     missing: list[dict[str, Any]] = []
     used_names: set[str] = set()
 
-    with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as zf:
-        for t in targets:
-            fs_path = t.get("fs_path")
-            file_name = t.get("file_name") or display_file_name(fs_path)
-            try:
-                fh = open(fs_path, "rb")  # noqa: SIM115 — copy 루프와 수명 분리(아래 with 로 닫음)
-            except (OSError, TypeError):
-                missing.append(
-                    {"asset_id": t.get("asset_id"), "fs_path": fs_path, "file_name": file_name}
-                )
-                continue
-            entry = _dedup_entry_name(file_name, used_names)
-            info = zipfile.ZipInfo(filename=entry, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            with fh, zf.open(info, "w") as dst:
-                shutil.copyfileobj(fh, dst, _BUNDLE_COPY_CHUNK)
+    try:
+        with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as zf:
+            for t in targets:
+                fs_path = t.get("fs_path")
+                file_name = t.get("file_name") or display_file_name(fs_path)
+                try:
+                    fh = open(fs_path, "rb")  # noqa: SIM115 — copy 루프와 수명 분리(아래 with 로 닫음)
+                except (OSError, TypeError):
+                    missing.append(
+                        {"asset_id": t.get("asset_id"), "fs_path": fs_path, "file_name": file_name}
+                    )
+                    continue
+                entry = _dedup_entry_name(file_name, used_names)
+                info = zipfile.ZipInfo(filename=entry, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                # zlib 스트리밍 압축(zf.open+copyfileobj)은 단일콜(writestr)과 청크 경계 무관하게
+                # **바이트 동일**(리뷰서 64KiB 초과 데이터로 검증) — 결정성·기존 zip 바이트 보존.
+                with fh, zf.open(info, "w") as dst:
+                    shutil.copyfileobj(fh, dst, _BUNDLE_COPY_CHUNK)
 
-        if missing:
-            manifest = json.dumps({"missing": missing}, ensure_ascii=False, sort_keys=True, indent=2)
-            _write_zip_entry(zf, "_manifest.json", manifest.encode("utf-8"))
+            if missing:
+                manifest = json.dumps(
+                    {"missing": missing}, ensure_ascii=False, sort_keys=True, indent=2
+                )
+                _write_zip_entry(zf, "_manifest.json", manifest.encode("utf-8"))
+    except BaseException:
+        # 리뷰(069 🟡1): 중간 실패(디스크 오류 등) 시 spool 파일 핸들이 누수되지 않게 닫고 재전파
+        # (64MiB 초과분은 실제 디스크 임시파일이라 FD 누수 실해가 있다). 성공 경로만 열어서 반환.
+        spool.close()
+        raise
 
     spool.seek(0)
     return spool

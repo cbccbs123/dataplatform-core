@@ -333,3 +333,25 @@ class TestBuildBundleZipStream(unittest.TestCase):
                     s.read()
             m_copy.assert_called_once()
             self.assertEqual(m_copy.call_args.args[2], 64 * 1024)
+
+    def test_spool_closed_on_midway_error(self) -> None:
+        # 리뷰 🟡1 회귀: zip 조립 중 예외(디스크 오류 등) 시 spool 핸들 close 후 재전파(FD 누수 차단).
+        from unittest.mock import patch as _patch
+
+        from src.portal import download as dl
+
+        captured: dict = {}
+        orig_spool = tempfile.SpooledTemporaryFile
+
+        def capture(*a, **k):
+            s = orig_spool(*a, **k)
+            captured["s"] = s
+            return s
+
+        with tempfile.TemporaryDirectory() as d:
+            targets = self._targets(d)[:1]
+            with _patch.object(dl.tempfile, "SpooledTemporaryFile", side_effect=capture), \
+                 _patch.object(dl.shutil, "copyfileobj", side_effect=OSError("disk fail")):
+                with self.assertRaises(OSError):
+                    dl.build_bundle_zip_stream(targets)
+        self.assertTrue(captured["s"].closed)

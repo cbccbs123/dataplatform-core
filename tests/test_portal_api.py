@@ -463,10 +463,13 @@ class TestBundle(unittest.TestCase):
         _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
 
-    @patch(
-        "src.app.portal_api.build_bundle_zip_stream",
-        side_effect=lambda targets: io.BytesIO(b"PK\x03\x04zipbytes"),
-    )
+    @staticmethod
+    def _mk_stream(targets):
+        s = io.BytesIO(b"PK\x03\x04zipbytes")
+        TestBundle._last_stream = s
+        return s
+
+    @patch("src.app.portal_api.build_bundle_zip_stream", side_effect=_mk_stream.__func__)
     @patch("src.app.portal_api.collect_bundle_assets")
     @patch("src.app.portal_api.resolve_download_target")
     def test_bundle_returns_zip(self, mock_resolve, mock_collect, mock_zip) -> None:
@@ -481,6 +484,8 @@ class TestBundle(unittest.TestCase):
         self.assertIn("attachment", resp.headers["content-disposition"])
         self.assertEqual(resp.content, b"PK\x03\x04zipbytes")
         mock_collect.assert_called_once()
+        # 리뷰 🟡2 회귀: 응답 송신 후 BackgroundTask 가 스트림을 명시 close(FD 정리 — GC 의존 금지).
+        self.assertTrue(TestBundle._last_stream.closed)
 
     @patch("src.app.portal_api.collect_bundle_assets")
     @patch("src.app.portal_api.resolve_download_target")

@@ -50,6 +50,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 # 065 자산 자기주제 정본 — 자산상세 topics·same_topic_groups + 주제 브라우즈/패싯(FR-402). 전부
@@ -238,9 +239,11 @@ app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
 # 069 P1-4(권고): OS 연결 실패(인프라 다운·타임아웃)를 코드버그 500 과 구분해 **503** 으로 —
 # 운영 알람·관측 구분용(ConnectionTimeout 은 ConnectionError 하위라 함께 잡힘). opensearchpy 는
 # 검색 백엔드(037) 필수 의존이나, 부분 설치 환경에서도 포탈 기동이 죽지 않게 지연·방어 임포트.
+# 리뷰(069 🟡4): 이 핸들러는 앱 전역이나 현재 OS 를 건드리는 라우트는 /search(search_hybrid)뿐 —
+# 향후 관리자 재색인/헬스체크 라우트 추가 시 메시지 문구(검색 엔진)가 오해되지 않게 유의.
 try:
     from opensearchpy.exceptions import ConnectionError as _OSConnectionError
-except Exception:  # noqa: BLE001 — 미설치 환경 방어(검색 요청 시점에 별도 ImportError 로 드러남)
+except ImportError:  # 미설치 환경 방어(검색 요청 시점에 별도 ImportError 로 드러남) — 리뷰 🟡3 반영
     _OSConnectionError = None
 
 if _OSConnectionError is not None:
@@ -1462,13 +1465,24 @@ def bundle(
         raise HTTPException(status_code=404, detail="묶음 seed 를 찾을 수 없거나 노출 대상이 아님")
 
     # 069 P1-2: zip 조립·응답 모두 스트리밍 — 파일 IO(원본 읽기)는 DB 트랜잭션 밖, 원본은 64KiB
-    # 청크로 zip 에 흘리고(전량 적재 0), 응답도 StreamingResponse(spooled 파일류·응답 종료 시 close)
-    # 라 메모리가 묶음 크기와 무관하다. 누락 파일은 부분 zip + manifest(기존 계약 불변).
+    # 청크로 zip 에 흘려(전량 적재 0) 메모리가 묶음 크기와 무관하다. 누락 파일은 부분 zip + manifest
+    # (기존 계약 불변). 리뷰(069 🟡2) 반영: Starlette 는 content 파일객체를 자동 close 하지 않으므로
+    # BackgroundTask 로 응답 송신 후 **명시적 close**(64MiB 초과 시 디스크 임시파일 FD 정리), 파일류를
+    # 그대로 넘기면 줄단위 iter 가 되므로 _STREAM_CHUNK 명시 제너레이터로 감싼다(_file_iterator 관례).
     zip_stream = build_bundle_zip_stream(targets)
+
+    def _iter_zip() -> Iterator[bytes]:
+        while True:
+            chunk = zip_stream.read(_STREAM_CHUNK)
+            if not chunk:
+                break
+            yield chunk
+
     return StreamingResponse(
-        zip_stream,
+        _iter_zip(),
         media_type="application/zip",
         headers={"Content-Disposition": _content_disposition(f"bundle_{asset_id}.zip")},
+        background=BackgroundTask(zip_stream.close),
     )
 
 
