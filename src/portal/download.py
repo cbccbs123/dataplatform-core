@@ -17,6 +17,8 @@ import io
 import json
 import logging
 import os
+import shutil
+import tempfile
 import zipfile
 from typing import Any
 
@@ -227,41 +229,61 @@ def _dedup_entry_name(name: str, used: set[str]) -> str:
         i += 1
 
 
-def build_bundle_zip(targets: list[dict[str, Any]]) -> bytes:
-    """묶음 타깃들의 원본 파일을 zip 바이트로 만든다(plan D-5).
+# 069 P1-2: 스트리밍 복사 청크(64KiB) — 원본을 통째로 메모리에 올리지 않는다.
+_BUNDLE_COPY_CHUNK = 64 * 1024
+# zip 결과가 이 크기를 넘으면 메모리 대신 디스크 임시파일로 굴린다(요청당 메모리 상한).
+_BUNDLE_SPOOL_MAX = 64 * 1024 * 1024
 
-    부분 zip 보장(Edge Case)
-        존재하지 않거나 읽기 실패한 파일은 **skip** 하고 zip 내 ``_manifest.json`` 에 누락
-        목록을 기록한다. 전체 실패하지 않는다 — 누락이 전부여도 manifest 만 담은 유효 zip 을 낸다.
 
-    결정성(헌법 3조)
-        엔트리 순서는 ``targets`` 순서(collect 가 결정적), 엔트리 타임스탬프는 1980-01-01 로
-        고정해 동일 입력 2회 동일 바이트를 보장한다.
+def build_bundle_zip_stream(targets: list[dict[str, Any]]) -> tempfile.SpooledTemporaryFile:
+    """묶음 타깃들의 원본 파일을 zip **스트림(파일류)**로 만든다(069 P1-2 — OOM 차단 코어).
+
+    기존 ``build_bundle_zip``(bytes)이 파일마다 ``fh.read()`` 전체 적재 + 전체 zip 을 BytesIO 로
+    들고 있어 대용량 묶음에서 OOM/DoS 소지가 있었다. 원본→zip 엔트리를 ``copyfileobj``(64KiB)로
+    흘리고, 결과도 ``SpooledTemporaryFile``(64MiB 초과 시 디스크)로 받아 메모리가 묶음 크기와
+    무관해진다. 반환 파일은 위치 0 으로 되감아 주며, 호출자가 소비 후 닫는다(StreamingResponse
+    는 응답 종료 시 자동 close).
+
+    부분 zip 보장(Edge Case) · 결정성(헌법 3조)은 기존과 동일 — 누락은 skip+``_manifest.json``,
+    엔트리 순서=``targets`` 순서, 타임스탬프 1980-01-01 고정(동일 입력 2회 동일 바이트).
     """
-    buf = io.BytesIO()
+    spool = tempfile.SpooledTemporaryFile(max_size=_BUNDLE_SPOOL_MAX)
     missing: list[dict[str, Any]] = []
     used_names: set[str] = set()
 
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as zf:
         for t in targets:
             fs_path = t.get("fs_path")
             file_name = t.get("file_name") or display_file_name(fs_path)
             try:
-                with open(fs_path, "rb") as fh:  # type: ignore[arg-type]
-                    data = fh.read()
+                fh = open(fs_path, "rb")  # noqa: SIM115 — copy 루프와 수명 분리(아래 with 로 닫음)
             except (OSError, TypeError):
                 missing.append(
                     {"asset_id": t.get("asset_id"), "fs_path": fs_path, "file_name": file_name}
                 )
                 continue
             entry = _dedup_entry_name(file_name, used_names)
-            _write_zip_entry(zf, entry, data)
+            info = zipfile.ZipInfo(filename=entry, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with fh, zf.open(info, "w") as dst:
+                shutil.copyfileobj(fh, dst, _BUNDLE_COPY_CHUNK)
 
         if missing:
             manifest = json.dumps({"missing": missing}, ensure_ascii=False, sort_keys=True, indent=2)
             _write_zip_entry(zf, "_manifest.json", manifest.encode("utf-8"))
 
-    return buf.getvalue()
+    spool.seek(0)
+    return spool
+
+
+def build_bundle_zip(targets: list[dict[str, Any]]) -> bytes:
+    """묶음 zip 을 bytes 로 돌려주는 하위호환 래퍼(plan D-5 — 코어는 ``build_bundle_zip_stream``).
+
+    069 P1-2 이후 라우트는 스트림 코어를 직접 쓰고, 이 래퍼는 zip **내용 검증용**(테스트·소규모)
+    으로 남는다. 파일별 전체 적재는 코어에서 이미 제거됐고, 여기서만 완성 zip 을 한 번에 읽는다.
+    """
+    with build_bundle_zip_stream(targets) as spool:
+        return spool.read()
 
 
 def _write_zip_entry(zf: zipfile.ZipFile, arcname: str, data: bytes) -> None:

@@ -95,7 +95,7 @@ from src.portal.auth.dev_issuer import issue_dev_token
 from src.portal.auth.schemas import DevTokenRequest
 from src.portal.dashboard import build_dashboard_summary
 from src.portal.download import (
-    build_bundle_zip,
+    build_bundle_zip_stream,
     collect_bundle_assets,
     parse_range_header,
     resolve_download_target,
@@ -1461,10 +1461,12 @@ def bundle(
     if targets is None:
         raise HTTPException(status_code=404, detail="묶음 seed 를 찾을 수 없거나 노출 대상이 아님")
 
-    # build_bundle_zip 은 파일 IO(원본 읽기) — DB 트랜잭션 밖에서 수행. 누락 파일은 부분 zip + manifest.
-    zip_bytes = build_bundle_zip(targets)
-    return Response(
-        content=zip_bytes,
+    # 069 P1-2: zip 조립·응답 모두 스트리밍 — 파일 IO(원본 읽기)는 DB 트랜잭션 밖, 원본은 64KiB
+    # 청크로 zip 에 흘리고(전량 적재 0), 응답도 StreamingResponse(spooled 파일류·응답 종료 시 close)
+    # 라 메모리가 묶음 크기와 무관하다. 누락 파일은 부분 zip + manifest(기존 계약 불변).
+    zip_stream = build_bundle_zip_stream(targets)
+    return StreamingResponse(
+        zip_stream,
         media_type="application/zip",
         headers={"Content-Disposition": _content_disposition(f"bundle_{asset_id}.zip")},
     )

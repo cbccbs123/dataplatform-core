@@ -290,3 +290,46 @@ class TestBuildBundleZip(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildBundleZipStream(unittest.TestCase):
+    """069 T008(P1-2) — zip 스트리밍 코어: bytes 래퍼와 동일 바이트·결정성·부분복사(copyfileobj)."""
+
+    def _targets(self, d: str) -> list[dict]:
+        p1 = os.path.join(d, "a.txt")
+        with open(p1, "wb") as f:
+            f.write(b"hello-stream" * 1000)
+        return [
+            {"asset_id": "A", "fs_path": p1, "file_name": "a.txt"},
+            {"asset_id": "MISS", "fs_path": os.path.join(d, "no.txt"), "file_name": "no.txt"},
+        ]
+
+    def test_stream_equals_bytes_wrapper_and_deterministic(self) -> None:
+        # 스트림 코어 == bytes 래퍼(하위호환) == 재호출(결정성·1980 타임스탬프·순서 보존).
+        from src.portal.download import build_bundle_zip, build_bundle_zip_stream
+
+        with tempfile.TemporaryDirectory() as d:
+            targets = self._targets(d)
+            with build_bundle_zip_stream(targets) as s:
+                b_stream = s.read()
+            b_wrap1 = build_bundle_zip(targets)
+            b_wrap2 = build_bundle_zip(targets)
+        self.assertEqual(b_stream, b_wrap1)   # 코어-래퍼 바이트 동일(기존 소비자 무영향)
+        self.assertEqual(b_wrap1, b_wrap2)    # 결정성(동일 입력 2회 동일 바이트)
+        zf = zipfile.ZipFile(io.BytesIO(b_stream))
+        self.assertEqual(zf.getinfo("a.txt").date_time, (1980, 1, 1, 0, 0, 0))
+        self.assertIn("_manifest.json", zf.namelist())
+
+    def test_copies_in_chunks_not_full_read(self) -> None:
+        # 원본을 fh.read() 전량 적재하지 않고 copyfileobj(64KiB) 로 흘린다(P1-2 핵심).
+        from unittest.mock import patch as _patch
+
+        from src.portal import download as dl
+
+        with tempfile.TemporaryDirectory() as d:
+            targets = self._targets(d)[:1]
+            with _patch.object(dl.shutil, "copyfileobj", wraps=dl.shutil.copyfileobj) as m_copy:
+                with dl.build_bundle_zip_stream(targets) as s:
+                    s.read()
+            m_copy.assert_called_once()
+            self.assertEqual(m_copy.call_args.args[2], 64 * 1024)

@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 import unittest
@@ -462,11 +463,14 @@ class TestBundle(unittest.TestCase):
         _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.build_bundle_zip", return_value=b"PK\x03\x04zipbytes")
+    @patch(
+        "src.app.portal_api.build_bundle_zip_stream",
+        side_effect=lambda targets: io.BytesIO(b"PK\x03\x04zipbytes"),
+    )
     @patch("src.app.portal_api.collect_bundle_assets")
     @patch("src.app.portal_api.resolve_download_target")
     def test_bundle_returns_zip(self, mock_resolve, mock_collect, mock_zip) -> None:
-        # seed 가 게이트(registered·비의료) 통과 → ego-network zip 스트리밍.
+        # seed 가 게이트(registered·비의료) 통과 → ego-network zip 스트리밍(069 P1-2: StreamingResponse).
         mock_resolve.return_value = {"asset_id": "seed", "fs_path": "/x/seed.txt"}
         mock_collect.return_value = [
             {"asset_id": "seed", "fs_path": "/x/seed.txt", "file_name": "seed.txt"}
