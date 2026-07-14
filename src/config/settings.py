@@ -113,6 +113,8 @@ class PipelineSettings:
     # (027 바이트 동일·회귀 0). on 이면 검색 직전 질의를 gemma 명사구로 정규화(temp=0·env 입력 0·단일
     # seam)해 임베딩·BM25 양쪽에 동일 적용한다. 순수 토글이라 범위검증 불필요(_env_bool_default·cutoff 동형).
     search_os_query_norm_enabled: bool
+    # 075: 질의 정규화 방식. "morph"(nori 형태소·072·기본) | "llm"(gemma·029). enabled on 일 때만 유효.
+    search_os_query_norm_method: str
     # 073: aboutness OR-증거 필터 토글. 기본 off(회귀 0). on 이면 적재시 확정한 about 개체+keywords 를
     # 증거로 질의 개체와 무증거 행을 버킷에서 걸러낸다(검색시점 LLM 0·전체 노출 깊이). 백필 후 opt-in.
     # ⚠️ 운영 전제(리뷰 지적): 필터는 질의가 **명사구**라고 가정한다(query.split()=명사 리스트) —
@@ -373,6 +375,24 @@ def _resolve_os_result_floor() -> float:
 _OS_BM25_OPERATORS = ("or", "and")
 
 
+_OS_QUERY_NORM_METHODS = ("morph", "llm")
+
+
+def _resolve_os_query_norm_method() -> str:
+    """질의 정규화 방식(075). 미설정 시 ``OS_QUERY_NORM_METHOD_DEFAULT``('morph'·072 채택값).
+
+    화이트리스트 {morph, llm} 밖 값은 **즉시 ValueError**(fail-fast — _resolve_os_bm25_operator 동형)."""
+    value = _env_str_default(
+        "SEARCH_OS_QUERY_NORM_METHOD", search_constants.OS_QUERY_NORM_METHOD_DEFAULT
+    ).lower()
+    if value not in _OS_QUERY_NORM_METHODS:
+        raise ValueError(
+            f"지원하지 않는 질의 정규화 방식: SEARCH_OS_QUERY_NORM_METHOD={value!r} "
+            f"(지원: {list(_OS_QUERY_NORM_METHODS)})"
+        )
+    return value
+
+
 def _resolve_os_bm25_operator() -> str:
     """OS BM25 multi_match operator(025, FR-001). 미설정 시 ``OS_BM25_OPERATOR_DEFAULT``('or', 현행·F1).
 
@@ -558,6 +578,8 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         search_os_query_norm_enabled=_env_bool_default(
             "SEARCH_OS_QUERY_NORM_ENABLED", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
         ),
+        # 075: 정규화 방식(morph 기본·llm 선택). 화이트리스트 fail-fast(_resolve_os_bm25_operator 동형).
+        search_os_query_norm_method=_resolve_os_query_norm_method(),
         # 073: aboutness OR-증거 필터(기본 off — 회귀 0). _env_bool_default 패턴(query_norm 동형).
         search_about_filter_enabled=_env_bool_default(
             "SEARCH_ABOUT_FILTER_ENABLED", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT

@@ -121,7 +121,9 @@ def _grouped_via_opensearch(
       수행해 정규화된 질의가 OS seam 안에서 임베딩·BM25·rerank 채점에 동일 적용되게 한다. 단어 질의
       (어절<3)는 원문 그대로(정규화·_analyze 스킵·지연 0). 관측성은 top-level ``meta["query_norm"]`` 로
       노출(os_gate 미오염). off 면 원문 passthrough(바이트 동일·정규화 미호출, SC-002). ``query_norm_fn``
-      은 테스트/커스텀 정규화 주입 seam(주입 시 형태소 대신 사용).
+      은 테스트/커스텀 정규화 주입 seam(주입 시 형태소 대신 사용). **075**: ``search_os_query_norm_method``
+      (``morph`` 기본 / ``llm``)로 방식을 고른다 — ``llm`` 이면 형태소 대신 gemma ``noun_phrase_query``
+      (029 보존·검색시점 LLM)를 재배선하고 ``meta["query_norm"]["method"]`` 로 어느 방식이 돌았는지 노출한다.
     - **(buckets, gate_meta) 튜플 수신(027)**: ``os_search_fn``(search_assets_os)은 클라이언트 융합
       전환으로 버킷과 함께 게이트 메타(모달리티별 top·baseline·gate_passed·cut_count)를 돌려준다 →
       ``meta["os_gate"]`` 로 합류시켜 빈 버킷이 no-match 판정인지 즉시 관측 가능하게 한다(F4 관측성).
@@ -173,25 +175,37 @@ def _grouped_via_opensearch(
     # 072: 형태소 정규화가 nori _analyze(client)를 쓰므로 client 를 정규화 앞에서 획득한다(아래
     # os_search_fn 도 이 동일 client 를 재사용 — 생성 1회). OS 생성 실패 예외는 그대로 전파(FR-007).
     client = os_client_fn()
+    # 075: 정규화 방식 선택(morph 기본·072 / llm·029 gemma). enabled on + query_norm_fn 미주입일 때만
+    # 배선한다(주입 seam 우선). off 는 방식 무관 원문 passthrough(불변).
+    qn_method = getattr(
+        cfg, "search_os_query_norm_method", search_constants.OS_QUERY_NORM_METHOD_DEFAULT
+    )
     norm_fn = query_norm_fn
     if qn_enabled and norm_fn is None:
-        # 072: 검색시점 질의 정규화를 gemma(LLM) → **nori 형태소 명사추출+스톱워드**로 교체(측정 2026-07-13:
-        # 자연어 nDCG 0.490→0.591 로 LLM 정규화 0.575 상회·검색시점 LLM 0·결정적). client·index 를 클로저로
-        # 바인딩해 morph_noun_phrase_query 의 analyze_fn(nori _analyze IO)을 배선한다. query_norm_fn 주입
-        # (테스트 seam) 시엔 그것을 우선한다(위 norm_fn = query_norm_fn).
-        from src.search.opensearch_search import nori_analyze_tokens
-        from src.search.query_preprocess import morph_noun_phrase_query
+        if qn_method == "llm":
+            # 075: gemma(LLM) 정규화 경로(029 noun_phrase_query 재활성). 검색시점 LLM·단일 seam·temp=0·
+            # fail-safe 원문 폴백. client=None → complete_json 이 현 설정 온프레미스 LLM 사용.
+            from src.search.query_preprocess import noun_phrase_query
 
-        _norm_index = getattr(cfg, "opensearch_index", "assets")
+            def norm_fn(q: str) -> str:
+                return noun_phrase_query(q)
+        else:
+            # 072(기본): 검색시점 질의 정규화를 **nori 형태소 명사추출+스톱워드**로(측정 2026-07-13: 자연어
+            # nDCG 0.490→0.591 로 LLM 정규화 0.575 상회·검색시점 LLM 0·결정적). client·index 를 클로저로
+            # 바인딩해 morph_noun_phrase_query 의 analyze_fn(nori _analyze IO)을 배선한다.
+            from src.search.opensearch_search import nori_analyze_tokens
+            from src.search.query_preprocess import morph_noun_phrase_query
 
-        def norm_fn(q: str, _client: Any = client, _index: str = _norm_index) -> str:
-            return morph_noun_phrase_query(
-                q,
-                analyze_fn=lambda text: nori_analyze_tokens(_client, text, index=_index),
-                stopwords=search_constants.OS_QUERY_NORM_STOPWORDS,
-                noun_pos=search_constants.OS_QUERY_NORM_NOUN_POS,
-                min_word_tokens=search_constants.OS_QUERY_NORM_MIN_WORD_TOKENS,
-            )
+            _norm_index = getattr(cfg, "opensearch_index", "assets")
+
+            def norm_fn(q: str, _client: Any = client, _index: str = _norm_index) -> str:
+                return morph_noun_phrase_query(
+                    q,
+                    analyze_fn=lambda text: nori_analyze_tokens(_client, text, index=_index),
+                    stopwords=search_constants.OS_QUERY_NORM_STOPWORDS,
+                    noun_pos=search_constants.OS_QUERY_NORM_NOUN_POS,
+                    min_word_tokens=search_constants.OS_QUERY_NORM_MIN_WORD_TOKENS,
+                )
 
     os_query = os_normalize_query(query, enabled=qn_enabled, llm_fn=norm_fn)
 
@@ -267,7 +281,7 @@ def _grouped_via_opensearch(
     # 동일(SC-001 — 기존 meta 형태 봉인 테스트 무영향).
     if qn_enabled:
         grouped["meta"]["query_norm"] = {
-            "enabled": True, "original": query, "normalized": os_query,
+            "enabled": True, "method": qn_method, "original": query, "normalized": os_query,
         }
     # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
     for m in requested:

@@ -322,6 +322,32 @@ class TestSearchOsQueryNorm(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestSearchOsQueryNormMethod(unittest.TestCase):
+    """075: 질의 정규화 방식 ``search_os_query_norm_method`` — 기본 morph·화이트리스트 fail-fast."""
+
+    def test_default_is_morph(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.search_os_query_norm_method, search_constants.OS_QUERY_NORM_METHOD_DEFAULT)
+        self.assertEqual(s.search_os_query_norm_method, "morph")
+
+    def test_env_override_llm(self) -> None:
+        with _env(SEARCH_OS_QUERY_NORM_METHOD="llm"):
+            s = _build_settings("dev")
+        self.assertEqual(s.search_os_query_norm_method, "llm")
+
+    def test_case_insensitive(self) -> None:
+        with _env(SEARCH_OS_QUERY_NORM_METHOD="LLM"):
+            s = _build_settings("dev")
+        self.assertEqual(s.search_os_query_norm_method, "llm")
+
+    def test_invalid_method_fail_fast(self) -> None:
+        # 화이트리스트 {morph, llm} 밖 값은 즉시 ValueError(_resolve_os_bm25_operator 동형).
+        with _env(SEARCH_OS_QUERY_NORM_METHOD="gpt"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestSearchOsResultFloor(unittest.TestCase):
     """027: OS per-result 컷 코사인 하한 ``search_os_result_floor`` — 024 정규화 스케일 4종을 대체.
 

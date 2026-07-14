@@ -56,6 +56,11 @@ OS_RERANK_TAU_DEFAULT: float = 0.0  # augment 기본 = 재정렬만(드롭 0). �
 # 021 FR-004 정식 개정 동반). 단일 출처(F1)이므로 settings resolver·search_service 배선이 이 값을 공유한다.
 OS_QUERY_NORM_ENABLED_DEFAULT: bool = False
 
+# 075: 정규화 방식 선택. enabled=on 일 때 "morph"(nori 형태소·072·기본·LLM 0) 또는 "llm"(gemma·029
+# 경로·검색시점 LLM)을 고른다. 기본 morph 라 072 동작 불변(회귀 0). 072 결론(형태소 품질 우위)은 유지 —
+# 이 토글은 운영자에게 방식 선택지를 여는 것(품질 재역전 아님·025 bm25_operator·029 토글 관례 동형).
+OS_QUERY_NORM_METHOD_DEFAULT: str = "morph"
+
 # ── 072: 검색 질의 형태소 정규화 상수 (단일 출처 F1) ──────────────────────────
 # 029 query-norm seam 의 정규화기를 gemma(LLM)에서 **nori 형태소 명사 추출 + 스톱워드 제거**로 교체한다
 # (측정 2026-07-13: 자연어 nDCG@10 baseline 0.490 → 형태소 0.591 > LLM 0.575, 검색시점 LLM 0·결정적).
@@ -182,6 +187,7 @@ __all__ = [
     "OS_FUSION_WEIGHTS_DEFAULT",
     "OS_KNN_SAMPLE_K",
     "OS_QUERY_NORM_ENABLED_DEFAULT",
+    "OS_QUERY_NORM_METHOD_DEFAULT",
     "OS_QUERY_NORM_MIN_WORD_TOKENS",
     "OS_QUERY_NORM_DECOMPOUND",
     "OS_QUERY_NORM_NOUN_POS",

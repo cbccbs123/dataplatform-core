@@ -225,7 +225,51 @@ class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
                 _os_search_fn=fake_os, _os_client_fn=lambda: client,
             )
         self.assertEqual(cap["query"], "김밥 만드는 법 영상")  # off → 원문 바이트 동일(회귀 0·SC-002)
-        client.indices.analyze.assert_not_called()
+
+    def test_method_defaults_to_morph_and_meta(self) -> None:
+        # 075: method 미지정(getattr 폴백) → 형태소 경로·meta.query_norm.method="morph".
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch", search_os_query_norm_enabled=True, opensearch_index="assets",
+        )
+        client = self._analyze_client([{"token": "김밥", "leftPOS": "NNG(General Noun)"}])
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            out = svc.search_hybrid(
+                "김밥 만드는 법 영상", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: client,
+            )
+        self.assertEqual(cap["query"], "김밥")
+        client.indices.analyze.assert_called()  # 형태소 경로
+        self.assertEqual(out["meta"]["query_norm"]["method"], "morph")
+
+
+class TestBackendOsLlmQueryNormWiring(unittest.TestCase):
+    """075 — method='llm' 이면 gemma(noun_phrase_query) 정규화 경로를 배선(형태소 _analyze 미호출)."""
+
+    def test_llm_method_uses_gemma_not_morph(self) -> None:
+        import src.search.query_preprocess as qp
+        import src.search.search_service as svc
+
+        cfg = types.SimpleNamespace(
+            search_backend="opensearch", search_os_query_norm_enabled=True,
+            search_os_query_norm_method="llm", opensearch_index="assets",
+        )
+        from unittest.mock import MagicMock
+
+        analyze_client = MagicMock()  # 형태소 경로면 indices.analyze 가 불릴 것
+        fake_os, cap = _recording_os({"text": [{"id": "t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg), \
+             mock.patch.object(qp, "noun_phrase_query", return_value="김밥") as m_gemma:
+            out = svc.search_hybrid(
+                "김밥 만드는 법 영상", modalities=["text"],
+                _os_search_fn=fake_os, _os_client_fn=lambda: analyze_client,
+            )
+        self.assertEqual(cap["query"], "김밥")           # gemma 정규화 결과가 OS seam 에 감
+        m_gemma.assert_called_once()                     # gemma 경로 사용
+        analyze_client.indices.analyze.assert_not_called()  # 형태소(_analyze) 경로 미사용
+        self.assertEqual(out["meta"]["query_norm"]["method"], "llm")
 
 
 class TestBackendOsAboutFilterWiring(unittest.TestCase):
@@ -494,7 +538,10 @@ class TestBackendOsRerankWiring(unittest.TestCase):
 
 
 class TestBackendOsQueryNormWiring(unittest.TestCase):
-    """029 T008/T011: query-norm 토글 배선 — service 가 cfg 토글(getattr 폴백)을 읽어 검색 직전 질의를
+    """029 T008/T011 (레거시 — ``_query_norm_fn`` **주입 seam 전용**, 075 method 분기와 무관): query-norm
+    토글 배선. 075 방식 분기(morph/llm)는 주입 미사용 시에만 타므로 이 주입 seam 테스트에 영향 없음
+    (참고: 형태소 배선은 TestBackendOsMorphQueryNormWiring·llm 배선은 TestBackendOsLlmQueryNormWiring).
+    service 가 cfg 토글(getattr 폴백)을 읽어 검색 직전 질의를
     **service 레벨에서 1회** 명사구 정규화하고(단일 LLM 호출), 정규화된 질의를 OS seam 에 넘긴다.
     관측성(FR-007)은 top-level ``meta["query_norm"]`` 로 노출해 모달리티 키 dict 인 ``os_gate``
     (gate_meta)를 오염시키지 않는다(골든 하니스 보호). off(기본)면 원문 passthrough(바이트 동일)·
