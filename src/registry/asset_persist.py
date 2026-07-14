@@ -25,7 +25,7 @@ from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.database.ids import uuid7
 from src.dispatch.types import AssetRecord
 from src.file.file_type_defs import modality_of  # 저장 경계 canonical 매핑(053)
-from src.ingest.status import AssetStatus, set_status
+from src.ingest.status import AssetStatus, InvalidTransitionError, fetch_status, set_status
 
 
 def find_registered_asset_by_hash(conn: Connection[Any], file_hash: str) -> uuid.UUID | None:
@@ -93,7 +93,17 @@ def finalize_asset(conn: Connection[Any], asset_id: uuid.UUID, record: AssetReco
 
     037(OS 전용): 종전 PG FTS 컬럼(v270 에서 드롭)을 제거했다. 풀텍스트 색인은 OpenSearch 동기화가
     ``ext_meta`` 기반으로 생성하므로 적재 시 FTS 평문을 더 이상 채우지 않는다(INSERT 4컬럼만).
+
+    069 B7(P2-7): 서두에서 현재 상태가 ``extracting`` 인지 먼저 확인해, 아니면 INSERT 이전에
+    ``InvalidTransitionError`` 로 막는다(SELECT 1회 추가). 말미 ``set_status`` 도 같은 전이를
+    검증하지만, autocommit 새 호출자에서는 그전에 metadata/embedding INSERT 가 이미 커밋돼
+    중복·고아 행이 영속될 수 있다. 정상 경로(extracting)는 결과가 완전히 동일하다(회귀 0).
     """
+    current = fetch_status(conn, asset_id)
+    if current != AssetStatus.EXTRACTING:
+        raise InvalidTransitionError(
+            f"finalize_asset 는 extracting 상태에서만 호출 가능: 현재 {current.value}"
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
