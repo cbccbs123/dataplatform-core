@@ -1,7 +1,7 @@
-"""006 검색 — 질의 구조화 폴백(client 주입, 네트워크 없음).
+"""006 검색 — 질의 명사구 정규화(client/analyze_fn 주입, 네트워크 없음).
 
-``structure_user_query`` 는 LLM 응답을 구조화 dict 로 만든다. LLM 이 스키마를 어겨
-비-dict JSON(배열·스칼라)을 내도 예외 없이 안전한 기본 dict 로 폴백해야 한다(#6).
+069 US-C: 037 로 은퇴한 ``structure_user_query`` 死코드가 삭제돼, 본 파일은 검색 시점 정규화
+(``noun_phrase_query``·``morph_noun_phrase_query``)만 봉인한다.
 """
 
 from __future__ import annotations
@@ -12,43 +12,15 @@ from unittest.mock import MagicMock
 from src.search.query_preprocess import (
     morph_noun_phrase_query,
     noun_phrase_query,
-    structure_user_query,
 )
 
 
 def _client_returning(content: str) -> MagicMock:
-    """``complete_text`` 가 호출하는 ``chat.completions.create`` 응답을 모킹."""
+    """``complete_text``/``complete_json`` 가 호출하는 ``chat.completions.create`` 응답을 모킹."""
     c = MagicMock()
     c.chat.completions.create.return_value.choices = [MagicMock()]
     c.chat.completions.create.return_value.choices[0].message.content = content
     return c
-
-
-class TestStructureUserQueryFallback(unittest.TestCase):
-    def test_valid_json_object_parsed(self) -> None:
-        c = _client_returning('{"keywords": ["a"], "semantic_query": "요약"}')
-        out = structure_user_query("워크숍 발표자료", client=c)
-        self.assertIsInstance(out, dict)
-        self.assertEqual(out["keywords"], ["a"])
-        self.assertEqual(out["semantic_query"], "요약")
-
-    def test_json_array_falls_back_to_dict(self) -> None:
-        c = _client_returning("[1, 2, 3]")
-        out = structure_user_query("워크숍 발표자료", client=c)
-        self.assertIsInstance(out, dict)
-        self.assertEqual(out["semantic_query"], "워크숍 발표자료")
-
-    def test_json_scalar_falls_back_to_dict(self) -> None:
-        c = _client_returning("42")
-        out = structure_user_query("워크숍 발표자료", client=c)
-        self.assertIsInstance(out, dict)
-        self.assertEqual(out["semantic_query"], "워크숍 발표자료")
-
-    def test_empty_response_falls_back_to_dict(self) -> None:
-        c = _client_returning("")
-        out = structure_user_query("워크숍 발표자료", client=c)
-        self.assertIsInstance(out, dict)
-        self.assertEqual(out["semantic_query"], "워크숍 발표자료")
 
 
 class TestNounPhraseQuery(unittest.TestCase):
@@ -88,7 +60,7 @@ class TestNounPhraseQuery(unittest.TestCase):
 
     def test_prompt_has_no_env_dependent_input(self) -> None:
         # 021 비결정성 재도입 차단: 프롬프트에 datetime/now/today/오늘/기준 시각/random 토큰 0
-        # (순수 질의→명사구 매핑 — reference_dates_block 의 datetime.now 같은 env 입력 없음).
+        # (순수 질의→명사구 매핑 — 옛 질의 구조화가 쓰던 datetime.now 같은 env 입력 없음).
         c = _client_returning('{"query_norm": "낚시"}')
         noun_phrase_query("물고기 잡는 법", client=c)
         sent = c.chat.completions.create.call_args.kwargs["messages"][0]["content"]

@@ -269,11 +269,10 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         """search_hybrid(backend='opensearch') text/audio 경로에서 LLM 질의 구조화 0회(seam 미접촉)."""
         from src.search import search_service
 
-        # 037: media_search 삭제로 structure_user_query 정의처는 query_preprocess 단일이다. OS 경로는
-        # 어떤 모듈의 structure_user_query 도 호출하지 않으므로 patch 대상을 살아있는 모듈로 두고 0회를 봉인.
-        with mock.patch(
-            "src.search.query_preprocess.structure_user_query"
-        ) as m_llm:
+        # 069 US-C: 037 로 은퇴한 structure_user_query 死코드는 삭제됐다. 질의 구조화 LLM 은
+        # complete_text 단일 seam 을 쓰던 유일 경로였으므로, complete_text 0회로 "검색 시점 질의
+        # 구조화 LLM 미접촉"을 봉인한다(query-norm morph/off·llm_verify off 기본).
+        with mock.patch("src.llm.client.complete_text") as m_llm:
             result = search_service.search_hybrid(
                 "재무 매출 보고서",
                 modalities=["text", "audio"],
@@ -386,8 +385,8 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         """search_hybrid(backend='opensearch') image/video 경로도 LLM 질의 구조화 0회(seam 미접촉)."""
         from src.search import search_service
 
-        # 037: media_search 삭제로 patch 대상을 살아있는 query_preprocess 로 둔다(OS 경로는 미호출 — 0회 봉인).
-        with mock.patch("src.search.query_preprocess.structure_user_query") as m_llm:
+        # 069 US-C: structure_user_query 死코드 삭제 후 complete_text 0회로 봉인(OS 경로는 미호출).
+        with mock.patch("src.llm.client.complete_text") as m_llm:
             result = search_service.search_hybrid(
                 "반려동물 산책 사진 영상",
                 modalities=["image", "video"],
