@@ -47,7 +47,7 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -207,6 +207,24 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
+
+# 069 P1-4(권고): OS 연결 실패(인프라 다운·타임아웃)를 코드버그 500 과 구분해 **503** 으로 —
+# 운영 알람·관측 구분용(ConnectionTimeout 은 ConnectionError 하위라 함께 잡힘). opensearchpy 는
+# 검색 백엔드(037) 필수 의존이나, 부분 설치 환경에서도 포탈 기동이 죽지 않게 지연·방어 임포트.
+try:
+    from opensearchpy.exceptions import ConnectionError as _OSConnectionError
+except Exception:  # noqa: BLE001 — 미설치 환경 방어(검색 요청 시점에 별도 ImportError 로 드러남)
+    _OSConnectionError = None
+
+if _OSConnectionError is not None:
+
+    @app.exception_handler(_OSConnectionError)
+    async def _os_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+        _LOG.warning("OpenSearch 연결 실패(503 반환): %s %s — %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "검색 엔진(OpenSearch) 연결 실패 — 잠시 후 다시 시도해 주세요."},
+        )
 
 
 def _user_id_from_request(request: Request) -> str:
@@ -1133,6 +1151,13 @@ def search(
     search_plan = (result.get("meta") or {}).get("search_plan")
     if search_plan is not None:
         meta["search_plan"] = search_plan
+    # 069 P1-4(재확인 2026-07-14 확장): search_hybrid 관측성 meta 를 포탈이 떨구지 않고 전파한다 —
+    # os_gate(027 게이트·부분 실패 관측) + llm_verify(074) + query_norm(075·method 포함). **있을 때만**
+    # 복사(각 기능 off 면 키 부재 — 하위 관례 유지·응답 형태 봉인 테스트 무영향).
+    for obs_key in ("os_gate", "llm_verify", "query_norm"):
+        obs_val = (result.get("meta") or {}).get(obs_key)
+        if obs_val is not None:
+            meta[obs_key] = obs_val
     if search_filters is not None:
         meta["filters"] = {
             "file_ext": list(search_filters.file_exts),

@@ -129,6 +129,39 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(body["meta"]["size"], 10)
 
     @patch("src.app.portal_api.search_hybrid")
+    def test_search_meta_propagates_observability_when_present(self, mock_search) -> None:
+        # 069 P1-4: search_hybrid meta 의 관측성 3종(os_gate·llm_verify·query_norm)을 포탈이 전파.
+        r = _fake_search_result()
+        r["meta"].update({
+            "os_gate": {"text": {"gate_passed": True}},
+            "llm_verify": {"verified": 3, "dropped": 1, "fallback": False},
+            "query_norm": {"enabled": True, "method": "morph", "original": "회식 영상", "normalized": "회식"},
+        })
+        mock_search.return_value = r
+        body = self.client.get("/search", params={"q": "회식", "size": 10}).json()
+        self.assertEqual(body["meta"]["os_gate"], {"text": {"gate_passed": True}})
+        self.assertEqual(body["meta"]["llm_verify"]["dropped"], 1)
+        self.assertEqual(body["meta"]["query_norm"]["method"], "morph")
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_meta_observability_keys_absent_when_off(self, mock_search) -> None:
+        # off 관례: search_hybrid meta 에 없으면 포탈 meta 에도 키 부재(빈 값 주입 금지).
+        mock_search.return_value = _fake_search_result()
+        body = self.client.get("/search", params={"q": "회식", "size": 10}).json()
+        for k in ("os_gate", "llm_verify", "query_norm"):
+            self.assertNotIn(k, body["meta"])
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_os_connection_error_returns_503(self, mock_search) -> None:
+        # 069 P1-4 권고: OS 연결 실패(인프라)는 503 — 코드버그 500 과 구분(운영 알람 분리).
+        from opensearchpy.exceptions import ConnectionError as OSConnectionError
+
+        mock_search.side_effect = OSConnectionError("N/A", "conn refused", None)
+        resp = self.client.get("/search", params={"q": "회식"})
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn("OpenSearch", resp.json()["detail"])
+
+    @patch("src.app.portal_api.search_hybrid")
     def test_search_limit_per_bucket_param_and_default(self, mock_search) -> None:
         # 후보 풀(limit_per_bucket) 요청 파라미터화: 미지정=기본 50, 지정 시 그 값이 search_hybrid 에 전달.
         mock_search.return_value = _fake_search_result()
