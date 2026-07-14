@@ -66,7 +66,10 @@ def _normalize_file_kind(value: str | None) -> str | None:
 
 def _choose_encoding(path: Path, preferred_encoding: str) -> str:
     # 파일 스트리밍 읽기를 위해 샘플 바이트로 인코딩을 추정한다.
-    sample = path.read_bytes()[:65536]
+    # 069 P1-8: read_bytes()[:65536](파일 **전체**를 메모리에 올린 뒤 슬라이스 — 대용량 문서에서
+    # 낭비·파일당 extract/chunk 2회 호출)를 앞 64KiB 만 읽는 부분 읽기로 교체(판정 결과 동일).
+    with path.open("rb") as f:
+        sample = f.read(65536)
     for enc in (preferred_encoding, "utf-8-sig", "cp949", "euc-kr"):
         try:
             sample.decode(enc)
