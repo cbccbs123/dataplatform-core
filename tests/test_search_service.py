@@ -358,7 +358,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
 
     search_constants 단일 출처를 ``getattr`` 폴백으로 써 ``cutoff_enabled``/``cutoff_eps``/
     ``cutoff_floor``/``result_floor``/``bm25_operator`` 를 G1/G2 ``search_assets_os`` seam 에 넘긴다
-    (cross-module private import 안 함). 027: 게이트 표본 수(probe_k)·정규화 스케일 임계 4종(min_scores)은
+    (cross-module private import 안 함). 027: 게이트 표본 수(probe_k)·정규화 스케일 임계 4종은
     제거되고, per-result 컷이 코사인 스케일 단일 임계(``result_floor``)로 통합됐다.
     """
 
@@ -386,7 +386,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         self.assertEqual(os_cap["cutoff_eps"], 0.22)
         self.assertEqual(os_cap["cutoff_floor"], 0.55)
         self.assertEqual(os_cap["result_floor"], 0.33)
-        # 027: 제거된 인자는 전달되지 않는다(probe_k·정규화 min_scores·pipeline_name 소멸).
+        # 027: 제거된 인자는 전달되지 않는다(probe_k·정규화 스케일 임계·pipeline_name 소멸).
         self.assertNotIn("cutoff_probe_k", os_cap)
         self.assertNotIn("pipeline_name", os_cap)
 
@@ -447,36 +447,9 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
 
 class TestBackendOsPerResultCutDelegation(unittest.TestCase):
     """027 — OS 는 per-result 컷을 ``search_assets_os`` 내부(코사인 스케일 cut_rows·result_floor)에
-    위임하므로, search_hybrid 호출부는 전달 ``min_scores``(PG 코사인 스케일)를 OS 경로에 **적용하지
-    않는다**(스케일 불일치 방지·F1·037 PG 제거로 no-op). OS 컷은 seam 내부에서 끝난다.
+    위임하므로, search_hybrid 호출부에는 별도 하한 필터가 없다(069 US-C: 037 로 no-op 였던
+    ``min_scores``·``_filter_by_min_score`` 철거). OS 컷은 seam 내부에서 끝난다.
     """
-
-    @staticmethod
-    def _os_rows() -> dict[str, list[dict[str, object]]]:
-        # OS 버킷: 이미 search_assets_os 내부 컷을 통과한 행들(여기선 가짜 seam 이 그대로 돌려줌).
-        return {
-            "image": [
-                {"id": "hi", "similarity": 0.6},
-                {"id": "lo", "similarity": 0.4},
-            ]
-        }
-
-    def test_opensearch_ignores_passed_min_scores(self) -> None:
-        # 전달 min_scores(PG 스케일)가 매우 높아도 OS 버킷 행이 잘리지 않는다 —
-        # 호출부가 OS 경로에 _filter_by_min_score 를 적용하지 않음(컷은 seam 내부에서 이미 끝남).
-        import src.search.search_service as svc
-
-        cfg = types.SimpleNamespace(search_backend="opensearch")
-        fake_os, _cap = _recording_os(self._os_rows())
-        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
-            out = svc.search_hybrid(
-                "질의",
-                modalities=["image"],
-                min_scores={"image": 0.99},  # 적용됐다면 둘 다 잘렸을 값 — OS 경로는 무시
-                _os_search_fn=fake_os,
-                _os_client_fn=lambda: "C",
-            )
-        self.assertEqual([r["id"] for r in out["results"]["image"]], ["hi", "lo"])
 
     def test_os_gate_meta_merged_into_response_meta(self) -> None:
         # (F4 관측성) search_assets_os 가 돌려준 gate_meta 가 응답 meta["os_gate"] 로 합류한다.

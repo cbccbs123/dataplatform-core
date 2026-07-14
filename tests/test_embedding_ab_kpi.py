@@ -506,7 +506,7 @@ class TestEmbeddingABKpi(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv(_ENV, override=False)
-        from src.config.settings import init_settings, model_for_channel
+        from src.config.settings import init_settings
 
         init_settings("dev")
         from src.database.postgres_util import PostgresUtil
@@ -519,8 +519,9 @@ class TestEmbeddingABKpi(unittest.TestCase):
             raise unittest.SkipTest(f"DB 미접속: {type(exc).__name__}: {exc}") from None
 
         cls.goldens = load_golden(_GOLDEN_PATH)
-        # 채널 → 질의 임베딩 모델(FR-004 질의-문서 일치). 'st' 는 None(media_search 가 KoSimCSE 로 해소).
-        cls.channels = [("st", None), ("st_bge", model_for_channel("st_bge"))]
+        # 평가 채널. 069 US-C: 질의 임베딩 모델은 search_hybrid 가 text_channel 로 해소하므로(037 로
+        # text_query_model 은 no-op 였음·철거됨) 채널명만 A/B 축으로 둔다.
+        cls.channels = ["st", "st_bge"]
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -548,13 +549,13 @@ class TestEmbeddingABKpi(unittest.TestCase):
             )
             return {str(r[0]) for r in cur.fetchall()}
 
-    def _ranked_ids(self, query: str, channel: str, model: str | None) -> list[str]:
+    def _ranked_ids(self, query: str, channel: str) -> list[str]:
         """한 질의를 한 채널로 검색해 평가 풀에 속한 자산 id 순위를 반환한다(멀티모달 합산).
 
-        LLM 질의 구조화를 건너뛰고(``structured`` 주입) **text+audio+video 모달리티**를 검색해
-        세 버킷을 단일 랭킹으로 합친다(``_merge_ranked_ids``) — text 만 평가하면 BGE-M3 핵심 강점
-        (긴 STT=audio·영상 자막)을 못 잰다. ST 하이브리드 경로(text_documents·audio·video_st)에는
-        ``text_channel``/``text_query_model`` 이 자동 전파돼 'st' vs 'st_bge' 가 분리 평가된다.
+        **text+audio+video 모달리티**를 검색해 세 버킷을 단일 랭킹으로 합친다(``_merge_ranked_ids``)
+        — text 만 평가하면 BGE-M3 핵심 강점(긴 STT=audio·영상 자막)을 못 잰다. ST 하이브리드
+        경로(text_documents·audio·video_st)에는 ``text_channel`` 이 전파돼 'st' vs 'st_bge' 가
+        분리 평가된다(질의 임베딩 모델도 채널로 해소 — 069 US-C 로 no-op text_query_model 철거).
         **image 버킷은 합산에서 제외**(CLIP 검색이라 텍스트 채널 A/B 무관). 평가 풀('st'·'st_bge'
         공존 + text/audio/video) 밖 자산도 제외 — 두 채널이 같은 후보 우주를 보게 해 공정 비교.
         합산 정렬은 similarity 내림차순 + asset_id 오름차순 tiebreak 로 결정적(헌법 3조).
@@ -563,9 +564,7 @@ class TestEmbeddingABKpi(unittest.TestCase):
             query,
             modalities=["text", "audio", "video"],
             limit_per_bucket=_FETCH,
-            structured={"semantic_query": query, "semantic_query_en": ""},
             text_channel=channel,
-            text_query_model=model,
         )
         return _merge_ranked_ids(res["results"], self.pool)
 
@@ -576,17 +575,17 @@ class TestEmbeddingABKpi(unittest.TestCase):
         질의는 건너뛴다(공정 비교 대상 아님).
         """
         metrics = ("recall@20", "MRR", "nDCG@20")
-        agg = {ch: {m: [] for m in metrics} for ch, _ in self.channels}
-        lat = {ch: [] for ch, _ in self.channels}
+        agg = {ch: {m: [] for m in metrics} for ch in self.channels}
+        lat = {ch: [] for ch in self.channels}
         evaluated = 0
         for g in self.goldens:
             rel = set(g["relevant_asset_ids"]) & self.pool
             if not rel:
                 continue
             evaluated += 1
-            for ch, model in self.channels:
+            for ch in self.channels:
                 t0 = time.perf_counter()
-                ranked = self._ranked_ids(g["query"], ch, model)
+                ranked = self._ranked_ids(g["query"], ch)
                 lat[ch].append(time.perf_counter() - t0)
                 agg[ch]["recall@20"].append(recall_at_k(ranked, rel, _K))
                 agg[ch]["MRR"].append(mrr(ranked, rel))
@@ -609,14 +608,14 @@ class TestEmbeddingABKpi(unittest.TestCase):
         )
         for m in metrics:
             line = f"  {m:<10}"
-            for ch, _ in self.channels:
+            for ch in self.channels:
                 line += f"  {ch}={statistics.mean(run1[ch][m]):.4f}"
             print(line)
-        for ch, _ in self.channels:
+        for ch in self.channels:
             print(f"  p95[{ch}] = {_p95(lat1[ch]) * 1000:.1f}ms")
 
         # SC-003: 두 채널 모두 같은 골든셋으로 지표가 산출됐다(개수 일치·유한값).
-        for ch, _ in self.channels:
+        for ch in self.channels:
             for m in metrics:
                 self.assertEqual(len(run1[ch][m]), evaluated)
                 self.assertTrue(all(math.isfinite(v) for v in run1[ch][m]))

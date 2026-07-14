@@ -32,13 +32,15 @@ class TestRunMapsArgs(unittest.TestCase):
             captured.update(kw)
             return {"query": query, "results": {}, "meta": {}}
 
-        ns = argparse.Namespace(query="질의", modalities="text,image", limit=5, alpha=0.6)
+        ns = argparse.Namespace(query="질의", modalities="text,image", limit=5)
         out = run_search._run(ns, search_fn=fake_search)
 
         self.assertEqual(captured["query"], "질의")
         self.assertEqual(captured["modalities"], ["text", "image"])
         self.assertEqual(captured["limit_per_bucket"], 5)
-        self.assertEqual(captured["text_hybrid_alpha"], 0.6)
+        # 069 US-C: 037 로 no-op 였던 text_hybrid_alpha·min_scores 는 더 이상 전달하지 않는다.
+        self.assertNotIn("text_hybrid_alpha", captured)
+        self.assertNotIn("min_scores", captured)
         self.assertEqual(out["query"], "질의")
 
     def test_run_no_modalities_passes_none(self) -> None:
@@ -48,33 +50,9 @@ class TestRunMapsArgs(unittest.TestCase):
             captured.update(kw)
             return {}
 
-        ns = argparse.Namespace(query="질의", modalities=None, limit=20, alpha=0.75)
+        ns = argparse.Namespace(query="질의", modalities=None, limit=20)
         run_search._run(ns, search_fn=fake_search)
         self.assertIsNone(captured["modalities"])
-
-    def test_run_forwards_min_scores(self) -> None:
-        # main() 이 settings.search_min_scores 를 읽어 넘기면 _run 은 그대로 search_hybrid 로 전달한다.
-        captured: dict[str, object] = {}
-
-        def fake_search(query: str, **kw: object) -> dict[str, object]:
-            captured.update(kw)
-            return {}
-
-        ns = argparse.Namespace(query="질의", modalities=None, limit=20, alpha=0.75)
-        scores = {"text": 0.3, "image": 0.2, "video": 0.0, "audio": 0.0}
-        run_search._run(ns, search_fn=fake_search, min_scores=scores)
-        self.assertEqual(captured["min_scores"], scores)
-
-    def test_run_min_scores_defaults_none(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_search(query: str, **kw: object) -> dict[str, object]:
-            captured.update(kw)
-            return {}
-
-        ns = argparse.Namespace(query="질의", modalities=None, limit=20, alpha=0.75)
-        run_search._run(ns, search_fn=fake_search)
-        self.assertIsNone(captured["min_scores"])
 
 
 if __name__ == "__main__":

@@ -64,7 +64,6 @@ from src.classify.asset_topic import (
     find_same_topic_groups,
     list_topics,
 )
-from src.config.settings import get_current_settings
 from src.ingest.archiver import (
     display_file_name,  # 다운로드 파일명 asset_id 프리픽스 제거(065 T605)
 )
@@ -1040,20 +1039,6 @@ def _search_topic_facet(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[s
     return facet
 
 
-def _search_min_scores() -> dict[str, float] | None:
-    """settings 의 모달리티별 적합도 하한(``SEARCH_MIN_SCORE_*``)을 검색에 적용한다.
-
-    ``run_search``/``sample_search_api`` 와 동일하게 ``search_hybrid`` 에 floor 를 넘겨, 점수
-    무관한 약한 후보가 결과에 그대로 노출되는 것을 막는다(010 포탈은 이 배선을 빠뜨렸었다).
-    settings 미초기화(라우팅 단위 테스트·오설정)면 ``None``(필터 비활성=기존 동작)으로 보수
-    폴백한다 — 운영 진입점은 lifespan 이 ``init_settings`` 하므로 항상 설정값을 따른다.
-    """
-    try:
-        return get_current_settings().search_min_scores
-    except RuntimeError:
-        return None
-
-
 def _parse_search_mode(mode: str) -> str:
     """검색 mode 파라미터 검증(044 — auto|keyword)."""
     m = (mode or "auto").strip().lower()
@@ -1142,15 +1127,14 @@ def search(
     inc_terms = [s for s in ((t or "").strip() for t in (must_include or [])) if s]
     exc_terms = [s for s in ((t or "").strip() for t in (must_exclude or [])) if s]
 
-    # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). min_scores 로 모달리티별 적합도
-    # 하한을 적용해 약한 후보를 거른다(settings 의 SEARCH_MIN_SCORE_*; 미초기화면 None=필터 비활성).
+    # FR-013: 검색은 006 seam 만 호출(신규 LLM 호출 추가 없음). per-result 적합도 컷은 OS seam 내부
+    # 코사인 스케일에서 끝난다(069 US-C: 037 로 no-op 였던 min_scores 배선 철거).
     # 풀 하한: 요청 풀이 노출 size 보다 얕으면 size 로 끌어올린다(size 계약 보장 + 승격 여지 확보).
     effective_pool = max(limit_per_bucket, size)
     result = search_hybrid(
         q,
         modalities=mods,
         limit_per_bucket=effective_pool,
-        min_scores=_search_min_scores(),
         search_mode=search_mode,
         search_filters=search_filters,
         # 057 FR-202: 서버 lexical 필터(전체 코퍼스 must/must_not) — 프론트 페이지-only 필터 대체.

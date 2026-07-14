@@ -69,14 +69,6 @@ class PipelineSettings:
     # 관계 재시도/미해소 큐(relation_resolution)의 재시도 상한(009). attempts 가 이 값에 도달하면
     # decide_resolution_status 가 failed(DLQ)로 승격한다. run_relations --retry 가 소비 (기본 3).
     relation_retry_max_attempts: int
-    # 검색 결과 적합도 하한(모달리티별). 0.0=비활성. relations 의 relation_min_sim 과 같은 성격의 게이트.
-    search_min_scores: dict[str, float]
-    # 019: per-asset 청크 집계 방식(검색 시점 산식). 검색 경로(ST 하이브리드·시각 2단계)가 흩어진
-    # MAX 하드코딩 대신 이 단일 출처(chunk_agg_config)를 참조한다. 선택 필드 —
-    # 미설정 시 기본 'max'(=기존 MAX 집계와 동치) → 회귀 0(SC-001). 'topk_mean'/'mix' 는 측정용 토글.
-    chunk_agg: str
-    chunk_agg_k: int        # topk_mean 상위 k(기본 3)
-    chunk_agg_mix_w: float  # mix 가중치 w: w*MAX + (1-w)*AVG (기본 0.5)
     # 020: OpenSearch 동기화(검색 엔진 도입·CQRS). url/index 는 증분 훅·복구 도구가 참조하는 선택 필드.
     # 038: opensearch_sync_enabled 기본 True — 037 로 검색이 OS 단일이 된 뒤 적재 시 증분 색인이 꺼져
     # 있으면 신규 자산이 검색에서 누락된다(PG 폴백 없음). 정합 가드(_validate_settings_consistency)가
@@ -238,21 +230,6 @@ def _env_bool_default(name: str, default: bool) -> bool:
     raise ValueError(f"불리언 환경변수 형식 오류: {name}={raw!r}")
 
 
-# 검색이 쓰는 모달리티 버킷. relations 와 달리 모달리티마다 점수 스케일이 달라(텍스트 하이브리드 vs
-# 시각 2단계) 임계값을 모달리티별로 둔다.
-_SEARCH_MIN_SCORE_MODALITIES = ("text", "image", "video", "audio")
-
-
-def resolve_search_min_scores() -> dict[str, float]:
-    """모달리티 → 검색 적합도 하한 임계값. 공통 ``SEARCH_MIN_SCORE``(기본 0.0)를 각 모달리티
-    기본값으로 쓰고, ``SEARCH_MIN_SCORE_<MODALITY>`` 가 있으면 덮는 2단 폴백. 0.0 이면 비활성."""
-    common = _env_float_default("SEARCH_MIN_SCORE", 0.0)
-    return {
-        m: _env_float_default(f"SEARCH_MIN_SCORE_{m.upper()}", common)
-        for m in _SEARCH_MIN_SCORE_MODALITIES
-    }
-
-
 # 037 OpenSearch 전용 정리: 검색 read path 는 020 OS 인덱스 하이브리드 단일 경로다. 021 의 'pg'
 # (media_search FTS/벡터) 분기는 제거됐으므로 화이트리스트도 'opensearch' 하나만 남긴다 — 과거 기본값
 # 'pg' 를 포함한 그 외 값은 잘못된 백엔드로 검색하지 않도록 _resolve_search_backend 가 즉시 차단한다.
@@ -264,7 +241,7 @@ def _resolve_search_backend() -> str:
 
     037 에서 PG 검색 경로를 제거하며 기본값을 'pg'→'opensearch' 로 전환했다. 화이트리스트
     ``{opensearch}`` 밖 값(과거 'pg' 포함)은 **즉시 ValueError** 로 차단한다 — 오설정이 런타임까지
-    숨지 않게(fail-fast, 백로그 '설정 fail-late' 교정). 019 chunk_agg(헬퍼 지연 검증)와 달리 검증을
+    숨지 않게(fail-fast, 백로그 '설정 fail-late' 교정). 헬퍼 지연 검증(선택 설정)과 달리 검증을
     ``_build_settings`` 시점에 끌어와 프로세스 시작 시 빠르게 실패시킨다(잘못된 백엔드 선택 차단)."""
     value = _env_str_default("SEARCH_BACKEND", "opensearch")
     if value not in _SEARCH_BACKENDS:
@@ -540,12 +517,6 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         relation_auto_approve_emb_min=_env_float_default("RELATION_AUTO_APPROVE_EMB_MIN", 0.0),
         relation_path_top_k=_env_int_default("RELATION_PATH_TOP_K", 10),
         relation_retry_max_attempts=_env_int_default("RELATION_RETRY_MAX_ATTEMPTS", 3),
-        search_min_scores=resolve_search_min_scores(),
-        # 019: 집계 방식의 유효성 검증(미지원 값 차단)은 chunk_agg_config 헬퍼가 수행한다 —
-        # 018 active_embed_channel(필드는 raw 저장) + active_embed_model(헬퍼가 ValueError) 과 동형.
-        chunk_agg=_env_str_default("SEARCH_CHUNK_AGG", "max"),
-        chunk_agg_k=_env_int_default("SEARCH_CHUNK_AGG_K", 3),
-        chunk_agg_mix_w=_env_float_default("SEARCH_CHUNK_AGG_MIX_W", 0.5),
         # 020: OpenSearch 동기화 선택 설정. 미설정 시 url/index 기본값.
         # 038: sync 기본 True(037 후 적재=색인 정합). backend=opensearch ∧ ¬sync 조합은 빌드 말미
         #   _validate_settings_consistency 가 ValueError 로 차단한다(아래 return 직전).
@@ -694,41 +665,3 @@ def active_embed_model(settings: PipelineSettings | None = None) -> str:
     기본 active='st' → KoSimCSE(``text_embedding_model``), 'st_bge' → BGE-M3. 미지원 활성 채널은
     ``model_for_channel`` 이 즉시 ``ValueError`` 로 차단한다(잘못된 모델 사용 방지)."""
     return model_for_channel(active_embed_channel(settings), settings)
-
-
-# 019: 지원하는 per-asset 청크 집계 방식. 'max'=기존 MAX(회귀 0), 'topk_mean'=상위 k 평균,
-# 'mix'=w*MAX+(1-w)*AVG. 미지원 값은 잘못된 산식으로 검색하지 않도록 chunk_agg_config 가 차단한다.
-_CHUNK_AGG_MODES = ("max", "topk_mean", "mix")
-
-
-@dataclass(frozen=True)
-class ChunkAggConfig:
-    """per-asset 청크 집계 설정의 네임드 단일 출처(019). 검색 경로가 이 값으로 집계식을 고른다.
-
-    frozen=True 라 동일 설정 → 동일 값(==)이 결정적으로 보장된다(헌법 3조)."""
-
-    agg: str        # 'max' | 'topk_mean' | 'mix'
-    k: int          # topk_mean 상위 k
-    mix_w: float    # mix 가중치 w
-
-
-def chunk_agg_config(settings: PipelineSettings | None = None) -> ChunkAggConfig:
-    """per-asset 청크 집계 설정(019). 검색 경로(ST 하이브리드·시각 2단계)가 공유하는 단일 출처.
-
-    018 ``active_embed_channel``/``active_embed_model`` 동형 — ``settings`` 미지정 시 활성 설정을
-    사용하고(테스트는 ``settings`` 주입으로 순수 단위 검증), 지원하지 않는 ``SEARCH_CHUNK_AGG`` 값은
-    즉시 ``ValueError`` 로 차단한다(잘못된 산식으로 검색 방지).
-
-    회귀 0(SC-001): 기본 ``agg='max'`` 는 기존 MAX 집계와 동치다. settings 미초기화(순수 단위 등)에서는
-    활성 해소가 ``RuntimeError`` 이므로 기존 MAX 동작을 보존하도록 ``max`` 기본 집계로 보수 폴백한다
-    (운영 진입점은 항상 ``init_settings`` 하므로 이 폴백은 비운영 경로 — 오설정을 warning 으로 남긴다)."""
-    try:
-        cfg = settings if settings is not None else get_current_settings()
-    except RuntimeError:
-        _LOG.warning("settings 미초기화 — 청크 집계 'max' 보수 폴백(운영은 init_settings 필수)")
-        return ChunkAggConfig(agg="max", k=3, mix_w=0.5)
-    if cfg.chunk_agg not in _CHUNK_AGG_MODES:
-        raise ValueError(
-            f"지원하지 않는 청크 집계 방식: {cfg.chunk_agg!r} (지원: {list(_CHUNK_AGG_MODES)})"
-        )
-    return ChunkAggConfig(agg=cfg.chunk_agg, k=cfg.chunk_agg_k, mix_w=cfg.chunk_agg_mix_w)

@@ -21,7 +21,6 @@ import io
 import os
 import tempfile
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -237,32 +236,6 @@ class TestSearch(unittest.TestCase):
         mock_search.return_value = _fake_search_result()
         body = self.client.get("/search", params={"q": "회식", "size": 2}).json()
         self.assertEqual([r["asset_id"] for r in body["results"]["text"]], ["a1", "a2"])
-
-    @patch("src.app.portal_api.get_current_settings")
-    @patch("src.app.portal_api.search_hybrid")
-    def test_search_applies_min_scores_from_settings(
-        self, mock_search, mock_settings
-    ) -> None:
-        # ②(2026-06-09): 포탈은 settings 의 모달리티별 적합도 하한(SEARCH_MIN_SCORE_*)을
-        # search_hybrid 에 전달해야 한다 — run_search/sample_search_api 와 동일하게 floor 를
-        # 걸어 점수 무관 무관 결과 벽을 막는다(010 포탈의 누락 교정).
-        mock_search.return_value = _fake_search_result()
-        floors = {"text": 0.35, "image": 0.25, "video": 0.42, "audio": 0.35}
-        mock_settings.return_value = SimpleNamespace(search_min_scores=floors)
-        self.client.get("/search", params={"q": "회식", "size": 5})
-        self.assertEqual(mock_search.call_args.kwargs["min_scores"], floors)
-
-    @patch("src.app.portal_api.get_current_settings", side_effect=RuntimeError)
-    @patch("src.app.portal_api.search_hybrid")
-    def test_search_without_settings_falls_back_to_none(
-        self, mock_search, _mock_settings
-    ) -> None:
-        # settings 미초기화(라우팅 단위 테스트·오설정)에서는 min_scores=None 으로 보수 폴백한다 —
-        # 필터 비활성(기존 동작)이며 500 을 내지 않는다. 운영은 lifespan 이 init_settings 보장.
-        mock_search.return_value = _fake_search_result()
-        resp = self.client.get("/search", params={"q": "x", "size": 5})
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(mock_search.call_args.kwargs["min_scores"])
 
     @patch("src.app.portal_api.search_hybrid")
     def test_search_passes_mode_and_exposes_search_plan(self, mock_search) -> None:

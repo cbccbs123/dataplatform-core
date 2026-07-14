@@ -29,20 +29,16 @@ def _parse_modalities(raw: str | None) -> list[str] | None:
 def _run(
     args: argparse.Namespace,
     *,
-    min_scores: dict[str, float] | None = None,
     search_fn: Callable[..., dict[str, Any]] = search_hybrid,
 ) -> dict[str, Any]:
     """파싱된 인자를 검색 서비스 호출로 매핑한다. ``search_fn`` 은 테스트 주입 seam.
 
-    ``min_scores``(모달리티별 적합도 하한)는 ``main()`` 이 settings 에서 읽어 주입한다 —
     ``_run`` 은 settings 전역에 의존하지 않아 순수 매핑으로 단위 테스트된다.
     """
     return search_fn(
         args.query,
         modalities=_parse_modalities(args.modalities),
         limit_per_bucket=args.limit,
-        text_hybrid_alpha=args.alpha,
-        min_scores=min_scores,
     )
 
 
@@ -56,7 +52,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="콤마 구분 모달리티(text,audio,image,video). 미지정=전체",
     )
     parser.add_argument("--limit", type=int, default=20, help="버킷당 최대 결과 수")
-    parser.add_argument("--alpha", type=float, default=0.75, help="텍스트 하이브리드 임베딩 가중(0~1)")
     return parser
 
 
@@ -65,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     from dotenv import load_dotenv
 
-    from src.config.settings import get_current_settings, init_settings
+    from src.config.settings import init_settings
 
     args = _build_parser().parse_args()
 
@@ -75,8 +70,7 @@ def main() -> int:
         load_dotenv(dotenv_path=dotenv_path, override=False)
     init_settings(args.env)
 
-    # settings 에서 모달리티별 적합도 하한을 읽어 주입(미설정 모달리티는 0.0=비활성).
-    result = _run(args, min_scores=get_current_settings().search_min_scores)
+    result = _run(args)
     print(json.dumps(result, ensure_ascii=False, default=str))
     return 0
 

@@ -475,8 +475,18 @@ class TestG3FieldNameContract(unittest.TestCase):
     제거 봉인은 아래 '제거된 필드 부재' 단언이 담당한다.
     """
 
-    # 027: 제거된 파이프라인 메타 필드명(부재를 봉인). 리터럴을 한 곳에만 두어 잔존 참조와 구분한다.
-    _REMOVED_FIELDS = ("opensearch_" + "search_pipeline", "search_os_" + "probe_k", "search_os_" + "min_scores")
+    # 027·069 US-C: 제거된 설정 필드명(부재를 봉인). 리터럴을 문자열 결합으로 쪼개 한 곳에만 두어
+    # 잔존 참조(grep)와 구분한다 — 삭제 심볼 grep 0(SC-C) 을 이 봉인이 깨지 않게 한다.
+    _REMOVED_FIELDS = (
+        "opensearch_" + "search_pipeline",
+        "search_os_" + "probe_k",
+        "search_os_" + "min_scores",
+        # 069 US-C(037 잔재 철거): SEARCH_MIN_SCORE·chunk_agg 죽은 배선 삭제.
+        "search_min" + "_scores",
+        "chunk" + "_agg",
+        "chunk" + "_agg_k",
+        "chunk" + "_agg_mix_w",
+    )
 
     def test_field_names_and_defaults_match_g3_getattr(self) -> None:
         with _env():

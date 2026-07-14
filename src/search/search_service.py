@@ -5,23 +5,21 @@
 담당하고, 본 모듈은 요청 정규화·채널 해소·응답 형태만 책임진다(F-4.3).
 
 037 OpenSearch 전용 정리: 021 의 PG(``media_search`` FTS/벡터) 백엔드 분기를 걷어내고 OS 단일
-경로만 남겼다. 공개 API(``search_hybrid``) 시그니처는 호출부(portal ``search_group`` 등) 무영향을
-위해 유지하되, 내부에서는 ``_grouped_via_opensearch`` 만 호출한다 — PG 전용 인자
-(``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·``min_scores``)는
-하위호환 수용을 위해 시그니처에 남지만 OS 경로에서는 사용되지 않는다(no-op).
+경로만 남겼다. 내부에서는 ``_grouped_via_opensearch`` 만 호출한다. 069 US-C: 037 로 죽어 있던 PG 전용
+no-op 인자(``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·
+``min_scores``·``text_query_model``)와 하한 필터 잔재(``_filter_by_min_score``)를 시그니처·본문에서
+철거했다 — ``backend`` 인자만 fail-fast(미지원 백엔드 ValueError) 가치로 남긴다.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 from typing import Any
 
 from src.config import search_constants
 from src.config.embedding_constants import EMBEDDING_KIND_ST
 from src.config.settings import (
-    ChunkAggConfig,
     active_embed_channel,
     get_current_settings,
 )
@@ -58,33 +56,6 @@ _MODALITY_BUCKETS: dict[str, str] = {
 # (cross-module private import 없음·하드코딩 0). 미초기화 시 게이트 기본은 운영 기본과 동일(enabled True)이다.
 
 
-def _row_similarity(row: dict[str, Any]) -> float:
-    """행의 ``similarity`` 를 유한 실수로 읽는다(None/NaN/inf/비수치 → 0.0).
-
-    검색 백엔드의 비공개 헬퍼에 의존하지 않도록 서비스 계층에 작은 정화 함수를 둔다.
-    """
-    value = row.get("similarity")
-    try:
-        x = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0.0
-    return x if math.isfinite(x) else 0.0
-
-
-def _filter_by_min_score(
-    rows: list[dict[str, Any]], threshold: float
-) -> list[dict[str, Any]]:
-    """``similarity`` 가 ``threshold`` 미만인 행을 제거한다. 0.0 이하(음수 포함)면 필터 비활성(원본 반환).
-
-    grouped 결과는 이미 ``similarity`` 내림차순 상위 N 건이라, 잘린 후보는 남은 것보다 점수가
-    더 낮다 — 따라서 cap 이후 이 계층에서 걸러도 누락되는 적합 자산은 없다.
-    ``NaN``/누락 ``similarity`` 는 ``_row_similarity`` 로 0.0 처리되어 임계값>0 이면 자연 탈락한다.
-    """
-    if not threshold or threshold <= 0.0:
-        return rows
-    return [r for r in rows if _row_similarity(r) >= threshold]
-
-
 def _grouped_via_opensearch(
     query: str,
     *,
@@ -108,13 +79,12 @@ def _grouped_via_opensearch(
     ``embedding`` kNN + **클라이언트 융합**)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM
     캡션·KoSimCSE 캡션 임베딩으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속).
     요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 응답 표준 키
-    (text_documents·audio·image·video·meta)로 담는다 — 호출부의 ``_filter_by_min_score`` 공유 코드가
-    그대로 처리한다(응답 동형, SC-005).
+    (text_documents·audio·image·video·meta)로 담는다(응답 동형, SC-005).
 
     설계 판단:
-    - **LLM 미접촉(FR-002·SC-004)**: ``structure_user_query``(검색 질의 구조화 LLM)를 호출하지 않는다
-      — 멀티모달 LLM 0·ms. 037 PG 검색 제거로 PG 전용 파라미터(structured·alpha·fusion·query_model_name·
-      chunk_agg·grouped_fn)는 search_hybrid 시그니처에만 하위호환으로 남고 이 경로에서는 쓰이지 않는다.
+    - **LLM 미접촉(FR-002·SC-004)**: 검색 질의 구조화 LLM 을 호출하지 않는다 — 멀티모달 LLM 0·ms.
+      037 PG 검색 제거·069 US-C 정리로 PG 전용 파라미터(structured·alpha·fusion·query_model_name·
+      chunk_agg 등)는 search_hybrid 시그니처에서 철거됐다(이 경로에서 쓰이지 않았음).
     - **query-norm 토글(072 — 029 seam 재사용, gemma 대체)**: ``search_os_query_norm_enabled`` on 이면
       검색 직전 **자연어 질의(어절≥3)**를 **nori 형태소 명사추출 + 모달리티어 스톱워드 제거**로 정규화
       (검색시점 LLM 0·결정적·``_analyze`` 사전 기반)한 뒤 OS 에 넘긴다 — 정규화를 service 레벨에서 1회만
@@ -132,8 +102,8 @@ def _grouped_via_opensearch(
     - **컷오프 설정(027)**: 게이트·per-result 컷 임계(eps·floor·result_floor·operator)를 cfg 에서 읽어
       OS seam 에 전달한다(getattr 폴백은 search_constants 단일 출처 — settings 미초기화 순수 단위 방어).
       ``disable_os_cutoff=True`` 면 ``cutoff_enabled=False`` 로 강제해 게이트·per-result 컷을 모두 끈다
-      (no_cutoff 디버그 우회 — 약한 후보까지 노출). per-result 컷이 search_assets_os 내부 코사인 스케일
-      (cut_rows·result_floor)로 이동했으므로 호출부 ``_filter_by_min_score`` 는 OS 경로에 적용하지 않는다.
+      (no_cutoff 디버그 우회 — 약한 후보까지 노출). per-result 컷은 search_assets_os 내부 코사인 스케일
+      (cut_rows·result_floor)에서 끝나므로 호출부에는 별도 하한 필터가 없다.
     - **OS 미도달(FR-007)**: ``os_client_fn``/``os_search_fn`` 예외를 try/except 로 감싸지 않아 그대로
       전파한다(silent pg 폴백 금지 — 결과가 백엔드 가용성에 따라 달라지지 않게).
 
@@ -295,15 +265,8 @@ def search_hybrid(
     *,
     modalities: list[str] | None = None,
     limit_per_bucket: int = 20,
-    text_hybrid_alpha: float = 0.75,
-    image_search_alpha: float = 0.65,
-    fusion: str = "alpha",
-    structured: dict[str, Any] | None = None,
-    min_scores: dict[str, float] | None = None,
     disable_os_cutoff: bool = False,
     text_channel: str | None = None,
-    text_query_model: str | None = None,
-    chunk_agg: ChunkAggConfig | None = None,
     backend: str | None = None,
     _os_search_fn: Callable[
         ..., tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]
@@ -348,11 +311,11 @@ def search_hybrid(
     불일치 해소). 필터 절만 추가하고 융합·게이트·컷 로직은 무변경 → 랭킹 산식·정렬 불변. 미지정(None)이면
     빈 리스트로 넘어가 body 바이트 동일(하위호환·회귀 0).
 
-    하위호환(037): ``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·
-    ``min_scores``·``text_query_model``·``backend`` 인자는 호출부(portal 등) 무영향을 위해 시그니처에
-    남지만, OS 단일 경로에서는 사용되지 않는다(PG 검색 제거로 no-op). per-result 컷은 ``search_assets_os``
-    내부 코사인 스케일(``cut_rows``·``result_floor``)로 이루어지므로 호출부 ``min_scores`` 필터는 적용하지
-    않는다. ``backend`` 는 'opensearch' 외 값을 받으면 ``ValueError``(미지원 백엔드).
+    069 US-C(037 잔재 철거): 037 로 죽어 있던 PG 전용 no-op 인자(``structured``·``fusion``·
+    ``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·``min_scores``·``text_query_model``)와
+    호출부 하한 필터(``_filter_by_min_score``)를 철거했다. per-result 컷은 ``search_assets_os`` 내부
+    코사인 스케일(``cut_rows``·``result_floor``)에서 끝난다. ``backend`` 만 남긴다 — 'opensearch' 외
+    값을 받으면 ``ValueError``(미지원 백엔드 fail-fast).
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -409,11 +372,8 @@ def search_hybrid(
         must_include=must_include,
         must_exclude=must_exclude,
     )
-    # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 수행하므로
-    # 호출부 필터는 적용하지 않는다(전달 min_scores 는 PG 코사인 스케일이라 OS 정규화·코사인 점수에
-    # 무의미·스케일 불일치 — 037 PG 제거로 no-op). 빈 임계(0.0)면 _filter_by_min_score 가 원본을 그대로 반환.
-    results = {
-        key: _filter_by_min_score(grouped.get(key, []), 0.0)
-        for _label, key in label_keys
-    }
+    # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 끝나므로
+    # 호출부에는 별도 하한 필터가 없다(069 US-C: 037 로 no-op 였던 _filter_by_min_score 철거). 요청 라벨
+    # 키만 골라 표준 버킷으로 담는다.
+    results = {key: grouped.get(key, []) for _label, key in label_keys}
     return {"query": query, "results": results, "meta": grouped.get("meta", {})}

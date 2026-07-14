@@ -168,7 +168,8 @@ class TestTopicCanonicalizeGate(unittest.TestCase):
     """``_topic_canonicalize_enabled`` — TOPIC_CANONICALIZE_ENABLED 설정 조회 헬퍼.
 
     settings 미초기화(순수 단위 등)에서는 보수적 False 폴백이라 현행 경로(canonicalize 미배선)를
-    보존한다 — 기존 graph_persist 단위 테스트가 init_settings 없이도 동작 불변이도록(chunk_agg 선례).
+    보존한다 — 기존 graph_persist 단위 테스트가 init_settings 없이도 동작 불변이도록(다른 선택 설정
+    조회 헬퍼의 미초기화 보수 폴백과 동형).
     """
 
     def test_gate_false_when_settings_uninitialized(self) -> None:

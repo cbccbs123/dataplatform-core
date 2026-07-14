@@ -22,8 +22,8 @@ def _topic_canonicalize_enabled() -> bool:
     """``TOPIC_CANONICALIZE_ENABLED`` 설정 조회(058 FR-401). 미초기화 시 보수적 **False** 폴백.
 
     settings 미초기화(순수 단위 테스트 등)에서는 ``get_current_settings()`` 가 ``RuntimeError`` 이므로
-    False 로 폴백해 현행 경로(canonicalize 미배선·coerce 결과 그대로)를 보존한다 —
-    ``chunk_agg_config`` 선례. 운영 진입점은 항상 ``init_settings`` 하므로 이 폴백은 비운영 경로다.
+    False 로 폴백해 현행 경로(canonicalize 미배선·coerce 결과 그대로)를 보존한다 — 다른 선택 설정
+    조회 헬퍼의 미초기화 보수 폴백과 동형. 운영 진입점은 항상 ``init_settings`` 하므로 이 폴백은 비운영 경로다.
     기본값 False 라 시드 전에는 관계 저장이 바이트 동일하다(동작 불변·회귀 0)."""
     from src.config.settings import get_current_settings
 

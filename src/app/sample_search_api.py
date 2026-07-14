@@ -8,13 +8,12 @@
 실행(conda 환경):
     conda activate AuroraFS && uvicorn src.app.sample_search_api:app --port 8000
     # 또는: conda run -n AuroraFS python -m src.app.sample_search_api
-예) curl "http://localhost:8000/search?q=무선%20충전기&modalities=text,image&fusion=alpha"
+예) curl "http://localhost:8000/search?q=무선%20충전기&modalities=text,image"
     curl "http://localhost:8000/search?q=회식&no_cutoff=true"   # 컷오프 끄고 약한 매칭까지
     curl "http://localhost:8000/search?q=회식&compact=true"     # 한눈에(순위·모달리티·점수·파일명·요약)
-    curl "http://localhost:8000/search?q=회식&compact=true&skip_llm=true"  # LLM 스킵(~2.3s↓)+축약
 
 부트스트랩은 run_search 와 동일: load_dotenv(.env.{env}) → init_settings → 첫 요청 시 LLM/DB 지연 초기화.
-환경은 SAMPLE_API_ENV(기본 dev). 실 PostgreSQL + 온프레미스 LLM(질의 구조화) 필요.
+환경은 SAMPLE_API_ENV(기본 dev). 실 PostgreSQL 필요.
 """
 from __future__ import annotations
 
@@ -240,26 +239,21 @@ def search(
     q: str = Query(..., description="검색 질의(한국어)"),
     modalities: str | None = Query(None, description="콤마 구분: text,image,video,audio (미지정=전체)"),
     limit: int = Query(20, ge=1, le=200, description="버킷당 최대 결과 수"),
-    alpha: float = Query(0.75, ge=0.0, le=1.0, description="텍스트 하이브리드 임베딩 가중"),
-    fusion: str = Query("alpha", pattern="^(alpha|rrf)$", description="융합 방식(alpha 기본 / rrf 프로토타입)"),
     no_cutoff: bool = Query(False, description="true 면 모달리티별 적합도 컷오프를 무시(약한 매칭까지 노출)"),
-    skip_llm: bool = Query(False, description="true 면 LLM 질의 구조화를 생략(structured 직접 주입) — ~2.3s 절감, 단 동의어/영문 확장 없음"),
     compact: bool = Query(False, description="true 면 한눈에 보기용 축약(전 모달리티 합쳐 점수순 top-K; 순위·모달리티·점수·파일명·요약만)"),
     group_by_relation: bool = Query(False, description="true 면 관계(graph_edge active duplicate_near/derived_from)로 같은 소스 영상의 모달리티를 한 묶음으로 접어 반환(compact 보다 우선)"),
     summary_chars: int = Query(160, ge=0, le=2000, description="compact/묶음 요약 최대 글자수(0=자르지 않음)"),
 ) -> dict[str, Any]:
     """`search_service.search_hybrid` 를 그대로 호출해 모달리티 버킷 결과를 JSON 으로 반환한다.
 
-    - ``fusion``: alpha(기본)/rrf 선택 — 단, grouped 출력은 cap 재정렬로 rrf 가 보이지 않을 수 있다(설계 §8 한계).
-    - ``no_cutoff``: 디버깅용 — OS 경로는 ``disable_os_cutoff=True`` 로 게이트·per-result 컷을 모두 끄고
-      (027), pg 경로는 min_scores 를 빈 dict 로 줘 약한 후보까지 노출한다.
+    - ``no_cutoff``: 디버깅용 — OS 경로에 ``disable_os_cutoff=True`` 로 게이트·per-result 컷을 모두
+      끈다(027 — 약한 매칭까지 노출).
     - ``compact``: 전 모달리티를 합쳐 합산 점수(similarity) 내림차순 top-K(=limit)로, 순위·모달리티·
       점수·파일명·요약만 남긴 단일 리스트를 반환한다(브라우저·터미널에서 한눈에 보기용).
     - ``group_by_relation``: 같은 영상의 모달리티들을 graph_edge(active duplicate_near/derived_from)로
       묶어 1건으로 접는다. 같은 영상이 4번 나오던 게 묶음 카드 1개가 된다(spec 010 프로토타입).
-    질의 구조화(LLM)·임베딩·DB 는 첫 호출 시 지연 초기화된다.
+    임베딩·DB 는 첫 호출 시 지연 초기화된다.
     """
-    from src.config.settings import get_current_settings
     from src.search.search_service import search_hybrid
 
     mods = None
@@ -269,32 +263,10 @@ def search(
         if unknown:
             return {"error": f"알 수 없는 modality: {unknown} (허용: {list(_VALID_MODALITIES)})"}
 
-    # pg 경로 per-result 컷(코사인 스케일). no_cutoff 면 빈 dict(=전부 0.0=비활성)로 pg 필터를 끈다.
-    # 027: OS 경로는 min_scores 를 쓰지 않고 컷이 search_assets_os 내부로 이동했으므로, OS 디버그 우회는
-    # 아래 search_hybrid(disable_os_cutoff=no_cutoff)로 전달한다(게이트·per-result 컷 모두 off).
-    min_scores: dict[str, float] = {} if no_cutoff else get_current_settings().search_min_scores
-
-    # skip_llm: structured 를 직접 주입하면 search_hybrid 가 structure_user_query(LLM) 를 건너뛴다.
-    # 동의어·영문 확장 없이 원 질의를 그대로 임베딩+FTS 에 태운다(테스트·지연 절감용).
-    structured = None
-    if skip_llm:
-        structured = {
-            "semantic_query": q,
-            "semantic_query_en": "",
-            "keywords": [q],
-            "keywords_en": [],
-            "date_start": "unknown",
-            "date_end": "unknown",
-        }
-
     result = search_hybrid(
         q,
         modalities=mods,
         limit_per_bucket=limit,
-        text_hybrid_alpha=alpha,  # 버그 수정: 받은 alpha 를 실제로 전달(이전엔 무시됐음)
-        fusion=fusion,
-        structured=structured,
-        min_scores=min_scores,
         disable_os_cutoff=no_cutoff,  # 027: OS 경로 게이트·per-result 컷 우회(디버그)
     )
     if group_by_relation:

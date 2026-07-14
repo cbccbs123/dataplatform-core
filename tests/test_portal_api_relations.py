@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import unittest
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -428,15 +427,13 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    # 승인 — ok=True(e1)만 감사 기록·응답 봉투 불변. OS on 이어도 재색인용 PostgresUtil 미생성.
+    # 승인 — ok=True(e1)만 감사 기록·응답 봉투 불변. 재색인용 PostgresUtil 미생성(065 로 재색인 훅 제거).
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api.get_current_settings",
-           return_value=SimpleNamespace(opensearch_sync_enabled=True))
     @patch("src.app.portal_api._record_relation_audit")
     @patch("src.app.portal_api.record_access")
     @patch("src.app.portal_api.bulk_review")
     def test_approve_records_audit_and_no_reindex(
-        self, m_bulk, m_access, m_audit, m_settings, m_pgutil
+        self, m_bulk, m_access, m_audit, m_pgutil
     ) -> None:
         m_bulk.return_value = [{"edge_id": "e1", "ok": True}, {"edge_id": "e2", "ok": False}]
         resp = self.client.post("/admin/relations/approve", json={"edge_ids": ["e1", "e2"]})
@@ -454,13 +451,11 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 반려 — 감사 기록·봉투 불변, 재색인 없음.
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api.get_current_settings",
-           return_value=SimpleNamespace(opensearch_sync_enabled=True))
     @patch("src.app.portal_api._record_relation_audit")
     @patch("src.app.portal_api.record_access")
     @patch("src.app.portal_api.bulk_review")
     def test_reject_records_audit_and_no_reindex(
-        self, m_bulk, m_access, m_audit, m_settings, m_pgutil
+        self, m_bulk, m_access, m_audit, m_pgutil
     ) -> None:
         m_bulk.return_value = [{"edge_id": "e1", "ok": True}]
         resp = self.client.post("/admin/relations/reject", json={"edge_ids": ["e1"]})
@@ -486,13 +481,11 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 정정(revise) 성공(ok=True) → 감사 기록·봉투 불변, 재색인 없음.
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api.get_current_settings",
-           return_value=SimpleNamespace(opensearch_sync_enabled=True))
     @patch("src.app.portal_api._record_relation_audit")
     @patch("src.app.portal_api.record_access")
     @patch("src.app.portal_api.revise_edge")
     def test_revise_ok_records_audit_and_no_reindex(
-        self, m_revise, m_access, m_audit, m_settings, m_pgutil
+        self, m_revise, m_access, m_audit, m_pgutil
     ) -> None:
         m_revise.return_value = True
         resp = self.client.post("/admin/relations/revise",
