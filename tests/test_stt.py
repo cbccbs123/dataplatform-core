@@ -18,7 +18,8 @@ class TestWhisperModelCache(unittest.TestCase):
 
         def _fresh_transcribe(*a, **k):
             # 호출마다 새 이터레이터 — 캐시로 재사용되는 모델이 소진된 이터레이터를 받지 않게.
-            seg = MagicMock(); seg.text = "안녕"
+            seg = MagicMock()
+            seg.text = "안녕"
             return (iter([seg]), MagicMock())
 
         m.transcribe.side_effect = _fresh_transcribe
