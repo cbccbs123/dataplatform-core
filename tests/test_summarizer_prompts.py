@@ -102,6 +102,15 @@ class TextPromptTopicTest(unittest.TestCase):
         )
         _assert_topic_instruction(self, prompt)
 
+    def test_audio_prompt_first_sentence_is_stt_specific(self) -> None:
+        # 069 B6(P2-6): _build_audio_prompt 첫 문장이 reduce("청크별 요약 목록") 복붙이면
+        # 오디오 summary 품질이 검색까지 전파되는 결함 — STT 전용 문구로 교체됨을 봉인한다.
+        prompt = text_summarizer._build_audio_prompt(
+            "STT 전사 텍스트", summary_max_chars=500, top_k_keywords=10
+        )
+        self.assertIn("오디오 음성 전사(STT) 전문 요약", prompt)
+        self.assertNotIn("청크별 요약 목록", prompt)
+
     def test_json_schema_keys_unchanged(self) -> None:
         # 텍스트/오디오 산출 스키마(summary/keywords) 불변. 오디오는 stt 필드도 보존.
         chunk = text_summarizer._build_chunk_summary_prompt("본문", summary_max_chars=500)

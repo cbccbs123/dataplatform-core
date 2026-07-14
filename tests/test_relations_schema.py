@@ -65,6 +65,16 @@ class TestTopicFields(unittest.TestCase):
         self.assertEqual(te, "general")
         self.assertEqual(se, "")
 
+    def test_coerce_from_reason_blocks_sentence_form_topic(self) -> None:
+        # 069 B5(P2-5): reason 폴백 topic_ko 는 원문 첫 줄(문장형·최대 200자)을 그대로 쓰지 말고
+        # normalize_topic_ko(첫 어절)로 좁혀 저장한다 — 문장형 topic 저장·패싯 오염·canonicalize
+        # 폭주 차단(정합/카디널리티 개선이지 주제 품질 개선 아님). "축구 경기 영상 비교" → "축구".
+        edge = {"reason": "축구 경기 영상 비교", "topic_ko": "", "subtopic_ko": ""}
+        tk, _sk, _te, _se, auto = coerce_topic_fields_mvp(edge)
+        self.assertTrue(auto)
+        self.assertEqual(tk, "축구")  # 문장 전체가 아니라 첫 어절만
+        self.assertNotIn(" ", tk)     # 공백 포함 문장형이 저장되지 않음
+
     def test_coerce_default_when_empty(self) -> None:
         edge: dict = {}
         tk, sk, te, se, auto = coerce_topic_fields_mvp(edge)

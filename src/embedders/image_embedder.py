@@ -207,18 +207,20 @@ def clip_zero_shot_ko_meta_items(label_scores: dict[str, float]) -> list[dict[st
     items: list[dict[str, float | str]] = [
         {"label": lab, "score": float(s)} for lab, s in label_scores.items()
     ]
-    items.sort(key=lambda x: -float(x["score"]))
+    # 069 B1(P2-1): 동점 score 를 label 문자열 2차키로 깨서 top-k 컷을 결정화한다(헌법 3조).
+    # 2차키 없으면 score 만으로는 동점 라벨의 상대 순서가 입력(dict) 순서에 좌우돼 재현성이 흔들린다.
+    items.sort(key=lambda x: (-float(x["score"]), str(x["label"])))
     return items
 
 
 def normalize_korean_label_candidates(korean_labels: list[str]) -> list[str]:
-    """VLM 등에서 온 한글 후보 문자열을 중복 제거·trim 한 리스트로 만든다."""
-    cleaned_set: set[str] = set()
-    for raw in korean_labels:
-        lab = str(raw).strip()
-        if lab:
-            cleaned_set.add(lab)
-    return list(cleaned_set)
+    """VLM 등에서 온 한글 후보 문자열을 중복 제거·trim 한 리스트로 만든다.
+
+    069 B1(P2-1): ``set`` 은 해시 순서(비결정)라 동일 입력이라도 후보 순서가 흔들려 하위 CLIP
+    제로샷 점수 계산·top-k 컷의 재현성을 저해했다. ``dict.fromkeys`` 로 바꿔 **첫 등장 순서를
+    보존**하면서 중복만 제거한다(헌법 3조·결정성). score 는 순서와 무관하므로 값 자체는 불변.
+    """
+    return list(dict.fromkeys(lab for raw in korean_labels if (lab := str(raw).strip())))
 
 
 def zero_shot_tag_rgb_korean_clip(
