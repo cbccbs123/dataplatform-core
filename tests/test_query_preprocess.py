@@ -95,6 +95,17 @@ class TestNounPhraseQuery(unittest.TestCase):
         for token in ("now", "today", "datetime", "timezone", "기준 시각", "오늘", "random"):
             self.assertNotIn(token, sent)
 
+    def test_prompt_forbids_paraphrase_and_preserves_compounds(self) -> None:
+        # 076 회귀 가드: 범용 strict 프롬프트가 (1) 의역/없는 단어 추가 금지 (2) 복합어 원형 보존 원칙을
+        # 담는다. 구 프롬프트가 의역 예시("별 보는 방법"→"천체 관측")로 노이즈를 유도하던 것을 차단.
+        c = _client_returning('{"query_norm": "낚시"}')
+        noun_phrase_query("물고기 잡는 법", client=c)
+        sent = c.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("원문에 실제로 등장한 단어만", sent)  # 의역 금지 원칙
+        self.assertIn("의역 금지", sent)
+        self.assertIn("원형 그대로", sent)                  # 복합어 보존 원칙
+        self.assertNotIn("천체 관측", sent)                 # 구 의역 예시 제거 확인
+
     def test_deterministic_same_query_same_phrase(self) -> None:
         # SC-003 결정성: 같은 질의 → 같은 명사구(temp=0·env 입력 0·순수 매핑).
         outs = [
