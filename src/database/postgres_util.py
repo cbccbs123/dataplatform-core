@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -137,6 +138,8 @@ class PostgresUtil:
         self.min_server_version = _resolve_min_server_version(min_server_version)
         self.logger = logger or logging.getLogger(__name__)
         self._pool: Any = None
+        # 069 P1-1: open_pool 의 check-then-set 경합 차단용 락(멀티스레드 서버에서 풀 2중 생성·누수 방지).
+        self._pool_lock = threading.Lock()
         self._version_checked = False
         self._on_retry = on_retry
         self._on_failure = on_failure
@@ -313,24 +316,30 @@ class PostgresUtil:
         raise RuntimeError("run_with_retry reached unexpected state.")
 
     def open_pool(self) -> Any:
-        """커넥션 풀을 지연 생성한다(최초 호출 때만; 이후 같은 풀 재사용). psycopg_pool 은 지연 import."""
-        if self._pool is None:
-            from psycopg_pool import ConnectionPool  # pyright: ignore[reportMissingImports]
+        """커넥션 풀을 지연 생성한다(최초 호출 때만; 이후 같은 풀 재사용). psycopg_pool 은 지연 import.
 
-            assert self.config is not None or self.dsn is not None
-            min_size = self.config.min_pool_size if self.config else 1
-            max_size = self.config.max_pool_size if self.config else 10
-            self.logger.debug(
-                "Opening PostgreSQL connection pool (min=%s, max=%s).",
-                min_size,
-                max_size,
-            )
-            self._pool = ConnectionPool(
-                conninfo=self._build_conninfo(),
-                min_size=min_size,
-                max_size=max_size,
-                open=True,
-            )
+        069 P1-1: 더블체크 락킹 — 멀티스레드 서버(포탈 스레드풀)에서 동시 최초 호출 시 check-then-set
+        경합으로 풀이 2개 만들어져 한쪽이 close 없이 누수되던 것을 차단한다(락은 최초 생성 때만 경합).
+        """
+        if self._pool is None:
+            with self._pool_lock:
+                if self._pool is None:
+                    from psycopg_pool import ConnectionPool  # pyright: ignore[reportMissingImports]
+
+                    assert self.config is not None or self.dsn is not None
+                    min_size = self.config.min_pool_size if self.config else 1
+                    max_size = self.config.max_pool_size if self.config else 10
+                    self.logger.debug(
+                        "Opening PostgreSQL connection pool (min=%s, max=%s).",
+                        min_size,
+                        max_size,
+                    )
+                    self._pool = ConnectionPool(
+                        conninfo=self._build_conninfo(),
+                        min_size=min_size,
+                        max_size=max_size,
+                        open=True,
+                    )
         return self._pool
 
     @contextmanager

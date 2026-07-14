@@ -38,6 +38,7 @@ import asyncio
 import logging
 import mimetypes
 import os
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -148,18 +149,46 @@ _STREAM_CHUNK = 64 * 1024
 _LOG = logging.getLogger("meta_extract.portal_api")
 
 
+# 069 P1-1: 앱 수명 PostgresUtil 싱글턴 — 기존엔 요청(트랜잭션)마다 PostgresUtil()+`with db:` 로
+# **풀을 생성·즉시 파괴**해 풀링 이득이 0(매 요청 TCP+auth 재수행·고부하 시 커넥션 폭증)이었다.
+# 지연 생성(최초 요청)·프로세스 공유·lifespan 종료 시 close. 생성 경합은 락으로 차단.
+_DB_SINGLETON: Any = None
+_DB_LOCK = threading.Lock()
+
+
+def _get_db() -> Any:
+    """앱 수명 DB 싱글턴을 돌려준다(최초 호출 시 풀 1회 생성 — 069 P1-1)."""
+    global _DB_SINGLETON
+    if _DB_SINGLETON is None:
+        with _DB_LOCK:
+            if _DB_SINGLETON is None:
+                from src.database.postgres_util import PostgresUtil
+
+                db = PostgresUtil()
+                db.open_pool()
+                _DB_SINGLETON = db
+    return _DB_SINGLETON
+
+
+def _close_db_singleton() -> None:
+    """lifespan 종료 훅 — 싱글턴 풀을 닫고 초기화한다(재기동·테스트 격리용)."""
+    global _DB_SINGLETON
+    if _DB_SINGLETON is not None:
+        try:
+            _DB_SINGLETON.close()
+        except Exception:  # noqa: BLE001 — 종료 경로 best-effort(닫힘 실패가 셧다운을 막지 않게)
+            _LOG.warning("DB 풀 close 실패(무시)", exc_info=True)
+        _DB_SINGLETON = None
+
+
 def _run_in_db(callback: Callable[[Any], Any]) -> Any:
     """PostgresUtil 조회 트랜잭션에서 ``callback(conn)`` 을 실행하는 단일 seam.
 
     상세/다운로드/묶음 핸들러의 DB 접근은 모두 이 함수를 거친다(테스트는 이 함수를 patch 로
     대체해 DB 없이 단위 검증). ``idempotent=True`` 조회 전용(쓰기 0, 헌법 6조).
-    PostgresUtil 은 import 비용·풀 초기화를 늦추기 위해 함수 안에서 지연 import 한다.
+    069 P1-1: 요청당 풀 생성·파괴 대신 앱 수명 싱글턴(``_get_db``)을 재사용한다.
     """
-    from src.database.postgres_util import PostgresUtil
-
-    db = PostgresUtil()
-    with db:
-        return db.execute_in_transaction(callback, idempotent=True)
+    return _get_db().execute_in_transaction(callback, idempotent=True)
 
 
 def _run_in_db_write(callback: Callable[[Any], Any]) -> Any:
@@ -167,13 +196,9 @@ def _run_in_db_write(callback: Callable[[Any], Any]) -> Any:
 
     조회 seam(``_run_in_db``)과 분리한 별도 write seam — 자산 데이터·스키마는 무변경,
     오직 ``access_log`` 한 행 INSERT 만 한다(append-only·013 FR-012 감사 무결성). 미들웨어가 best-effort
-    로만 호출하며(테스트는 이 함수를 patch), PostgresUtil 은 함수 안에서 지연 import 한다.
+    로만 호출한다(테스트는 이 함수를 patch). 069 P1-1: 앱 수명 싱글턴 재사용.
     """
-    from src.database.postgres_util import PostgresUtil
-
-    db = PostgresUtil()
-    with db:
-        return db.execute_in_transaction(callback, idempotent=False)
+    return _get_db().execute_in_transaction(callback, idempotent=False)
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -204,6 +229,8 @@ async def _lifespan(_app: FastAPI):
     # _PENDING_TASKS 는 모듈 하단(app 정의 후)에 선언 — 종료 시점엔 모듈 로드 완료라 참조 가능.
     if _PENDING_TASKS:
         await asyncio.gather(*_PENDING_TASKS, return_exceptions=True)
+    # 069 P1-1: 앱 수명 DB 풀 정리(드레인 뒤 — 감사 write 가 풀을 쓸 수 있으므로 순서 중요).
+    _close_db_singleton()
 
 
 app = FastAPI(title="일반 도메인 포탈 API (010 P1)", lifespan=_lifespan)
