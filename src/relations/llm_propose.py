@@ -22,6 +22,15 @@ from src.relations.schema import (
 _LLM_LOG = logging.getLogger("meta_extract.relations.llm")
 
 
+class RelationProposalParseError(RuntimeError):
+    """LLM 관계 제안 응답이 스키마 불능(파싱 실패·빈 응답·엣지 구조 부재)일 때(069 P1-3).
+
+    ``{}``(client 의 파싱실패 폴백)나 인식 키가 전혀 없는 응답을 정상 빈 제안(``{"edges": []}``)과
+    구분해 예외로 승격한다 — ``run_relations`` 자산 단위 except 가 이를 받아 ``pending`` 재시도로
+    보낸다(기존엔 edges=0·error=None 으로 흘러 **isolated 영구 오확정**되던 조용한 실패).
+    """
+
+
 def _configure_llm_logging() -> None:
     """중복 핸들러 방지 후 stderr 로 프롬프트·응답 로깅(디버그·감사용)."""
     if _LLM_LOG.handlers:
@@ -34,12 +43,23 @@ def _configure_llm_logging() -> None:
 
 
 def propose_edges_json(prompt: str) -> dict[str, Any]:
-    """관계 제안 프롬프트를 온프레미스 LLM에 넘겨 JSON dict 반환."""
+    """관계 제안 프롬프트를 온프레미스 LLM에 넘겨 JSON dict 반환.
+
+    069 P1-3: 파싱 실패·빈 응답(``{}``)·엣지 구조 부재를 ``RelationProposalParseError`` 로 승격 —
+    "edges"/"items"/단일 엣지(``target_media_item_id``) 중 하나라도 있으면 정상 경로(빈 리스트
+    ``{"edges": []}`` 는 **정상 빈 제안**으로 그대로 통과·isolated 유지). 예외는 호출자
+    (run_relations 자산 단위 except)가 pending 재시도로 처리한다.
+    """
     from src.llm.client import complete_json
 
     out = complete_json(prompt)
     _configure_llm_logging()
     _LLM_LOG.info("response_json=%s", json.dumps(out, ensure_ascii=False))
+    if not out or not any(k in out for k in ("edges", "items", "target_media_item_id")):
+        raise RelationProposalParseError(
+            "LLM 관계 제안 응답 파싱 실패(빈/스키마 불능) — pending 재시도 대상: "
+            + json.dumps(out, ensure_ascii=False)[:200]
+        )
     return out
 
 
