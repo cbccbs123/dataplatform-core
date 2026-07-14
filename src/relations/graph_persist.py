@@ -241,8 +241,16 @@ def sync_graph_edges(
             # ON CONFLICT DO UPDATE 는 신규·충돌 모두 행을 돌려주므로 RETURNING 은 항상 1행이다.
             returned = cur.fetchone()
         # 계보에는 계산 status_val 이 아니라 DB 실제 status 를 기록한다 — 반려 재제안이 계보에
-        # active 로 남는 오염을 차단(B4). 방어적으로 RETURNING 부재 시에만 status_val 로 폴백.
-        db_status = returned[0] if returned is not None else status_val
+        # active 로 남는 오염을 차단(B4). RETURNING 이 None 이면 위 INSERT 가 DO UPDATE 에서
+        # DO NOTHING 으로 바뀌었다는 뜻이며, 그 순간 status_val 로 조용히 폴백하면 B4 가 고친
+        # 버그(계보에 계산값 오염)가 소리 없이 되살아난다. 조용한 폴백 대신 즉시 예외로 못박아
+        # SQL 변경이 이 불변식을 깨면 배치에서 바로 드러나게 한다(재발 차단).
+        if returned is None:  # 현재 SQL(DO UPDATE)로는 도달 불가 — 방어적 불변식 가드
+            raise RuntimeError(
+                "graph_edge upsert RETURNING 이 행을 돌려주지 않음 — ON CONFLICT 가 "
+                "DO NOTHING 으로 바뀌었는지 확인(B4: 계보 status 는 DB 확정값이어야 함)."
+            )
+        db_status = returned[0]
         upserted += 1
         if collect is not None:  # 계보 관계쌍 기록용(013) — upsert 된 것만, skip 제외
             collect.append({"target_asset_id": tid, "kind_code": kind_code,

@@ -10,6 +10,11 @@
 -- received/failed 등 비종료 상태·file_hash NULL 은 여전히 제약 대상 외.
 -- 운영 주의(migration-reviewer): 트랜잭션 내 DDL 이라 CONCURRENTLY 불가 — 재빌드 동안 asset 락.
 --   행수 큰 운영 DB 는 off-peak 배포 창 권고(dev 1148행은 즉시).
+-- 운영 배포 사전점검(code-reviewer): 위 dev 확인은 1회 스냅샷이므로, prod 적용 직전 아래 쿼리로
+--   중복 0 을 재확인한다(>0 이면 CREATE UNIQUE 가 실패·트랜잭션 롤백 — 데이터 정리 후 재시도).
+--     SELECT file_hash, count(*) FROM asset
+--      WHERE status IN ('registered','deferred') AND file_hash IS NOT NULL
+--      GROUP BY file_hash HAVING count(*) > 1;
 -- =============================================================================
 
 DROP INDEX IF EXISTS uq_asset_file_hash_registered;

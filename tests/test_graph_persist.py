@@ -126,6 +126,22 @@ class TestSyncGraphEdgesUnit(unittest.TestCase):
                           if "INSERT INTO graph_edge" in str(c.args[0]))
         self.assertIn("RETURNING status", insert_sql)
 
+    def test_returning_none_raises_instead_of_silent_fallback(self) -> None:
+        # 069 B4 재발 차단(code-reviewer): 현재 SQL(DO UPDATE)은 항상 1행을 돌려주므로 이 경로는
+        # 도달 불가지만, 누군가 INSERT 를 DO NOTHING 으로 바꾸면 RETURNING 이 None 이 된다. 그때
+        # status_val 로 조용히 폴백하면 B4 가 고친 계보 오염 버그가 소리 없이 부활한다 → 조용한
+        # 폴백 대신 RuntimeError 로 못박아, SQL 변경이 이 불변식을 깨면 즉시 드러나게 한다.
+        from src.relations import graph_persist
+        self.cur.fetchone.return_value = None  # DO NOTHING 이 무행을 돌려주는 가상 상황
+        with mock.patch.object(graph_persist, "ensure_asset_node", side_effect=lambda conn, aid: "n_" + aid), \
+             mock.patch.object(graph_persist, "fetch_relation_kind",
+                               return_value={"relation_kind_id": "k1", "is_symmetric": True}):
+            with self.assertRaises(RuntimeError):
+                graph_persist.sync_graph_edges(
+                    self.conn, source_asset_id=_SRC,
+                    edges=[self._edge(target_media_item_id=_T1, confidence=0.99)],
+                    allowed_target_ids=frozenset({_T1}), collect=[])
+
     def _insert_params(self, edges, kind=("k1", True), **kwargs):
         """단일 엣지 upsert 의 INSERT 바인딩 파라미터(ensure_asset_node mock — INSERT 만 self.cur 사용)."""
         from src.relations import graph_persist
