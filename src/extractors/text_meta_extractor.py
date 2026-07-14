@@ -8,18 +8,22 @@
 from __future__ import annotations
 
 import re
-from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
 
-from sentence_transformers import SentenceTransformer
-
+# 069 P1-7: 동명 자체 lru_cache 로더(별도 캐시)로 같은 체크포인트를 **이중 로드**하던 것을
+# text_embedder 의 프로세스 캐시를 공유(re-export)해 해소한다 — 기본 채널(st)에서 추출·임베딩이
+# 같은 model_name 을 쓰므로 로드 1회로 수렴(GB 단위 가중치·수 초 절감). 여기서 모델이 필요한
+# 이유는 임베딩이 아니라 **토크나이저**(count_tokens)뿐이라 공유가 안전하다.
+from src.embedders.text_embedder import get_embedding_model
 from src.file.data_loader import (
     MAX_INPUT_CHARS,
     choose_encoding,
     iter_document_chunks,
     normalize_file_kind,
 )
+
+__all__ = ["EmbeddingTextMeta", "count_tokens", "extract_text_meta", "get_embedding_model"]
 
 
 class EmbeddingTextMeta(TypedDict):
@@ -28,11 +32,6 @@ class EmbeddingTextMeta(TypedDict):
     num_sentences: int
     num_tokens: int
     length: int
-
-
-@lru_cache(maxsize=4)
-def get_embedding_model(model_name: str) -> SentenceTransformer:
-    return SentenceTransformer(model_name)
 
 
 def count_tokens(text: str, *, model_name: str) -> int:
