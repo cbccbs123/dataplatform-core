@@ -486,6 +486,9 @@ class TestG3FieldNameContract(unittest.TestCase):
         "chunk" + "_agg",
         "chunk" + "_agg_k",
         "chunk" + "_agg_mix_w",
+        # 069 US-C(FR-C6): 037 로 소비자 소멸한 라벨 검색 top-k 2종(labels_score_min·*_meta_top_k 는 유지).
+        "image_labels" + "_search_top_k",
+        "video_keyframe_labels" + "_search_top_k",
     )
 
     def test_field_names_and_defaults_match_g3_getattr(self) -> None:

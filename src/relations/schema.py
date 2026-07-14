@@ -180,13 +180,6 @@ def extract_topic_fields_from_edge(edge: dict[str, Any]) -> tuple[str, str, str,
     )
 
 
-def validate_topic_fields(topic_ko: str, _subtopic_ko: str) -> tuple[bool, str]:
-    """``topic_ko`` 비어 있으면 실패 코드 ``topic_ko_missing``. 세부토피는 검증하지 않음."""
-    if not topic_ko.strip():
-        return False, "topic_ko_missing"
-    return True, ""
-
-
 def coerce_topic_fields_mvp(edge: dict[str, Any]) -> tuple[str, str, str, str, bool]:
     """
     ``topic_ko`` 가 비어 있으면 MVP 폴백으로 채운다.
@@ -200,8 +193,8 @@ def coerce_topic_fields_mvp(edge: dict[str, Any]) -> tuple[str, str, str, str, b
         ``(topic_ko, subtopic_ko, topic_en, subtopic_en, mvp_topic_auto)`` — 마지막 bool 은 자동 보정 여부.
 
     설계 의도
-        ``validate_topic_fields`` 실패(topic_ko 없음) 시 엣지를 버리지 않고 여기서 보정해
-        DB 에 저장한다. ``mvp_topic_auto=True`` 는 나중에 재검토·재정제가 필요한 행을 식별하는 마커.
+        ``topic_ko`` 가 비어 있어도 엣지를 버리지 않고 여기서 보정해 DB 에 저장한다.
+        ``mvp_topic_auto=True`` 는 나중에 재검토·재정제가 필요한 행을 식별하는 마커.
 
     auto 변수 초기화 패턴
         ``auto = False`` 로 시작하고 1번 분기에서 조기 반환(``False`` 하드코드)하므로

@@ -51,8 +51,6 @@ class PipelineSettings:
     text_embedding_chunk_size: int
     text_embedding_normalize: bool
     video_max_keyframes: int
-    image_labels_search_top_k: int
-    video_keyframe_labels_search_top_k: int
     image_labels_meta_top_k: int
     video_keyframe_labels_meta_top_k: int
     labels_score_min: float
@@ -501,10 +499,6 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
         video_max_keyframes=(
             48 if (vk := _env_int_default("VIDEO_MAX_KEYFRAMES", 48)) <= 0 else vk
-        ),
-        image_labels_search_top_k=_env_int_default("IMAGE_LABELS_SEARCH_TOP_K", 5),
-        video_keyframe_labels_search_top_k=_env_int_default(
-            "VIDEO_KEYFRAME_LABELS_SEARCH_TOP_K", 3
         ),
         image_labels_meta_top_k=_env_int_default("IMAGE_LABELS_META_TOP_K", 10),
         video_keyframe_labels_meta_top_k=_env_int_default(

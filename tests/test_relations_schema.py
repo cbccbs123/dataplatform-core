@@ -17,7 +17,6 @@ from src.relations.schema import (
     parse_llm_edges,
     sanitize_llm_proposed_type_code,
     type_label_from_kind_code,
-    validate_topic_fields,
 )
 
 STRUCTURAL_TYPE_CODES = frozenset({"duplicate_near", "derived_from", "references"})
@@ -56,10 +55,6 @@ class TestTopicFields(unittest.TestCase):
             extract_topic_fields_from_edge(edge),
             ("교통안전", "보행자", "traffic safety", "pedestrian"),
         )
-
-    def test_validate_requires_topic(self) -> None:
-        self.assertFalse(validate_topic_fields("", "")[0])
-        self.assertTrue(validate_topic_fields("게임", "")[0])
 
     def test_coerce_from_reason(self) -> None:
         edge = {"reason": "스팀 하드웨어와 게임 추천", "topic_ko": "", "subtopic_ko": ""}
