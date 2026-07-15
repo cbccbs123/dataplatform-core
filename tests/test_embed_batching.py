@@ -82,6 +82,24 @@ class TestEmbeddingTextChunksBatched(unittest.TestCase):
         m_local.assert_called_once()
         m_api.assert_not_called()
 
+    def test_vector_count_mismatch_raises(self) -> None:
+        # zip(strict=True) 방어선: _embed_many 가 청크수보다 적은 벡터를 돌려주면(응답 손실 등) 즉시
+        # ValueError — silent 하게 앞쪽 청크만 매핑되고 뒤 청크가 사라지는 오류를 차단(069 리뷰 🟡).
+        import src.embedders.text_embedder as te
+
+        def _fake_iter(path, **kw):
+            yield "청크1"
+            yield "청크2"
+
+        with mock.patch.object(te, "_embed_many", side_effect=lambda texts, **kw: [[0.1]]), \
+             mock.patch.object(te, "iter_document_chunks", _fake_iter), \
+             mock.patch.object(te, "pad_embedding_to_storage_dim", side_effect=lambda v: v), \
+             mock.patch.object(te, "get_embedding_model",
+                               return_value=mock.MagicMock(max_seq_length=None)), \
+             mock.patch.object(te.Path, "is_file", return_value=True):
+            with self.assertRaises(ValueError):
+                te.embedding_text_chunks("/tmp/x.txt", file_kind="txt", chunk_size=512)
+
     def test_channel_set_uses_embed_texts_for(self) -> None:
         # channel 지정 → embed_texts_for(백엔드 라우팅) 경유.
         import src.embedders.text_embedder as te
@@ -96,7 +114,8 @@ class TestEmbeddingTextChunksBatched(unittest.TestCase):
              mock.patch.object(te, "get_embedding_model",
                                return_value=mock.MagicMock(max_seq_length=None)), \
              mock.patch.object(te.Path, "is_file", return_value=True):
-            te.embedding_text_chunks("/tmp/x.txt", file_kind="txt", chunk_size=512, channel="st_api")
+            te.embedding_text_chunks(
+                "/tmp/x.txt", file_kind="txt", chunk_size=512, channel="st_api")
         m_api.assert_called_once()
         m_local.assert_not_called()
 
