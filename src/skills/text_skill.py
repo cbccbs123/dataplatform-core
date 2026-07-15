@@ -24,7 +24,9 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
         file_kind=file_kind,
         encoding=cfg.encoding,
         chunk_size=cfg.text_embedding_chunk_size,
-        embedding_model_name=cfg.text_embedding_model,
+        # 토큰 수는 **활성 임베딩 모델**(active_embed_model)의 토크나이저로 센다 — _embed_text 와 동일
+        # 모델이라 정합(종전 cfg.text_embedding_model=KoSimCSE 하드코딩은 st_api=bge-m3 와 불일치했음).
+        embedding_model_name=active_embed_model(cfg),
     )
     # | 연산자로 dict 머지 — 오른쪽(요약)이 같은 키를 덮어쓴다.
     meta = meta | summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)

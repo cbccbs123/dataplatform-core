@@ -21,8 +21,11 @@ class TestTextSplit(unittest.TestCase):
         with mock.patch.multiple("src.extractors.text_meta_extractor", extract_text_meta=mock.Mock(return_value={"size": 1})), \
              mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords=mock.Mock(return_value={"summary": "s", "keywords": ["k"]})):
             ctx = _ctx()
+            # active_embed_channel='st' → active_embed_model = text_embedding_model('m').
+            # _extract_text_meta 가 토큰 수를 활성 임베딩 모델 토크나이저로 세도록 정합(count_tokens 정합 개선).
             ctx.settings = mock.Mock(encoding="utf-8", text_embedding_chunk_size=100,
-                                     text_embedding_model="m", text_embedding_normalize=True)
+                                     text_embedding_model="m", text_embedding_normalize=True,
+                                     active_embed_channel="st")
             rec = text_skill._extract_text_meta(ctx)
         self.assertIsInstance(rec, AssetRecord)
         self.assertEqual(rec.embeddings, [])

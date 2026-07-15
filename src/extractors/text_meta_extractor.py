@@ -1,21 +1,17 @@
 """텍스트/문서 본문 통계 메타(언어·인코딩·문장수·토큰수·길이) 추출 — text_skill 이 호출.
 
 본문을 청크로 순회하며 집계만 한다. 임베딩 벡터는 ``src/embedders/text_embedder.py`` 가
-별도로 만든다(추출/임베딩 분리 설계). 여기서 모델을 로드하는 이유는 임베딩이 아니라
-임베딩 모델의 **토크나이저**로 토큰 수를 세기 위해서다(``count_tokens`` 참조).
+별도로 만든다(추출/임베딩 분리 설계). 토큰 수는 **토크나이저만** 필요하므로, GB 단위 임베딩 모델
+전체(SentenceTransformer)를 로드하지 않고 경량 ``AutoTokenizer`` 만 로드한다(``count_tokens`` 참조).
 """
 
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-# 069 P1-7: 동명 자체 lru_cache 로더(별도 캐시)로 같은 체크포인트를 **이중 로드**하던 것을
-# text_embedder 의 프로세스 캐시를 공유(re-export)해 해소한다 — 기본 채널(st)에서 추출·임베딩이
-# 같은 model_name 을 쓰므로 로드 1회로 수렴(GB 단위 가중치·수 초 절감). 여기서 모델이 필요한
-# 이유는 임베딩이 아니라 **토크나이저**(count_tokens)뿐이라 공유가 안전하다.
-from src.embedders.text_embedder import get_embedding_model
 from src.file.data_loader import (
     MAX_INPUT_CHARS,
     choose_encoding,
@@ -23,7 +19,10 @@ from src.file.data_loader import (
     normalize_file_kind,
 )
 
-__all__ = ["EmbeddingTextMeta", "count_tokens", "extract_text_meta", "get_embedding_model"]
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+__all__ = ["EmbeddingTextMeta", "count_tokens", "extract_text_meta"]
 
 
 class EmbeddingTextMeta(TypedDict):
@@ -34,11 +33,25 @@ class EmbeddingTextMeta(TypedDict):
     length: int
 
 
+@lru_cache(maxsize=4)
+def _get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
+    """토큰 수 세기용 **토크나이저만** 로드(가중치 X). 프로세스 캐시.
+
+    종전엔 ``get_embedding_model``(SentenceTransformer 전체·GB)을 로드해 그 ``.tokenizer`` 만 썼다.
+    임베딩이 원격(st_api=bge-m3)이면 로컬 임베딩 모델은 애초에 없고, 로컬(st)이어도 토큰 수 하나
+    세자고 GB 가중치를 올릴 이유가 없다 → ``AutoTokenizer`` 로 토크나이저만 로드해 컨테이너 메모리·
+    콜드로드를 줄인다. 무거운 import 는 함수 내부(모듈 import 시 transformers 미로딩)."""
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(model_name)
+
+
 def count_tokens(text: str, *, model_name: str) -> int:
+    # model_name = 활성 임베딩 모델(호출부가 active_embed_model 로 넘김) — 토큰 수를 임베딩과 정합.
     if not text:
         return 0
-    model = get_embedding_model(model_name)
-    token_ids = model.tokenizer.encode(text, add_special_tokens=False)
+    tokenizer = _get_tokenizer(model_name)
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
     return len(token_ids)
 
 
