@@ -197,19 +197,28 @@ def embedding_text_chunks(
     # 069 D8: 청크 overlap 은 설정(text_embedding_chunk_overlap) 단일 출처. 미전달/구 객체는 getattr
     # 폴백 0(하드코딩과 동일·동작 불변). >0 이면 인접 청크가 겹쳐 경계 문맥 손실을 줄인다(opt-in).
     overlap_size = int(getattr(settings, "text_embedding_chunk_overlap", 0) or 0)
-    # 069 D8: chunk_size 가 모델 최대 시퀀스의 2배를 넘으면 인코딩 시 조용히 잘려(재현 불가) 임베딩
-    # 품질이 저하될 수 있다 — 로컬 경로에서 1회 관측 경고(동작은 불변·로그만). API 채널은 원격 모델의
-    # max_seq 를 알 수 없어 생략. 모델 조회 실패는 경고 목적이라 임베딩을 막지 않고 조용히 넘어간다.
+    # 069 D8: chunk_size 가 임베딩 모델 최대 시퀀스의 2배를 넘으면 인코딩 시 조용히 잘려(재현 불가)
+    # 임베딩 품질이 저하될 수 있다 — **로컬 백엔드**에서 1회 관측 경고(동작은 불변·로그만). API
+    # 백엔드(st_api)는 원격 모델의 max_seq 를 알 수 없어 생략. 판정 모델은 _embed_one 의 실제 경로를
+    # 그대로 미러링한다: channel=None → 로컬 embed_texts(embedding_model_name), channel 있으면
+    # backend_for_channel 로 api/local 분기 후 로컬이면 model_for_channel 의 모델. (운영 text_skill 은
+    # channel=active('st') 를 넘기므로 과거 `channel is None` 조건은 운영에서 절대 발동 안 했음 — 069 리뷰)
     if channel is None:
+        _is_api, _model_name = False, embedding_model_name
+    else:
+        from src.config.settings import backend_for_channel, model_for_channel
+        _is_api = backend_for_channel(channel, settings) == "api"
+        _model_name = None if _is_api else model_for_channel(channel, settings)
+    if not _is_api:
         try:
-            _max_seq = getattr(get_embedding_model(embedding_model_name), "max_seq_length", None)
+            _max_seq = getattr(get_embedding_model(_model_name), "max_seq_length", None)
             if _max_seq and chunk_size > _max_seq * 2:
                 _LOG.warning(
-                    "chunk_size=%d 가 모델 max_seq_length=%d 의 2배(%d)를 초과 — 청크가 인코딩 시 "
-                    "잘려 임베딩 품질이 저하될 수 있음(TEXT_EMBED_CHUNK_SIZE 재검토 권장).",
+                    "chunk_size=%d 가 임베딩 모델 max_seq_length=%d 의 2배(%d)를 초과 — 청크가 "
+                    "인코딩 시 잘려 임베딩 품질이 저하될 수 있음(TEXT_EMBED_CHUNK_SIZE 재검토 권장).",
                     chunk_size, _max_seq, _max_seq * 2,
                 )
-        except Exception:  # noqa: BLE001 — 경고는 관측용, 모델 로드 실패가 임베딩을 막으면 안 됨
+        except Exception:  # noqa: BLE001 — 경고는 관측용, 모델 조회 실패가 임베딩을 막으면 안 됨
             pass
 
     out: list[TextChunkEmbedding] = []

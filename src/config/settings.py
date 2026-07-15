@@ -275,6 +275,15 @@ def _validate_settings_consistency(settings: PipelineSettings) -> None:
             "설정 불일치: EMBED_ACTIVE_CHANNEL=st_api(API 임베딩) 인데 EMBED_API_BASE_URL 이 비어 있습니다. "
             "API 백엔드는 엔드포인트 주입이 필수입니다 — EMBED_API_BASE_URL 을 설정하세요(예: http://<host>:<port>/v1)."
         )
+    # 069 D8: 임베딩 청크 overlap 은 iter_document_chunks 가 0<=overlap<chunk_size 를 요구한다. 위반 시
+    #   첫 문서 처리 시점(파이프라인 한복판)에야 ValueError 가 터지므로, opt-in 오설정을 기동 시점에
+    #   즉시 차단한다(038/062 fail-fast 관례와 통일). 기본 0 은 항상 통과(동작 불변).
+    if not (0 <= settings.text_embedding_chunk_overlap < settings.text_embedding_chunk_size):
+        raise ValueError(
+            f"설정 불일치: TEXT_EMBED_CHUNK_OVERLAP={settings.text_embedding_chunk_overlap} 는 "
+            f"0 이상이고 TEXT_EMBED_CHUNK_SIZE={settings.text_embedding_chunk_size} 미만이어야 합니다 "
+            "(청크 겹침은 청크 크기보다 작아야 함 — iter_document_chunks 계약)."
+        )
 
 
 def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
