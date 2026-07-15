@@ -60,12 +60,15 @@ def _row_similarity(row: dict[str, Any]) -> float:
     return x if math.isfinite(x) else 0.0
 
 
-def _display_name(uri: str) -> str:
+def display_name(uri: str) -> str:
     """file_uri(전체 경로/URI)에서 **표시용** 파일명을 뽑는다(결정적·순수).
 
     공통 코어 ``basename_of``(쿼리/프래그먼트 제거·백슬래시 정규화) 위에 아카이브 asset_id
     프리픽스(``{asset_id}__``) 제거를 합성한다(065 T605). basename 추출은 단일 출처(069 D3)이고,
     프리픽스 제거는 표시 전용 책임이라 여기서만 얹는다(색인·샘플 경로는 프리픽스를 벗기지 않음).
+
+    **공개 심볼**: 상세 응답(``asset_detail``)·테스트가 모듈 경계 너머로 재사용하는 표시명 단일
+    출처이므로 언더스코어 비공개가 아니라 공개 이름으로 노출한다(069 D3 후속·P2-27 private import 해소).
     """
     return _ASSET_ID_PREFIX.sub("", basename_of(uri))
 
@@ -86,7 +89,7 @@ def _shape(row: dict[str, Any], modality: str) -> dict[str, Any]:
         "modality": modality,
         "similarity": _row_similarity(row),
         "summary": row.get("summary", "") or "",
-        "file_name": _display_name(str(row.get("file_uri", ""))),
+        "file_name": display_name(str(row.get("file_uri", ""))),
         "domain_label": row.get("domain_label") or "general",
         # 057-후속: 주제 패싯·결과-좁히기용(os_hit_to_row 색인 topics 통과). 프론트가 로드된 결과를
         # 이 topics 로 클라 필터(재검색 없이) → 패싯 수와 표시 수 일치·컷오프 무관.

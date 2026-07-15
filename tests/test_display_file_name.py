@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 
 from src.ingest.archiver import display_file_name, strip_asset_id_prefix
-from src.portal.search_group import _display_name
+from src.portal.search_group import display_name
 
 _UUID = "018f0000-0000-7000-8000-000000000271"
 
@@ -50,12 +50,12 @@ class TestDisplayFileName(unittest.TestCase):
 
 class TestSearchGroupBasenameStrips(unittest.TestCase):
     def test_basename_strips_prefix(self) -> None:
-        # 표시명 헬퍼도 동일하게 프리픽스를 벗긴다(계약 일치·069 D3 후 _display_name).
+        # 표시명 헬퍼도 동일하게 프리픽스를 벗긴다(계약 일치·069 D3 후 display_name).
         uri = f"/data/{_UUID}__씨름 한판_(씨름).mp4"
-        self.assertEqual(_display_name(uri), "씨름 한판_(씨름).mp4")
+        self.assertEqual(display_name(uri), "씨름 한판_(씨름).mp4")
 
     def test_basename_non_prefixed(self) -> None:
-        self.assertEqual(_display_name("/data/wikipedia_커피_9204.txt"), "wikipedia_커피_9204.txt")
+        self.assertEqual(display_name("/data/wikipedia_커피_9204.txt"), "wikipedia_커피_9204.txt")
 
 
 if __name__ == "__main__":

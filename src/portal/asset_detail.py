@@ -21,7 +21,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from src.portal.search_group import _display_name
+from src.portal.search_group import display_name
 from src.registry.access_tier import project_ext_meta
 from src.registry.ext_meta_field_registry import fetch_access_tiers
 from src.relations.graph_query import fetch_active_relations_for_asset
@@ -158,8 +158,8 @@ def fetch_asset_detail(
         "modality": row["modality"],
         "domain_label": row["domain_label"],
         "status": row["status"],
-        # FR-101(057): 표시용 파일명 하향(하위호환 필드 추가) — search_group._display_name 단일 출처 재사용.
-        "file_name": _display_name(str(row["fs_path"] or "")),
+        # FR-101(057): 표시용 파일명 하향(하위호환 필드 추가) — search_group.display_name 단일 출처 재사용.
+        "file_name": display_name(str(row["fs_path"] or "")),
         "core_meta": row["core_meta"],
         "ext_meta": ext_meta,
         "tags": row["tags"],
