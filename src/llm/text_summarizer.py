@@ -95,9 +95,14 @@ def _build_reduce_prompt(merged: str, *, summary_max_chars: int, top_k_keywords:
 
 
 def _build_audio_prompt(text: str, *, summary_max_chars: int, top_k_keywords: int) -> str:
-    """STT 전사 전문 요약·키워드 프롬프트(순수). 토픽화 지시를 단위로 가드 가능하게 노출."""
+    """STT 전사 전문 요약·키워드 프롬프트(순수). 토픽화 지시를 단위로 가드 가능하게 노출.
+
+    069 B6(P2-6): 첫 문장을 reduce 프롬프트("청크별 요약 목록") 복붙에서 STT 전용 문구로 교체한다.
+    오디오 입력은 청크 요약 목록이 아니라 전사 전문(원문)이라 지시가 어긋나면 summary 품질이 낮아지고
+    그 summary 가 임베딩·BM25 의 단일 원천이라 검색 품질까지 전파된다. JSON 키·파싱은 불변.
+    """
     return (
-        "아래는 긴 문서의 청크별 요약 목록이다. 이를 종합해 반드시 JSON만 출력해.\n"
+        "아래는 오디오 음성 전사(STT) 전문 요약 작업이다. 다음 전사 전문을 종합해 반드시 JSON만 출력해.\n"
         "형식:\n"
         '{ "summary": "최종 요약", "keywords": ["키워드1", "키워드2"] }\n'
         f"- summary는 {summary_max_chars}자 이내\n"

@@ -17,6 +17,21 @@ _MAX_CHARS = 4000  # stage2 어휘 스캔용 — stage3 LLM 입력(_MAX_TEXT=400
 _PLAIN_KINDS = frozenset({MediaKind.TEXT.value, MediaKind.JSON.value})  # txt, json
 
 
+def _resolve_encoding() -> str:
+    """분류용 읽기 인코딩(069 B10·P2-12). 하드코딩 "utf-8" 대신 설정 인코딩을 쓴다 —
+
+    extract(``data_loader``)가 ``cfg.encoding`` 으로 읽으므로, 분류 stage2 도 같은 인코딩으로 읽어야
+    cp949 문서의 어휘 매칭이 어긋나지 않는다(utf-8 강제 시 글자 깨짐). 설정 미초기화(순수 단위 등)면
+    보수적으로 "utf-8" 폴백 — 지연 import 로 미초기화 오염을 막는다.
+    """
+    try:
+        from src.config.settings import get_current_settings
+
+        return get_current_settings().encoding
+    except (RuntimeError, AttributeError):
+        return "utf-8"
+
+
 def extract_text_for_classification(file_path: str, modality: str, *, max_chars: int = _MAX_CHARS) -> str:
     """분류용 텍스트(LLM 없음). 실패는 빈 문자열로 흡수.
 
@@ -31,9 +46,10 @@ def extract_text_for_classification(file_path: str, modality: str, *, max_chars:
 
 
 def _document_text(file_path: str, modality: str, max_chars: int) -> str:
+    enc = _resolve_encoding()  # extract 와 동일 인코딩(B10) — cp949 문서 stage2 어휘 매칭 정합.
     if modality in _PLAIN_KINDS:
         try:
-            with open(file_path, encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding=enc, errors="ignore") as f:
                 return f.read(max_chars)
         except OSError:
             return ""
@@ -47,7 +63,7 @@ def _document_text(file_path: str, modality: str, max_chars: int) -> str:
         out: list[str] = []
         total = 0
         for ch in iter_document_chunks(
-            Path(file_path), file_kind=kind, encoding="utf-8",
+            Path(file_path), file_kind=kind, encoding=enc,
             chunk_size=max_chars, overlap_size=0, max_input_chars=max_chars,
         ):
             out.append(ch)

@@ -50,7 +50,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=100, help="--list 출력 상한")
     # 동작은 상호 배타(하나만 지정 가능).
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--list", action="store_true", help="proposed 엣지 큐 출력")
+    group.add_argument("--list", action="store_true",
+                       help="proposed 엣지 큐 출력(양끝 의료 자산 엣지는 제외 — 헌법 10조·의료 3년차 이연)")
     group.add_argument("--approve", metavar="EDGE_ID", help="엣지 승인(active)")
     group.add_argument("--reject", metavar="EDGE_ID", help="엣지 반려(rejected)")
     group.add_argument("--promote-kind", dest="promote_kind", metavar="KIND_CODE",

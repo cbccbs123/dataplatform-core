@@ -106,6 +106,33 @@ class TestFinalizeAsset(unittest.TestCase):
         upd = [c for c in _executes(cur) if "UPDATE asset SET status" in c.args[0]]
         self.assertEqual(upd[0].args[1], ("registered", None, _FIXED, "extracting"))
 
+    def test_rejects_non_extracting_before_any_insert(self) -> None:
+        # 069 B7(P2-7): finalize_asset 서두 가드 — 상태가 extracting 이 아니면 메타·임베딩 INSERT
+        # 이전에 InvalidTransitionError 로 차단한다. set_status 의 말미 검증만으로는 autocommit
+        # 새 호출자에서 INSERT 가 먼저 커밋돼 중복/고아 행이 영속될 수 있어, 서두에서 막는다.
+        from src.ingest.status import InvalidTransitionError
+
+        conn, cur = _mock_conn({"status": "received"})  # extracting 아님
+        rec = AssetRecord(
+            core_meta={"w": 1},
+            embeddings=[EmbeddingItem(channel="st", vector=[0.1], model_name="m")],
+        )
+        with self.assertRaises(InvalidTransitionError):
+            finalize_asset(conn, _FIXED, rec)
+        # 가드가 서두에서 막으므로 metadata INSERT·임베딩 executemany 가 실행되지 않는다.
+        meta_ins = [c for c in _executes(cur) if "INSERT INTO asset_metadata" in c.args[0]]
+        self.assertEqual(len(meta_ins), 0)
+        self.assertEqual(cur.executemany.call_count, 0)
+
+    def test_happy_path_result_unchanged_with_guard(self) -> None:
+        # 정상 경로(extracting)는 가드 추가 후에도 결과 동일 — metadata INSERT + registered 전이.
+        conn, cur = _mock_conn({"status": "extracting"})
+        finalize_asset(conn, _FIXED, AssetRecord(core_meta={"w": 1}))
+        meta_ins = [c for c in _executes(cur) if "INSERT INTO asset_metadata" in c.args[0]]
+        self.assertEqual(len(meta_ins), 1)
+        upd = [c for c in _executes(cur) if "UPDATE asset SET status" in c.args[0]]
+        self.assertEqual(upd[0].args[1], ("registered", None, _FIXED, "extracting"))
+
 
 if __name__ == "__main__":
     unittest.main()

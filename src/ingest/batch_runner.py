@@ -257,6 +257,15 @@ def process_received_batch(
          · 그 외 예외 → ``_handle_failure``(cap·종료 격리, 불변식 #3). **한 자산 실패가 배치를 멈추지
            않는다**(자산별 try).
     """
+    # 069 B8(P2-9): settings 미주입 시 현재 설정으로 폴백(CLI run_ingest L329 동형). 미폴백이면
+    # _make_opensearch_indexer 에 None 이 넘어가 opensearch_sync_enabled 를 못 읽고 OS 색인이
+    # 조용히 off 된다. get_current_settings 는 운영 진입점(init_settings)에서 활성 — 순수 단위는
+    # 호출자가 settings 를 주입하므로 이 폴백 경로를 타지 않는다(지연 import 로 미초기화 오염 방지).
+    if settings is None:
+        from src.config.settings import get_current_settings
+
+        settings = get_current_settings()
+
     report = BatchReport()
 
     # OpenSearch 증분 색인기 — os_index 미주입 시 배치당 1회 생성(run_ingest CLI 동형, FR-002·US1§2).

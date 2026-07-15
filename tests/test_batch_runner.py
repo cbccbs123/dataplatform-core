@@ -366,6 +366,36 @@ class TestProcessBatchOpenSearchWiring(unittest.TestCase):
         self.assertEqual(calls, [_A1])
 
 
+# ── 069 B8(P2-9): settings 미주입 폴백 — OS 색인 조용한 off 차단 ─────────────
+
+
+class TestSettingsFallback(unittest.TestCase):
+    """settings=None 이면 get_current_settings() 로 폴백해 _make_opensearch_indexer 가 실제
+    설정(opensearch_sync_enabled 등)을 읽게 한다(CLI run_ingest 동형). 미폴백 시 None 이 넘어가
+    OS 색인이 조용히 off 되는 결함을 막는다.
+    """
+
+    def test_none_settings_falls_back_to_current_settings(self) -> None:
+        sentinel = types.SimpleNamespace(opensearch_sync_enabled=False)
+        captured: dict = {}
+
+        def _fake_indexer(*, db, settings):
+            captured["settings"] = settings
+            return None
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(br, "scan_received_assets", return_value=[]))
+            stack.enter_context(
+                mock.patch.object(br, "_make_opensearch_indexer", side_effect=_fake_indexer)
+            )
+            stack.enter_context(
+                mock.patch("src.config.settings.get_current_settings", return_value=sentinel)
+            )
+            br.process_received_batch(mock.MagicMock(), limit=10, max_failures=3, settings=None)
+        # 폴백된 현재 설정이 인덱서 팩토리로 전달됐다(None 아님).
+        self.assertIs(captured["settings"], sentinel)
+
+
 # ── T004: 재시도 cap·종료 격리 ───────────────────────────────────────────────
 
 

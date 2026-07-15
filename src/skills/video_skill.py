@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from src.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.skills.meta_split import split_core_ext
 
 _CHANNEL_CLIP = "clip"
+_LOG = logging.getLogger("meta_extract.video_skill")
 
 
 def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
@@ -51,6 +54,12 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     frame_items = extract_video_representative_frame_bytes(
         video_path=file, max_frames=cfg.video_max_keyframes, dedup=dedup_config
     )
+    # 069 B9(P2-10): 키프레임 0장 관측만(현행 동작 유지 — failed 전환·zero-vector 통일 금지).
+    # 코덱 미지원·손상 등으로 대표 프레임을 못 뽑으면 이 영상은 시각 임베딩·키프레임 라벨이 비어
+    # 검색에서 사실상 누락되는데, 지금까지 조용했다. 근본 처방(ffmpeg 폴백)은 064 몫이고 여기선
+    # 관측 공백만 메운다 — 상태·임베딩 계약은 그대로 두어 US-B "국소" 원칙을 지킨다.
+    if not frame_items:
+        _LOG.warning("키프레임 0장 — 시각 임베딩·라벨 없이 진행(현행 유지·관측): video=%s", file)
     korean_labels_per_frame: list[list[str]] = []
     result: list[dict] = []
     for item in frame_items:

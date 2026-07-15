@@ -230,14 +230,29 @@ def sync_graph_edges(
                         WHEN COALESCE(EXCLUDED.confidence, 0) > COALESCE(graph_edge.confidence, 0)
                         THEN EXCLUDED.reason ELSE graph_edge.reason END,
                     updated_at = now()
+                RETURNING status
                 """,
                 # ON CONFLICT(032·#5): confidence 더 큰 재제안의 topic·reason 만 갱신(작거나 같으면 기존 유지)
                 # — 첫 제안 stale topic 고정을 해소한다. confidence 는 GREATEST 화해.
                 # ★ status 는 **미갱신** — 사람이 한 번 내린 검토 결정(특히 rejected)을 LLM 재제안이 덮어쓰면 안 된다.
+                # 069 B4(P2-4): RETURNING status 로 DB 확정 status(신규=status_val, 충돌=기존 보존값)를 회수한다.
                 (uuid7_str(), a_node, b_node, kind_id, conf_f, reason, topic_json, status_val),
             )
+            # ON CONFLICT DO UPDATE 는 신규·충돌 모두 행을 돌려주므로 RETURNING 은 항상 1행이다.
+            returned = cur.fetchone()
+        # 계보에는 계산 status_val 이 아니라 DB 실제 status 를 기록한다 — 반려 재제안이 계보에
+        # active 로 남는 오염을 차단(B4). RETURNING 이 None 이면 위 INSERT 가 DO UPDATE 에서
+        # DO NOTHING 으로 바뀌었다는 뜻이며, 그 순간 status_val 로 조용히 폴백하면 B4 가 고친
+        # 버그(계보에 계산값 오염)가 소리 없이 되살아난다. 조용한 폴백 대신 즉시 예외로 못박아
+        # SQL 변경이 이 불변식을 깨면 배치에서 바로 드러나게 한다(재발 차단).
+        if returned is None:  # 현재 SQL(DO UPDATE)로는 도달 불가 — 방어적 불변식 가드
+            raise RuntimeError(
+                "graph_edge upsert RETURNING 이 행을 돌려주지 않음 — ON CONFLICT 가 "
+                "DO NOTHING 으로 바뀌었는지 확인(B4: 계보 status 는 DB 확정값이어야 함)."
+            )
+        db_status = returned[0]
         upserted += 1
         if collect is not None:  # 계보 관계쌍 기록용(013) — upsert 된 것만, skip 제외
             collect.append({"target_asset_id": tid, "kind_code": kind_code,
-                            "confidence": conf_f, "status": status_val})
+                            "confidence": conf_f, "status": db_status})
     return upserted, skipped

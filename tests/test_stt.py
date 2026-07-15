@@ -56,6 +56,17 @@ class TestWhisperModelCache(unittest.TestCase):
                 stt.transcribe_audio_local("/no/such/file.mp3")
         mk.assert_not_called()
 
+    def test_transcribe_passes_temperature_zero(self) -> None:
+        # 069 B2(P2-2): faster-whisper 는 기본 폴백 래더([0.0,0.2,...]) 로 샘플링해 결정성을
+        # 저해한다 — temperature=0.0 을 명시 전달해 재현성을 고정한다(헌법 3조).
+        from src.preprocess import stt
+
+        with patch.object(stt, "WhisperModel", side_effect=lambda *a, **k: self._fake_model()):
+            with patch.object(stt.Path, "is_file", return_value=True):
+                stt.transcribe_audio_local("/tmp/a.mp3")
+                model = stt._get_whisper("small", "cpu", "int8")
+        self.assertEqual(model.transcribe.call_args.kwargs["temperature"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

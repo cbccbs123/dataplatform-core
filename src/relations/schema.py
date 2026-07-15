@@ -212,7 +212,11 @@ def coerce_topic_fields_mvp(edge: dict[str, Any]) -> tuple[str, str, str, str, b
     reason = str(edge.get("reason") or "").strip()
     if reason:
         first = reason.split("\n")[0].strip()
-        topic_ko = first[:TOPIC_KO_MAX].strip() or _TOPIC_DEFAULT_KO
+        # 069 B5(P2-5): 원문 첫 줄(문장형·최대 200자)을 그대로 폴백하면 문장형 topic 이 저장돼
+        # 패싯 오염·canonicalize LLM 폭주를 부른다. normalize_topic_ko 로 **첫 어절**만 취해
+        # 문장형 저장을 차단한다(정합·카디널리티 개선 — 첫 어절이 조사/무의미어일 수 있어 주제
+        # 품질 개선은 아니다). 비면 기본값으로 폴백.
+        topic_ko = normalize_topic_ko(first) or _TOPIC_DEFAULT_KO
     else:
         topic_ko = _TOPIC_DEFAULT_KO
     if not topic_en.strip():

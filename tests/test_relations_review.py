@@ -35,6 +35,50 @@ class TestReview(unittest.TestCase):
         self.assertIn("status='inactive'", cur.execute.call_args[0][0].replace(" ", ""))
 
 
+class TestListProposedEdges(unittest.TestCase):
+    """069 B3(P2-3) — CLI(run_relations_review --list) 큐 조회에 양끝 의료 제외 +
+    결정적 정렬(confidence 뒤 edge_id 2차키). JSON shape(컬럼 키)는 불변.
+    """
+
+    def _conn(self, rows=None):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__.return_value = cur
+        cur.fetchall.return_value = rows if rows is not None else []
+        conn.cursor.return_value = cur
+        return conn, cur
+
+    def test_excludes_medical_both_ends_and_edge_id_tiebreaker(self):
+        from src.relations.review import list_proposed_edges
+        conn, cur = self._conn(rows=[])
+        list_proposed_edges(conn, limit=100)
+        sql = str(cur.execute.call_args.args[0])
+        # 양끝(src·dst) 자산 의료 제외 — NULL 도메인 노출 위해 IS DISTINCT FROM(= 은 NULL 누락).
+        self.assertEqual(sql.count("IS DISTINCT FROM 'medical'"), 2)
+        self.assertIn("JOIN node", sql)   # 양끝 자산 도메인 확인용 조인(_REVIEW_FROM 재사용)
+        self.assertIn("JOIN asset", sql)
+        self.assertIn("e.status = 'proposed'", sql)
+        # 결정적 정렬: confidence 1차 + edge_id 2차키(동점 순서 고정·헌법 3조).
+        order = sql.split("ORDER BY", 1)[1]
+        self.assertIn("confidence DESC NULLS LAST", order)
+        self.assertIn("edge_id", order)
+        self.assertIn("LIMIT %s", sql)
+        self.assertEqual(cur.execute.call_args.args[1], (100,))
+
+    def test_json_shape_columns_preserved(self):
+        # CLI 소비 계약 불변 — SELECT 컬럼(=행 dict 키)이 그대로.
+        from src.relations.review import list_proposed_edges
+        row = {"edge_id": "e1", "src_node": "n1", "dst_node": "n2",
+               "kind_code": "same_domain", "confidence": 0.9, "reason": "r", "topic": {}}
+        conn, cur = self._conn(rows=[row])
+        out = list_proposed_edges(conn, limit=10)
+        self.assertEqual(out, [row])
+        sql = str(cur.execute.call_args.args[0])
+        for col in ("e.edge_id", "e.src_node", "e.dst_node", "rk.kind_code",
+                    "e.confidence", "e.reason", "e.topic"):
+            self.assertIn(col, sql)
+
+
 class TestListEdgesForReview(unittest.TestCase):
     """FR-101/102/103 — status별 식별보강 페이징 조회(엣지 행 그대로·C6·의료 제외)."""
 
@@ -456,5 +500,7 @@ class TestHumanLlmBoundary(unittest.TestCase):
         upsert_sql = next(
             str(c.args[0]) for c in cur.execute.call_args_list
             if "INSERT INTO graph_edge" in str(c.args[0]))
-        do_update = upsert_sql.split("DO UPDATE SET", 1)[1]
-        self.assertNotIn("status", do_update)  # ON CONFLICT 시 status 는 사람 결정 보존(미갱신)
+        # 069 B4: SET 절 뒤에 RETURNING status 가 붙으므로(=DB 실제 status 회수), "SET 대상에
+        # status 가 없다"는 원 의도를 보존하려면 RETURNING 이전(=DO UPDATE SET 할당부)만 검사한다.
+        set_clause = upsert_sql.split("DO UPDATE SET", 1)[1].split("RETURNING", 1)[0]
+        self.assertNotIn("status", set_clause)  # ON CONFLICT 시 status 는 사람 결정 보존(미갱신)

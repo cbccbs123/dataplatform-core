@@ -54,6 +54,13 @@ def transcribe_audio_local(
         language=language,
         vad_filter=True,
         beam_size=5,
+        # 069 B2(P2-2): faster-whisper 는 temperature 미지정 시 기본 폴백 래더
+        # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] 로, 낮은 온도 결과가 compression/logprob 임계에
+        # 걸리면 더 높은 온도(샘플링)로 재시도해 비결정 전사가 나온다. temperature=0.0 을
+        # 명시해 그 래더를 끄고 재현성을 고정한다(헌법 3조).
+        # 트레이드오프: 재시도 폴백이 없어져, 임계에 걸리는 일부 어려운 구간은 빈 세그먼트로
+        # 남을 수 있다(환각 대신 누락). 결정성 요구가 우선이므로 이 손실을 수용한다.
+        temperature=0.0,
     )
     texts: list[str] = []
     for seg in segments_iter:

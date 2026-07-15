@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -50,6 +51,24 @@ class TestTextProbe(unittest.TestCase):
 
     def test_audio_returns_empty(self) -> None:
         self.assertEqual(text_probe.extract_text_for_classification("/x/a.mp3", "audio"), "")
+
+    def test_uses_settings_encoding_cp949(self) -> None:
+        # 069 B10(P2-12): 인코딩 하드코딩("utf-8") → settings.encoding. extract 와 동일 인코딩으로
+        # 읽어야 cp949 문서의 stage2 어휘 매칭이 정상화된다. cp949 파일을 utf-8 로 읽으면(현행)
+        # errors="ignore" 로 글자가 깨져 "진단" 이 사라진다.
+        p = self.dir / "cp949.txt"
+        p.write_bytes("환자 진단 처방".encode("cp949"))
+        fake = types.SimpleNamespace(encoding="cp949")
+        with mock.patch("src.config.settings.get_current_settings", return_value=fake):
+            out = text_probe.extract_text_for_classification(str(p), "txt")
+        self.assertIn("진단", out)
+
+    def test_uninitialized_settings_falls_back_utf8(self) -> None:
+        # settings 미초기화(get_current_settings RuntimeError) → "utf-8" 폴백(현행 보존).
+        p = self.dir / "u.txt"
+        p.write_text("환자 진단", encoding="utf-8")
+        with mock.patch("src.config.settings.get_current_settings", side_effect=RuntimeError):
+            self.assertIn("진단", text_probe.extract_text_for_classification(str(p), "txt"))
 
     @unittest.skipUnless(_HAS_PYTESSERACT, "pytesseract 미설치(선택 의존성)")
     def test_ocr_failure_returns_empty(self) -> None:
