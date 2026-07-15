@@ -16,7 +16,7 @@ from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 # /assets/{seg} 의 seg 가 자산 단건인지 판정하는 UUID 형식(대소문자 무관). 비-UUID(예약/컬렉션
 # 세그먼트·오타)는 감사 대상에서 제외한다 — derive_access_action docstring 참조(2026-07-15 B3).
 _UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"  # \Z: $ 는 말미 개행 허용
 )
 
 _INSERT = (

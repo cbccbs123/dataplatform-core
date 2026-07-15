@@ -385,16 +385,18 @@ class HistoryEndpointsTest(unittest.TestCase):
     def test_middleware_schedules_recording_non_blocking(self):
         # 미들웨어는 기록을 await 하지 않고 create_task 로 스케줄(비차단)·응답은 그대로 반환.
         # _record_access_bg 를 AsyncMock 으로 가로채 호출 인자만 확인(실 DB·실제 태스크 실행 불요).
-        with mock.patch.object(portal_api, "fetch_asset_detail", return_value={"asset_id": "a1"}), \
+        # 표본은 실제 UUID — B3(비-UUID 세그먼트 감사 제외) 이후 "a1" 류는 유효 asset_id 표본이 아니다.
+        aid = "018f0000-0000-7000-8000-000000000252"
+        with mock.patch.object(portal_api, "fetch_asset_detail", return_value={"asset_id": aid}), \
              mock.patch.object(portal_api, "fetch_asset_topic", return_value=[]), \
              mock.patch.object(portal_api, "find_same_topic_groups", return_value=[]), \
              mock.patch.object(portal_api, "_run_in_db", side_effect=lambda cb: cb(None)), \
              mock.patch.object(portal_api, "_record_access_bg", new=mock.AsyncMock()) as bg:
-            r = self.client.get("/assets/a1")
+            r = self.client.get(f"/assets/{aid}")
         self.assertEqual(r.status_code, 200)          # 응답 정상(기록과 분리)
         bg.assert_called_once()                       # 기록은 스케줄됨
         self.assertEqual(bg.call_args.args[0], "GET")
-        self.assertEqual(bg.call_args.args[1], "/assets/a1")
+        self.assertEqual(bg.call_args.args[1], f"/assets/{aid}")
 
 
 class SnapshotBucketApiTest(unittest.TestCase):
