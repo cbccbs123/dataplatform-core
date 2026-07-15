@@ -31,7 +31,7 @@ class TestOverlapThreading(unittest.TestCase):
         # (069 D8 리뷰 수정 후) 실 HF 모델 로드를 막는다("실모델 0" 계약).
         fake_model = mock.MagicMock(max_seq_length=None)  # None → 경고 미발동(overlap 스레딩만 검증)
         with mock.patch.object(te, "iter_document_chunks", _fake_iter_document_chunks), \
-             mock.patch.object(te, "_embed_one", return_value=[0.1, 0.2]), \
+             mock.patch.object(te, "_embed_many", side_effect=lambda texts, **kw: [[0.1, 0.2] for _ in texts]), \
              mock.patch.object(te, "get_embedding_model", return_value=fake_model), \
              mock.patch.object(te.Path, "is_file", return_value=True):
             te.embedding_text_chunks(
@@ -73,7 +73,7 @@ class TestChunkSizeWarning(unittest.TestCase):
         ctx = [
             mock.patch.object(te, "get_embedding_model", return_value=fake_model),
             mock.patch.object(te, "iter_document_chunks", side_effect=lambda *a, **k: iter(["청크"])),
-            mock.patch.object(te, "_embed_one", return_value=[0.1]),
+            mock.patch.object(te, "_embed_many", side_effect=lambda texts, **kw: [[0.1] for _ in texts]),
             mock.patch.object(te.Path, "is_file", return_value=True),
         ]
         # channel 이 주어지면(운영 경로) backend/model 해소를 모킹 — 로컬 백엔드로 가드가 발동해야 함.
@@ -110,7 +110,7 @@ class TestChunkSizeWarning(unittest.TestCase):
         import src.embedders.text_embedder as te
 
         with mock.patch.object(te, "iter_document_chunks", side_effect=lambda *a, **k: iter(["청크"])), \
-             mock.patch.object(te, "_embed_one", return_value=[0.1]), \
+             mock.patch.object(te, "_embed_many", side_effect=lambda texts, **kw: [[0.1] for _ in texts]), \
              mock.patch.object(te, "get_embedding_model") as mk_model, \
              mock.patch.object(te.Path, "is_file", return_value=True):
             import src.config.settings as st

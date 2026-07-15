@@ -123,26 +123,31 @@ def embed_texts_for(
     return embed_texts(texts, model_name=model, normalize_embeddings=normalize_embeddings)
 
 
-def _embed_one(
-    clean: str,
+def _embed_many(
+    texts: list[str],
     *,
     channel: str | None,
     settings: Any,
     embedding_model_name: str,
     normalize_embeddings: bool,
-) -> list[float]:
-    """청크 1개 임베딩 — ``channel`` 있으면 백엔드 라우팅(``embed_texts_for``), 없으면 로컬 모델(기존 동치).
+) -> list[list[float]]:
+    """청크 여러 개를 **1회 배치**로 임베딩 — ``channel`` 있으면 백엔드 라우팅(``embed_texts_for``),
+    없으면 로컬 모델(``embed_texts``). 입력 순서대로 벡터 리스트 반환.
 
-    ※ 현재 청크마다 1회 호출한다(API 백엔드는 청크당 1 요청 — 정확하나 배치 최적화는 후속). 로컬 경로는
-    ``channel=None`` 기존 호출과 완전 동일(회귀 0).
-    """
+    069 D7(P2-32): 과거 ``_embed_one`` 이 청크마다 1회(로컬 model.encode / API HTTP 요청 1건)를 돌던
+    것을 전 청크 1회 배치로 대체한다. 하부 ``embed_texts``·``embed_texts_api`` 는 내부에서 batch_size 로
+    나눠 처리하므로 API 요청 왕복이 청크수→⌈청크수/batch_size⌉ 로 급감한다. **수치 동일성 실측**(120
+    실코퍼스 청크): 운영 API bge-m3 개별 vs 배치 bit-identical(차이 0), 로컬 bge cos이탈 8.8e-12 —
+    검색 무영향·재백필 불필요(동작 불변). 빈 입력은 빈 리스트(호출 생략)."""
+    if not texts:
+        return []
     if channel is not None:
         return embed_texts_for(
-            [clean], channel=channel, settings=settings, normalize_embeddings=normalize_embeddings
-        )[0]
+            texts, channel=channel, settings=settings, normalize_embeddings=normalize_embeddings
+        )
     return embed_texts(
-        [clean], model_name=embedding_model_name, normalize_embeddings=normalize_embeddings
-    )[0]
+        texts, model_name=embedding_model_name, normalize_embeddings=normalize_embeddings
+    )
 
 
 def _iter_nonempty_chunks(
@@ -199,7 +204,7 @@ def embedding_text_chunks(
     overlap_size = int(getattr(settings, "text_embedding_chunk_overlap", 0) or 0)
     # 069 D8: chunk_size 가 임베딩 모델 최대 시퀀스의 2배를 넘으면 인코딩 시 조용히 잘려(재현 불가)
     # 임베딩 품질이 저하될 수 있다 — **로컬 백엔드**에서 1회 관측 경고(동작은 불변·로그만). API
-    # 백엔드(st_api)는 원격 모델의 max_seq 를 알 수 없어 생략. 판정 모델은 _embed_one 의 실제 경로를
+    # 백엔드(st_api)는 원격 모델의 max_seq 를 알 수 없어 생략. 판정 모델은 _embed_many 의 실제 경로를
     # 그대로 미러링한다: channel=None → 로컬 embed_texts(embedding_model_name), channel 있으면
     # backend_for_channel 로 api/local 분기 후 로컬이면 model_for_channel 의 모델. (운영 text_skill 은
     # channel=active('st') 를 넘기므로 과거 `channel is None` 조건은 운영에서 절대 발동 안 했음 — 069 리뷰)
@@ -221,7 +226,9 @@ def embedding_text_chunks(
         except Exception:  # noqa: BLE001 — 경고는 관측용, 모델 조회 실패가 임베딩을 막으면 안 됨
             pass
 
-    out: list[TextChunkEmbedding] = []
+    # 069 D7: 청크를 먼저 (chunk_index, clean) 로 모은 뒤 **1회 배치** 임베딩한다(과거 청크별 _embed_one
+    # 대체). 정규화·빈청크 " " 치환·chunk_index 순번은 기존과 동일 — 임베딩 호출만 개별→배치.
+    indexed: list[tuple[int, str]] = []
     for chunk_index, chunk in _iter_nonempty_chunks(
         path,
         file_kind=file_kind,
@@ -232,27 +239,20 @@ def embedding_text_chunks(
         clean = normalize_text_for_embedding(chunk)
         if not clean.strip():
             clean = " "
-        chunk_vector = _embed_one(
-            clean,
-            channel=channel,
-            settings=settings,
-            embedding_model_name=embedding_model_name,
-            normalize_embeddings=normalize_embeddings,
-        )
-        out.append(
-            {
-                "chunk_index": chunk_index,
-                "embedding_vector": pad_embedding_to_storage_dim(chunk_vector),
-            }
-        )
-    if not out:
-        out.append(
-            {
-                "chunk_index": 0,
-                "embedding_vector": pad_embedding_to_storage_dim([]),
-            }
-        )
-    return out
+        indexed.append((chunk_index, clean))
+    if not indexed:
+        return [{"chunk_index": 0, "embedding_vector": pad_embedding_to_storage_dim([])}]
+    vectors = _embed_many(
+        [clean for _, clean in indexed],
+        channel=channel,
+        settings=settings,
+        embedding_model_name=embedding_model_name,
+        normalize_embeddings=normalize_embeddings,
+    )
+    return [
+        {"chunk_index": idx, "embedding_vector": pad_embedding_to_storage_dim(vec)}
+        for (idx, _clean), vec in zip(indexed, vectors, strict=True)  # 청크수==벡터수 방어
+    ]
 
 
 def embedding_plain_text_chunks(
@@ -270,8 +270,10 @@ def embedding_plain_text_chunks(
 
     062: ``channel`` 지정 시 그 채널 백엔드(로컬/API)로 임베딩(``embed_texts_for``). 미지정=기존 로컬(회귀 0).
     """
-    out: list[TextChunkEmbedding] = []
-    chunk_index = 0
+    # 069 D7: 파일 경로와 동일하게 청크를 모아 1회 배치 임베딩(과거 청크별 _embed_one 대체).
+    # chunk_index 는 빈 청크를 건너뛴 뒤의 연속 순번(0,1,2,…) — 기존과 동일.
+    indexed: list[tuple[int, str]] = []
+    idx = 0
     for chunk in iter_plain_text_chunks(
         text,
         chunk_size=chunk_size,
@@ -283,25 +285,18 @@ def embedding_plain_text_chunks(
         clean = normalize_text_for_embedding(chunk)
         if not clean.strip():
             clean = " "
-        chunk_vector = _embed_one(
-            clean,
-            channel=channel,
-            settings=settings,
-            embedding_model_name=embedding_model_name,
-            normalize_embeddings=normalize_embeddings,
-        )
-        out.append(
-            {
-                "chunk_index": chunk_index,
-                "embedding_vector": pad_embedding_to_storage_dim(chunk_vector),
-            }
-        )
-        chunk_index += 1
-    if not out:
-        out.append(
-            {
-                "chunk_index": 0,
-                "embedding_vector": pad_embedding_to_storage_dim([]),
-            }
-        )
-    return out
+        indexed.append((idx, clean))
+        idx += 1
+    if not indexed:
+        return [{"chunk_index": 0, "embedding_vector": pad_embedding_to_storage_dim([])}]
+    vectors = _embed_many(
+        [clean for _, clean in indexed],
+        channel=channel,
+        settings=settings,
+        embedding_model_name=embedding_model_name,
+        normalize_embeddings=normalize_embeddings,
+    )
+    return [
+        {"chunk_index": i, "embedding_vector": pad_embedding_to_storage_dim(vec)}
+        for (i, _clean), vec in zip(indexed, vectors, strict=True)  # 청크수==벡터수 방어
+    ]
