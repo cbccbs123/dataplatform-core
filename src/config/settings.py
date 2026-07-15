@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from src.config import keyframe_dedup_defaults as _kf
 from src.config import search_constants
 
 _LOG = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ class PipelineSettings:
     # off면 스킬이 clip EmbeddingItem 만 스킵(ST 캡션·CLIP 라벨·검색·관계 불변). 신규 셋업 opt-in.
     embed_enable_clip: bool
     text_embedding_chunk_size: int
+    # 069 D8: 임베딩 청크 overlap(env TEXT_EMBED_CHUNK_OVERLAP·선택·기본 0). 요약용 overlap_size 와 별개
+    # (이쪽은 임베딩 청킹 전용). 0=인접 청크 미겹침(현행·동작 불변), >0=경계 문맥 보존 opt-in.
+    text_embedding_chunk_overlap: int
     text_embedding_normalize: bool
     video_max_keyframes: int
     image_labels_meta_top_k: int
@@ -484,6 +488,8 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 063: clip 임베딩 토글(기본 True=회귀 0). 신규 셋업서 false 로 opt-out.
         embed_enable_clip=_env_bool_default("EMBED_ENABLE_CLIP", True),
         text_embedding_chunk_size=_require_env_int("TEXT_EMBED_CHUNK_SIZE"),
+        # 069 D8: 선택 필드(_env_int_default) — 미설정 시 0(overlap 없음·하드코딩과 동일·동작 불변).
+        text_embedding_chunk_overlap=_env_int_default("TEXT_EMBED_CHUNK_OVERLAP", 0),
         text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
         video_max_keyframes=(
             48 if (vk := _env_int_default("VIDEO_MAX_KEYFRAMES", 48)) <= 0 else vk
@@ -563,13 +569,14 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
         # 048: 영상 키프레임 near-dup 제거 7필드(FR-501 단일 출처). 모두 선택 env — 미설정 시 spec
         # 기본설정표 값. enabled 기본 True(2026-06-29 결정). compare_mode 'global' 은 타임라인 손실
         # 위험이 있어 비기본(SC-008) — 화이트리스트 검증은 dedup 코어가 수행한다(잘못된 모드 = keep 폴백).
-        video_keyframe_dedup_enabled=_env_bool_default("VIDEO_KEYFRAME_DEDUP_ENABLED", True),
-        video_keyframe_dedup_hash_max=_env_int_default("VIDEO_KEYFRAME_DEDUP_HASH_MAX", 7),
-        video_keyframe_dedup_ssim_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_MIN", 0.94),
-        video_keyframe_dedup_ssim_gray_lo=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO", 0.90),
-        video_keyframe_dedup_hist_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_HIST_MIN", 0.97),
-        video_keyframe_dedup_compare_mode=_env_str_default("VIDEO_KEYFRAME_DEDUP_COMPARE_MODE", "recent"),
-        video_keyframe_dedup_recent_window=_env_int_default("VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW", 4),
+        # 069 D2: fallback 기본값은 keyframe_dedup_defaults 상수 단일 출처(dataclass 기본값과 공유·드리프트 차단).
+        video_keyframe_dedup_enabled=_env_bool_default("VIDEO_KEYFRAME_DEDUP_ENABLED", _kf.DEFAULT_ENABLED),
+        video_keyframe_dedup_hash_max=_env_int_default("VIDEO_KEYFRAME_DEDUP_HASH_MAX", _kf.DEFAULT_HASH_MAX),
+        video_keyframe_dedup_ssim_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_MIN", _kf.DEFAULT_SSIM_MIN),
+        video_keyframe_dedup_ssim_gray_lo=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO", _kf.DEFAULT_SSIM_GRAY_LO),
+        video_keyframe_dedup_hist_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_HIST_MIN", _kf.DEFAULT_HIST_MIN),
+        video_keyframe_dedup_compare_mode=_env_str_default("VIDEO_KEYFRAME_DEDUP_COMPARE_MODE", _kf.DEFAULT_COMPARE_MODE),
+        video_keyframe_dedup_recent_window=_env_int_default("VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW", _kf.DEFAULT_RECENT_WINDOW),
         # 049: VLM 요약 프롬프트 v2 토글(기본 False — v1 바이트 동일·회귀 안전판·FR-102). 순수 토글이라
         # _env_bool_default 가 불리언 형식 오류만 fail-fast(029/048 동형). False 면 summarize_* 가 v1
         # 경로(현행 inline 키워드 루프)를 그대로 써 추출 결과가 바이트 동일하다.

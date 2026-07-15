@@ -22,6 +22,16 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
+# 069 D2: dedup 기본값 단일 출처(settings env fallback 과 공유하는 경량 상수 모듈·cv2 무의존).
+from src.config.keyframe_dedup_defaults import (
+    DEFAULT_COMPARE_MODE,
+    DEFAULT_HASH_MAX,
+    DEFAULT_HIST_MIN,
+    DEFAULT_RECENT_WINDOW,
+    DEFAULT_SSIM_GRAY_LO,
+    DEFAULT_SSIM_MIN,
+)
+
 if TYPE_CHECKING:
     from src.preprocess.video_keyframes import KeyframeBytesResult
 
@@ -43,13 +53,13 @@ class KeyframeDedupConfig:
     dedup 을 무력화(예: hash_max<0)하거나 과대 적용하지 않도록(레포 fail-fast 관례).
     """
 
-    enabled: bool
-    hash_max: int = 7
-    ssim_min: float = 0.94
-    ssim_gray_lo: float = 0.90
-    hist_min: float = 0.97
-    compare_mode: str = "recent"  # "recent" | "last" | "global"
-    recent_window: int = 4
+    enabled: bool  # 필수(video_skill 이 settings 에서 항상 주입) — 기본값 없음
+    hash_max: int = DEFAULT_HASH_MAX
+    ssim_min: float = DEFAULT_SSIM_MIN
+    ssim_gray_lo: float = DEFAULT_SSIM_GRAY_LO
+    hist_min: float = DEFAULT_HIST_MIN
+    compare_mode: str = DEFAULT_COMPARE_MODE  # "recent" | "last" | "global"
+    recent_window: int = DEFAULT_RECENT_WINDOW
 
     def __post_init__(self) -> None:
         if self.compare_mode not in _COMPARE_MODES:

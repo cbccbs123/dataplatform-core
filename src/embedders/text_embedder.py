@@ -12,6 +12,7 @@ per-asset 파이프라인의 ST 채널 벡터를 여기서 만든다: 텍스트/
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +29,8 @@ from src.file.data_loader import (
     normalize_file_kind,
 )
 from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
+
+_LOG = logging.getLogger(__name__)
 
 
 class TextChunkEmbedding(TypedDict):
@@ -148,9 +151,11 @@ def _iter_nonempty_chunks(
     file_kind: str,
     encoding: str,
     chunk_size: int,
+    overlap_size: int = 0,
 ) -> Iterator[tuple[int, str]]:
     # idx 는 빈 청크를 건너뛴 뒤의 연속 번호(0,1,2,…) — 원본 문서상의 청크 위치가 아니다.
     # DB persist 가 chunk_index 로 청크를 식별하므로 빈틈 없는 0-based 순번을 보장한다.
+    # 069 D8: overlap_size 기본 0 = 하드코딩과 동일(동작 불변). 호출자가 설정으로 조정 가능.
     kind = normalize_file_kind(file_kind)
     if kind is None:
         raise ValueError("file_kind는 필수입니다.")
@@ -160,7 +165,7 @@ def _iter_nonempty_chunks(
         file_kind=kind,
         encoding=encoding,
         chunk_size=chunk_size,
-        overlap_size=0,
+        overlap_size=overlap_size,
         max_input_chars=MAX_INPUT_CHARS,
     ):
         if not chunk:
@@ -189,12 +194,31 @@ def embedding_text_chunks(
     if not path.is_file():
         raise FileNotFoundError(str(path))
 
+    # 069 D8: 청크 overlap 은 설정(text_embedding_chunk_overlap) 단일 출처. 미전달/구 객체는 getattr
+    # 폴백 0(하드코딩과 동일·동작 불변). >0 이면 인접 청크가 겹쳐 경계 문맥 손실을 줄인다(opt-in).
+    overlap_size = int(getattr(settings, "text_embedding_chunk_overlap", 0) or 0)
+    # 069 D8: chunk_size 가 모델 최대 시퀀스의 2배를 넘으면 인코딩 시 조용히 잘려(재현 불가) 임베딩
+    # 품질이 저하될 수 있다 — 로컬 경로에서 1회 관측 경고(동작은 불변·로그만). API 채널은 원격 모델의
+    # max_seq 를 알 수 없어 생략. 모델 조회 실패는 경고 목적이라 임베딩을 막지 않고 조용히 넘어간다.
+    if channel is None:
+        try:
+            _max_seq = getattr(get_embedding_model(embedding_model_name), "max_seq_length", None)
+            if _max_seq and chunk_size > _max_seq * 2:
+                _LOG.warning(
+                    "chunk_size=%d 가 모델 max_seq_length=%d 의 2배(%d)를 초과 — 청크가 인코딩 시 "
+                    "잘려 임베딩 품질이 저하될 수 있음(TEXT_EMBED_CHUNK_SIZE 재검토 권장).",
+                    chunk_size, _max_seq, _max_seq * 2,
+                )
+        except Exception:  # noqa: BLE001 — 경고는 관측용, 모델 로드 실패가 임베딩을 막으면 안 됨
+            pass
+
     out: list[TextChunkEmbedding] = []
     for chunk_index, chunk in _iter_nonempty_chunks(
         path,
         file_kind=file_kind,
         encoding=encoding,
         chunk_size=chunk_size,
+        overlap_size=overlap_size,
     ):
         clean = normalize_text_for_embedding(chunk)
         if not clean.strip():
