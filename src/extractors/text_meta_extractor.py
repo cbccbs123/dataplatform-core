@@ -82,7 +82,8 @@ def extract_text_meta(
     file_kind: str,
     encoding: str = "utf-8",
     chunk_size: int = 512,
-    embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",#"BAAI/bge-m3",
+    # 기본은 토큰 수 세기용 폴백 — 운영 호출부(text_skill)는 active_embed_model 을 명시 주입한다.
+    embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
 ) -> EmbeddingTextMeta:
     path = Path(file_path)
     if not path.is_file():
@@ -92,7 +93,6 @@ def extract_text_meta(
     if kind is None:
         raise ValueError("file_kind는 필수입니다.")
 
-    effective_encoding = "UTF-8"
     effective_encoding = choose_encoding(path, encoding).upper()
 
     num_sentences = 0

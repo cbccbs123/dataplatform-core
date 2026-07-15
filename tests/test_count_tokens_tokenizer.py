@@ -61,10 +61,12 @@ class TestExtractTextMetaAlignsModel(unittest.TestCase):
 
         cfg = mock.MagicMock()
         ctx = mock.MagicMock(settings=cfg, modality="txt", file_path="/tmp/x.txt")
-        with mock.patch("src.extractors.text_meta_extractor.extract_text_meta", side_effect=_fake_extract), \
-             mock.patch("src.llm.text_summarizer.summarize_and_extract_keywords", return_value={}), \
-             mock.patch.object(ts, "active_embed_model", return_value="BAAI/bge-m3") as mk_active, \
-             mock.patch.object(ts, "split_core_ext", return_value=({}, {})):
+        with (
+            mock.patch("src.extractors.text_meta_extractor.extract_text_meta", side_effect=_fake_extract),
+            mock.patch("src.llm.text_summarizer.summarize_and_extract_keywords", return_value={}),
+            mock.patch.object(ts, "active_embed_model", return_value="BAAI/bge-m3") as mk_active,
+            mock.patch.object(ts, "split_core_ext", return_value=({}, {})),
+        ):
             ts._extract_text_meta(ctx)
         mk_active.assert_called()  # 활성 모델 해소 경유
         self.assertEqual(captured.get("embedding_model_name"), "BAAI/bge-m3")
