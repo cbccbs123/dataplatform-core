@@ -190,6 +190,7 @@ def embedding_text_chunks(
     file_kind: str,
     encoding: str = "utf-8",
     chunk_size: int = 512,
+    # 기본값은 테스트 전용 폴백 — 운영은 skills 가 active_embed_model+channel 을 항상 주입한다(D7·062).
     embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
     normalize_embeddings: bool = True,
     channel: str | None = None,
@@ -264,6 +265,7 @@ def embedding_plain_text_chunks(
     text: str,
     *,
     chunk_size: int,
+    # 기본값은 테스트 전용 폴백 — 운영은 skills 가 active_embed_model+channel 을 항상 주입한다(D7·062).
     embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
     normalize_embeddings: bool = True,
     overlap_size: int = 0,

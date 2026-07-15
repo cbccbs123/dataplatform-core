@@ -7,7 +7,7 @@
     - 일반·의료의 legacy relations 경로(``run_relations`` propose)는 아직 이 dataclass 가
       아니라 dict(``src/relations`` 의 ``EmbeddingCandidate`` TypedDict 등)를 쓴다.
     - ``Evidence`` 의 ``m_prob``/``u_prob``/``weight``(=log(m/u))는 레코드 링크
-      (Fellegi-Sunter) 스코어링 필드로 아직 미배선(의료 ER, 단계 D 대기). 샘플 ``sample_score``
+      (Fellegi-Sunter) 스코어링 필드로 아직 미배선(의료 ER, 단계 D=3년차 이연·2026-07-06 대기). 샘플 ``sample_score``
       는 ``similarity``/``weight`` 만 채워 부착하고 m/u 확률은 사용하지 않는다.
 """
 from __future__ import annotations

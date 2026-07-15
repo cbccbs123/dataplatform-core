@@ -9,7 +9,7 @@
 재계산 없이 임베딩에 재사용한다. 두 함수는 항상 같은 ctx 인스턴스로 쌍으로 호출해야 한다.
 
 의료 도메인(``ctx.domain == 'medical'``)도 현 단계에서는 modality 기준으로 동일 분기한다.
-의료 표준 포맷(DICOM/HL7/FHIR) 전용 추출은 후속(F-5.2/5.3)에서 분기를 추가한다.
+의료 표준 포맷(DICOM/HL7/FHIR) 전용 추출은 후속(단계 D·3년차 이연·2026-07-06)에서 분기를 추가한다.
 """
 
 from __future__ import annotations

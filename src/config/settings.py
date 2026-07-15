@@ -59,7 +59,7 @@ class PipelineSettings:
     video_keyframe_labels_meta_top_k: int
     labels_score_min: float
     relation_top_k: int
-    # 아래 두 필드는 이번 브랜치(relations-catalog-slim)에서 추가된 관계 제안 품질 게이트.
+    # 아래 두 필드는 관계 제안 품질 게이트(032/033)에서 추가된 것이다.
     relation_min_sim: float       # 후보 코사인 유사도 하한 — 이 미만은 LLM 에 넣지 않음 (기본 0.2)
     relation_auto_approve_min: float  # 이 이상이면 HITL 없이 자동 승인 (기본 0.9)
     # 033 FR-002: 자동승인 emb_score(후보 코사인 유사도) 하한 — 기본 0.0=무력(현 동작).
@@ -636,6 +636,8 @@ def model_for_channel(channel: str, settings: PipelineSettings | None = None) ->
 
 
 # 062: API 계산 백엔드를 쓰는 채널(직교 축). 그 외 채널은 로컬 SentenceTransformer.
+# 값 "st_api" 는 embedding_constants.EMBEDDING_KIND_ST_API 와 동값 이중정의다. 실사용 정본은 이쪽
+# (backend_for_channel 이 직접 참조), 상수 쪽은 US-F 에서 처분 예정. 두 문자열은 동기 유지할 것.
 _API_EMBED_CHANNELS = frozenset({"st_api"})
 
 

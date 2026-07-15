@@ -3,10 +3,13 @@
 두 역할을 한 모델로 묶는다(같은 임베딩 공간이라 가능):
   - 인덱싱 측: 이미지/키프레임을 CLIP 이미지 인코더로 벡터화(``src/skills/image_skill.py``·
     ``video_embedder``). 동시에 VLM 이 준 한글 후보 라벨로 제로샷 점수도 매긴다(이미지 인코딩 1회 재사용).
-  - 검색 측: 텍스트 질의를 CLIP **텍스트** 인코더로 벡터화(``embed_clip_text_query_for_image_search``),
-    저장된 CLIP 이미지 벡터와 같은 공간에서 비교(검색 read path 는 037 이후 OpenSearch 하이브리드).
+    이 CLIP 이미지 벡터는 현재 관계 후보(``asset_candidates``)가 소비한다.
+  - (사장) 텍스트 질의를 CLIP **텍스트** 인코더로 벡터화하던 ``embed_clip_text_query_for_image_search``
+    — 037 이후 검색 read path 는 OpenSearch 하이브리드(활성 텍스트 채널 임베딩)뿐이라 이 CLIP 질의
+    함수는 소비처 0(US-F 처분 예정·함수 본문은 보존).
 
-따라서 적재·검색이 동일 ``model_name``(기본 ``DEFAULT_CLIP_MODEL_NAME``)을 써야 한다.
+따라서 CLIP 벡터를 쓰는 경로(인덱싱·관계)는 동일 ``model_name``(기본 ``DEFAULT_CLIP_MODEL_NAME``)을
+같은 공간 비교 전제로 공유한다.
 모든 출력 벡터는 ``clip_image_row_to_embedding_1536`` 으로 DB ``vector(1536)`` 에 맞춘다
 (CLIP 기본 차원은 512라 뒤를 0 패딩 — 헌법 1536D 통일).
 

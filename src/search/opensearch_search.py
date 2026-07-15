@@ -81,8 +81,9 @@ _MEDICAL_LABEL = "medical"
 # file_kind 값(txt·json·pdf·office)이 남아 있을 수 있어, text 버킷을 **합집합**
 # ({text} ∪ ALLOWED_TEXT_META_FILE_KINDS)으로 두어 구·신 문서를 동시 매칭한다(무중단·C5).
 # 재색인 안정 후 frozenset({"text"})로 정리(FR-403). 단일 term 이 아니라 terms(집합) 필터를 써야 회수된다.
-# 022 G1: image·video 는 020 assets 인덱스에 한국어 VLM 캡션(nori) + KoSimCSE 캡션 임베딩으로 이미
-# 색인돼 text/audio 와 동일 OS 하이브리드로 검색한다(CLIP 아님). 저장값=라벨이라 단일값·문서화용 명시.
+# 022 G1: image·video 는 020 assets 인덱스에 한국어 VLM 캡션(nori) + 활성 텍스트 채널 임베딩(현행
+# st_api·bge-m3)으로 이미 색인돼 text/audio 와 동일 OS 하이브리드로 검색한다(CLIP 아님). 저장값=
+# 라벨이라 단일값·문서화용 명시.
 _MODALITY_VALUES: dict[str, frozenset[str]] = {
     "text": frozenset({"text", *ALLOWED_TEXT_META_FILE_KINDS}),
     "audio": frozenset({MediaKind.AUDIO.value}),
@@ -570,8 +571,9 @@ def embed_query(query: str, *, channel: str) -> list[float]:
 
     적재·검색이 공유하는 텍스트 임베더(`query_embed.embed_query_for_media_search`)를 **재사용**한다
     — 임베딩 로직을 복제하지 않는다. 채널→모델 해소는 단일 출처 ``settings.model_for_channel``
-    (017 A/B)로 한다(기본 ``'st'`` → KoSimCSE, ``'st_bge'`` → BGE-M3). 020 인덱스가 활성 채널
-    임베딩을 색인하므로, 질의도 같은 채널 모델로 임베딩해야 같은 벡터 공간에서 비교된다.
+    (017 A/B)로 한다(``'st'`` → KoSimCSE·``'st_bge'`` → 로컬 BGE-M3·``'st_api'`` → 원격 API bge-m3·062).
+    020 인덱스가 활성 채널 임베딩을 색인하므로, 질의도 같은 채널 모델로 임베딩해야 같은 벡터 공간에서
+    비교된다.
     """
     from src.config.settings import model_for_channel
     from src.search.query_embed import embed_query_for_media_search
@@ -733,9 +735,10 @@ def search_assets_os(
             query, modality_values=values, k=int(k),
             operator=bm25_operator, exclude_medical=exclude_medical,
             search_filters=search_filters,
-            # 057 FR-202: 서버 lexical 필터(must_include→must·must_exclude→must_not)는 BM25 서브검색
-            # 본문에만 적용한다(kNN 표본은 게이트 신호용). 미지정(None)이면 build_bm25_body 가 절을
-            # 만들지 않아 body 바이트 동일(하위호환·회귀 0).
+            # 057 FR-202 + T213: 서버 lexical 필터(must_include→must·must_exclude→must_not)는 BM25·kNN
+            # 양쪽 서브검색 본문에 적용한다(위 build_knn_body 에도 동일 전달) — 융합이 BM25∪kNN 이라
+            # BM25 만 필터하면 kNN 회수분이 우회한다(T213 골든서 발견). 미지정(None)이면 절 미생성·body
+            # 바이트 동일(하위호환·회귀 0).
             must_include=must_include,
             must_exclude=must_exclude,
         )

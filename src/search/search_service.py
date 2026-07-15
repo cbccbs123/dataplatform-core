@@ -47,7 +47,7 @@ _MODALITY_BUCKETS: dict[str, str] = {
 
 # 022/037 백엔드 단일화: text·audio·**image·video 모두** 020 OS 인덱스(하이브리드)에서 검색한다(021 의
 # image/video→PG CLIP 경로를 OS 로 전환·037 PG 경로 제거). image/video 는 020 assets 인덱스에 한국어 VLM
-# 캡션(nori) + KoSimCSE 캡션 임베딩(embedding)으로 이미 색인돼 있어 text/audio 와 동일 하이브리드로
+# 캡션(nori) + 활성 텍스트 채널 임베딩(embedding·현행 st_api·bge-m3)으로 이미 색인돼 있어 text/audio 와 동일 하이브리드로
 # 회수된다(CLIP 아님 — 시각-내용 매칭은 후속 spec). 따라서 OS 경로는 요청 모달리티 전체를 한 번의
 # search_assets_os 호출로 처리한다.
 
@@ -77,7 +77,7 @@ def _grouped_via_opensearch(
 
     text·audio·**image·video 모든 버킷**을 020 OS 인덱스에서 동일 하이브리드(nori BM25 캡션·라벨 +
     ``embedding`` kNN + **클라이언트 융합**)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM
-    캡션·KoSimCSE 캡션 임베딩으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속).
+    캡션·활성 텍스트 채널 임베딩(현행 st_api·bge-m3)으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속).
     요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 응답 표준 키
     (text_documents·audio·image·video·meta)로 담는다(응답 동형, SC-005).
 
@@ -286,8 +286,8 @@ def search_hybrid(
 
     037 OpenSearch 전용 정리: text·audio·image·video **모든 버킷**을 020 OS 인덱스(nori BM25 캡션·라벨
     + ``embedding`` kNN + 클라이언트 융합)에서 ``_os_search_fn`` 으로 검색해 같은 키(text_documents·
-    audio·image·video)로 반환한다(022 — image/video 도 020 assets 인덱스에 한국어 VLM 캡션·KoSimCSE
-    캡션 임베딩으로 색인돼 text/audio 와 동일 하이브리드, CLIP 아님). OS 미도달이면
+    audio·image·video)로 반환한다(022 — image/video 도 020 assets 인덱스에 한국어 VLM 캡션·활성 텍스트
+    채널 임베딩(현행 st_api·bge-m3)으로 색인돼 text/audio 와 동일 하이브리드, CLIP 아님). OS 미도달이면
     ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다(FR-007·SC-006 — silent 폴백 금지).
 
     ``disable_os_cutoff`` 는 OS 경로의 **게이트·per-result 컷을 모두 끄는 디버그 우회**다(기본 False).

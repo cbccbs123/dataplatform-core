@@ -50,7 +50,13 @@ _verifier: TokenVerifier | None = None  # 프로세스 내 싱글턴 — secret�
 
 
 def get_token_verifier(*, config: PortalAuthConfig | None = None) -> TokenVerifier:
-    """``PortalAuthConfig.backend`` 에 맞는 검증기 싱글턴."""
+    """``PortalAuthConfig.backend`` 에 맞는 검증기 싱글턴.
+
+    무인자 호출은 캐시된 ``_verifier`` 를 재사용한다(없으면 env 설정으로 1회 생성). 단 ``config=`` 를
+    명시하면 항상 새로 만들어 **전역 ``_verifier`` 를 덮어쓴다** — 이후의 무인자 호출도 그 검증기를
+    받는 부수효과가 있다(요청별 config 주입 API 가 아니라 전역 교체). 테스트는 이 오염을 막으려
+    ``_reset_verifier_for_tests`` 로 캐시를 비운 뒤 원하는 config 로 세팅한다.
+    """
     global _verifier
     if _verifier is not None and config is None:
         return _verifier

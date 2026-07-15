@@ -56,9 +56,10 @@ OS_RERANK_TAU_DEFAULT: float = 0.0  # augment 기본 = 재정렬만(드롭 0). �
 # 021 FR-004 정식 개정 동반). 단일 출처(F1)이므로 settings resolver·search_service 배선이 이 값을 공유한다.
 OS_QUERY_NORM_ENABLED_DEFAULT: bool = False
 
-# 075: 정규화 방식 선택. enabled=on 일 때 "morph"(nori 형태소·072·기본·LLM 0) 또는 "llm"(gemma·029
-# 경로·검색시점 LLM)을 고른다. 기본 morph 라 072 동작 불변(회귀 0). 072 결론(형태소 품질 우위)은 유지 —
-# 이 토글은 운영자에게 방식 선택지를 여는 것(품질 재역전 아님·025 bm25_operator·029 토글 관례 동형).
+# 075: 정규화 방식 선택. enabled=on 일 때 "morph"(nori 형태소·072·LLM 0) 또는 "llm"(gemma·029 경로·
+# 검색시점 LLM)을 고른다. 코드 기본은 morph(072 동작 불변·회귀 0)이나, 076 strict 프롬프트 측정에서
+# llm 이 형태소를 재역전(자연어 nDCG 0.438→0.531)해 **운영은 llm 을 선택**한다(.env.dev). 방식 선택은
+# 운영자 몫(025 bm25_operator·029 토글 관례 동형).
 OS_QUERY_NORM_METHOD_DEFAULT: str = "morph"
 
 # ── 072: 검색 질의 형태소 정규화 상수 (단일 출처 F1) ──────────────────────────
@@ -110,6 +111,7 @@ ABOUT_FILTER_NOUN_MAX_MATCH_RATIO: float = 0.5
 # 073(L1) 후 잔존 자연어 상위3 무관을, 노출 직전 상위 3 자산만 gemma **개별** 병렬 판정해 제거한다
 # (측정 2026-07-13: 개별=무관 44.7→0%·연관 1.36→1.60 / 배치는 판정 흔들림(일치율 66~77%)으로 기각).
 # 검색시점 LLM 은 021 FR-004 의 029 거버넌스 토글 개정 선례를 따른다 — 기본 off·opt-in·단일 seam·temp=0.
+# 2026-07-14: 독립지표 재평가로 운영 off 유지·코드 보존(L3 재접근 예정·ADR 2026-07-14-llm-verify-off-reeval).
 SEARCH_LLM_VERIFY_ENABLED_DEFAULT: bool = False
 # 검증 대상 상위 자산 수. 3=측정 실용점(동시 30검색 p95 1.06s) — 전수 검증은 동시 4~5검색 포화(기각).
 SEARCH_LLM_VERIFY_TOP_N: int = 3

@@ -52,7 +52,19 @@ def apply_bucket_policy(
     cut_rows_fn: Callable[..., list[dict[str, Any]]],
     rerank_reorder_fn: Callable[..., tuple[list[dict[str, Any]], list[float]]],
 ) -> BucketPolicyOutcome:
-    """융합 행에 게이트·컷·rerank·lexical rescue·응답 정제를 적용한다.
+    """융합 행에 게이트·컷·rerank·lexical rescue·aboutness 필터·응답 정제를 적용한다.
+
+    분기 5종(cutoff_enabled·gate_passed·bm25_operator 로 택1):
+      1. 게이트 off(``cutoff_enabled=False``): 컷 없이 융합 전체 통과(gate_passed=True·cut_count=0·디버그).
+      2. 게이트 통과: ``cut_rows_fn`` per-result 컷 후, ``rerank_enabled`` 면 상위 head 만 재정렬(순서만).
+      3. 게이트 실패 + ``bm25_operator=='and'`` + lexical 증거: BM25 매칭 행만 ``lexical_rescue_keep``
+         으로 선별 회수(AND 질의 구제).
+      4. 그 외 게이트 실패: 전멸(빈 버킷 — no-match).
+    (+) 위 결과에 ``about_filter_enabled`` on 이면 aboutness OR-증거 필터를 추가 적용한다.
+
+    ``cut_count`` 는 분기에 따라 **최대 3회 재계산**된다(컷 후·rerank 후·about 필터 후) — 매번
+    ``len(fused) - len(kept)`` 로 다시 구하므로 최종값은 게이트·컷·rescue·about 로 제거된 **총량**이다
+    (요청 k 상한 절삭은 제외 — 컷 효과만 관측).
 
     ``passes_cutoff_fn``·``cut_rows_fn``·``rerank_reorder_fn`` 은 ``opensearch_search`` 의
     순수 함수를 주입받아 단위 테스트에서 mock·동일 구현을 공유한다(순환 import 방지).

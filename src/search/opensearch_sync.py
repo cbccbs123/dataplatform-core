@@ -6,10 +6,10 @@ PG 는 **읽기 전용**(SELECT 만), OpenSearch 에만 색인을 쓴다(CQRS �
     - **자산 1건 = OpenSearch 문서 1개**. 임베딩은 활성 채널 청크들의 **평균 풀링**(`avg(embedding)`)
       한 벡터를 `knn_vector` 로 색인한다 — 019 측정에서 평균 집계가 MAX 보다 검색 품질이 좋았고,
       자산당 단일 벡터라 색인·질의가 단순하다(청크별 색인은 후속 선택지).
-    - **하이브리드 한 인덱스**: 텍스트(summary·keywords·labels·file_name)는 한국어 형태소 분석기
-      `nori` 로 BM25, 임베딩은 `knn_vector`(코사인). 메타(modality·domain_label·filter_kw 등)는
-      keyword/date 필터. ``status``·``channel``·``chunk_count`` 는 색인하지 않는다(047 — 동기화 SQL·
-      단일 active channel 전제).
+    - **하이브리드 한 인덱스**: 텍스트(summary·keywords·file_name)는 한국어 형태소 분석기 `nori` 로
+      BM25(``labels`` 는 keyword 정확매칭 필드), 임베딩은 `knn_vector`(코사인). 메타(modality·
+      domain_label·filter_kw 등)는 keyword/date 필터. ``status``·``channel``·``chunk_count`` 는 색인하지
+      않는다(047 — 동기화 SQL·단일 active channel 전제).
 
 이 모듈의 **순수 함수**(`build_index_body`·`asset_to_doc`·`parse_vector`)는 DB·OS·opensearch-py
 없이 결정적으로 동작하며 단위 게이트에서 항상 검증된다. **IO 함수**(get_client·ensure_index·
@@ -189,7 +189,7 @@ def build_index_body(
                 "summary": {"type": "text", "analyzer": "nori_user"},
                 "keywords": {"type": "text", "analyzer": "nori_user"},
                 "labels": {"type": "keyword"},
-                # 056 관계 주제(FR-201) — 관계 단계가 확정한 graph_edge.topic 을 자산으로 투영한 값.
+                # 065 자기주제 — 자산 자기주제 정본(fetch_asset_topic)을 색인한 값(관계-이웃 투영 은퇴).
                 # 패싯·정확필터용 keyword(terms)만 색인한다. BM25 관련도 보강(topics_text)은
                 # 스코프 철회(FR-504·SC-04 제거) — 랭킹 회귀 위험 대비 이득이 낮아 keyword 필터만 남긴다.
                 "topics": {"type": "keyword"},
@@ -325,8 +325,8 @@ def asset_to_doc(
     비-리스트(스키마 위반)여도 빈 값으로 안전 처리한다. ``noise_patterns`` 는 settings 정제 패턴(IO 층 주입).
 
     ``topics``(065) 는 자기주제 정본(``fetch_asset_topic``) 결과 리스트다. **주어지고 비어있지
-    않으면** ``topics``/``subtopics`` 두 필드(keyword)를 수록하고, ``None``/빈 리스트면 두 필드를
-    **넣지 않는다**(주제 미부여 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다
+    않으면** ``topics``/``subtopics``/``topic_pairs``(059) 3필드(keyword)를 수록하고, ``None``/빈
+    리스트면 이 필드들을 **넣지 않는다**(주제 미부여 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다
     자산 자기주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
     """
     _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
@@ -356,7 +356,7 @@ def asset_to_doc(
     vec = parse_vector(row["emb"])
     if any(x != 0.0 for x in vec):
         doc["embedding"] = vec
-    # 관계 주제 수록(056) — 비어있지 않을 때만 두 필드(topics·subtopics) 추가(None/[] → 생략·하위호환).
+    # 자기주제 수록(065) — 비어있지 않을 때만 3필드(topics·subtopics·topic_pairs) 추가(None/[] → 생략·하위호환).
     if topics:
         doc.update(_topics_doc_fields(topics))
     doc.update(
@@ -495,8 +495,8 @@ def iter_asset_docs(
     """PG 에서 registered 자산을 읽어 OpenSearch 문서를 yield(읽기 전용).
 
     ``noise_patterns`` 는 파일명 정제용 settings 패턴(IO 층이 주입 — 순수 ``asset_to_doc`` 으로 전달).
-    ``topics_fn``(056) 은 자산별 현재 active 주제를 계산해 문서에 함께 싣는다 — 전체 재색인(백필·
-    복구) 문서가 topics 를 포함해 재색인이 색인된 주제를 지우지 않게 한다(C5·SC-03, R3 self-heal).
+    ``topics_fn``(065·기본 ``fetch_asset_topic``)은 자산별 자기주제 정본을 읽어 문서에 함께 싣는다 —
+    전체 재색인(백필·복구) 문서가 topics 를 포함해 재색인이 색인된 주제를 지우지 않게 한다(C5·SC-03, R3 self-heal).
 
     구현 주의(실 DB): 바깥 커서를 순회하며 자산마다 ``topics_fn`` 이 conn 에 **중첩 커서**로 topic 을
     조회한다. psycopg3 기본(client-side) 커서는 ``execute`` 시 결과를 클라이언트로 내려받아 버퍼링하므로,
@@ -545,11 +545,11 @@ def index_asset(
 def update_asset_topics(
     client: Any, index: str, asset_id: Any, topics: list[dict[str, Any]]
 ) -> None:
-    """자산 문서의 **주제 2필드만** 부분 갱신한다(056 FR-203 — 전체 재색인 아님).
+    """자산 문서의 **주제 3필드만**(topics·subtopics·topic_pairs) 부분 갱신한다(056 FR-203·059 — 전체 재색인 아님).
 
     G5 재색인 훅(관계 배치 꼬리·검토 승인 커밋 후)이 관계 변화를 반영할 때 쓰는 seam이다. OS
-    ``update`` API 의 부분 문서(``body={"doc": {...}}``)로 ``topics``/``subtopics`` 만
-    덮어쓴다 — ``asset_to_doc`` 과 동일한 ``_topics_doc_fields`` 로 조립해 두 경로의 주제 표현을 일치시킨다.
+    ``update`` API 의 부분 문서(``body={"doc": {...}}``)로 ``topics``/``subtopics``/``topic_pairs``(059)
+    3필드를 덮어쓴다 — ``asset_to_doc`` 과 동일한 ``_topics_doc_fields`` 로 조립해 두 경로의 주제 표현을 일치시킨다.
     ``topics`` 가 비면 두 필드를 **빈 값으로 갱신**해 강등/제거된 stale 주제를 지운다(SC-02). ``asset_to_doc``
     은 관계 없는 자산에서 필드를 생략하지만, 여기서는 이미 색인된 문서의 주제를 갱신·삭제해야 하므로
     비어도 필드를 실어 보낸다(전체문서 색인과 의도적으로 다른 대칭). ``_id`` 는 ``index`` 색인과 동형으로 str.

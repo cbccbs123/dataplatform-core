@@ -32,7 +32,7 @@ class Constraint(Protocol):
 class ForbidTag:
     """팩의 어느 슬롯 전략도 이 태그를 가지면 안 된다.
 
-    **알려진 한계(단계 D 이전)**: ``check`` 는 ``pack.per_asset`` 슬롯만 순회한다.
+    **알려진 한계(단계 D=3년차 이연·2026-07-06 이전)**: ``check`` 는 ``pack.per_asset`` 슬롯만 순회한다.
     ``pack.cross_asset`` 슬롯은 현재 검사하지 않는다. 따라서 단계 D 에서 의료 cross_asset 에
     'external_llm' 태그를 가진 전략을 배선하더라도 medical_strict 의 ForbidTag 가 통과해버린다.
     단계 D 착수 전에 cross_asset 슬롯도 순회하도록 보완해야 한다.
@@ -87,7 +87,7 @@ def validate(pack: DomainPack, registry: StrategyRegistry) -> None:
     """팩의 정책을 검증한다. 위반 시 PolicyViolation.
 
     **호출 시점**: run_ingest 진입부(policy_validate 스테이지)에서 파일당 1회 호출된다.
-    팩 구성이 고정(frozen dataclass)이므로 중복 검증 비용은 무시할 수준이다.
+    팩 구성이 사실상 고정(frozen dataclass·얕은 동결이나 변조 금지 관례)이므로 중복 검증 비용은 무시할 수준이다.
     """
     policy = POLICIES.get(pack.policy)
     if policy is None:

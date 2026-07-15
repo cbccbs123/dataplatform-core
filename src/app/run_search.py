@@ -3,8 +3,8 @@
 예) python -m src.app.run_search --env dev --query "작년 워크숍 발표자료" --modalities text,image
 
 검색은 파이프라인(run_ingest/run_relations) 밖의 라이브러리 계층이라 레지스트리·도메인 팩
-import 부수효과가 필요 없다. 질의 구조화 LLM 은 공통 seam(``src.llm.client``)을, 임베딩/FTS 는
-현행 ``asset_metadata``/``asset_embedding`` 을 쓴다.
+import 부수효과가 필요 없다. 질의 구조화 LLM 은 공통 seam(``src.llm.client``)을 쓰고, 검색은
+OpenSearch 단일 백엔드(037·BM25+kNN)를 ``search_hybrid`` seam 경유로만 조회한다(PG 직조회 아님).
 """
 
 from __future__ import annotations

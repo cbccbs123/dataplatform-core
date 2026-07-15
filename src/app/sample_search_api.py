@@ -1,9 +1,9 @@
 """[샘플·개발용] 하이브리드 검색 테스트 API (FastAPI).
 
 ⚠️ **개발/테스트 편의용 샘플이다 — 개발계획(specs/README)에 등재하지 않는다.**
-정식 HTTP/포탈 레이어는 단계 E(spec 010/013)에서 별도로 설계한다. 이 파일은 그 전에
-`search_service.search_hybrid` 를 브라우저·curl 로 빠르게 두들겨 보기 위한 일회성 도구다.
-프로덕션 사용 금지(인증·레이트리밋·에러 표준화 없음).
+정식 포탈은 ``src.app.portal_api`` (spec 010)로 승격됐고, 본 파일은 그와 무관한 디버그 전용이다:
+``search_service.search_hybrid`` 를 브라우저·curl 로 빠르게 두들기며 no_cutoff·compact·
+group_by_relation 뷰로 결과를 살피는 도구다. 프로덕션 사용 금지(인증·레이트리밋·에러 표준화 없음).
 
 실행(conda 환경):
     conda activate AuroraFS && uvicorn src.app.sample_search_api:app --port 8000

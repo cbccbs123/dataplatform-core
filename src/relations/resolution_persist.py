@@ -21,6 +21,8 @@ from typing import Any
 from psycopg import Connection
 
 # ── 큐 상태 상수 ────────────────────────────────────────────────────────────
+# 닫힌 어휘 정본은 domain/status_vocab.RelationResolutionStatus(v250/v260 CHECK 대응) — 여기 상수는
+# 실사용 문자열이며 값이 정본과 동일해야 한다(테스트가 동기 검증). 신규 상태는 정본에 먼저 추가할 것.
 STATUS_PENDING = "pending"
 STATUS_RESOLVED = "resolved"
 STATUS_ISOLATED = "isolated"  # 035 #2: 평가 완료·관계 0(고립). 실패 아님 — 재시도·DLQ 없음, #6 재평가 대상.

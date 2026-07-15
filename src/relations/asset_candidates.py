@@ -8,9 +8,8 @@
     ``embedding_kind``: ``st`` / ``clip`` / ``both`` — ``asset_embedding.channel`` 값과 매핑된다.
     차원은 ``FIX_EMBEDDING_DIMENSION`` 과 일치해야 한다(추출·적재 파이프라인과 동일).
 
-OLD ``candidates.py`` 와의 차이
-    media_chunks→asset_embedding, media_items→asset(+asset_metadata), id 가 UUID(str) 다.
-    요약은 ``asset_metadata.ext_meta->>'summary'`` 에서 읽는다.
+구 스키마(media_chunks/media_items) 대비
+    asset_embedding·asset(+asset_metadata) 재배선, id 는 UUID(str), 요약은 ``ext_meta->>'summary'``.
 """
 
 from __future__ import annotations

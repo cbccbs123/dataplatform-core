@@ -1,5 +1,8 @@
 """Cross-encoder reranker(028 평가) — 질의-문서 쌍별 절대 적합도(추론만·헌법 1조).
 
+운영 상태(2026-07-13): A/B 측정 결과 이득 0(nDCG 무개선·지연만 증가)으로 운영 **off**(기본
+``OS_RERANK_ENABLED_DEFAULT=False``). 코드·주입 seam(``rerank_fn``)은 보존하며, GPU 이행 시 재평가한다.
+
 bi-encoder 코사인(코퍼스 통계 의존)과 달리 cross-encoder 는 (질의, 문서) **쌍 단독**으로
 적합도(sigmoid 0~1)를 출력한다 — 같은 쌍은 코퍼스가 커져도 같은 점수(결정적 forward)라
 임계(τ)가 **모델 기준 1회 보정**으로 끝난다(코퍼스 추적 재보정 소멸 — 028 ADR).

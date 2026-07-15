@@ -20,7 +20,12 @@ def derive_file_ext(fs_path: str) -> str | None:
 
 
 def derive_source_dataset(fs_path: str) -> str:
-    """경로 규칙으로 source_dataset 키를 반환한다(ADR 2026-06-24-search-filter-v1)."""
+    """경로 규칙으로 source_dataset 키를 반환한다(ADR 2026-06-24-search-filter-v1).
+
+    규칙 순서: ``sample_data/data1|2|3`` 경로면 그 키 → 아니면 경로에 ``wikipedia``/``youtube`` 가 있으면
+    그 출처 → 그 외 ``unknown``. 현행 코퍼스는 새 경로 ``data_all`` 이라 data1/2/3 규칙은 불발하고,
+    파일명·경로의 ``youtube``/``wikipedia`` substring 폴백으로 분류된다(그 외 파일은 unknown 패싯).
+    """
     p = unicodedata.normalize("NFKC", fs_path or "").casefold().replace("\\", "/")
     for n in ("data1", "data2", "data3"):
         if f"/sample_data/{n}/" in p or f"sample_data/{n}/" in p:

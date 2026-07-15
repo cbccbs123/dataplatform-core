@@ -4,7 +4,8 @@
 샘플(``sample_search_api``)이 증명한 FastAPI 패턴(`_lifespan`: load_dotenv→init_settings)을
 정식 포탈 라우터로 승격한다. 환경은 ``PORTAL_API_ENV``(기본 dev).
 
-엔드포인트(FR-015 계약)
+엔드포인트 — P1 원형 5종(FR-015 계약, 아래). 이후 013(감사)·052(관계 검토)·054·056·057·
+065(주제)·070(미분류) 라우터가 누적돼 현재 총 32개 — 전체는 파일 내 ``@app`` 라우트 정의 참조.
     - ``GET /health``                       → ``{"status":"ok","env":...}``
     - ``GET /search``                       → ``{"query","results":{modality:[...]},"meta"}`` (모달리티별 그룹)
     - ``GET /assets/{asset_id}``            → AssetDetail (없음/의료/비registered → 404)
@@ -19,9 +20,10 @@
       서비스 계층(``fetch_asset_detail``/``resolve_download_target``)의 노출 게이트로 의료를 배제한다.
     - **결정성(헌법 3조)**: 응답 순서는 ``group_ranked``(버킷 내 -round(sim,6)·asset_id)/
       ``graph_query`` 결정성에 위임한다(라우터는 추가 정렬을 하지 않는다).
-    - **읽기 전용(헌법 6조) + append-only 감사(013 FR-012)**: 자산 데이터·스키마는 쓰기 0. 단 접근 이력
-      (``access_log``)은 미들웨어가 append-only 로 적재한다(``_run_in_db_write``·best-effort).
-      계보·검색·상세·다운로드 조회는 idempotent 트랜잭션이며, 신규 LLM 호출 0(SQL 만).
+    - **읽기 위주(헌법 6조) + 거버넌스 write(013·052)**: 원본 자산 payload·스키마는 쓰기 0. 단
+      (1) 접근 이력(``access_log``)을 미들웨어가 append-only 로 적재하고(013 FR-012·best-effort),
+      (2) 052 관계 검토 결정(graph_edge status·relation_kind status)을 write 한다 — 둘 다
+      ``_run_in_db_write`` seam 공유. 계보·검색·상세·다운로드 조회는 idempotent(SQL 만·신규 LLM 0).
 
 인증·ext_meta 키 omit(spec 042 · 010 US4 흡수)
     JWT Bearer ``Depends(require_principal)`` — 검색·상세·다운로드·묶음.
@@ -194,11 +196,13 @@ def _run_in_db(callback: Callable[[Any], Any]) -> Any:
 
 
 def _run_in_db_write(callback: Callable[[Any], Any]) -> Any:
-    """access_log append-only 감사 write 용 트랜잭션(``idempotent=False``·commit).
+    """조회 seam(``_run_in_db``)과 분리한 write 트랜잭션(``idempotent=False``·commit) 공유 seam.
 
-    조회 seam(``_run_in_db``)과 분리한 별도 write seam — 자산 데이터·스키마는 무변경,
-    오직 ``access_log`` 한 행 INSERT 만 한다(append-only·013 FR-012 감사 무결성). 미들웨어가 best-effort
-    로만 호출한다(테스트는 이 함수를 patch). 069 P1-1: 앱 수명 싱글턴 재사용.
+    원본 자산 payload·스키마는 무변경이나, 두 부류의 거버넌스 write 가 이 seam 을 공유한다:
+    (1) 미들웨어의 append-only 감사(``access_log`` 1행·013 FR-012·best-effort),
+    (2) 052 관계 검토 결정(``bulk_review``/``revise_edge``/``promote_relation_kind`` — graph_edge
+    status·relation_kind status 전이 + relation 감사). 테스트는 이 함수를 patch.
+    069 P1-1: 앱 수명 싱글턴 재사용.
     """
     return _get_db().execute_in_transaction(callback, idempotent=False)
 

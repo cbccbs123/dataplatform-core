@@ -169,7 +169,7 @@ def sync_graph_edges(
         symmetric = bool(kind["is_symmetric"])
 
         # topic은 C+ 슬림화 설계에 따라 graph_edge.topic jsonb에 비정규화 저장.
-        # relation_type / relation_subtopic / relation_topic_parent 3테이블은 v210에서 드랍됨.
+        # relation_type / relation_subtopic / relation_topic_parent 3테이블은 v230에서 드랍됨.
         # 065 FR-405: graph_edge.topic 은 **관계 맥락 라벨(자산 주제 아님)** — 이 쌍(pairwise) 관계를
         #   설명하는 메타일 뿐, 자산의 주제는 asset_topic 정본이 결정한다. 기록은 존치(관계 검토 UI용)·
         #   소비만 끊음(065). 컬럼 제거는 후속.

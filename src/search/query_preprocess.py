@@ -5,7 +5,8 @@
 + ``reference_dates_block`` 의 ``datetime.now`` 비결정 패턴)를 삭제했다 — 운영 호출 0. 검색 시점 질의
 정규화는 query-norm 토글(072 형태소 / 075 gemma)이 담당한다.
 
-필요: 프로젝트 루트의 ``.env.dev`` / ``.env.prod`` (OPENAI_BASE_URL, OPENAI_API_KEY, META_MODEL 등)
+필요(``llm`` 방식 선택 시에만): 온프레미스 LLM seam 설정(``.env.dev``/``.env.prod``). 형태소(``morph``·
+기본) 경로는 nori ``_analyze`` 만 쓰므로 LLM/OPENAI 설정은 **불요**다.
 """
 
 from __future__ import annotations

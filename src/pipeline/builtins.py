@@ -50,7 +50,7 @@ def register_defaults(registry: StrategyRegistry) -> None:
     - decide/confidence         : propose_relations_for_asset 내부 auto_approve 임계로 처리되므로
                                   별도 Callable 미등록(슬롯 이름만 팩에 선언).
 
-    단계 D: 의료 전용 cross_asset 전략(예: blocking_5keys)이 추가될 때 이 함수에서 함께 등록한다.
+    단계 D(3년차 이연·2026-07-06): 의료 전용 cross_asset 전략(예: blocking_5keys)이 추가될 때 이 함수에서 함께 등록한다.
     그 시점에 run_relations 는 팩별 슬롯 resolve 로 전환해야 한다(현재 묶음 위임과의 전환점).
     """
     # per-asset

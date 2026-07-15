@@ -23,6 +23,10 @@ class DomainPack:
     **불변식**: per_asset/cross_asset 값은 반드시 DEFAULT_REGISTRY 에 등록된 이름이어야 한다.
     등록되지 않은 이름을 지정하면 resolve() 호출 시점에 KeyError 가 발생한다(조기 실패 아님).
 
+    **얕은 동결 주의**: ``frozen=True`` 는 필드 재바인딩만 막고 per_asset/cross_asset **dict 내용은
+    동결하지 않는다**(``pack.per_asset["x"]=...`` 가능). 관례상 생성 후 변조 금지 — US-E1 에서
+    MappingProxyType 로 강제 예정.
+
     **주의**: ``is_symmetric`` 등 관계 속성은 팩이 아니라 relation_kind 카탈로그(DB)에 속한다.
     팩은 "어느 전략을 쓸지"만 고르고, 개별 관계 종류의 의미론(방향·대칭·is_causal 등)은 관리하지 않는다.
     """

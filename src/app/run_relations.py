@@ -155,6 +155,10 @@ def _record_resolution(
     그래서 큐 갱신은 propose_relations_for_asset 트랜잭션 **밖**, 자산별 독립 fresh 트랜잭션에서 수행하고,
     여기서 또 예외가 나면 로그만 남기고 흡수한다(배치·다른 자산에 전파 금지).
 
+    attempts 는 별도 조회(``_fetch_attempts``) 후 이 fresh 트랜잭션에서 upsert 한다 — read-then-write 가
+    서로 다른 트랜잭션이라, 배치가 자산을 **순차 처리하는 단일 워커** 전제에서만 안전하다. 병렬화 시
+    두 워커가 같은 자산의 attempts 를 겹쳐 읽어 카운트가 어긋날 수 있다(TOCTOU — 병렬화 시 재설계 필요).
+
     last_reason 은 비식별만(헌법 10조): 고립은 _REASON_ISOLATED 표식, 예외는 예외 **타입명**만.
     예외 메시지·파일 경로는 PHI/풀경로 누출 위험이 있어 큐에 담지 않는다.
     """

@@ -8,8 +8,10 @@ search·relations·portal)으로 위임만 한다. v2 아키텍처 "고정 뼈�
   · run_ingest            — per-asset 수집·적재 (route→classify→extract→embed→persist)
   · run_relations         — cross-asset 관계 제안 배치 (candidates→propose→graph_edge)
   · run_relations_review  — 관계 HITL 검토(proposed 엣지 승인/반려·relation_kind 승격)
-  · run_search            — 하이브리드 검색 CLI(임베딩+FTS)
+  · run_search            — 하이브리드 검색 CLI(OpenSearch BM25+kNN 클라이언트 융합·037)
   · run_opensearch_resync — PG→OpenSearch 전체 재색인 복구 도구(spec 020)
+  · run_about_backfill    — aboutness 개체 소급 확정 배치(summary→ext_meta['about']·spec 073)
+  · run_topic_backfill    — 자산 자기주제 소급 부여 배치(summary/keywords→asset_topic·spec 065)
   · portal_api            — 일반 도메인 포탈 백엔드(FastAPI, spec 010)
   · sample_search_api     — 샘플·개발용 검색 API(개발계획 미등재, 프로덕션 금지)
 

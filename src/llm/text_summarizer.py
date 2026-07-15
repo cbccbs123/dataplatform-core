@@ -29,7 +29,12 @@ _DEFAULT_MIN_SELF_TEXT_CHARS = 15
 
 
 def _min_self_text_chars() -> int:
-    """무내용 가드 임계(글자 수). env ``TOPIC_MIN_SELF_TEXT`` 우선, 파싱 실패·음수면 기본 15."""
+    """무내용 가드 임계(글자 수). env ``TOPIC_MIN_SELF_TEXT`` 우선, 파싱 실패·음수면 기본 15.
+
+    settings 객체를 주입받지 않고 ``os.getenv`` 를 **직독**하는 이유: 이 요약기는 적재 파이프라인의
+    text_skill·audio_skill 등 여러 경로에서 호출되는데 settings 스냅샷이 항상 주입된다는 보장이 없어,
+    env 직독이 어느 호출 경로에서도 값을 안전하게 얻는 방식이기 때문이다(env 는 프로세스 시작 시 고정 전제).
+    """
     raw = os.getenv("TOPIC_MIN_SELF_TEXT")
     if raw is None or not str(raw).strip():
         return _DEFAULT_MIN_SELF_TEXT_CHARS
