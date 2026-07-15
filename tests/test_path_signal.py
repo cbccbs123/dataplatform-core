@@ -396,5 +396,42 @@ class TestPathSignalDB(unittest.TestCase):
         self.assertEqual(out[0]["media_type"], "text")  # 053: 저장 modality = canonical 'text'
 
 
+class TestPathSignal066Contract(unittest.TestCase):
+    """2026-07-15 B4 — path 후보도 066 계약 적용(무내용 EXISTS 배제 + 자기주제 동반)."""
+
+    def test_sql_has_exists_and_topic_join(self) -> None:
+        # FR-101: asset_topic EXISTS 배제 / FR-201: LEFT JOIN 으로 topic 동반 — 임베딩 후보와 동일.
+        src_row = {"fs_path": "/data/docs/report.docx"}
+        conn, cur = _mock_conn_with_source_and_dir(src_row, [])
+        find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
+        sql = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
+        self.assertIn("EXISTS (SELECT 1 FROM asset_topic", sql)
+        self.assertIn("LEFT JOIN asset_topic t", sql)
+
+    def test_topic_fields_passthrough(self) -> None:
+        # 후보 dict 가 topic_ko/subtopic_ko 를 포함(EmbeddingCandidate 계약 완전 충족).
+        src_row = {"fs_path": "/data/docs/report.docx"}
+        dir_rows = [
+            {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
+             "modality": "pdf", "summary": "요약", "topic_ko": "경제·산업", "subtopic_ko": "보고서"},
+        ]
+        conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
+        out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
+        self.assertEqual(out[0]["topic_ko"], "경제·산업")
+        self.assertEqual(out[0]["subtopic_ko"], "보고서")
+
+    def test_topic_absent_defensive_none(self) -> None:
+        # LEFT JOIN 특성상 None 허용(방어) — 구형 mock 행(topic 키 없음)도 안전.
+        src_row = {"fs_path": "/data/docs/report.docx"}
+        dir_rows = [
+            {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
+             "modality": "pdf", "summary": ""},
+        ]
+        conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
+        out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
+        self.assertIsNone(out[0]["topic_ko"])
+        self.assertIsNone(out[0]["subtopic_ko"])
+
+
 if __name__ == "__main__":
     unittest.main()

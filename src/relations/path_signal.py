@@ -100,8 +100,10 @@ def find_path_signal_candidates(
 ) -> list[EmbeddingCandidate]:
     """동일 디렉터리 + C-1 stem 일치 registered 자산을 결정적 정렬·LIMIT 으로 산출.
 
-    반환은 임베딩 후보와 동일한 ``EmbeddingCandidate`` 형태(id/file_uri/media_type/emb_score/summary).
-    path-only 이므로 ``emb_score=0.0``(C-3 sentinel). self 제외.
+    반환은 임베딩 후보와 동일한 ``EmbeddingCandidate`` 형태(id/file_uri/media_type/emb_score/summary
+    + 066 ``topic_ko``/``subtopic_ko`` — 2026-07-15 B4 로 임베딩 후보와 계약 통일).
+    path-only 이므로 ``emb_score=0.0``(C-3 sentinel). self 제외. 미부여(무내용) 자산은
+    ``asset_topic`` EXISTS 로 배제(066 FR-101 — 임베딩 후보와 동일).
 
     정렬·LIMIT(C-2)
         근접도 DESC(정확 raw 일치 > 정규화 일치), 동률은 asset_id ASC, 상위 ``limit`` 만.
@@ -129,12 +131,20 @@ def find_path_signal_candidates(
         cur.execute(
             """
             SELECT a.asset_id, a.fs_path, a.modality,
-                   COALESCE(m.ext_meta->>'summary', '') AS summary
+                   COALESCE(m.ext_meta->>'summary', '') AS summary,
+                   -- 066 FR-201(2026-07-15 B4): 후보 자기주제 동반 — 임베딩 후보(asset_candidates)와
+                   --   동일 계약. 종전 path 후보는 topic 없이 프롬프트에 null 로 실렸다.
+                   t.topic_ko    AS topic_ko,
+                   t.subtopic_ko AS subtopic_ko
             FROM asset a
             LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
+            LEFT JOIN asset_topic t ON t.asset_id = a.asset_id
             WHERE a.status = 'registered'
               AND a.asset_id <> %s
               AND a.fs_path LIKE %s
+              -- 066 FR-101(2026-07-15 B4): 미부여(무내용) 자산 배제 — 임베딩 후보의 EXISTS 와 동일.
+              --   종전엔 path 신호 경로만 이 배제가 없어 무내용 자산이 관계 후보로 재유입 가능했다.
+              AND EXISTS (SELECT 1 FROM asset_topic at WHERE at.asset_id = a.asset_id)
             """,
             (source_asset_id, like_escape(dir_prefix) + "%"),
         )
@@ -165,6 +175,9 @@ def find_path_signal_candidates(
 
     out: list[EmbeddingCandidate] = []
     for _rank, aid, r in matched[:limit]:
+        # 066 FR-201: 주제는 방어적으로 None 허용(LEFT JOIN — EXISTS 배제로 사실상 항상 존재).
+        topic_ko = r.get("topic_ko")
+        subtopic_ko = r.get("subtopic_ko")
         out.append(
             {
                 "id": aid,
@@ -173,6 +186,8 @@ def find_path_signal_candidates(
                 # C-3: path-only 후보는 결정적 sentinel 0.0. union 시 임베딩 실측값 우선.
                 "emb_score": 0.0,
                 "summary": str(r["summary"] or ""),
+                "topic_ko": str(topic_ko) if topic_ko is not None else None,
+                "subtopic_ko": str(subtopic_ko) if subtopic_ko is not None else None,
             }
         )
     return out
