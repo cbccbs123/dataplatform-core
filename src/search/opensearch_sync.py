@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+from src.config.filename_util import basename_of
 from src.config.search_constants import NORI_USER_WORDS_DEFAULT
 from src.search.filter_index_fields import build_filter_index_fields
 
@@ -58,14 +59,6 @@ def parse_vector(value: Any) -> list[float]:
     s = str(value).strip()
     inner = s[1:-1] if s.startswith("[") and s.endswith("]") else s
     return [float(x) for x in inner.split(",") if x.strip()]
-
-
-def _basename(uri: str) -> str:
-    """경로/URI 에서 파일명만 추출한다(결정적·순수). 쿼리·프래그먼트는 제거."""
-    if not uri:
-        return ""
-    tail = uri.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    return tail.split("?", 1)[0].split("#", 1)[0] or tail
 
 
 # 파일명 정제(spec 026 FR-003②) — ID스러움 판정 상수.
@@ -339,7 +332,7 @@ def asset_to_doc(
     _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
     ext = row.get("ext_meta") or {}
     file_name = clean_file_name(
-        _basename(str(row.get("fs_path") or "")), noise_patterns=noise_patterns
+        basename_of(str(row.get("fs_path") or "")), noise_patterns=noise_patterns
     )
     summary = str(ext.get("summary") or "")
     keywords = ext.get("keywords") if isinstance(ext.get("keywords"), list) else []

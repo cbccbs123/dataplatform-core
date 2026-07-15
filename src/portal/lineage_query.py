@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.portal._ext_expr import ext_expr  # 확장자 SQL 정규식 단일 출처(069 D4·057 FR-104)
 from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
 # 057 FR-204: relations.proposed 판별 activity 는 054 스냅샷 카운트(asset_stats)와 **단일 출처** 공유 —
@@ -19,8 +20,8 @@ _NONMEDICAL = (
     "FROM asset_lineage al JOIN asset a ON a.asset_id = al.asset_id "
     "WHERE a.domain_label <> 'medical'"
 )
-# 파일 확장자(file_ext) = a.fs_path 마지막 .세그먼트(소문자). 고정 SQL·raw 정규식(인젝션 안전).
-_EXT_EXPR = r"lower(substring(a.fs_path from '\.([^./]+)$'))"
+# 파일 확장자(file_ext) = a.fs_path 마지막 .세그먼트(소문자). 단일 출처 ext_expr(별칭 a. — JOIN 모호성 차단).
+_EXT_EXPR = ext_expr("a.")
 
 
 def query_asset_lineage(conn: Any, asset_id: str, *, limit: int = 500) -> list[dict]:

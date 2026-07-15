@@ -8,11 +8,12 @@ from __future__ import annotations
 from typing import Any
 
 from src.ingest.archiver import display_file_name  # 표시 파일명 asset_id 프리픽스 제거(065 T605)
+from src.portal._ext_expr import ext_expr  # 확장자 SQL 정규식 단일 출처(069 D4·057 FR-104)
 from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 
 _EXCLUDE_MEDICAL = "domain_label <> 'medical'"  # 고정 SQL(사용자 입력 아님)·검색/상세와 일관
-# 파일 확장자(file_ext) = fs_path 마지막 .세그먼트(소문자·없으면 NULL). 고정 SQL·raw 정규식(인젝션 안전).
-_EXT_EXPR = r"lower(substring(fs_path from '\.([^./]+)$'))"
+# 파일 확장자(file_ext) = fs_path 마지막 .세그먼트(소문자·없으면 NULL). 단일 출처 ext_expr(비한정 fs_path).
+_EXT_EXPR = ext_expr()
 
 # 054 관리자 스냅샷 버킷(계보 현황 화면) — FSM status 를 운영 관점 5버킷으로 롤업.
 # 버킷 순서 = 응답/집계 열거 순서(결정적). relation_proposed 는 registered 중 관계 제안이 있는 하위집합.
@@ -201,7 +202,8 @@ def query_assets(conn: Any, *, status: str | None = None, modality: str | None =
     if domain:
         specs.append(("{a}domain_label = %s", [domain]))
     if file_ext:
-        specs.append((r"lower(substring({a}fs_path from '\.([^./]+)$')) = %s", [file_ext]))
+        # {a} 자리표시자 유지 — 아래 _where 가 .format(a=pfx) 로 접두("" / "a.")를 채운다.
+        specs.append((ext_expr("{a}") + " = %s", [file_ext]))
     if created_from is not None:
         specs.append(("{a}created_at >= %s", [created_from]))
     if created_to is not None:

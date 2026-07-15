@@ -97,7 +97,7 @@ class TestFetchAssetDetail(unittest.TestCase):
 
     @patch("src.portal.asset_detail.fetch_active_relations_for_asset")
     def test_top_level_file_name_from_fs_path_basename(self, mock_rel) -> None:
-        # FR-101(057): 상세 응답 최상위 file_name = fs_path basename(search_group._basename 단일 출처).
+        # FR-101(057): 상세 응답 최상위 file_name = fs_path basename(search_group._display_name 단일 출처).
         # → web A3·admin A1 다운로드 프리플라이트 워크어라운드 제거 기반(N+1 소멸).
         mock_rel.return_value = []
         conn, _ = _conn_for_detail(dict(_REGISTERED_ROW), [])

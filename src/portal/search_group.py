@@ -25,9 +25,13 @@ import math
 import re
 from typing import Any
 
+# 파일명 코어(basename_of)는 단일 출처(069 D3) — src/config 는 empty __init__ 라 heavy 의존을
+# 끌지 않으므로 본 모듈의 "표준 라이브러리만 import" 순수 계약(torch 등 미로드)이 유지된다.
+from src.config.filename_util import basename_of
+
 # 아카이브 asset_id 프리픽스(``{asset_id}__``) 역패턴 — 표시용 파일명서 벗긴다(065 T605).
-# 정본은 ``src/ingest/archiver.py::_ASSET_ID_PREFIX`` 이나, 본 모듈은 "표준 라이브러리만 import"
-# 순수 계약이라 heavy 의존을 끌지 않도록 같은 UUIDv7 패턴을 작은 사본으로 둔다(포맷 변경 시 동기).
+# 정본은 ``src/ingest/archiver.py::_ASSET_ID_PREFIX`` 이나, 본 모듈은 순수 계약이라 heavy 의존을
+# 끌지 않도록 같은 UUIDv7 패턴을 작은 사본으로 둔다(포맷 변경 시 동기).
 _ASSET_ID_PREFIX = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}__"
 )
@@ -56,16 +60,14 @@ def _row_similarity(row: dict[str, Any]) -> float:
     return x if math.isfinite(x) else 0.0
 
 
-def _basename(uri: str) -> str:
-    """file_uri(전체 경로/URI)에서 표시용 파일명을 뽑는다(결정적·순수).
+def _display_name(uri: str) -> str:
+    """file_uri(전체 경로/URI)에서 **표시용** 파일명을 뽑는다(결정적·순수).
 
-    쿼리/프래그먼트 제거 후 아카이브 asset_id 프리픽스(``{asset_id}__``)도 벗긴다(065 T605·단일 출처).
+    공통 코어 ``basename_of``(쿼리/프래그먼트 제거·백슬래시 정규화) 위에 아카이브 asset_id
+    프리픽스(``{asset_id}__``) 제거를 합성한다(065 T605). basename 추출은 단일 출처(069 D3)이고,
+    프리픽스 제거는 표시 전용 책임이라 여기서만 얹는다(색인·샘플 경로는 프리픽스를 벗기지 않음).
     """
-    if not uri:
-        return ""
-    tail = uri.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    tail = tail.split("?", 1)[0].split("#", 1)[0] or tail
-    return _ASSET_ID_PREFIX.sub("", tail)
+    return _ASSET_ID_PREFIX.sub("", basename_of(uri))
 
 
 def _sort_key(item: dict[str, Any]) -> tuple[float, str]:
@@ -84,7 +86,7 @@ def _shape(row: dict[str, Any], modality: str) -> dict[str, Any]:
         "modality": modality,
         "similarity": _row_similarity(row),
         "summary": row.get("summary", "") or "",
-        "file_name": _basename(str(row.get("file_uri", ""))),
+        "file_name": _display_name(str(row.get("file_uri", ""))),
         "domain_label": row.get("domain_label") or "general",
         # 057-후속: 주제 패싯·결과-좁히기용(os_hit_to_row 색인 topics 통과). 프론트가 로드된 결과를
         # 이 topics 로 클라 필터(재검색 없이) → 패싯 수와 표시 수 일치·컷오프 무관.

@@ -26,6 +26,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 
+from src.config.filename_util import basename_of
 from src.config.search_modalities import VALID_SEARCH_MODALITIES, parse_modalities_csv
 
 _ENV = os.getenv("SAMPLE_API_ENV", "dev")
@@ -46,14 +47,6 @@ def _finite(value: object) -> float:
     except (TypeError, ValueError):
         return 0.0
     return x if math.isfinite(x) else 0.0
-
-
-def _basename(uri: str) -> str:
-    """file_uri(전체 경로/URI)에서 파일명만 뽑는다(결정적·순수)."""
-    if not uri:
-        return ""
-    tail = uri.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    return tail.split("?", 1)[0].split("#", 1)[0] or tail
 
 
 def _clip_text(text: str, max_chars: int) -> str:
@@ -83,7 +76,7 @@ def _compact_view(result: dict[str, Any], limit: int, summary_max: int) -> dict[
                     {
                         "모달리티": modality,
                         "점수": score,
-                        "파일명": _basename(str(r.get("file_uri", ""))),
+                        "파일명": basename_of(str(r.get("file_uri", ""))),
                         "요약": _clip_text(str(r.get("summary", "")), summary_max),
                     },
                 )
@@ -155,7 +148,7 @@ def _group_by_relation_view(result: dict[str, Any], summary_max: int) -> dict[st
         modality = _BUCKET_TO_MODALITY.get(bucket, bucket)
         for r in rows:
             aid = str(r.get("id") or "")
-            fn = _basename(str(r.get("file_uri", "")))
+            fn = basename_of(str(r.get("file_uri", "")))
             if not aid or fn == "manifest.json":
                 continue
             score = round(_finite(r.get("similarity")), 4)
