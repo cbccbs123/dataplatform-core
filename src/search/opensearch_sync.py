@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+from src.config.search_constants import NORI_USER_WORDS_DEFAULT
 from src.search.filter_index_fields import build_filter_index_fields
 
 # ── 읽기전용 SELECT (FR-004, 헌법 6조) — 원본 PG 무수정 ──
@@ -142,22 +143,6 @@ def clean_file_name(name: str, *, noise_patterns: Iterable[str] = ()) -> str:
     return " ".join(kept)
 
 
-# nori user_dictionary 외래어 고유명사 기본 목록(spec 026 FR-004). 내장 'nori' analyzer 는
-# user_dictionary 를 받지 못하므로 커스텀 analyzer 의 사전 규칙으로 넣어 분해를 막는다(아이패드→아이/
-# 패드 분해 시 '아이패드' 정확매칭 무력화·가짜매칭 발생). settings.opensearch_nori_user_words 가 운영
-# 단일 출처이며, build_index_body 는 순수 함수라 인자 미지정 시 이 모듈 기본을 쓴다(IO 층이 settings
-# 값을 주입). 둘의 동치는 test_settings 의 계약 테스트가 봉인한다.
-_DEFAULT_NORI_USER_WORDS: tuple[str, ...] = (
-    "아이패드",
-    "아이폰",
-    "스마트워치",
-    "맥세이프",
-    "에어팟",
-    "갤럭시",
-    "애플워치",
-)
-
-
 def build_index_body(
     *,
     dim: int = FIX_EMBEDDING_DIMENSION,
@@ -168,10 +153,11 @@ def build_index_body(
     ``index.knn=true`` 로 kNN 검색을 켜고, 텍스트 필드는 ``analyzer='nori_user'`` 를 쓴다 — 이는
     ``nori_tokenizer`` + ``user_dictionary_rules``(외래어 고유명사 목록)로 만든 **커스텀** analyzer 다.
     내장 'nori' analyzer 는 user_dictionary 를 받지 못해(설정 불가) 외래어가 분해되므로, 사전을 받는
-    커스텀 토크나이저를 반드시 정의한다(FR-004). ``nori_user_words`` 미지정 시 모듈 기본 목록을 쓴다.
+    커스텀 토크나이저를 반드시 정의한다(FR-004). ``nori_user_words`` 미지정 시 단일 출처 기본
+    (``search_constants.NORI_USER_WORDS_DEFAULT`` — settings resolver 와 공유·069 T302)을 쓴다.
     임베딩은 lucene HNSW + cosinesimil. 차원은 단일 출처 ``FIX_EMBEDDING_DIMENSION``(1536D, 헌법 6조).
     """
-    words = list(nori_user_words) if nori_user_words is not None else list(_DEFAULT_NORI_USER_WORDS)
+    words = list(nori_user_words) if nori_user_words is not None else list(NORI_USER_WORDS_DEFAULT)
     return {
         "settings": {
             "index": {

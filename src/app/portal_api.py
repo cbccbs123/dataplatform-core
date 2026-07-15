@@ -64,6 +64,7 @@ from src.classify.asset_topic import (
     find_same_topic_groups,
     list_topics,
 )
+from src.config.search_modalities import VALID_SEARCH_MODALITIES, parse_modalities_csv
 from src.ingest.archiver import (
     display_file_name,  # 다운로드 파일명 asset_id 프리픽스 제거(065 T605)
 )
@@ -129,7 +130,8 @@ from src.search.search_service import search_hybrid
 # (구 import: from src.search.topic_reindex import reindex_asset_topics — topic_reindex 모듈 은퇴.)
 
 _ENV = os.getenv("PORTAL_API_ENV", "dev")
-_VALID_MODALITIES = ("text", "image", "video", "audio")
+# 069 T301(D5·P2-29): 유효 모달리티 튜플은 src.config.search_modalities 단일 출처를 공유한다
+# (기존 로컬 _VALID_MODALITIES 복제 제거 — run_search·sample_search_api 와 드리프트 차단).
 
 # 의료(PHI) 배제 도메인 집합(FR-014). group_ranked 가 각 모달리티 버킷에서 이 도메인 행을 제거한다.
 _EXCLUDE_DOMAINS = frozenset({"medical"})
@@ -1053,16 +1055,17 @@ def _parse_search_mode(mode: str) -> str:
 def _parse_modalities(modalities: str | None) -> list[str] | None:
     """콤마 구분 모달리티 문자열을 검증된 리스트로 파싱한다(미지정=None=전체).
 
-    알 수 없는 모달리티는 ``HTTPException(400)`` 으로 거부한다.
+    파싱은 공유 파서 ``parse_modalities_csv`` 단일 출처(069 T301), 알 수 없는 모달리티는
+    현행대로 ``HTTPException(400)`` 으로 거부한다(포탈 검증 계약 보존).
     """
-    if not modalities or not modalities.strip():
+    mods = parse_modalities_csv(modalities)
+    if mods is None:
         return None
-    mods = [m.strip() for m in modalities.split(",") if m.strip()]
-    unknown = [m for m in mods if m not in _VALID_MODALITIES]
+    unknown = [m for m in mods if m not in VALID_SEARCH_MODALITIES]
     if unknown:
         raise HTTPException(
             status_code=400,
-            detail=f"알 수 없는 modality: {unknown} (허용: {list(_VALID_MODALITIES)})",
+            detail=f"알 수 없는 modality: {unknown} (허용: {list(VALID_SEARCH_MODALITIES)})",
         )
     return mods or None
 

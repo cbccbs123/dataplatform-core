@@ -12,15 +12,36 @@ import unittest
 from src.app import run_search
 
 
-class TestParseModalities(unittest.TestCase):
+class TestResolveModalities(unittest.TestCase):
+    """069 T301: run_search 는 공유 파서(parse_modalities_csv)로 파싱하고 유효값을 검증한다."""
+
     def test_none_and_blank_return_none(self) -> None:
-        self.assertIsNone(run_search._parse_modalities(None))
-        self.assertIsNone(run_search._parse_modalities(""))
-        self.assertIsNone(run_search._parse_modalities("   "))
+        self.assertIsNone(run_search._resolve_modalities(None))
+        self.assertIsNone(run_search._resolve_modalities(""))
+        self.assertIsNone(run_search._resolve_modalities("   "))
 
     def test_comma_split_and_strip(self) -> None:
-        self.assertEqual(run_search._parse_modalities("text,image"), ["text", "image"])
-        self.assertEqual(run_search._parse_modalities(" text , , image "), ["text", "image"])
+        self.assertEqual(run_search._resolve_modalities("text,image"), ["text", "image"])
+        self.assertEqual(run_search._resolve_modalities(" text , , image "), ["text", "image"])
+
+    def test_rejects_unknown_modality(self) -> None:
+        # 069 P3-12: 오타 모달리티는 raw traceback 대신 명확한 ValueError 로 거부(main 이 parser.error 로 변환).
+        with self.assertRaises(ValueError):
+            run_search._resolve_modalities("text,bogus")
+
+    def test_main_rejects_unknown_modality_cleanly(self) -> None:
+        # CLI 진입점: 미지 모달리티는 argparse parser.error → SystemExit(2)(usage 출력·traceback 없음).
+        # init_settings 는 DB 를 요구하므로 mock — 인자 검증 후 검색 이전에 거부됨을 확인.
+        import sys
+        from unittest.mock import patch
+
+        argv = ["run_search", "--env", "dev", "--query", "x", "--modalities", "text,bogus"]
+        with patch.object(sys, "argv", argv), patch(
+            "src.config.settings.init_settings"
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                run_search.main()
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class TestRunMapsArgs(unittest.TestCase):

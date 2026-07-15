@@ -26,8 +26,9 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 
+from src.config.search_modalities import VALID_SEARCH_MODALITIES, parse_modalities_csv
+
 _ENV = os.getenv("SAMPLE_API_ENV", "dev")
-_VALID_MODALITIES = ("text", "image", "video", "audio")
 
 # 결과 버킷 키 → 사람이 읽기 쉬운 모달리티 라벨(compact 뷰 표시용).
 _BUCKET_TO_MODALITY = {
@@ -256,12 +257,13 @@ def search(
     """
     from src.search.search_service import search_hybrid
 
-    mods = None
-    if modalities and modalities.strip():
-        mods = [m.strip() for m in modalities.split(",") if m.strip()]
-        unknown = [m for m in mods if m not in _VALID_MODALITIES]
+    # 069 T301(D5): 파싱은 공유 파서 단일 출처. sample 은 HTTPException 400 통일(CR-13=US-F) 전이라
+    # 미지 모달리티 응답 형태(200 + {"error"})를 **현행 그대로** 유지한다(반환 계약 불변).
+    mods = parse_modalities_csv(modalities)
+    if mods is not None:
+        unknown = [m for m in mods if m not in VALID_SEARCH_MODALITIES]
         if unknown:
-            return {"error": f"알 수 없는 modality: {unknown} (허용: {list(_VALID_MODALITIES)})"}
+            return {"error": f"알 수 없는 modality: {unknown} (허용: {list(VALID_SEARCH_MODALITIES)})"}
 
     result = search_hybrid(
         q,

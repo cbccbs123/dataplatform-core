@@ -431,12 +431,34 @@ class TestOpenSearchNoriUserWords(unittest.TestCase):
                 _build_settings("dev")
 
     def test_default_matches_build_index_body_default(self) -> None:
-        # 단일 출처 계약: settings 기본 = opensearch_sync.build_index_body 기본 외래어 목록(드리프트 차단).
-        from src.search.opensearch_sync import _DEFAULT_NORI_USER_WORDS
+        # 069 T302(D6·P2-30): 단일 출처화 — settings 기본 = build_index_body 기본 = search_constants
+        # 단일 상수(NORI_USER_WORDS_DEFAULT). 세 지점이 같은 값을 가리켜 드리프트가 원천 차단됨을 봉인
+        # 한다(예전엔 settings·opensearch_sync 에 목록 2벌 + 이 테스트가 동치를 감시했다).
+        from src.config import search_constants
+        from src.search.opensearch_sync import build_index_body
 
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(tuple(s.opensearch_nori_user_words), tuple(_DEFAULT_NORI_USER_WORDS))
+        rules = build_index_body()["settings"]["analysis"]["tokenizer"][
+            "nori_user_tokenizer"
+        ]["user_dictionary_rules"]
+        self.assertEqual(
+            tuple(s.opensearch_nori_user_words), search_constants.NORI_USER_WORDS_DEFAULT
+        )
+        self.assertEqual(tuple(rules), search_constants.NORI_USER_WORDS_DEFAULT)
+
+    def test_default_defined_once_in_search_constants(self) -> None:
+        # 069 T302: 기본 외래어 목록 리터럴이 src/ 전체에서 단 1곳(search_constants.py)에만.
+        # 대표 항목 '맥세이프'(이 목록에만 등장)의 출현 파일로 단일 출처를 봉인한다(grep 계약).
+        import pathlib
+
+        src_root = pathlib.Path(__file__).resolve().parents[1] / "src"
+        hits = sorted(
+            p.name
+            for p in src_root.rglob("*.py")
+            if '"맥세이프"' in p.read_text(encoding="utf-8")
+        )
+        self.assertEqual(hits, ["search_constants.py"])
 
 
 class TestOpenSearchFilenameNoisePatterns(unittest.TestCase):

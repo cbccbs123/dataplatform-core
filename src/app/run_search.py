@@ -15,15 +15,27 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.config.search_modalities import VALID_SEARCH_MODALITIES, parse_modalities_csv
 from src.search.search_service import search_hybrid
 
 
-def _parse_modalities(raw: str | None) -> list[str] | None:
-    """``--modalities`` 콤마 구분 문자열 → 라벨 리스트. 미지정/공백이면 None(전체 버킷)."""
-    if not raw:
+def _resolve_modalities(raw: str | None) -> list[str] | None:
+    """``--modalities`` 를 공유 파서로 파싱한 뒤 유효값을 검증한다(069 T301·D5).
+
+    파싱(split/strip/소문자·미지정=None)은 ``parse_modalities_csv`` 단일 출처를 쓰고, 유효값 밖
+    모달리티는 ``ValueError`` 로 거부한다(069 P3-12). 이 예외는 ``main`` 이 ``parser.error`` 로
+    변환해 raw traceback 대신 명확한 CLI 에러+usage 로 안내한다(예전엔 search_hybrid 내부에서
+    ValueError 가 터져 traceback 이 그대로 노출됐다).
+    """
+    mods = parse_modalities_csv(raw)
+    if mods is None:
         return None
-    items = [m.strip() for m in raw.split(",") if m.strip()]
-    return items or None
+    unknown = [m for m in mods if m not in VALID_SEARCH_MODALITIES]
+    if unknown:
+        raise ValueError(
+            f"알 수 없는 modality: {unknown} (허용: {list(VALID_SEARCH_MODALITIES)})"
+        )
+    return mods
 
 
 def _run(
@@ -37,7 +49,7 @@ def _run(
     """
     return search_fn(
         args.query,
-        modalities=_parse_modalities(args.modalities),
+        modalities=_resolve_modalities(args.modalities),
         limit_per_bucket=args.limit,
     )
 
@@ -62,7 +74,16 @@ def main() -> int:
 
     from src.config.settings import init_settings
 
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    # 모달리티 검증을 부트스트랩(.env 로드·init_settings) **이전**에 수행한다 — 오타는 raw traceback·
+    # 불필요한 DB 초기화 없이 즉시 명확한 에러+usage 로 거부(069 P3-12, parser.error → exit 2).
+    # 아래 _run 이 동일 파서로 재해석하나 순수·저비용이라 무해하다(검증은 여기서 이미 통과 확정).
+    try:
+        _resolve_modalities(args.modalities)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     project_root = Path(__file__).resolve().parents[2]
     dotenv_path = project_root / f".env.{args.env}"

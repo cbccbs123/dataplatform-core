@@ -265,6 +265,20 @@ class TestSearch(unittest.TestCase):
         mock_search.assert_not_called()
 
     @patch("src.app.portal_api.search_hybrid")
+    def test_search_unknown_modality_400(self, mock_search) -> None:
+        # 069 T301: 포탈은 미지 모달리티를 현행대로 HTTPException 400 으로 거부(공유 상수 검증·계약 보존).
+        resp = self.client.get("/search", params={"q": "x", "modalities": "bogus"})
+        self.assertEqual(resp.status_code, 400)
+        mock_search.assert_not_called()
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_search_valid_modalities_passthrough(self, mock_search) -> None:
+        # 069 T301: 유효 모달리티(공유 파서)는 그대로 search_hybrid 로 전달(valid 입력 결과 불변).
+        mock_search.return_value = _fake_search_result()
+        self.client.get("/search", params={"q": "회식", "modalities": "text,image"})
+        self.assertEqual(mock_search.call_args.kwargs["modalities"], ["text", "image"])
+
+    @patch("src.app.portal_api.search_hybrid")
     def test_search_passes_v1_filters(self, mock_search) -> None:
         mock_search.return_value = _fake_search_result()
         resp = self.client.get(

@@ -380,27 +380,15 @@ def _resolve_os_bm25_operator() -> str:
     return value
 
 
-# 026 T006(FR-004): nori user_dictionary 외래어 고유명사 기본 목록. opensearch_sync.build_index_body
-# 의 기본과 **동치**(단일 출처 — test_settings 계약 테스트가 드리프트를 봉인). 외래어가 nori 로 분해되면
-# ('아이패드'→'아이'+'패드') 정확매칭 무력화·가짜매칭이 생기므로 한 토큰으로 보존한다.
-_DEFAULT_NORI_USER_WORDS: tuple[str, ...] = (
-    "아이패드",
-    "아이폰",
-    "스마트워치",
-    "맥세이프",
-    "에어팟",
-    "갤럭시",
-    "애플워치",
-)
-
-
 def resolve_opensearch_nori_user_words() -> tuple[str, ...]:
     """nori user_dictionary 외래어 목록(026 FR-004). ``OPENSEARCH_NORI_USER_WORDS="아이패드,아이폰,..."``
-    CSV 로 오버라이드, 미설정 시 기본 7종. 공백 항목은 nori 사전 규칙으로 무의미·거부 대상이라 **즉시
-    ValueError**(fail-fast — 잘못된 사전으로 인덱스를 만들지 않게, ``_resolve_search_backend`` 동형)."""
+    CSV 로 오버라이드, 미설정 시 기본 목록(``search_constants.NORI_USER_WORDS_DEFAULT`` 단일 출처 —
+    069 T302). 외래어가 nori 로 분해되면('아이패드'→'아이'+'패드') 정확매칭 무력화·가짜매칭이 생기므로
+    한 토큰으로 보존한다. 공백 항목은 nori 사전 규칙으로 무의미·거부 대상이라 **즉시 ValueError**
+    (fail-fast — 잘못된 사전으로 인덱스를 만들지 않게, ``_resolve_search_backend`` 동형)."""
     raw = os.getenv("OPENSEARCH_NORI_USER_WORDS")
     if raw is None or not raw.strip():
-        return _DEFAULT_NORI_USER_WORDS
+        return search_constants.NORI_USER_WORDS_DEFAULT
     words = [w.strip() for w in raw.split(",")]
     if any(not w for w in words):
         raise ValueError(

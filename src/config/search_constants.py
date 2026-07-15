@@ -80,6 +80,23 @@ OS_QUERY_NORM_STOPWORDS: frozenset[str] = frozenset({
     "소개", "방법", "법", "모습", "관련", "내용", "종류", "장면", "클립",
 })
 
+# ── 026 T006(FR-004): nori 인덱스 analyzer 외래어 고유명사 사전 기본 목록(단일 출처) ──────
+# 색인 시 커스텀 nori analyzer 의 user_dictionary_rules 로 실어 외래어 고유명사가 분해되지 않게 한다
+# ('아이패드'→'아이'+'패드' 분해 시 '아이패드' 정확매칭 무력화·가짜매칭 발생). settings resolver
+# (``resolve_opensearch_nori_user_words``·운영 단일 출처·CSV 오버라이드)와 순수 인덱스 빌더
+# (``opensearch_sync.build_index_body`` 기본)가 **이 상수 1벌**을 공유한다(069 T302·D6 — 예전엔 두 모듈에
+# 목록이 복제돼 계약 테스트가 동치를 감시했으나, 단일 출처화로 드리프트 원천 차단). **값 불변**(재색인 시
+# analyzer 동일). 닫힌·안정적 목록(대표 외래어 브랜드명)이라 자산 증가와 무관하게 거의 불변.
+NORI_USER_WORDS_DEFAULT: tuple[str, ...] = (
+    "아이패드",
+    "아이폰",
+    "스마트워치",
+    "맥세이프",
+    "에어팟",
+    "갤럭시",
+    "애플워치",
+)
+
 # ── 073: aboutness OR-증거 필터 상수(단일 출처 F1) ─────────────────────────────
 # 적재시 확정한 about 개체 + keywords 를 증거로, 질의 개체와 무증거 행을 버킷에서 걸러낸다
 # (검색시점 LLM 0·전체 노출 깊이 적용). 측정(2026-07-13): @10 무관 −4~7%p·연관 무손실.
@@ -179,6 +196,7 @@ __all__ = [
     "EVIDENCE_NORMAL_THRESHOLD",
     "EVIDENCE_RESTRICTED_STRONG_THRESHOLD",
     "GENERIC_SINGLE_TERM_SEED",
+    "NORI_USER_WORDS_DEFAULT",
     "SEARCH_GENERIC_TERM_SEED_EXTRA_ENV",
     "OS_BM25_OPERATOR_DEFAULT",
     "OS_CUTOFF_ENABLED_DEFAULT",
