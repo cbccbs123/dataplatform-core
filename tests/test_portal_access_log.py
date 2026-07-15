@@ -28,12 +28,21 @@ class _Conn:
     def cursor(self): return self._cur
 
 
+_UUID = "018f0000-0000-7000-8000-000000000251"  # UUID 형식 표본(B3: 단건 감사는 UUID 세그먼트만)
+
+
 class DeriveActionTest(unittest.TestCase):
     def test_routes(self):
         self.assertEqual(derive_access_action("GET", "/search"), ("search", None))
-        self.assertEqual(derive_access_action("GET", "/assets/abc"), ("asset_view", "abc"))
-        self.assertEqual(derive_access_action("GET", "/assets/abc/download"), ("download", "abc"))
-        self.assertEqual(derive_access_action("GET", "/assets/abc/bundle"), ("bundle", "abc"))
+        self.assertEqual(derive_access_action("GET", f"/assets/{_UUID}"), ("asset_view", _UUID))
+        self.assertEqual(derive_access_action("GET", f"/assets/{_UUID}/download"), ("download", _UUID))
+        self.assertEqual(derive_access_action("GET", f"/assets/{_UUID}/bundle"), ("bundle", _UUID))
+
+    def test_non_uuid_segment_none(self):
+        # 2026-07-15 B3: 비-UUID 세그먼트(컬렉션/예약·오타)는 단건 감사 아님 — 과거엔 'unclassified' 를
+        # asset_id 로 오인해 UUID FK INSERT 가 매번 실패(감사 유실+노이즈)했다. None=기록 안 함이 계약.
+        for p in ("/assets/unclassified", "/assets/abc", "/assets/abc/download", "/assets/abc/bundle"):
+            self.assertIsNone(derive_access_action("GET", p), p)
 
     def test_non_data_routes_none(self):
         for p in ("/health", "/me", "/auth/token", "/admin/access-logs", "/admin/access-logs/stats",

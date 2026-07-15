@@ -21,6 +21,8 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.relations.path_signal import like_escape  # LIKE 메타문자 이스케이프 공용(B9·SSOT)
+
 # 조회·정정 status 화이트리스트(포탈 API 검증과 공유). 검토 큐 = proposed,
 # 승인 내역 = active, 비승인 내역 = rejected 세 상태만 노출·전이 대상이다.
 _REVIEW_STATUSES = ("proposed", "active", "rejected")
@@ -80,7 +82,9 @@ def _build_review_where(
         # 통합 텍스트 검색(FR-702) — 대소문자 무시 부분 일치를 8개 필드에 OR 매칭한다.
         # UUID 컬럼은 ::text 캐스팅 후 ILIKE. Postgres 에 basename() 이 없어 fs_path 전체를
         # ILIKE 하는데, 파일명이 경로의 부분문자열이라 파일명 검색을 커버한다.
-        q_pat = f"%{q}%"
+        # 2026-07-15 B9(P3-2): 검색어의 %·_ 를 이스케이프해 리터럴 매칭한다 — 이전엔 "100%" 검색이
+        # "100"+임의 문자열로 와일드카드 동작(인젝션은 아님·의미 혼동만). path_signal 과 규칙 공유.
+        q_pat = f"%{like_escape(q)}%"
         conditions.append(
             "(e.edge_id::text ILIKE %s OR sn.asset_id::text ILIKE %s"
             " OR dn.asset_id::text ILIKE %s OR sa.fs_path ILIKE %s"

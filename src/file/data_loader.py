@@ -19,6 +19,7 @@ per-asset 파이프라인의 텍스트 경로(extract→embed, 그리고 classif
 
 from __future__ import annotations
 
+import codecs
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import TypedDict
@@ -72,7 +73,11 @@ def _choose_encoding(path: Path, preferred_encoding: str) -> str:
         sample = f.read(65536)
     for enc in (preferred_encoding, "utf-8-sig", "cp949", "euc-kr"):
         try:
-            sample.decode(enc)
+            # 2026-07-15 B5: 64KiB 경계가 멀티바이트 문자 **중간**에 걸리면 일반 decode 는 꼬리에서
+            # 실패해(정상 utf-8 한글 문서인데) 다음 후보 cp949 가 관대하게 성공 → 오판(모지바케)했다.
+            # incremental decoder 의 final=False 는 잘린 꼬리를 "이어질 바이트"로 대기시키고 통과하므로
+            # 절단 위치와 무관하게 본문 바이트로만 판정한다(모든 후보 인코딩에 동일 적용·결정적).
+            codecs.getincrementaldecoder(enc)().decode(sample, final=False)
             return enc
         except UnicodeDecodeError:
             continue

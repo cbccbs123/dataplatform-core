@@ -29,8 +29,10 @@ HAS_MATCH = ["아이폰", "무선충전기", "주식", "자전거 정비"]
 NO_MATCH = ["아이패드", "양자컴퓨터", "에펠탑 야경"]
 MODALITIES = ["text", "audio", "image", "video"]
 
-# 게이트 신호용 kNN 표본 하한(robust baseline 안정). search_constants 단일 출처 동치.
-_SIGNAL_K = 50
+# 게이트 신호용 kNN 표본 하한(robust baseline 안정) — 프로덕션 게이트와 **같은 상수를 import**
+# 해야 보정 결과가 운영 표본과 일치한다(2026-07-15 B6·P2-25: 종전 리터럴 50 사본은 '동치' 주석만
+# 있고 실제론 갈라질 수 있는 이중 정의였다 — search_constants 단일 출처로 통합).
+from src.config.search_constants import OS_KNN_SAMPLE_K as _SIGNAL_K  # noqa: E402
 
 
 def _bootstrap() -> None:

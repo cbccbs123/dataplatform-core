@@ -357,12 +357,14 @@ class HistoryEndpointsTest(unittest.TestCase):
     def test_record_access_safe_records_data_route(self):
         # 기록 결정 로직 직접 검증(미들웨어 fire-and-forget 타이밍과 무관·결정적):
         # 데이터 라우트 성공 응답 → record_access(action=asset_view·asset_id) 1회.
+        # 2026-07-15 B3: asset_id 세그먼트는 UUID 형식만 감사 대상(비-UUID 는 아래 skip 테스트).
+        aid = "018f0000-0000-7000-8000-000000000252"
         with mock.patch.object(portal_api, "_run_in_db_write", side_effect=lambda cb: cb(None)), \
              mock.patch.object(portal_api, "record_access") as rec:
-            portal_api._record_access_safe("GET", "/assets/a1", 200, "u1")
+            portal_api._record_access_safe("GET", f"/assets/{aid}", 200, "u1")
         rec.assert_called_once()
         self.assertEqual(rec.call_args.kwargs["action"], "asset_view")
-        self.assertEqual(rec.call_args.kwargs["asset_id"], "a1")
+        self.assertEqual(rec.call_args.kwargs["asset_id"], aid)
         self.assertEqual(rec.call_args.kwargs["user_id"], "u1")
 
     def test_record_access_safe_skips_non_data_and_error_status(self):

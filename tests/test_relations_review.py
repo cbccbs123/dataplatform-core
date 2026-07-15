@@ -266,6 +266,14 @@ class TestListEdgesForReviewFilters(unittest.TestCase):
         # rows 는 status + 8×q_pat + limit + offset
         self.assertEqual(rows_params, ("proposed",) + ("%게임%",) * 8 + (10, 0))
 
+    def test_q_like_metachars_escaped(self):
+        # 2026-07-15 B9(P3-2) — 검색어의 %·_ 는 이스케이프돼 리터럴 매칭(와일드카드 오동작 차단).
+        from src.relations.review import list_edges_for_review
+        conn, cur = self._conn(total=0, rows=[])
+        list_edges_for_review(conn, status="proposed", limit=10, offset=0, q="100%_a")
+        _, count_params, _, _ = self._both_sql(cur)
+        self.assertEqual(count_params[1], "%100\\%\\_a%")  # 감싸는 %만 와일드카드·본문은 리터럴
+
     def test_asset_id_reviewed_by_use_text_equals(self):
         # FR-703 — asset_id/reviewed_by 는 ::text = (비-UUID 입력에 500 아닌 0건).
         from src.relations.review import list_edges_for_review

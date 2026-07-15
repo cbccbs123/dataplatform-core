@@ -7,10 +7,17 @@ portal_api 미들웨어가 derive_access_action 으로 (action, asset_id)를 정
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from src.database.ids import uuid7
 from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
+
+# /assets/{seg} 의 seg 가 자산 단건인지 판정하는 UUID 형식(대소문자 무관). 비-UUID(예약/컬렉션
+# 세그먼트·오타)는 감사 대상에서 제외한다 — derive_access_action docstring 참조(2026-07-15 B3).
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 _INSERT = (
     "INSERT INTO access_log (access_id, asset_id, user_id, action, detail) "
@@ -30,7 +37,14 @@ def record_access(conn: Any, *, action: str, user_id: str,
 
 
 def derive_access_action(method: str, path: str) -> tuple[str, str | None] | None:
-    """데이터 접근 GET 라우트 → (action, asset_id). 그 외(감사뷰·비GET·health 등)는 None(기록 안 함)."""
+    """데이터 접근 GET 라우트 → (action, asset_id). 그 외(감사뷰·비GET·health 등)는 None(기록 안 함).
+
+    ⚠ 데이터 라우트를 새로 추가하면 이 함수도 **동기 갱신**해야 감사가 기록된다(누락=조용히 미기록).
+    ``/assets/`` 뒤 첫 세그먼트는 **UUID 형식일 때만** 자산 단건으로 간주한다 — ``/assets/unclassified``
+    (070 컬렉션) 같은 비-UUID 세그먼트를 asset_id 로 오인하면 ``access_log.asset_id``(UUID FK) INSERT 가
+    매번 실패해 best-effort 로 삼켜졌다(감사 유실+경고 노이즈 — 2026-07-15 리뷰 B3). 컬렉션 조회 감사가
+    필요해지면 asset_id 없는 별도 action 으로 설계한다(현재는 단건·검색·다운로드·bundle 만 감사).
+    """
     if method.upper() != "GET":
         return None
     p = path.rstrip("/")
@@ -39,8 +53,8 @@ def derive_access_action(method: str, path: str) -> tuple[str, str | None] | Non
     if p.startswith("/assets/"):
         parts = p[len("/assets/"):].split("/")
         asset_id = parts[0]
-        if not asset_id:
-            return None
+        if not asset_id or not _UUID_RE.match(asset_id):
+            return None  # 비-UUID(unclassified 등 컬렉션/예약 세그먼트) — 단건 감사 아님(B3)
         if len(parts) == 1:
             return ("asset_view", asset_id)
         if len(parts) == 2 and parts[1] == "download":

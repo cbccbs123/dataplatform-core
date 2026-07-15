@@ -136,7 +136,7 @@ def find_path_signal_candidates(
               AND a.asset_id <> %s
               AND a.fs_path LIKE %s
             """,
-            (source_asset_id, _like_escape(dir_prefix) + "%"),
+            (source_asset_id, like_escape(dir_prefix) + "%"),
         )
         rows = cur.fetchall()
 
@@ -178,8 +178,10 @@ def find_path_signal_candidates(
     return out
 
 
-def _like_escape(value: str) -> str:
-    """LIKE 패턴의 메타문자(% _ \\)를 이스케이프해 디렉터리 prefix 를 리터럴로 매칭.
+def like_escape(value: str) -> str:
+    """LIKE 패턴의 메타문자(% _ \\)를 이스케이프해 입력을 리터럴로 매칭(공용).
+
+    2026-07-15 B9: review 검색 q 등 다른 모듈도 쓰도록 공개 승격(동일 규칙 사본 방지·SSOT).
 
     디렉터리 경로에 ``_`` 가 흔하므로(예: ``my_docs``) 와일드카드로 오인되지 않게 escape 한다.
     PostgreSQL 기본 escape 문자는 백슬래시다.

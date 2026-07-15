@@ -735,5 +735,18 @@ class TestLookupSubtopicEn(unittest.TestCase):
         self.assertIsNone(asset_topic._lookup_subtopic_en(conn, "여행·지역", "없음"))
 
 
+class TestPatchSeamExists(unittest.TestCase):
+    """e2e 가 patch 하는 후보 seam 의 존재를 비-DB 로 봉인(2026-07-15 B1 재발 차단).
+
+    068 G1 때 seam 이 knn_topic_candidates→topic_candidates_for_self_text 로 바뀌었는데 e2e 의
+    patch 대상이 안 따라가 RUN_DB_E2E 에서만 AttributeError 가 나는 잠복 파손이 있었다. mock.patch
+    는 진입 시 대상 속성 부재를 즉시 던지므로, 게이트 없는 이 테스트가 seam 개명을 항상 잡는다.
+    """
+
+    def test_topic_candidates_seam_patchable(self) -> None:
+        with patch("src.classify.asset_topic.topic_candidates_for_self_text", return_value=[]):
+            pass  # 진입 성공 = seam 실존(반환값 사용 안 함)
+
+
 if __name__ == "__main__":
     unittest.main()

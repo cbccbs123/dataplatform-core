@@ -35,5 +35,30 @@ class TestChooseEncodingPartialRead(unittest.TestCase):
             p.unlink()
 
 
+class ChooseEncodingTruncationTest(unittest.TestCase):
+    """2026-07-15 B5 — 64KiB 경계가 멀티바이트 문자 중간에 걸려도 utf-8 을 오판하지 않는다."""
+
+    def test_utf8_cut_mid_char_still_utf8(self) -> None:
+        # '가'(3바이트) 반복으로 65,536 바이트 지점이 문자 중간(65536 % 3 == 1)에 걸리는 파일.
+        # 종전(일반 decode)엔 꼬리 실패 → cp949 로 오판. incremental(final=False)은 utf-8 유지.
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write("가".encode() * 30000)  # 90,000 바이트 > 64KiB
+            p = Path(f.name)
+        try:
+            self.assertEqual(dl._choose_encoding(p, "utf-8"), "utf-8")
+        finally:
+            p.unlink()
+
+    def test_truly_cp949_still_cp949(self) -> None:
+        # 진짜 cp949 문서는 여전히 cp949 로 판정(회귀 보존) — 잘림 없는 소형 표본.
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write("한글 인코딩 확인".encode("cp949"))
+            p = Path(f.name)
+        try:
+            self.assertEqual(dl._choose_encoding(p, "utf-8"), "cp949")
+        finally:
+            p.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

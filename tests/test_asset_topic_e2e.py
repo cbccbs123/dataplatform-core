@@ -120,11 +120,16 @@ class TestAssetTopicClassifyDB(_AssetTopicE2EBase):
         }
 
     def _classify(self, asset_id: str, client) -> dict | None:
-        """kNN 후보를 patch(문서화된 모듈 seam)하고 분류 1회 실행 — 임베딩 API 미사용."""
+        """topic 후보 seam 을 patch 하고 분류 1회 실행 — 임베딩 API 미사용.
+
+        068 G1 이후 후보 seam 은 ``knn_topic_candidates`` 가 아니라 레지스트리 전체-27 조회
+        ``topic_candidates_for_self_text`` 다(2026-07-15 B1: 옛 seam patch 는 대상 부재로
+        AttributeError·게이트 뒤라 CI 미탐이었음). seam 존재는 비-DB 가드 테스트가 봉인.
+        """
         from src.classify.asset_topic import classify_asset_topic
         # 후보에 catch-all '미분류' 를 섞어 FR-702 배제 필터가 실경로에서도 무해함을 겸사 확인.
         with mock.patch(
-            "src.classify.asset_topic.knn_topic_candidates",
+            "src.classify.asset_topic.topic_candidates_for_self_text",
             return_value=[self._topic, "미분류"],
         ):
             return self.db.execute_in_transaction(
