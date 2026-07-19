@@ -636,8 +636,8 @@ def model_for_channel(channel: str, settings: PipelineSettings | None = None) ->
 
 
 # 062: API 계산 백엔드를 쓰는 채널(직교 축). 그 외 채널은 로컬 SentenceTransformer.
-# 값 "st_api" 는 embedding_constants.EMBEDDING_KIND_ST_API 와 동값 이중정의다. 실사용 정본은 이쪽
-# (backend_for_channel 이 직접 참조), 상수 쪽은 US-F 에서 처분 예정. 두 문자열은 동기 유지할 것.
+# 채널 문자열 "st_api" 의 정본은 여기(_API_EMBED_CHANNELS)다 — backend_for_channel 이 직접 참조.
+# embedding_constants 에 있던 동값 죽은 상수(EMBEDDING_KIND_ST_API)는 069 US-F 에서 제거됐다.
 _API_EMBED_CHANNELS = frozenset({"st_api"})
 
 

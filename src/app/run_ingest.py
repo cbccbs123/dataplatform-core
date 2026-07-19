@@ -391,7 +391,7 @@ def run_ingest(
 #     register_defaults 를 실행 → classify/cascade_v1·extract·embed/by_modality·persist + cross-asset 슬롯.
 #   · 도메인 프로파일 DOMAIN_PROFILES ← builtins→cascade→`src.classify.domains`→medical 체인 →
 #     {"medical"}(DICOM/HL7/FHIR 시그니처+어휘). general 은 미등록 — cascade 엔진 내장 폴백.
-#   (run_relations/run_relations_review 는 이 import 가 없어 레지스트리·프로파일이 비어 있다.)
+#   (run_relations·검색/포탈 진입점은 이 import 가 없어 레지스트리·프로파일이 비어 있다.)
 # [런타임·main() 안·순서 중요] 아래 3단계는 반드시 이 순서로:
 #   1) load_dotenv(.env.{env}, override=False) — OS 기존 환경변수 우선.
 #   2) init_settings(env) — 필수 환경변수 검증 후 frozen PipelineSettings 생성(이후 get_current_settings 활성).

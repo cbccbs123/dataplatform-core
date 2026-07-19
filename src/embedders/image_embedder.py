@@ -4,9 +4,9 @@
   - 인덱싱 측: 이미지/키프레임을 CLIP 이미지 인코더로 벡터화(``src/skills/image_skill.py``·
     ``video_embedder``). 동시에 VLM 이 준 한글 후보 라벨로 제로샷 점수도 매긴다(이미지 인코딩 1회 재사용).
     이 CLIP 이미지 벡터는 현재 관계 후보(``asset_candidates``)가 소비한다.
-  - (사장) 텍스트 질의를 CLIP **텍스트** 인코더로 벡터화하던 ``embed_clip_text_query_for_image_search``
-    — 037 이후 검색 read path 는 OpenSearch 하이브리드(활성 텍스트 채널 임베딩)뿐이라 이 CLIP 질의
-    함수는 소비처 0(US-F 처분 예정·함수 본문은 보존).
+  - (제거됨·2026-07-20) 텍스트 질의를 CLIP **텍스트** 인코더로 벡터화하던
+    ``embed_clip_text_query_for_image_search`` — 037 이후 검색 read path 는 OpenSearch
+    하이브리드(활성 텍스트 채널 임베딩)뿐이라 소비처 0 이 되어 069 US-F 에서 제거했다.
 
 따라서 CLIP 벡터를 쓰는 경로(인덱싱·관계)는 동일 ``model_name``(기본 ``DEFAULT_CLIP_MODEL_NAME``)을
 같은 공간 비교 전제로 공유한다.
@@ -30,7 +30,6 @@ from torch import nn
 from transformers import CLIPModel, CLIPProcessor
 
 from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME, FIX_EMBEDDING_DIMENSION
-from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 
 
 class ZeroShotKoTagResult(TypedDict):
@@ -156,26 +155,6 @@ def clip_text_embeddings_normalized(
         attention_mask=inputs.get("attention_mask"),
     )
     return l2_normalize_rows(feat)
-
-
-def embed_clip_text_query_for_image_search(
-    query: str,
-    *,
-    model_name: str = DEFAULT_CLIP_MODEL_NAME,
-) -> list[float]:
-    """
-    DB에 저장된 CLIP 이미지 벡터(``clip_image_row_to_embedding_1536``)와 같은 공간의
-    **CLIP 텍스트 인코더** 쿼리 벡터. 인덱싱 시 ``model_name`` 과 같아야 한다.
-
-    검색 단계(037 이후 OpenSearch 하이브리드)에서 이 CLIP 텍스트 질의 벡터로 시각 자산을 회수한다.
-    """
-    raw = (query or "").strip() or " "
-    q = normalize_text_for_embedding(raw)
-    if not q.strip():
-        q = " "
-    processor, model = get_clip(model_name)
-    text_emb = clip_text_embeddings_normalized(processor, model, [q])
-    return clip_image_row_to_embedding_1536(text_emb[0])
 
 
 def clip_zero_shot_logits(

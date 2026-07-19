@@ -458,8 +458,8 @@ class TestUnclassifiedExclusion(unittest.TestCase):
 class TestSubtopicCoarsening(unittest.TestCase):
     """T603/T302 — 소분류 과코스닝 대응: 068 G4 는 subtopic 을 부모의 **닫힌 시드 선택**으로 바꾼다.
 
-    종전 065 는 subtopic 을 058 ``canonicalize_subtopic(prefer_reuse=True)``(열린 어휘 생성 + 부모 스코프
-    재사용)으로 정했는데, 이게 과병합·과코스닝(여행>관광지 64%)을 낳았다. 068 은 topic 처럼 부모의 닫힌
+    종전 065 는 subtopic 을 058 ``canonicalize_subtopic`` 의 재사용-우선 경로(열린 어휘 생성 + 부모 스코프
+    재사용)로 정했는데, 이게 과병합·과코스닝(여행>관광지 64%)을 낳았다. 068 은 topic 처럼 부모의 닫힌
     시드 목록에서 LLM 이 고르게 해 변별력을 회복한다 — topic 콜(_CLASSIFY_PROMPT)이 곁들여 만드는
     raw subtopic 은 무시하고, ``fetch_closed_subtopics`` 후보에서 ``_pick_subtopic_via_llm`` 이 고른 값을 쓴다.
     (_CLASSIFY_PROMPT 의 subtopic 생성 지시 제거는 후속으로 이연 — G4 는 배선만 교체.)

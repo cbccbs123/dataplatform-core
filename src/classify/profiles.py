@@ -41,7 +41,8 @@ class DomainProfile:
 
     domain: str
     lexicon: frozenset[str] = frozenset()      # stage2: 어휘(순수 데이터)
-    llm_label: str = ""                         # stage3: LLM 허용 라벨에 합류(순수 데이터)
+    llm_label: str = ""                         # stage3 LLM 허용 라벨용 예비 필드(순수 데이터). 현재
+    #   stage3 배선은 이 필드를 소비하지 않는다 — 의료 stage3 는 3년차 이연(2026-07-06)이라 미배선(P3-6).
     signatures: tuple[SignatureRule, ...] = ()  # stage1: 능력 모듈(코드)
 
 

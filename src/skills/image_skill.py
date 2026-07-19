@@ -17,7 +17,8 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     """이미지 파일의 메타데이터를 추출하고 CLIP 벡터를 scratch 에 저장한다.
 
     처리 순서:
-    1) 파일·이미지 속성 메타(EXIF 등)  2) VLM 캡션·키워드·객체  3) CLIP 제로샷 라벨
+    1) 이미지 속성 메타(width·height·format — `extract_image_meta`. EXIF 는 추출하지 않는다·2026-07-15 P3-11)
+    2) VLM 캡션·키워드·객체  3) CLIP 제로샷 라벨
     objects(VLM 출력)는 CLIP 제로샷의 한국어 후보 레이블로 활용된 뒤 최종 메타에서 제거된다.
     CLIP 이미지 벡터를 ``ctx.scratch["clip_vec"]`` 에 저장해 _embed_image 에서 재사용한다
     — CLIP 추론을 두 번 실행하지 않기 위한 핸드오프 계약이다.

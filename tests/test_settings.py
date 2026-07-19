@@ -550,7 +550,7 @@ class TestRelationAutoApproveEmbMin(unittest.TestCase):
 class TestSearchBackendWiring(unittest.TestCase):
     """T008 스모크(037 갱신): ``SEARCH_BACKEND`` 설정과 ``search_hybrid`` 경로 — OS 단일 백엔드.
 
-    진입점(run_search·portal_api·sample_search_api)은 ``backend`` 인자 없이 ``search_hybrid`` 를
+    진입점(run_search·portal_api)은 ``backend`` 인자 없이 ``search_hybrid`` 를
     호출하며, 037 OpenSearch 전용 정리로 검색 경로는 OS 단일이다 — 즉 진입점 **호출부 코드 변경이
     불필요**함을 봉인한다(plan §B). settings 전역을 오염시키지 않도록 ``get_current_settings`` 를
     모킹해 빌드된 설정을 주입한다.

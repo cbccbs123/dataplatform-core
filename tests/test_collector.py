@@ -41,21 +41,13 @@ class TestDirectoryCollection(CollectorTestBase):
         self.assertEqual(len(non), 1)
         self.assertTrue(any(p.endswith("top.txt") for p in non))
 
-    def test_hidden_excluded_by_default_and_included_on_flag(self) -> None:
+    def test_hidden_excluded_by_default(self) -> None:
+        # 069 US-F: include_hidden 옵션은 제거됐고 숨김 항목은 항상 제외(종전 기본 동작).
         self._touch("visible.txt")
         self._touch(".hidden.txt")
         default = collect_files(input_dir=self.root)
-        with_hidden = collect_files(input_dir=self.root, include_hidden=True)
         self.assertEqual(len(default), 1)
-        self.assertEqual(len(with_hidden), 2)
-
-    def test_dedup_by_prefix(self) -> None:
-        self._touch("PC_game_aaaaa.mp4")
-        self._touch("PC_game_bbbbb.mp4")
-        self._touch("other_zzzzz.mp4")
-        out = collect_files(input_dir=self.root, dedup_by_prefix=True, sample_seed=42)
-        # PC_game_* 는 1개로 묶이고 other_* 1개 → 총 2개
-        self.assertEqual(len(out), 2)
+        self.assertTrue(default[0].endswith("visible.txt"))
 
 
 class TestFileList(CollectorTestBase):

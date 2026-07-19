@@ -40,11 +40,6 @@ MEDIA_TYPES_ST_CHUNK_SEARCH = frozenset(
     {*ALLOWED_TEXT_META_FILE_KINDS, MediaKind.AUDIO.value, MediaKind.VIDEO.value}
 )
 
-# ``asset_embedding.channel=clip``(CLIP)으로 시각·키프레임 검색에 쓸 media_type
-MEDIA_TYPES_CLIP_CHUNK_SEARCH = frozenset(
-    {MediaKind.IMAGE.value, MediaKind.VIDEO.value}
-)
-
 
 # asset.modality 저장 허용값(canonical). v292 CHECK 와 일치. unknown 은 모달리티가 아닌 격리표식.
 CANONICAL_MODALITIES = ("text", "image", "video", "audio", "unknown")
@@ -72,7 +67,6 @@ __all__ = [
     "TEXT_FILE_KINDS",
     "ALLOWED_TEXT_META_FILE_KINDS",
     "MEDIA_TYPES_ST_CHUNK_SEARCH",
-    "MEDIA_TYPES_CLIP_CHUNK_SEARCH",
     "CANONICAL_MODALITIES",
     "modality_of",
 ]

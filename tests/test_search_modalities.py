@@ -11,8 +11,6 @@ import pathlib
 import re
 import unittest
 
-from fastapi.testclient import TestClient
-
 from src.config.search_modalities import VALID_SEARCH_MODALITIES, parse_modalities_csv
 
 
@@ -46,15 +44,14 @@ class TestValidModalitiesSingleSource(unittest.TestCase):
     def test_valid_tuple_value(self) -> None:
         self.assertEqual(VALID_SEARCH_MODALITIES, ("text", "image", "video", "audio"))
 
-    def test_three_entrypoints_reference_shared_constant(self) -> None:
-        # 3진입점 모듈이 자체 튜플을 복제하지 않고 공유 상수를 참조(객체 동일성).
+    def test_entrypoints_reference_shared_constant(self) -> None:
+        # 검색 진입점 모듈이 자체 튜플을 복제하지 않고 공유 상수를 참조(객체 동일성).
+        # 069 T407: 3번째 진입점 sample_search_api 는 삭제됨(디버그 3종 portal /search 로 이관).
         import src.app.portal_api as portal
         import src.app.run_search as run_search
-        import src.app.sample_search_api as sample
 
         self.assertIs(portal.VALID_SEARCH_MODALITIES, VALID_SEARCH_MODALITIES)
         self.assertIs(run_search.VALID_SEARCH_MODALITIES, VALID_SEARCH_MODALITIES)
-        self.assertIs(sample.VALID_SEARCH_MODALITIES, VALID_SEARCH_MODALITIES)
 
     def test_valid_tuple_literal_defined_once(self) -> None:
         # grep 계약: `= ("text","image","video","audio")` 튜플 리터럴이 src/ 전체에서 단 1곳만.
@@ -70,19 +67,9 @@ class TestValidModalitiesSingleSource(unittest.TestCase):
         self.assertEqual(hits, ["search_modalities.py"])
 
 
-class TestSampleSearchModalityContract(unittest.TestCase):
-    """sample_search_api 미지 모달리티 응답 형태(200 + {"error"}) 보존(RED ④)."""
-
-    def test_unknown_modality_returns_200_with_error(self) -> None:
-        # sample 은 HTTPException 400 통일(CR-13=US-F) 전이라 **현행 그대로** 200+{"error"} 반환.
-        # 미지 모달리티는 search_hybrid 호출 전에 반환되므로 DB/OS 없이 검증된다.
-        from src.app.sample_search_api import app
-
-        client = TestClient(app)
-        resp = client.get("/search", params={"q": "x", "modalities": "bogus"})
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("error", resp.json())
-        self.assertIn("bogus", resp.json()["error"])
+# 069 T407: TestSampleSearchModalityContract(sample 미지 모달리티 200+{"error"} 보존)를 제거했다 —
+# sample_search_api 삭제로 그 응답 계약이 소멸(CR-13 moot). 미지 모달리티 거부는 이제 포탈
+# _parse_modalities 의 HTTPException(400)이 담당(tests.test_portal_api.test_search_unknown_modality_400).
 
 
 if __name__ == "__main__":

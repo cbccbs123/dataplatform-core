@@ -63,14 +63,17 @@ class TestBasenameOfCore(unittest.TestCase):
 
 
 class TestNoResidualBasenameDefs(unittest.TestCase):
-    """RED ②: 3 모듈에 ``_basename`` 정의가 남지 않는다(공개 basename_of 1벌 대체)."""
+    """RED ②: 각 모듈에 ``_basename`` 정의가 남지 않는다(공개 basename_of 1벌 대체).
+
+    069 T407: 3번째 대상 ``sample_search_api`` 는 삭제됨(basename_of 소비처가 함께 소멸) →
+    잔여 2 모듈(search_group·opensearch_sync)만 확인한다.
+    """
 
     def test_modules_have_no_private_basename(self) -> None:
-        import src.app.sample_search_api as sample
         import src.portal.search_group as group
         import src.search.opensearch_sync as ossync
 
-        for mod in (sample, group, ossync):
+        for mod in (group, ossync):
             self.assertFalse(
                 hasattr(mod, "_basename"),
                 f"{mod.__name__} 에 _basename 잔존 — basename_of 로 통합해야 함",
@@ -121,25 +124,10 @@ class TestCallSiteOutputsPreserved(unittest.TestCase):
         grouped = group_ranked(result, limit_per_modality=10)
         self.assertEqual(grouped["text"][0]["file_name"], "wikipedia_커피_9204.txt")
 
-    def test_sample_compact_view_does_not_strip_prefix(self) -> None:
-        # sample_search_api 는 프리픽스를 벗기지 않는다(통합 전 동작 그대로 보존).
-        from src.app.sample_search_api import _compact_view
-
-        result = {
-            "query": "q",
-            "results": {
-                "text_documents": [
-                    {
-                        "id": "t1",
-                        "similarity": 0.5,
-                        "file_uri": f"/data/{_UUID}__보고서.pdf",
-                        "summary": "s",
-                    }
-                ]
-            },
-        }
-        out = _compact_view(result, limit=10, summary_max=50)
-        self.assertEqual(out["결과"][0]["파일명"], f"{_UUID}__보고서.pdf")
+    # 069 T407: test_sample_compact_view_does_not_strip_prefix 제거 — sample_search_api 삭제.
+    # 포탈로 이관된 compact 뷰는 이미 group_ranked 로 display_name(프리픽스 제거)된 grouped 를
+    # 소비하므로 프리픽스를 벗긴다(포탈 표준 표시명·의료 배제 보존). sample 의 원시 basename(미제거)
+    # 동작은 디버그 도구의 부수적 특성이었고 재현하지 않는다(정당성: 069 T407 보고).
 
     def test_opensearch_sync_indexes_raw_basename_no_strip(self) -> None:
         # opensearch_sync file_name 은 basename_of(프리픽스 미제거) → clean_file_name 정제 결과.

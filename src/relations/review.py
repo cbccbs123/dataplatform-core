@@ -2,7 +2,8 @@
 
 검토 큐 설계
     별도 큐 테이블 없이 ``graph_edge.status = 'proposed'`` 자체가 검토 큐다.
-    ``list_proposed_edges`` 로 조회하고, ``approve_edge``/``reject_edge`` 로 상태를 전환한다.
+    ``list_edges_for_review`` 로 조회하고(052 API·식별보강·페이징·검색/필터),
+    ``approve_edge``/``reject_edge`` 로 상태를 전환한다(포탈 ``bulk_review`` 경유).
 
 멱등·반려 부활 방지 계약
     ``_decide_edge`` 의 ``WHERE edge_id = %s AND status = 'proposed'`` 가드가 핵심이다.
@@ -242,36 +243,10 @@ def list_relation_kinds(
     return {"rows": rows, "total": len(rows)}
 
 
-def list_proposed_edges(conn: Connection[Any], *, limit: int = 100) -> list[dict[str, Any]]:
-    """검토 대기(proposed) 엣지를 신뢰도 높은 순으로. status='active' 필터는 소비자 몫.
-
-    ``topic`` 컬럼은 jsonb(topic_ko/en, subtopic_ko/en)다. 소비자가 필요한 키를 꺼내 쓴다.
-
-    069 B3(P2-3): CLI(``run_relations_review --list``) 큐에 두 가지를 보강한다(반환 shape 불변).
-      (a) 양끝 자산 의료 제외 — ``_REVIEW_FROM`` 조인(node→asset 양끝) 재사용해 src/dst 어느 쪽이든
-          ``domain_label = 'medical'`` 인 엣지를 큐에서 뺀다(헌법 10조·의료 3년차 이연). NULL 도메인을
-          놓치지 않도록 ``IS DISTINCT FROM``(``= 'medical'`` 은 NULL 을 통과시킴)을 쓴다.
-      (b) 정렬 2차키 ``e.edge_id`` — 동일 confidence 다수가 limit 경계에 걸릴 때 어떤 엣지가 큐에
-          노출되는지가 흔들리지 않게 결정화한다(헌법 3조). SELECT 컬럼(=행 dict 키)은 그대로라
-          CLI JSON shape 은 불변이다.
-    """
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT e.edge_id, e.src_node, e.dst_node, rk.kind_code,
-                   e.confidence, e.reason, e.topic
-            """
-            + _REVIEW_FROM
-            + """
-            WHERE e.status = 'proposed'
-              AND sa.domain_label IS DISTINCT FROM 'medical'
-              AND da.domain_label IS DISTINCT FROM 'medical'
-            ORDER BY e.confidence DESC NULLS LAST, e.edge_id
-            LIMIT %s
-            """,
-            (limit,),
-        )
-        return [dict(r) for r in cur.fetchall()]
+# 069 T406: ``list_proposed_edges`` 를 삭제했다 — 유일 소비였던 ``run_relations_review`` CLI 가
+# 052 포탈 API(``GET /admin/relations`` = ``list_edges_for_review``)로 상위호환 대체되며 함께
+# 폐기됐다(사용자 결정 2026-07-20). proposed 큐 조회는 ``list_edges_for_review(status="proposed")``
+# 가 식별보강·페이징·검색/필터까지 포함해 담당한다.
 
 
 def _decide_edge(conn: Connection[Any], *, edge_id: str, reviewer: str, status: str) -> bool:

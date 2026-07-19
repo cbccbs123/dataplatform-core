@@ -334,6 +334,129 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
         mock_search.assert_not_called()
 
+    # ── 069 T407: sample_search_api 디버그 3종을 portal /search opt-in 으로 이관 ──────
+    # 전부 기본 off = 기존 응답 불변. no_cutoff 는 search_hybrid 배선, compact/group_by_relation 은
+    # 이미 group_ranked 로 의료 배제·projection 된 grouped 결과 위에서 축약/묶음 뷰를 만든다.
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_no_cutoff_default_off_not_disabled(self, mock_search) -> None:
+        # 기본(off): disable_os_cutoff=True 를 전달하지 않는다(동작 불변).
+        mock_search.return_value = _fake_search_result()
+        self.client.get("/search", params={"q": "회식"})
+        self.assertNotEqual(mock_search.call_args.kwargs.get("disable_os_cutoff"), True)
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_no_cutoff_true_wires_disable_os_cutoff(self, mock_search) -> None:
+        # no_cutoff=true → search_hybrid(disable_os_cutoff=True) 배선(027 디버그 우회).
+        mock_search.return_value = _fake_search_result()
+        self.client.get("/search", params={"q": "회식", "no_cutoff": "true"})
+        self.assertIs(mock_search.call_args.kwargs["disable_os_cutoff"], True)
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_compact_default_off_returns_grouped(self, mock_search) -> None:
+        # 기본(off): 기존 grouped 응답 계약 불변.
+        mock_search.return_value = _fake_search_result()
+        body = self.client.get("/search", params={"q": "회식", "size": 10}).json()
+        self.assertIn("results", body)
+        self.assertNotIn("결과", body)
+
+    @patch("src.app.portal_api.search_hybrid")
+    def test_compact_true_returns_flat_ranking(self, mock_search) -> None:
+        # compact=true → {query, 건수, 결과} 축약 뷰(전 모달리티 합쳐 점수순·의료 배제 후).
+        mock_search.return_value = _fake_search_result()
+        body = self.client.get("/search", params={"q": "회식", "compact": "true"}).json()
+        self.assertEqual(body["query"], "회식")
+        self.assertIn("건수", body)
+        self.assertIn("결과", body)
+        # 의료(image med1)는 group_ranked 에서 배제 → text 3건만.
+        self.assertEqual(body["건수"], 3)
+        rows = body["결과"]
+        self.assertEqual([r["순위"] for r in rows], [1, 2, 3])
+        # 점수 내림차순(a1 0.9 > a2 0.8 > a3 0.7), 각 행에 모달리티·점수·파일명·요약.
+        self.assertEqual([r["파일명"] for r in rows], ["a1.txt", "a2.txt", "a3.txt"])
+        for r in rows:
+            self.assertEqual(r["모달리티"], "text")
+            self.assertIn("점수", r)
+            self.assertIn("요약", r)
+        # 의료 자산 파일명이 축약 뷰로 새지 않는다(헌법 10조·FR-014).
+        self.assertNotIn("m.png", [r["파일명"] for r in rows])
+
+    @patch("src.app.portal_api.fetch_active_relations_for_asset")
+    @patch("src.app.portal_api.search_hybrid")
+    def test_group_by_relation_folds_same_source(self, mock_search, mock_edges) -> None:
+        # group_by_relation=true → 같은 소스 엣지(active duplicate_near/derived_from)로 묶음.
+        # a1(text)·v1(video)이 duplicate_near 로 이어져 한 묶음, a2 는 별도 묶음.
+        result = {
+            "query": "회식",
+            "results": {
+                "text_documents": [
+                    {"id": "a1", "similarity": 0.9, "file_uri": "/x/a1.txt", "summary": "s1"},
+                    {"id": "a2", "similarity": 0.6, "file_uri": "/x/a2.txt", "summary": "s2"},
+                ],
+                "video": [
+                    {"id": "v1", "similarity": 0.8, "file_uri": "/x/회식.mp4", "summary": "vs"},
+                ],
+            },
+            "meta": {},
+        }
+        mock_search.return_value = result
+
+        def _neighbors(_conn, *, asset_id, status="active"):
+            # a1↔v1 은 same-source(duplicate_near·대칭 엣지 양방향), 그 외 이웃 없음.
+            if asset_id == "a1":
+                return [{"asset_id": "v1", "kind_code": "duplicate_near"}]
+            if asset_id == "v1":
+                return [{"asset_id": "a1", "kind_code": "duplicate_near"}]
+            return []
+
+        mock_edges.side_effect = _neighbors
+        body = self.client.get(
+            "/search", params={"q": "회식", "group_by_relation": "true"}
+        ).json()
+        self.assertEqual(body["query"], "회식")
+        self.assertIn("묶음", body)
+        self.assertEqual(body["묶음수"], 2)  # {a1,v1} + {a2}
+        # graph_query seam(대칭 양방향)을 경유했는지 — 순진한 단방향 SQL 우회 금지(CR-19).
+        self.assertTrue(mock_edges.called)
+        # 묶음점수 내림차순: {a1(0.9),v1(0.8)} 대표 0.9 먼저, {a2 0.6} 뒤.
+        first = body["묶음"][0]
+        self.assertEqual(first["묶음점수"], 0.9)
+        self.assertEqual({m["파일명"] for m in first["구성"]}, {"a1.txt", "회식.mp4"})
+        second = body["묶음"][1]
+        self.assertEqual([m["파일명"] for m in second["구성"]], ["a2.txt"])
+
+    @patch("src.app.portal_api.fetch_active_relations_for_asset")
+    @patch("src.app.portal_api.search_hybrid")
+    def test_group_by_relation_priority_over_compact(self, mock_search, mock_edges) -> None:
+        # 조합 우선순위(sample 보존): group_by_relation 이 compact 보다 우선.
+        mock_search.return_value = _fake_search_result()
+        mock_edges.return_value = []
+        body = self.client.get(
+            "/search",
+            params={"q": "회식", "compact": "true", "group_by_relation": "true"},
+        ).json()
+        self.assertIn("묶음", body)   # group 뷰
+        self.assertNotIn("결과", body)  # compact 뷰 아님
+
+    @patch("src.app.portal_api.fetch_active_relations_for_asset")
+    @patch("src.app.portal_api.search_hybrid")
+    def test_group_by_relation_excludes_manifest_hub(self, mock_search, mock_edges) -> None:
+        # manifest.json 허브는 묶음에서 제외(sample 보존).
+        result = {
+            "query": "q",
+            "results": {
+                "text_documents": [
+                    {"id": "a1", "similarity": 0.9, "file_uri": "/x/a1.txt", "summary": "s1"},
+                    {"id": "h1", "similarity": 0.5, "file_uri": "/x/manifest.json", "summary": ""},
+                ],
+            },
+            "meta": {},
+        }
+        mock_search.return_value = result
+        mock_edges.return_value = []
+        body = self.client.get("/search", params={"q": "q", "group_by_relation": "true"}).json()
+        self.assertEqual(body["묶음수"], 1)  # a1 만(manifest 제외)
+
 
 class TestAssetDetail(unittest.TestCase):
     """``/assets/{id}`` — 상세 200 / 노출 게이트 404."""

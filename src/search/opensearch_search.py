@@ -720,12 +720,10 @@ def search_assets_os(
     # msearch 본문: 모달리티당 [헤더, knn, 헤더, bm25] 를 결정적 순서로 쌓는다(opensearch-py 규약 —
     # 각 서브검색 앞에 인덱스 헤더 1줄). 본문 순서가 결정적이라야 응답 분해도 결정적이다(헌법 3조).
     msearch_body: list[dict[str, Any]] = []
-    label_values: list[frozenset[str]] = []
     for label in labels:
         # 요청 라벨('text'/'audio') → 저장된 modality 값 집합으로 해소(text=txt·json·pdf·office).
         # 매핑에 없는 라벨은 라벨 자체를 값으로 본다(미래 모달리티 안전 폴백 — 022 image/video 동형).
         values = _MODALITY_VALUES.get(label, frozenset({label}))
-        label_values.append(values)
         knn_body = build_knn_body(
             query_vector, modality_values=values, k=sample_k, exclude_medical=exclude_medical,
             search_filters=search_filters,

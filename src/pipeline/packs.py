@@ -13,7 +13,9 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -23,17 +25,24 @@ class DomainPack:
     **불변식**: per_asset/cross_asset 값은 반드시 DEFAULT_REGISTRY 에 등록된 이름이어야 한다.
     등록되지 않은 이름을 지정하면 resolve() 호출 시점에 KeyError 가 발생한다(조기 실패 아님).
 
-    **얕은 동결 주의**: ``frozen=True`` 는 필드 재바인딩만 막고 per_asset/cross_asset **dict 내용은
-    동결하지 않는다**(``pack.per_asset["x"]=...`` 가능). 관례상 생성 후 변조 금지 — US-E1 에서
-    MappingProxyType 로 강제 예정.
+    **동결(US-E1·2026-07-20)**: ``frozen=True`` 는 필드 재바인딩만 막으므로, per_asset/cross_asset
+    매핑 **내용**도 ``__post_init__`` 에서 ``MappingProxyType`` 으로 감싸 읽기 전용으로 강제한다
+    (``pack.per_asset["x"]=...`` → ``TypeError``). 제자리 수정에 의한 라우팅 무언 변경을 원천 차단.
+    ``MappingProxyType`` 은 ``==`` 를 원본 매핑에 위임하므로 ``run_relations`` 의
+    ``pack.cross_asset == GENERAL_PACK.cross_asset`` 비교 의미는 그대로 보존된다(동작 불변).
 
     **주의**: ``is_symmetric`` 등 관계 속성은 팩이 아니라 relation_kind 카탈로그(DB)에 속한다.
     팩은 "어느 전략을 쓸지"만 고르고, 개별 관계 종류의 의미론(방향·대칭·is_causal 등)은 관리하지 않는다.
     """
     name: str
-    per_asset: dict[str, str]    # 슬롯 → 전략 이름
-    cross_asset: dict[str, str]  # 슬롯 → 전략 이름 (candidates/score/decide/persist_edges)
-    policy: str                  # POLICIES 키(policy.py 참조)
+    per_asset: Mapping[str, str]    # 슬롯 → 전략 이름(생성 후 읽기전용 MappingProxyType)
+    cross_asset: Mapping[str, str]  # 슬롯 → 전략 이름 (candidates/score/decide/persist_edges)
+    policy: str                     # POLICIES 키(policy.py 참조)
+
+    def __post_init__(self) -> None:
+        # 얕은 동결 해소: 입력 매핑을 복사 후 읽기전용 뷰로 재바인딩(frozen 이라 object.__setattr__).
+        object.__setattr__(self, "per_asset", MappingProxyType(dict(self.per_asset)))
+        object.__setattr__(self, "cross_asset", MappingProxyType(dict(self.cross_asset)))
 
 
 # 일반 도메인 cross-asset 묶음.

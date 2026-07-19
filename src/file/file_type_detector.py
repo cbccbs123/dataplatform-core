@@ -15,8 +15,6 @@ import magic
 
 from src.file.file_type_defs import MediaKind, OfficeKind
 
-_READ_CHUNK = 262_144
-
 _WORD_MIMES = frozenset(
     {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -49,11 +47,6 @@ _PPT_MIMES = frozenset(
         "application/vnd.ms-powerpoint.presentation",
     }
 )
-
-
-def _read_head(path: Path, max_bytes: int = _READ_CHUNK) -> bytes:
-    with path.open("rb") as f:
-        return f.read(max_bytes)
 
 
 def _magic_mime(path: Path) -> str:

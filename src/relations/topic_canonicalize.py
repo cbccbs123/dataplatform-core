@@ -421,53 +421,8 @@ def canonicalize_topic(
     return {"canonical_ko": label, "canonical_en": canonical.get(label), "decided_by": "classify"}
 
 
-# subtopic 재사용-우선 판정 프롬프트(065 T603·FR-703) — judge_topic(동의어-한정)과 다르다.
-#
-# 065 자기주제는 subtopic 을 **재사용 가능한 일반 카테고리**(도시여행·전통건축)로 코스닝한다. 여기서는
-# strict 동의어가 아니라 **원본이 후보 카테고리와 같은 일반 범주에 속하면 그 후보로 재사용**하도록
-# 완화한다(과편화·싱글턴 억제). 단 억지 흡수는 막는다: 명백히 다른 범주면 NEW. 058 관계의 strict
-# judge_topic 은 건드리지 않는다(prefer_reuse=False 기본 경로가 그대로 judge_topic 을 쓴다).
-_SUBTOPIC_REUSE_PROMPT = """너는 자산의 하위주제(subtopic) 라벨을 **부모 주제 안의 기존 카테고리로 재사용**시키는 판정기다.
-아래 "원본 라벨"이 "후보 카테고리" 중 하나와 **같은 일반 카테고리로 묶을 수 있으면** 그 후보를 고르고,
-어느 후보와도 같은 카테고리로 묶기 어려우면 "NEW" 를 고른다.
-
-핵심 기준: "원본을 이 후보 카테고리 안에 넣어도 자연스러운가?"(같은 일반 범주). 재사용을 우선한다.
-- 예(같은 카테고리로 묶임) → 그 후보를 고른다: "파리자유여행" → "도시여행", "경복궁" → "전통건축".
-- 아니오(명백히 다른 범주) → "NEW". 억지로 넓은 범주에 몰아넣지는 마라.
-
-규칙:
-- 반드시 JSON 객체 하나만 출력한다. 코드블록·설명 문장 금지.
-- 형식: {{"match": "<후보 카테고리 중 하나>"}} 또는 {{"match": "NEW"}}.
-- 후보 목록에 없는 라벨을 지어내지 않는다. 같은 카테고리로 볼 수 없으면 "NEW".
-
-원본 라벨: {raw_ko}
-후보 카테고리: {candidates}
-
-출력: {{"match": "..."}}"""
-
-
-def judge_subtopic_reuse(raw_ko: str, candidates: list[str], *, client=None) -> str | None:
-    """subtopic 재사용-우선 판정(065 T603) — 같은 일반 카테고리면 후보 재사용, 아니면 None(NEW).
-
-    - 후보가 비면 **LLM 호출 없이** None(NEW) — judge_topic 과 동일한 비용 절감.
-    - ``src.llm.client.complete_json`` 단일 seam·temp=0·``client=`` 주입. 후보 K개만 프롬프트에.
-    - LLM 이 후보 밖 라벨을 지어내면 안전하게 None(오병합 방지·결정성).
-    - judge_topic 과 별개 함수 — 058 관계의 strict 동의어 판정을 바꾸지 않고 065 만 완화한다.
-    """
-    if not candidates:
-        return None
-    from src.llm.client import complete_json
-
-    prompt = _SUBTOPIC_REUSE_PROMPT.format(raw_ko=raw_ko, candidates=candidates)
-    out = complete_json(prompt, client=client)
-    match = out.get("match")
-    if isinstance(match, str) and match in candidates:
-        return match
-    return None
-
-
 def canonicalize_subtopic(
-    conn, topic_ko_canonical: str, raw_sub: str | None, *, client=None, prefer_reuse: bool = False
+    conn, topic_ko_canonical: str, raw_sub: str | None, *, client=None
 ) -> str | None:
     """subtopic 정규화 — 부모 스코프 해소(spec 058 v2·FR-202v2·C7).
 
@@ -483,10 +438,6 @@ def canonicalize_subtopic(
     파라미터
         ``topic_ko_canonical``: 이미 정본화된 상위 topic(부모 스코프 키·범주명 비움 기준).
         ``client``: 동의어 judge 에 주입(캐시 미스에만 호출). 캐시 히트·조기 반환 경로는 LLM 0(결정성).
-        ``prefer_reuse``: 재사용-우선 완화(065 T603). 기본 ``False``=058 관계 경로(strict 동의어
-            ``judge_topic`` 불변). ``True``=065 자기주제 경로 — 같은 부모 안에서 기존 subtopic 카테고리
-            를 우선 재사용(``judge_subtopic_reuse``)해 과편화(싱글턴)를 줄인다. 후보(부모 스코프 kNN)가
-            없으면 두 경로 모두 NEW 로 동일(신규 등록).
     """
     # 0a) None/빈/공백만 → 하위주제 없음
     if raw_sub is None or not str(raw_sub).strip():
@@ -511,16 +462,11 @@ def canonicalize_subtopic(
         return hit
 
     # 2) 미스 → 같은 부모 스코프 kNN 후보(오병합 폭발 반경 = 부모 버킷·C3)
-    #    = 부모 topic 의 기존 subtopic 후보 회수. prefer_reuse 경로는 이 후보를 재사용-우선 판정에 넘긴다.
+    #    = 부모 topic 의 기존 subtopic 후보 회수(동의어-한정 judge 에 넘긴다).
     candidates = knn_topic_candidates(conn, normalized, parent_topic=topic_ko_canonical)
 
-    # 3) 재사용 판정(후보 same-parent 만) → 매칭 or NEW.
-    #    prefer_reuse=True(065·T603): 같은 일반 카테고리면 재사용(judge_subtopic_reuse·완화).
-    #    기본(058 관계): strict 동의어-한정 judge_topic(불변).
-    if prefer_reuse:
-        match = judge_subtopic_reuse(normalized, candidates, client=client)
-    else:
-        match = judge_topic(normalized, candidates, client=client)
+    # 3) 동의어-한정 judge(후보 same-parent 만·strict·058 관계 경로 불변) → 매칭 or NEW.
+    match = judge_topic(normalized, candidates, client=client)
     if match is not None:
         # 매칭(재사용) → 같은 부모 스코프로 alias 동결(재실행 캐시 히트·SC-04v2)
         _freeze_alias(conn, normalized, match, "llm", parent_topic=topic_ko_canonical)

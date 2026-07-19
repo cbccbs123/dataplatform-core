@@ -291,7 +291,7 @@ def search_hybrid(
     ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다(FR-007·SC-006 — silent 폴백 금지).
 
     ``disable_os_cutoff`` 는 OS 경로의 **게이트·per-result 컷을 모두 끄는 디버그 우회**다(기본 False).
-    True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(sample_search_api ``no_cutoff`` 배선).
+    True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(포탈 ``/search?no_cutoff=true`` 배선·069 T407).
     **072 query-norm 토글**(``search_os_query_norm_enabled``, 029 seam 재사용)이 on 이면 검색 직전
     자연어 질의(어절≥3)를 **nori 형태소 명사추출+스톱워드 제거**(검색시점 LLM 0·결정적)한 뒤 임베딩·
     BM25·rerank 채점에 동일 적용한다 — 단어 질의(어절<3)·off 는 원문 ``query`` 그대로(바이트 동일).

@@ -173,6 +173,9 @@ def sync_graph_edges(
         # 065 FR-405: graph_edge.topic 은 **관계 맥락 라벨(자산 주제 아님)** — 이 쌍(pairwise) 관계를
         #   설명하는 메타일 뿐, 자산의 주제는 asset_topic 정본이 결정한다. 기록은 존치(관계 검토 UI용)·
         #   소비만 끊음(065). 컬럼 제거는 후속.
+        # 5번째 반환 mvp_topic_auto(자동 보정 마커)는 **의도적으로 폐기(_)** — 현재 prod 는 이 마커로
+        # 어떤 동작도 하지 않는다. "나중에 재검토 필요" 표식일 뿐이라 향후 재정제 도구가 소비할 예비값이며
+        # 테스트(test_relations_schema)가 산출을 봉인한다(P3-1: prod 미소비는 死가 아니라 의도).
         topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
         # 058 FR-401: persist 직전 정본화(플래그 게이트). off(기본)면 이 블록 통째로 skip →
         # coerce 결과를 그대로 저장(canonicalize·registry·LLM 0·바이트 동일·동작 불변·T403).

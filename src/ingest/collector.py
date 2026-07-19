@@ -31,9 +31,6 @@ def collect_files(
     file_list: str | Path | None = None,
     paths: Iterable[str] | None = None,
     recursive: bool = True,
-    include_hidden: bool = False,
-    dedup_by_prefix: bool = False,
-    sample_seed: int | None = None,
 ) -> list[str]:
     """로컬 파일 경로 리스트를 수집한다.
 
@@ -44,7 +41,7 @@ def collect_files(
         input_dir: 이 디렉터리 아래 파일 수집(``list_file_paths_under_directory``).
         file_list: UTF-8 경로 목록 파일(한 줄 하나).
         paths: 명시 파일 경로들.
-        recursive/include_hidden/dedup_by_prefix/sample_seed: ``input_dir`` 수집 옵션.
+        recursive: ``input_dir`` 하위 디렉터리까지 재귀 탐색할지.
 
     Returns:
         파일 경로 문자열 리스트(소스가 비어 있으면 빈 리스트).
@@ -62,13 +59,7 @@ def collect_files(
         collected.extend(_read_file_list(file_list))
     if input_dir is not None:
         collected.extend(
-            list_file_paths_under_directory(
-                input_dir,
-                recursive=recursive,
-                include_hidden=include_hidden,
-                dedup_by_prefix=dedup_by_prefix,
-                sample_seed=sample_seed,
-            )
+            list_file_paths_under_directory(input_dir, recursive=recursive)
         )
     if paths is not None:
         collected.extend(str(p) for p in paths)

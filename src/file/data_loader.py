@@ -22,7 +22,6 @@ from __future__ import annotations
 import codecs
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import TypedDict
 
 from src.file.file_type_defs import (
     ALLOWED_TEXT_META_FILE_KINDS,
@@ -31,19 +30,6 @@ from src.file.file_type_defs import (
     MediaKind,
     OfficeKind,
 )
-
-
-# 주의: 이 TypedDict 는 이 모듈에서 사용되지 않는 잔재다. 실제 정본은
-# ``src/llm/text_summarizer.py`` 의 동명 ``SummaryKeywords`` (그쪽이 import 대상).
-class SummaryKeywords(TypedDict):
-    summary: str
-    keywords: list[str]
-    language: str
-    encoding: str
-    num_sentences: int
-    num_tokens: int
-    length: int
-
 
 _OFFICE_EXTENSIONS: dict[str, frozenset[str]] = {
     OfficeKind.WORD.value: frozenset({".docx"}),

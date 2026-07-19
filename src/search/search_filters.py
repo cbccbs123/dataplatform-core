@@ -7,19 +7,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-# v1 allowlist — ADR 2026-06-24-search-filter-v1-decisions.md
-FILTERABLE_FILE_EXT = "file_ext"
-FILTERABLE_SOURCE_DATASET = "source_dataset"
-FILTERABLE_CREATED_FROM = "created_from"
-FILTERABLE_CREATED_TO = "created_to"
-
-V1_FILTER_PARAM_NAMES = frozenset({
-    FILTERABLE_FILE_EXT,
-    FILTERABLE_SOURCE_DATASET,
-    FILTERABLE_CREATED_FROM,
-    FILTERABLE_CREATED_TO,
-})
-
 
 @dataclass(frozen=True, slots=True)
 class SearchFilters:
@@ -115,12 +102,7 @@ def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, 
 
 
 __all__ = [
-    "FILTERABLE_CREATED_FROM",
-    "FILTERABLE_CREATED_TO",
-    "FILTERABLE_FILE_EXT",
-    "FILTERABLE_SOURCE_DATASET",
     "SearchFilters",
-    "V1_FILTER_PARAM_NAMES",
     "filters_to_opensearch_bool",
     "parse_search_filters",
 ]
