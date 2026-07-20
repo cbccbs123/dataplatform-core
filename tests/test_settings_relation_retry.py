@@ -60,12 +60,12 @@ class TestRelationRetryMaxAttempts(unittest.TestCase):
     def test_default_is_three_when_unset(self) -> None:
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.relation_retry_max_attempts, 3)
+        self.assertEqual(settings.relations.retry_max_attempts, 3)
 
     def test_env_override(self) -> None:
         with _env(retry="5"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.relation_retry_max_attempts, 5)
+        self.assertEqual(settings.relations.retry_max_attempts, 5)
 
     def test_invalid_int_env_raises(self) -> None:
         # 잘못된 형식의 정수 env 는 _env_int_default 가 ValueError — 프로세스 시작 시 빠르게 실패.

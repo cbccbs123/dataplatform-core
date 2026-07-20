@@ -34,13 +34,13 @@ def _mock_conn(rows):
 
 
 # ── 순수 단위용 최소 cfg 더블(propose_relations_for_asset 이 읽는 설정만) ─────────
-_FAKE_CFG = types.SimpleNamespace(
-    relation_top_k=10,
-    relation_min_sim=0.2,
-    relation_path_top_k=10,
-    relation_auto_approve_min=0.75,
-    relation_auto_approve_emb_min=0.0,
-)
+_FAKE_CFG = types.SimpleNamespace(relations=types.SimpleNamespace(
+    top_k=10,
+    min_sim=0.2,
+    path_top_k=10,
+    auto_approve_min=0.75,
+    auto_approve_emb_min=0.0,
+))
 
 
 class _SingleConnDB:

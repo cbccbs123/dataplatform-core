@@ -64,19 +64,19 @@ class TestTextEmbeddingModelBgeField(unittest.TestCase):
         # 선택 필드: 미설정 시 기본 BAAI/bge-m3 (필수 env 가 아니라 누락해도 ValueError 안 남).
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.text_embedding_model_bge, "BAAI/bge-m3")
+        self.assertEqual(settings.embed.model_bge, "BAAI/bge-m3")
 
     def test_env_override(self) -> None:
         # 설정 시 그 값으로 해석(향후 다른 BGE 변형 모델 교체 여지).
         with _env(bge="org/bge-custom"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.text_embedding_model_bge, "org/bge-custom")
+        self.assertEqual(settings.embed.model_bge, "org/bge-custom")
 
     def test_kosimcse_field_unchanged(self) -> None:
         # 회귀 가드: 기존 text_embedding_model(KoSimCSE) 동작은 무변경.
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.text_embedding_model, _KOSIMCSE)
+        self.assertEqual(settings.embed.model, _KOSIMCSE)
 
 
 class TestModelForChannel(unittest.TestCase):

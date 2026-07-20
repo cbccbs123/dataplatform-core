@@ -500,7 +500,7 @@ class TestBackfillBgeE2E(unittest.TestCase):
             cur.executemany(
                 f"INSERT INTO asset_embedding (asset_id, channel, chunk_index, embedding, model_name) "
                 f"VALUES (%s,'st',%s,%s::vector({FIX_EMBEDDING_DIMENSION}),%s)",
-                [(aid, i, dummy, cfg.text_embedding_model) for i in range(n_chunks)],
+                [(aid, i, dummy, cfg.embed.model) for i in range(n_chunks)],
             )
         return aid
 
@@ -513,10 +513,10 @@ class TestBackfillBgeE2E(unittest.TestCase):
         with self.db.transaction() as conn:
             return self.backfill.backfill_asset(
                 conn, row,
-                model_name=cfg.text_embedding_model_bge,
-                chunk_size=cfg.text_embedding_chunk_size,
+                model_name=cfg.embed.model_bge,
+                chunk_size=cfg.embed.chunk_size,
                 encoding=cfg.encoding,
-                normalize=cfg.text_embedding_normalize,
+                normalize=cfg.embed.normalize,
             )
 
     def _assert_coexist_idempotent(self, aid, modality, fs_path, core_meta, ext_meta, n_chunks):
@@ -540,7 +540,7 @@ class TestBackfillBgeE2E(unittest.TestCase):
         n_chunks = len(
             list(
                 _iter_nonempty_chunks(
-                    txt, file_kind="txt", encoding=cfg.encoding, chunk_size=cfg.text_embedding_chunk_size
+                    txt, file_kind="txt", encoding=cfg.encoding, chunk_size=cfg.embed.chunk_size
                 )
             )
         ) or 1
@@ -568,7 +568,7 @@ class TestBackfillBgeE2E(unittest.TestCase):
         stt = "안녕하세요 테스트 전사 텍스트입니다. " * 120
         ext_meta = {"stt": stt}
         n_chunks = len(
-            [c for c in iter_plain_text_chunks(stt, chunk_size=cfg.text_embedding_chunk_size, overlap_size=0) if c]
+            [c for c in iter_plain_text_chunks(stt, chunk_size=cfg.embed.chunk_size, overlap_size=0) if c]
         ) or 1
         aid = self._insert_asset("audio", "/d/a.mp3", core_meta={}, ext_meta=ext_meta, n_chunks=n_chunks)
         self._assert_coexist_idempotent(aid, "audio", "/d/a.mp3", {}, ext_meta, n_chunks)

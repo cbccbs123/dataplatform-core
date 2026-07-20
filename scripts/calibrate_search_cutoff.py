@@ -62,11 +62,11 @@ def main() -> None:
     cfg = get_current_settings()
     client = get_client()
     # 운영 임계(cfg)를 기준으로 측정한다 — search_constants 단일 출처가 settings resolver 로 들어온 값.
-    eps = cfg.search_os_cutoff_eps
-    floor = cfg.search_os_cutoff_floor
-    result_floor = cfg.search_os_result_floor
-    index = getattr(cfg, "opensearch_index", "assets")
-    weights = getattr(cfg, "opensearch_fusion_weights", (0.5, 0.5))
+    eps = cfg.search.os_cutoff_eps
+    floor = cfg.search.os_cutoff_floor
+    result_floor = cfg.search.os_result_floor
+    index = cfg.opensearch.index
+    weights = cfg.search.fusion_weights
 
     print(
         f"# calibration(027) — EPS={eps} FLOOR={floor} RESULT_FLOOR={result_floor} "
@@ -82,7 +82,7 @@ def main() -> None:
         return [knn_score_to_cosine(h.get("_score")) for h in hits]
 
     def signal_row(query: str) -> dict[str, tuple[float, float, bool]]:
-        vec = embed_query(query, channel=cfg.active_embed_channel)
+        vec = embed_query(query, channel=cfg.embed.active_channel)
         out: dict[str, tuple[float, float, bool]] = {}
         for label in MODALITIES:
             top, baseline = gate_signal(knn_cosines(vec, label))
@@ -110,11 +110,11 @@ def main() -> None:
     for tag, queries in (("HAS", HAS_MATCH), ("NO", NO_MATCH)):
         for q in queries:
             off, _ = search_assets_os(
-                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
+                client, q, modalities=MODALITIES, k=20, channel=cfg.embed.active_channel,
                 index=index, tuning=SearchTuning(weights=weights, cutoff_enabled=False),
             )
             on, _ = search_assets_os(
-                client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
+                client, q, modalities=MODALITIES, k=20, channel=cfg.embed.active_channel,
                 index=index,
                 tuning=SearchTuning(weights=weights, cutoff_enabled=True,
                                     cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor),
@@ -128,7 +128,7 @@ def main() -> None:
     def timed(enabled: bool, q: str) -> float:
         t0 = time.perf_counter()
         search_assets_os(
-            client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
+            client, q, modalities=MODALITIES, k=20, channel=cfg.embed.active_channel,
             index=index,
             tuning=SearchTuning(weights=weights, cutoff_enabled=enabled,
                                 cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor),

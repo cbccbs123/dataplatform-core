@@ -47,8 +47,8 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
         labels_all = clip_zero_shot_ko_meta_items(zs["label_scores"])
         # score 하한 필터 + top-k — 설정값 초과 레이블은 메타에 포함하지 않는다.
         labels = [
-            it for it in labels_all if float(it.get("score") or 0.0) >= cfg.labels_score_min
-        ][: cfg.image_labels_meta_top_k]
+            it for it in labels_all if float(it.get("score") or 0.0) >= cfg.vlm.labels_score_min
+        ][: cfg.vlm.image_labels_meta_top_k]
         meta = meta | {"labels": labels}
 
     meta.pop("objects", None)  # objects 는 CLIP 후보용일 뿐 최종 meta 에서 제외
@@ -66,7 +66,7 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     ST(SentenceTransformer): VLM 이 생성한 캡션+키워드+라벨을 텍스트로 직렬화해 임베딩.
     텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
     CLIP: _extract_image_meta 에서 저장한 벡터를 ctx.scratch["clip_vec"] 로 재사용(시각 채널은 무변경).
-    063: CLIP 임베딩 항목은 ``cfg.embed_enable_clip``(기본 True) 일 때만 추가(off=ST 캡션만·라벨·계약 불변).
+    063: CLIP 임베딩 항목은 ``cfg.embed.enable_clip``(기본 True) 일 때만 추가(off=ST 캡션만·라벨·계약 불변).
 
     ``chunk_content`` 가 공백뿐이면 " " 로 대체 — pad 후 영벡터에 가깝지만 DB 삽입은 성공한다.
     1536D 통일은 ``pad_embedding_to_storage_dim`` 이 담당한다(CLIP 벡터는 이미 1536D 패딩됨).
@@ -88,7 +88,7 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         [chunk_content],
         channel=channel,
         settings=cfg,
-        normalize_embeddings=cfg.text_embedding_normalize,
+        normalize_embeddings=cfg.embed.normalize,
     )[0]
     st_vec = pad_embedding_to_storage_dim(st_raw)
     # 계약 위반 즉시 탐지: extract 없이 embed 만 단독 호출하면 RuntimeError.
@@ -98,7 +98,7 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
     items = [EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=0)]
     # 063: clip 임베딩 토글(기본 True=기존 동치). off면 clip 채널 항목만 스킵(라벨·계약·검색 불변).
-    if cfg.embed_enable_clip:
+    if cfg.embed.enable_clip:
         items.append(
             EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0)
         )

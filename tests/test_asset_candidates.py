@@ -24,7 +24,7 @@ from src.relations.asset_candidates import _channels_param, find_embedding_candi
 
 def _fake_cfg(active: str) -> SimpleNamespace:
     """active_embed_channel 이 읽는 필드만 가진 가짜 설정(실 .env·init_settings 없이)."""
-    return SimpleNamespace(active_embed_channel=active)
+    return SimpleNamespace(embed=SimpleNamespace(active_channel=active))
 
 
 class TestChannelsParamActive(unittest.TestCase):

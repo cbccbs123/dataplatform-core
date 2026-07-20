@@ -282,17 +282,17 @@ def _make_os_syncer(db, settings) -> Callable[[Any], bool] | None:
     (run_ingest 증분 훅과 동일 개별 sync 경로 재사용·FR-502). OS 실패는 삼켜(주제 부여는 이미 커밋)
     False 를 돌려준다. 지연 import — 플래그 off 환경에서 opensearch-py 미설치를 허용한다.
     """
-    if not getattr(settings, "opensearch_sync_enabled", False):
+    if not settings.opensearch.sync_enabled:
         _LOG.info("opensearch_sync_enabled off — OS 재색인 생략(주제는 DB 정본에만 부여)")
         return None
 
     from src.config.settings import active_embed_channel
     from src.search.opensearch_sync import get_client, index_asset
 
-    client = get_client(settings.opensearch_url)
+    client = get_client(settings.opensearch.url)
     channel = active_embed_channel(settings)
-    index = settings.opensearch_index
-    noise = getattr(settings, "opensearch_filename_noise_patterns", ())
+    index = settings.opensearch.index
+    noise = settings.opensearch.filename_noise_patterns
 
     def _sync(asset_id) -> bool:
         def _run(conn):

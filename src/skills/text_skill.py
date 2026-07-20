@@ -23,9 +23,9 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
         file_path=ctx.file_path,
         file_kind=file_kind,
         encoding=cfg.encoding,
-        chunk_size=cfg.text_embedding_chunk_size,
+        chunk_size=cfg.embed.chunk_size,
         # 토큰 수는 **활성 임베딩 모델**(active_embed_model)의 토크나이저로 센다 — _embed_text 와 동일
-        # 모델이라 정합(종전 cfg.text_embedding_model=KoSimCSE 하드코딩은 st_api=bge-m3 와 불일치했음).
+        # 모델이라 정합(종전 cfg.embed.model=KoSimCSE 하드코딩은 st_api=bge-m3 와 불일치했음).
         embedding_model_name=active_embed_model(cfg),
     )
     # | 연산자로 dict 머지 — 오른쪽(요약)이 같은 키를 덮어쓴다.
@@ -54,9 +54,9 @@ def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         ctx.file_path,
         file_kind=ctx.modality,
         encoding=cfg.encoding,
-        chunk_size=cfg.text_embedding_chunk_size,
+        chunk_size=cfg.embed.chunk_size,
         embedding_model_name=model,
-        normalize_embeddings=cfg.text_embedding_normalize,
+        normalize_embeddings=cfg.embed.normalize,
         channel=channel,   # 062: 채널 백엔드(로컬/API)로 라우팅. 기본 st=로컬(동작 불변).
         settings=cfg,
     )

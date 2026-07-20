@@ -43,16 +43,16 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     # 048: 키프레임 추출 직후·VLM 루프 이전 near-dup 제거(설정 단일 출처 주입).
     # enabled=False 면 extract 가 현행 경로 그대로 → 결과 바이트 동일(FR-103).
     dedup_config = KeyframeDedupConfig(
-        enabled=cfg.video_keyframe_dedup_enabled,
-        hash_max=cfg.video_keyframe_dedup_hash_max,
-        ssim_min=cfg.video_keyframe_dedup_ssim_min,
-        ssim_gray_lo=cfg.video_keyframe_dedup_ssim_gray_lo,
-        hist_min=cfg.video_keyframe_dedup_hist_min,
-        compare_mode=cfg.video_keyframe_dedup_compare_mode,
-        recent_window=cfg.video_keyframe_dedup_recent_window,
+        enabled=cfg.video.dedup_enabled,
+        hash_max=cfg.video.dedup_hash_max,
+        ssim_min=cfg.video.dedup_ssim_min,
+        ssim_gray_lo=cfg.video.dedup_ssim_gray_lo,
+        hist_min=cfg.video.dedup_hist_min,
+        compare_mode=cfg.video.dedup_compare_mode,
+        recent_window=cfg.video.dedup_recent_window,
     )
     frame_items = extract_video_representative_frame_bytes(
-        video_path=file, max_frames=cfg.video_max_keyframes, dedup=dedup_config
+        video_path=file, max_frames=cfg.video.max_keyframes, dedup=dedup_config
     )
     # 069 B9(P2-10): 키프레임 0장 관측만(현행 동작 유지 — failed 전환·zero-vector 통일 금지).
     # 코덱 미지원·손상 등으로 대표 프레임을 못 뽑으면 이 영상은 시각 임베딩·키프레임 라벨이 비어
@@ -87,8 +87,8 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     for kf in clip_ve.get("keyframes") or []:
         labels_all = kf.get("labels") or []
         kf["labels"] = [
-            it for it in labels_all if float(it.get("score") or 0.0) >= cfg.labels_score_min
-        ][: cfg.video_keyframe_labels_meta_top_k]
+            it for it in labels_all if float(it.get("score") or 0.0) >= cfg.vlm.labels_score_min
+        ][: cfg.video.labels_meta_top_k]
     # jpeg_bytes 는 이후 불필요 — result 에서 제거해 메모리를 돌려준다.
     for _it in result:
         _it.pop("jpeg_bytes", None)
@@ -148,13 +148,13 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
             [chunk_content],
             channel=channel,
             settings=cfg,
-            normalize_embeddings=cfg.text_embedding_normalize,
+            normalize_embeddings=cfg.embed.normalize,
         )[0]
         st_vec = pad_embedding_to_storage_dim(st_raw)
         # 키프레임당 ST(+CLIP) 항목(같은 chunk_index, 채널로 구분)
         embeddings.append(EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=i))
         # 063: clip 임베딩 토글(기본 True=기존 동치). off면 키프레임 clip 항목만 스킵.
-        if cfg.embed_enable_clip:
+        if cfg.embed.enable_clip:
             embeddings.append(EmbeddingItem(
                 channel=_CHANNEL_CLIP, vector=kf["clip_vec"],
                 model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=i,

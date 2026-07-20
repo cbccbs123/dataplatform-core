@@ -42,7 +42,6 @@ def main() -> int:
     from dotenv import load_dotenv
 
     load_dotenv(_REPO_ROOT / ".env.dev", override=False)
-    from src.config import search_constants as sc
     from src.config.settings import get_current_settings, init_settings
 
     init_settings("dev")
@@ -58,14 +57,14 @@ def main() -> int:
     queries = golden["queries"]
 
     # 설정 단일 출처(search_constants 폴백) — 게이트·컷·rerank 임계.
-    g = lambda name, d: getattr(cfg, name, d)  # noqa: E731
-    cutoff_eps = g("search_os_cutoff_eps", sc.OS_CUTOFF_EPS_DEFAULT)
-    cutoff_floor = g("search_os_cutoff_floor", sc.OS_CUTOFF_FLOOR_DEFAULT)
-    result_floor = g("search_os_result_floor", sc.OS_RESULT_FLOOR_DEFAULT)
-    bm25_op = g("search_os_bm25_operator", sc.OS_BM25_OPERATOR_DEFAULT)
-    rr_top_r = g("search_os_rerank_top_r", sc.OS_RERANK_TOP_R_DEFAULT)
-    rr_tau = g("search_os_rerank_tau", sc.OS_RERANK_TAU_DEFAULT)
-    rr_model = g("search_os_rerank_model", sc.OS_RERANK_MODEL_DEFAULT)
+    # PR4b: cfg.search 하위 직접 접근(방어 getattr 폐지 — 오설정 fail-fast·오타 정적 검사).
+    cutoff_eps = cfg.search.os_cutoff_eps
+    cutoff_floor = cfg.search.os_cutoff_floor
+    result_floor = cfg.search.os_result_floor
+    bm25_op = cfg.search.os_bm25_operator
+    rr_top_r = cfg.search.os_rerank_top_r
+    rr_tau = cfg.search.os_rerank_tau
+    rr_model = cfg.search.os_rerank_model
 
     client = get_client()
 
@@ -73,9 +72,9 @@ def main() -> int:
         """한 설정으로 search_assets_os 를 호출(.env 무변경·파라미터 직접 주입)."""
         return search_assets_os(
             client, query, modalities=_MODALITIES, k=20,
-            channel=cfg.active_embed_channel, index=cfg.opensearch_index,
+            channel=cfg.embed.active_channel, index=cfg.opensearch.index,
             tuning=SearchTuning(
-                weights=cfg.opensearch_fusion_weights, cutoff_enabled=cutoff,
+                weights=cfg.search.fusion_weights, cutoff_enabled=cutoff,
                 cutoff_eps=cutoff_eps, cutoff_floor=cutoff_floor, result_floor=result_floor,
                 bm25_operator=bm25_op,
                 rerank_enabled=rerank, rerank_top_r=rr_top_r, rerank_tau=rr_tau, rerank_model=rr_model,

@@ -51,7 +51,7 @@ class TestRunIngestPackPath(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             self._patch(stack)
             with mock.patch.object(ps, "policy_validate") as mval:
-                res = ri.run_ingest(["/d/a.txt"], db=mock.MagicMock(), registry=reg, settings=object())
+                res = ri.run_ingest(["/d/a.txt"], db=mock.MagicMock(), registry=reg, settings=mock.MagicMock(opensearch=mock.MagicMock(sync_enabled=False)))
         self.assertEqual(len(res["registered"]), 1)
         self.assertTrue(captured["embed_called"])      # embed 슬롯 호출됨(분리 경로)
         mval.assert_called()                            # 정책 검증 호출됨
@@ -64,7 +64,7 @@ class TestRunIngestPackPath(unittest.TestCase):
             ri.run_ingest(["/d/a.txt"], db=mock.MagicMock(), registry=reg,
                           extract_fn=lambda ctx: AssetRecord(),
                           classify_fn=lambda p, m: ClassificationResult(final_label="general", confidence=0.7, decided_stage=2),
-                          settings=object())
+                          settings=mock.MagicMock(opensearch=mock.MagicMock(sync_enabled=False)))
         self.assertNotIn("embed_called", captured)      # override 경로는 embed 슬롯 미호출
 
     def test_stage1_signature_defers_medical_format(self) -> None:
@@ -91,7 +91,7 @@ class TestRunIngestPackPath(unittest.TestCase):
                 ["/d/a.dcm"],
                 db=mock.MagicMock(),
                 registry=reg,
-                settings=object(),
+                settings=mock.MagicMock(opensearch=mock.MagicMock(sync_enabled=False)),
                 classify_fn=stage1_medical_fn,
             )
 

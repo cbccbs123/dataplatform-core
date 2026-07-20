@@ -112,12 +112,12 @@ def embed_texts_for(
         cfg = settings if settings is not None else get_current_settings()
         return embed_texts_api(
             texts,
-            base_url=cfg.embed_api_base_url,
+            base_url=cfg.embed.api_base_url,
             model=model,
-            api_key=(cfg.embed_api_key or None),
-            timeout_s=cfg.embed_api_timeout_s,
-            batch_size=cfg.embed_api_batch_size,
-            max_retries=cfg.embed_api_max_retries,
+            api_key=(cfg.embed.api_key or None),
+            timeout_s=cfg.embed.api_timeout_s,
+            batch_size=cfg.embed.api_batch_size,
+            max_retries=cfg.embed.api_max_retries,
             normalize_embeddings=normalize_embeddings,
         )
     return embed_texts(texts, model_name=model, normalize_embeddings=normalize_embeddings)
@@ -205,9 +205,9 @@ def embedding_text_chunks(
     if not path.is_file():
         raise FileNotFoundError(str(path))
 
-    # 069 D8: 청크 overlap 은 설정(text_embedding_chunk_overlap) 단일 출처. 미전달/구 객체는 getattr
-    # 폴백 0(하드코딩과 동일·동작 불변). >0 이면 인접 청크가 겹쳐 경계 문맥 손실을 줄인다(opt-in).
-    overlap_size = int(getattr(settings, "text_embedding_chunk_overlap", 0) or 0)
+    # 069 D8: 청크 overlap 은 설정(embed.chunk_overlap) 단일 출처. settings 미전달(None)은 0
+    # (하드코딩과 동일·동작 불변). >0 이면 인접 청크가 겹쳐 경계 문맥 손실을 줄인다(opt-in).
+    overlap_size = int(settings.embed.chunk_overlap or 0) if settings is not None else 0
     # 069 D8: chunk_size 가 임베딩 모델 최대 시퀀스의 2배를 넘으면 인코딩 시 조용히 잘려(재현 불가)
     # 임베딩 품질이 저하될 수 있다 — **로컬 백엔드**에서 1회 관측 경고(동작은 불변·로그만). API
     # 백엔드(st_api)는 원격 모델의 max_seq 를 알 수 없어 생략. 판정 모델은 _embed_many 의 실제 경로를

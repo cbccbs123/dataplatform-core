@@ -65,7 +65,7 @@ def _read_candidates_prompt(conn: Connection[Any], sid: str, cfg: Any, config: d
         conn, source_asset_id=sid, top_k=config["top_k"],
         embedding_kind=config["embedding_kind"], min_sim=config["min_sim"],
     )
-    path = find_path_signal_candidates(conn, source_asset_id=sid, limit=cfg.relation_path_top_k)
+    path = find_path_signal_candidates(conn, source_asset_id=sid, limit=cfg.relations.path_top_k)
     cands = union_candidates(emb, path)
     summary, modality = _source_summary_modality(conn, sid)
     kinds = fetch_active_relation_kinds(conn)
@@ -211,7 +211,7 @@ def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict
 
 # ── snapshot / measure ───────────────────────────────────────────────────────
 def _make_config(args: Any, cfg: Any) -> dict:
-    return {"top_k": args.top_k or cfg.relation_top_k, "min_sim": cfg.relation_min_sim,
+    return {"top_k": args.top_k or cfg.relations.top_k, "min_sim": cfg.relations.min_sim,
             "embedding_kind": args.embedding_kind}
 
 
@@ -322,7 +322,7 @@ def main() -> int:
 
     if args.cmd == "measure":  # DB/LLM 불요(스냅샷 기반)
         # confidence_min 미지정이면 프로덕션 자동승인 임계(RELATION_AUTO_APPROVE_MIN)로 측정.
-        cmin = args.confidence_min if args.confidence_min is not None else _settings().relation_auto_approve_min
+        cmin = args.confidence_min if args.confidence_min is not None else _settings().relations.auto_approve_min
         report = cmd_measure(_load_golden(args.golden), args.snapshot, confidence_min=cmin)
         if args.out:
             _dump_report(report, args.out)

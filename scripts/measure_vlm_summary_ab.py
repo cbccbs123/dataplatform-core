@@ -42,13 +42,13 @@ def _keyframe_jpegs(args: argparse.Namespace) -> list[tuple[str, list[bytes]]]:
     from src.preprocess.video_keyframes import extract_video_representative_frame_bytes
     cfg = get_current_settings()
     dedup = KeyframeDedupConfig(
-        enabled=cfg.video_keyframe_dedup_enabled,
-        hash_max=cfg.video_keyframe_dedup_hash_max,
-        ssim_min=cfg.video_keyframe_dedup_ssim_min,
-        ssim_gray_lo=cfg.video_keyframe_dedup_ssim_gray_lo,
-        hist_min=cfg.video_keyframe_dedup_hist_min,
-        compare_mode=cfg.video_keyframe_dedup_compare_mode,
-        recent_window=cfg.video_keyframe_dedup_recent_window,
+        enabled=cfg.video.dedup_enabled,
+        hash_max=cfg.video.dedup_hash_max,
+        ssim_min=cfg.video.dedup_ssim_min,
+        ssim_gray_lo=cfg.video.dedup_ssim_gray_lo,
+        hist_min=cfg.video.dedup_hist_min,
+        compare_mode=cfg.video.dedup_compare_mode,
+        recent_window=cfg.video.dedup_recent_window,
     )
     for v in args.videos:
         p = Path(v)
@@ -56,7 +56,7 @@ def _keyframe_jpegs(args: argparse.Namespace) -> list[tuple[str, list[bytes]]]:
             print(f"  skip(영상 아님): {v}", file=sys.stderr)
             continue
         frames = extract_video_representative_frame_bytes(
-            video_path=p, max_frames=cfg.video_max_keyframes, dedup=dedup
+            video_path=p, max_frames=cfg.video.max_keyframes, dedup=dedup
         )
         out.append((p.name, [f["jpeg_bytes"] for f in frames]))
     return out
@@ -104,7 +104,7 @@ def main() -> int:
     # 키프레임 준비는 현재 toggle 무관(추출은 dedup 만). 먼저 한 번 init.
     from src.config.settings import get_current_settings, init_settings
     init_settings(args.env)
-    judge_on = args.judge or get_current_settings().vlm_summary_ab_judge
+    judge_on = args.judge or get_current_settings().vlm.summary_ab_judge
     items = _keyframe_jpegs(args)
     if not items:
         print("측정할 키프레임이 없습니다(--keyframe-dir 또는 영상 경로).", file=sys.stderr)

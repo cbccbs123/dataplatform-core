@@ -57,8 +57,8 @@ class Stage2GateTest(unittest.TestCase):
 
     def _run_main(self, argv: list[str], *, v2: bool):
         cfg = SimpleNamespace(
-            vlm_summary_prompt_v2=v2,
-            text_embedding_normalize=True,
+            vlm=SimpleNamespace(summary_prompt_v2=v2),
+            embed=SimpleNamespace(normalize=True),
         )
         with (
             mock.patch.object(sys, "argv", ["reextract_summaries.py", *argv]),
@@ -122,7 +122,7 @@ class Stage2DryRunTest(unittest.TestCase):
     """T003 — --stage2 --dry-run: video 대상 수·fs_path 부재 집계·쓰기 0."""
 
     def _run(self, rows: list, *, v2: bool = True):
-        cfg = SimpleNamespace(vlm_summary_prompt_v2=v2, text_embedding_normalize=True)
+        cfg = SimpleNamespace(vlm=SimpleNamespace(summary_prompt_v2=v2), embed=SimpleNamespace(normalize=True))
         conn = _DryRunConn(rows)
         db_ctx = mock.MagicMock()
         db_ctx.__enter__.return_value = db_ctx
@@ -200,7 +200,7 @@ class ReprocessVideoStage2Test(unittest.TestCase):
     """T101~T103 — _reprocess_video_stage2 코어(P1 video_skill 재사용·P2 DELETE+INSERT)."""
 
     def setUp(self) -> None:
-        self.cfg = SimpleNamespace(vlm_summary_prompt_v2=True, text_embedding_normalize=True)
+        self.cfg = SimpleNamespace(vlm=SimpleNamespace(summary_prompt_v2=True), embed=SimpleNamespace(normalize=True))
         # ext_meta 에 keyframes 2개를 둔 AssetRecord mock(키프레임 수 반환 검증용).
         self.rec = mod_types.AssetRecord(
             core_meta={},

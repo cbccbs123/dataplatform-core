@@ -120,7 +120,7 @@ def summarize_video_from_scene_results(
     # 049: 토글(vlm_summary_prompt_v2)을 빌더에 v2= 로 전달한다. False(기본)면 v1 프롬프트·v1 키워드
     # 루프가 그대로 돌아 출력이 현행과 바이트 동일하다(FR-102 회귀 안전판). 빌더는 settings 미접촉 순수
     # 함수라 토글 해소는 여기에서만 한다(image_summarizer 와 동형·plan P2).
-    v2 = cfg.vlm_summary_prompt_v2
+    v2 = cfg.vlm.summary_prompt_v2
     prompt = _build_video_summary_prompt(
         timeline_lines,
         summary_max_chars=cfg.summary_max_chars,

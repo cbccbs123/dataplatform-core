@@ -130,7 +130,9 @@ def _grouped_via_opensearch(
     # 069 US-E(FR-E5②): OS 검색 튜닝 12종(융합·게이트·컷·rerank·evidence·about)을 cfg 에서 **1회**
     # 해소해 SearchTuning 한 묶음으로 만든다(종전 getattr 릴레이 12줄 제거·인자 축소). disable_os_cutoff
     # (디버그 우회)면 cutoff_enabled 만 False 로 덮는다(replace) — 게이트·per-result 컷 모두 off.
-    tuning = SearchTuning.from_settings(cfg)
+    # PR4b: settings 미초기화(순수 단위 등)로 cfg=None 이면 SearchTuning() 기본(search_constants·F1)으로
+    # 폴백한다 — from_settings 는 완전한 cfg.search 를 요구하므로 None 가드를 호출부에 명시(방어 getattr 폐지).
+    tuning = SearchTuning.from_settings(cfg) if cfg is not None else SearchTuning()
     if disable_os_cutoff:
         tuning = replace(tuning, cutoff_enabled=False)
 
@@ -141,17 +143,23 @@ def _grouped_via_opensearch(
     # 별도 반환·gate_meta 오염 없이 정규화된 질의만 받음). off(기본)면 normalize_query 가 원문 그대로
     # 돌려줘 정규화 미호출·바이트 동일(SC-002). 정규화된 질의가 OS seam 안에서 임베딩·BM25·rerank 채점에
     # 동일 적용된다(query_norm_fn 미주입+enabled 면 아래 morph_noun_phrase_query 클로저를 배선).
-    qn_enabled = getattr(
-        cfg, "search_os_query_norm_enabled", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
-    )
+    # PR4b: cfg-파생 검색 설정을 여기서 한 번에 해소한다(방어 getattr 폐지·직접 중첩 접근). cfg=None
+    # (settings 미초기화·순수 단위)이면 search_constants 단일 출처 기본으로 폴백(운영은 항상 init_settings).
+    if cfg is not None:
+        qn_enabled = cfg.search.os_query_norm_enabled
+        qn_method = cfg.search.os_query_norm_method
+        lv_enabled = cfg.search.llm_verify_enabled
+        os_index_name = cfg.opensearch.index
+    else:
+        qn_enabled = search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
+        qn_method = search_constants.OS_QUERY_NORM_METHOD_DEFAULT
+        lv_enabled = search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT
+        os_index_name = "assets"
     # 072: 형태소 정규화가 nori _analyze(client)를 쓰므로 client 를 정규화 앞에서 획득한다(아래
     # os_search_fn 도 이 동일 client 를 재사용 — 생성 1회). OS 생성 실패 예외는 그대로 전파(FR-007).
     client = os_client_fn()
     # 075: 정규화 방식 선택(morph 기본·072 / llm·029 gemma). enabled on + query_norm_fn 미주입일 때만
     # 배선한다(주입 seam 우선). off 는 방식 무관 원문 passthrough(불변).
-    qn_method = getattr(
-        cfg, "search_os_query_norm_method", search_constants.OS_QUERY_NORM_METHOD_DEFAULT
-    )
     norm_fn = query_norm_fn
     if qn_enabled and norm_fn is None:
         if qn_method == "llm":
@@ -168,7 +176,7 @@ def _grouped_via_opensearch(
             from src.search.opensearch_search import nori_analyze_tokens
             from src.search.query_preprocess import morph_noun_phrase_query
 
-            _norm_index = getattr(cfg, "opensearch_index", "assets")
+            _norm_index = os_index_name
 
             def norm_fn(q: str, _client: Any = client, _index: str = _norm_index) -> str:
                 return morph_noun_phrase_query(
@@ -187,7 +195,7 @@ def _grouped_via_opensearch(
         modalities=requested,  # 요청 전 모달리티(image/video 포함)를 한 번에 OS 검색
         k=limit_per_bucket,
         channel=text_channel,
-        index=getattr(cfg, "opensearch_index", "assets"),
+        index=os_index_name,
         exclude_medical=True,
         # 069 US-E(FR-E5②): 융합·게이트·컷·rerank·evidence·about 튜닝 12종을 SearchTuning 한 묶음으로
         # 전달한다(위에서 from_settings 로 1회 해소·disable_os_cutoff 시 cutoff_enabled=False 덮음).
@@ -205,9 +213,6 @@ def _grouped_via_opensearch(
     # 074: 검색시점 top-3 개별 LLM 검증(L2) — 토글 on AND 자연어(어절≥3·072 판별과 동일 기준)일 때만.
     # 판정 질의=**사용자 원문**(의도 정보 보존·측정과 동일), 캐시 키=정규화 질의(표현 변형 흡수).
     # 단어 질의·off 는 검증 경로 무접촉(호출 0·응답 바이트 동일 — FR-001·005). 폴백은 모듈 내부(FR-003).
-    lv_enabled = getattr(
-        cfg, "search_llm_verify_enabled", search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT
-    )
     llm_verify_meta: dict[str, Any] | None = None
     if lv_enabled and len((query or "").split()) >= search_constants.OS_QUERY_NORM_MIN_WORD_TOKENS:
         from src.search.llm_verify import verify_top_assets
@@ -329,7 +334,7 @@ def search_hybrid(
             text_channel = EMBEDDING_KIND_ST
 
     # OS 컷오프 설정을 읽기 위한 cfg. settings 미초기화(순수 단위 등)면 cfg=None → _grouped_via_opensearch
-    # 의 getattr 폴백이 search_constants 단일 출처 기본값을 쓴다(F1).
+    # 가 None 을 명시 가드해 SearchTuning() 기본(search_constants 단일 출처·F1)·index 'assets' 로 폴백한다.
     try:
         cfg = get_current_settings()
     except RuntimeError:

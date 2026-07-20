@@ -556,13 +556,13 @@ class _SingleConnDB:
 # propose_relations_for_asset 이 읽는 4개 설정만 채운다(나머지는 본 경로에서 미사용).
 import types  # noqa: E402
 
-_FAKE_CFG = types.SimpleNamespace(
-    relation_top_k=10,
-    relation_min_sim=0.2,
-    relation_path_top_k=10,
-    relation_auto_approve_min=0.75,
-    relation_auto_approve_emb_min=0.0,  # 033: 무력 기본값(자동승인 emb 게이트 미적용)
-)
+_FAKE_CFG = types.SimpleNamespace(relations=types.SimpleNamespace(
+    top_k=10,
+    min_sim=0.2,
+    path_top_k=10,
+    auto_approve_min=0.75,
+    auto_approve_emb_min=0.0,  # 033: 무력 기본값(자동승인 emb 게이트 미적용)
+))
 
 
 class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
@@ -772,8 +772,8 @@ class TestLineageRecordsEdgePairs(unittest.TestCase):
             def execute_in_transaction(self, fn, *, idempotent):
                 return fn(object())  # fake conn — seam 들이 전부 mock 이라 미사용
 
-        cfg = SimpleNamespace(relation_top_k=10, relation_min_sim=0.2, relation_path_top_k=5,
-                              relation_auto_approve_min=0.9, relation_auto_approve_emb_min=0.0)
+        cfg = SimpleNamespace(relations=SimpleNamespace(top_k=10, min_sim=0.2, path_top_k=5,
+                              auto_approve_min=0.9, auto_approve_emb_min=0.0))
         with mock.patch.object(asset_entry, "get_current_settings", return_value=cfg), \
              mock.patch.object(asset_entry, "_fetch_source_row",
                                return_value={"summary": "s", "modality": "text"}), \

@@ -77,18 +77,18 @@ def main() -> int:
     client = get_client()
     golden = json.loads((_REPO_ROOT / "tests/fixtures/search/golden_os.json").read_text(encoding="utf-8"))
     queries = golden["queries"]
-    tau = args.tau if args.tau is not None else cfg.search_os_rerank_tau
-    top_r = args.top_r if args.top_r is not None else cfg.search_os_rerank_top_r
+    tau = args.tau if args.tau is not None else cfg.search.os_rerank_tau
+    top_r = args.top_r if args.top_r is not None else cfg.search.os_rerank_top_r
 
     # 069 US-E(FR-E5②): 비튜닝 인자(common)와 튜닝(SearchTuning)을 분리한다. _base_tuning(weights·
     # bm25_operator)에 호출별 cutoff/rerank 를 얹어 SearchTuning 을 조립한다.
     common = {
-        "modalities": _MODALITIES, "k": 20, "channel": cfg.active_embed_channel,
-        "index": cfg.opensearch_index,
+        "modalities": _MODALITIES, "k": 20, "channel": cfg.embed.active_channel,
+        "index": cfg.opensearch.index,
     }
     _base_tuning = {
-        "weights": cfg.opensearch_fusion_weights,
-        "bm25_operator": cfg.search_os_bm25_operator,
+        "weights": cfg.search.fusion_weights,
+        "bm25_operator": cfg.search.os_bm25_operator,
     }
 
     if args.sweep:
@@ -106,9 +106,9 @@ def main() -> int:
                 cands = b[:top_r]
                 if not cands:
                     continue
-                rr = _rrtext_map(client, cfg.opensearch_index, [str(r.get("id")) for r in cands])
+                rr = _rrtext_map(client, cfg.opensearch.index, [str(r.get("id")) for r in cands])
                 texts = [rr.get(str(r.get("id"))) or str(r.get("summary") or "") for r in cands]
-                scores = score_pairs(q["query"], texts, model_name=cfg.search_os_rerank_model)
+                scores = score_pairs(q["query"], texts, model_name=cfg.search.os_rerank_model)
                 for r, sc in zip(cands, scores, strict=False):
                     if q.get("expect_empty"):
                         absent_scores.append(sc)
@@ -149,9 +149,9 @@ def main() -> int:
                 client, q["query"], **common,
                 tuning=SearchTuning(
                     **flags, **_base_tuning,
-                    rerank_top_r=top_r, rerank_tau=tau, rerank_model=cfg.search_os_rerank_model,
-                    cutoff_eps=cfg.search_os_cutoff_eps, cutoff_floor=cfg.search_os_cutoff_floor,
-                    result_floor=cfg.search_os_result_floor,
+                    rerank_top_r=top_r, rerank_tau=tau, rerank_model=cfg.search.os_rerank_model,
+                    cutoff_eps=cfg.search.os_cutoff_eps, cutoff_floor=cfg.search.os_cutoff_floor,
+                    result_floor=cfg.search.os_result_floor,
                 ),
             )
             lat.append((time.perf_counter() - t0) * 1000)

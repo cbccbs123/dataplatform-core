@@ -62,7 +62,7 @@ def _patch_all(stack: contextlib.ExitStack, route_result, *, dup=None) -> dict:
 
 class TestRunIngest(unittest.TestCase):
     def setUp(self) -> None:
-        self.settings = object()
+        self.settings = mock.MagicMock(opensearch=mock.MagicMock(sync_enabled=False))
         self.db = mock.MagicMock()
 
     def _ingest(self, files, m_route, *, extract_fn, classify=None, dup=None, configure=None):
@@ -219,7 +219,7 @@ class TestRunIngestSelfTopicWiring(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.settings = object()
+        self.settings = mock.MagicMock(opensearch=mock.MagicMock(sync_enabled=False))
         self.db = mock.MagicMock()
 
     def _run(self, *, extract_fn, classify_topic, os_recorder):

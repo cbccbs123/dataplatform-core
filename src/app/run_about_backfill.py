@@ -124,7 +124,7 @@ def run(env: str, *, only_missing: bool, limit: int | None, os_sync: bool, repor
 
         # OS 부분 갱신기(옵션) — 구 인덱스 매핑 보강 1회 후 자산별 update. 실패는 코어가 삼킴.
         os_update_fn = None
-        if os_sync and getattr(settings, "opensearch_sync_enabled", False):
+        if os_sync and settings.opensearch.sync_enabled:
             from src.search.opensearch_sync import (
                 ensure_about_mapping,
                 get_client,
@@ -132,7 +132,7 @@ def run(env: str, *, only_missing: bool, limit: int | None, os_sync: bool, repor
             )
 
             os_client = get_client()
-            index = settings.opensearch_index
+            index = settings.opensearch.index
             ensure_about_mapping(os_client, index)
 
             def os_update_fn(asset_id: Any, about: list[str]) -> None:

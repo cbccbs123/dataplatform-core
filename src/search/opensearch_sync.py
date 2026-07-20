@@ -379,7 +379,7 @@ def asset_to_doc(
 def get_client(url: str | None = None) -> Any:
     """현재 설정(`OPENSEARCH_URL`, 미지정 시 기본 http://localhost:9200)의 OpenSearch 클라이언트.
 
-    DEV 무인증(http) 기준. ``url`` 미지정 시 020 에서 추가된 정식 선택 필드 ``settings.opensearch_url``
+    DEV 무인증(http) 기준. ``url`` 미지정 시 020 에서 추가된 정식 선택 필드 ``settings.opensearch.url``
     (기본 http://localhost:9200)을 참조한다.
     """
     from opensearchpy import OpenSearch
@@ -387,7 +387,7 @@ def get_client(url: str | None = None) -> Any:
     from src.config.settings import get_current_settings
 
     if url is None:
-        url = get_current_settings().opensearch_url
+        url = get_current_settings().opensearch.url
     return OpenSearch(
         hosts=[url],
         http_compress=True,

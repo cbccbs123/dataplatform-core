@@ -241,7 +241,7 @@ def run_relations(
     if max_attempts is None:
         from src.config.settings import get_current_settings
 
-        max_attempts = get_current_settings().relation_retry_max_attempts
+        max_attempts = get_current_settings().relations.retry_max_attempts
     result: dict[str, list[Any]] = {"done": [], "failed": []}
     for aid in asset_ids:
         edges_u = 0

@@ -2,7 +2,7 @@
 
 018 은 운영 텍스트 임베딩 채널(=모델)을 ``EMBED_ACTIVE_CHANNEL`` 설정으로 토글한다.
 적재·검색·관계가 흩어진 'st' 하드코딩 대신 **활성 채널 단일 출처**를 참조하도록,
-``settings.active_embed_channel`` 필드와 모듈 헬퍼 두 개를 제공한다:
+``settings.embed.active_channel`` 필드와 모듈 헬퍼 두 개를 제공한다:
 
 - ``active_embed_channel(settings)`` → 활성 채널 문자열(기본 'st')
 - ``active_embed_model(settings)`` → 활성 채널의 임베딩 모델(017 ``model_for_channel`` 재사용)
@@ -72,13 +72,13 @@ class TestActiveEmbedChannelField(unittest.TestCase):
         # 선택 필드: 미설정 시 기본 'st' (필수 env 가 아니라 누락해도 ValueError 안 남). → 회귀 0.
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.active_embed_channel, "st")
+        self.assertEqual(settings.embed.active_channel, "st")
 
     def test_env_override(self) -> None:
         # 설정 시 그 값으로 해석(운영 토글: st_bge 로 전환).
         with _env(active="st_bge"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.active_embed_channel, "st_bge")
+        self.assertEqual(settings.embed.active_channel, "st_bge")
 
 
 class TestActiveEmbedChannelHelper(unittest.TestCase):

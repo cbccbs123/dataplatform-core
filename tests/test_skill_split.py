@@ -23,9 +23,8 @@ class TestTextSplit(unittest.TestCase):
             ctx = _ctx()
             # active_embed_channel='st' → active_embed_model = text_embedding_model('m').
             # _extract_text_meta 가 토큰 수를 활성 임베딩 모델 토크나이저로 세도록 정합(count_tokens 정합 개선).
-            ctx.settings = mock.Mock(encoding="utf-8", text_embedding_chunk_size=100,
-                                     text_embedding_model="m", text_embedding_normalize=True,
-                                     active_embed_channel="st")
+            ctx.settings = mock.Mock(encoding="utf-8", embed=mock.Mock(
+                chunk_size=100, model="m", normalize=True, active_channel="st"))
             rec = text_skill._extract_text_meta(ctx)
         self.assertIsInstance(rec, AssetRecord)
         self.assertEqual(rec.embeddings, [])
@@ -38,9 +37,8 @@ class TestTextSplit(unittest.TestCase):
         chunks = [{"embedding_vector": [0.1], "chunk_index": 0}, {"embedding_vector": [0.2], "chunk_index": 1}]
         ctx = _ctx()
         # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
-        ctx.settings = mock.Mock(encoding="utf-8", text_embedding_chunk_size=100,
-                                 text_embedding_model="m", text_embedding_normalize=True,
-                                 active_embed_channel="st")
+        ctx.settings = mock.Mock(encoding="utf-8", embed=mock.Mock(
+            chunk_size=100, model="m", normalize=True, active_channel="st"))
         with mock.patch.multiple("src.embedders.text_embedder", embedding_text_chunks=mock.Mock(return_value=chunks)):
             embs = text_skill._embed_text(ctx, AssetRecord())
         self.assertEqual([e.chunk_index for e in embs], [0, 1])
@@ -51,9 +49,11 @@ class TestImageSplit(unittest.TestCase):
     def _cfg(self, embed_enable_clip=True):
         # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
         # 063: embed_enable_clip(기본 True) — clip 임베딩 토글.
-        return mock.Mock(labels_score_min=0.0, image_labels_meta_top_k=5,
-                         text_embedding_model="m", text_embedding_normalize=True,
-                         active_embed_channel="st", embed_enable_clip=embed_enable_clip)
+        return mock.Mock(
+            vlm=mock.Mock(labels_score_min=0.0, image_labels_meta_top_k=5),
+            embed=mock.Mock(model="m", normalize=True, active_channel="st",
+                            enable_clip=embed_enable_clip),
+        )
 
     def test_extract_stashes_clip_vec_and_embed_reuses(self) -> None:
         from src.skills import image_skill
@@ -101,8 +101,8 @@ class TestAudioSplit(unittest.TestCase):
         from src.skills import audio_skill
         ctx = _ctx("audio")
         # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
-        ctx.settings = mock.Mock(text_embedding_chunk_size=100, text_embedding_model="m",
-                                 text_embedding_normalize=True, active_embed_channel="st")
+        ctx.settings = mock.Mock(embed=mock.Mock(
+            chunk_size=100, model="m", normalize=True, active_channel="st"))
         with mock.patch.multiple("src.preprocess.stt", transcribe_audio_local=mock.Mock(return_value={"text": "안녕"})), \
              mock.patch.multiple("src.extractors.audio_meta_extractor", extract_audio_meta=mock.Mock(return_value={"dur": 3})), \
              mock.patch.multiple("src.llm.text_summarizer", summarize_and_extract_keywords_from_audio=mock.Mock(return_value={"summary": "s"})):
@@ -122,19 +122,18 @@ class TestVideoSplit(unittest.TestCase):
         from src.skills import video_skill
         ctx = _ctx("video")
         # active_embed_channel='st' → active_embed_model = text_embedding_model('m'). 기본 'st' 동치(018 G2).
-        ctx.settings = mock.Mock(video_max_keyframes=2, labels_score_min=0.0,
-                                 video_keyframe_labels_meta_top_k=5, text_embedding_model="m",
-                                 text_embedding_normalize=True, active_embed_channel="st",
-                                 # 048: video_skill 이 KeyframeDedupConfig 를 빌드하므로 유효 dedup 설정 필요
-                                 # (extract 는 mock 이라 enabled 무관 — __post_init__ 검증 통과용 유효값).
-                                 video_keyframe_dedup_enabled=False,
-                                 video_keyframe_dedup_hash_max=7,
-                                 video_keyframe_dedup_ssim_min=0.94,
-                                 video_keyframe_dedup_ssim_gray_lo=0.90,
-                                 video_keyframe_dedup_hist_min=0.97,
-                                 video_keyframe_dedup_compare_mode="recent",
-                                 video_keyframe_dedup_recent_window=4,
-                                 embed_enable_clip=True)  # 063: 기본 True(기존 동치)
+        ctx.settings = mock.Mock(
+            video=mock.Mock(
+                max_keyframes=2, labels_meta_top_k=5,
+                # 048: video_skill 이 KeyframeDedupConfig 를 빌드하므로 유효 dedup 설정 필요
+                # (extract 는 mock 이라 enabled 무관 — __post_init__ 검증 통과용 유효값).
+                dedup_enabled=False, dedup_hash_max=7, dedup_ssim_min=0.94,
+                dedup_ssim_gray_lo=0.90, dedup_hist_min=0.97,
+                dedup_compare_mode="recent", dedup_recent_window=4,
+            ),
+            vlm=mock.Mock(labels_score_min=0.0),
+            embed=mock.Mock(model="m", normalize=True, active_channel="st", enable_clip=True),
+        )  # 063: enable_clip 기본 True(기존 동치)
         frames = [{"scene_index": 0, "start_sec": 0, "end_sec": 1, "frame_sec": 0, "jpeg_bytes": b"x"}]
         clip_ve = {"keyframes": [{"clip_image_embedding": [0.7] * 4,
                                   "summary": {"summary": "s", "keywords": ["k"]},
@@ -161,7 +160,7 @@ class TestVideoSplit(unittest.TestCase):
         self.assertTrue(all(e.chunk_index == 0 for e in embs))
 
         # 063 SC-02: 토글 off → 키프레임 clip 항목 스킵·ST 캡션만(같은 scratch 재사용).
-        ctx.settings.embed_enable_clip = False
+        ctx.settings.embed.enable_clip = False
         with mock.patch.multiple("src.embedders.text_embedder",
                                  embed_texts=mock.Mock(return_value=[[0.1]]),
                                  pad_embedding_to_storage_dim=mock.Mock(side_effect=lambda v: v)), \

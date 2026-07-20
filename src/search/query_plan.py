@@ -71,7 +71,7 @@ def resolve_generic_term_seed() -> tuple[str, ...]:
     try:
         from src.config.settings import get_current_settings
 
-        return get_current_settings().search_generic_term_seed
+        return get_current_settings().search.generic_term_seed
     except RuntimeError:
         return sc.GENERIC_SINGLE_TERM_SEED
 

@@ -388,10 +388,10 @@ def main() -> int:
     with db:
         result = run_backfill_db(
             db,
-            model_name=cfg.text_embedding_model_bge,
-            chunk_size=cfg.text_embedding_chunk_size,
+            model_name=cfg.embed.model_bge,
+            chunk_size=cfg.embed.chunk_size,
             encoding=cfg.encoding,
-            normalize=cfg.text_embedding_normalize,
+            normalize=cfg.embed.normalize,
             limit=args.limit,
         )
     print(json.dumps(result, ensure_ascii=False))

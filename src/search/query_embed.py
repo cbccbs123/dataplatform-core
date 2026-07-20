@@ -17,7 +17,7 @@ from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 def embed_query_for_media_search(
     query: str, *, model_name: str | None = None, channel: str | None = None
 ) -> list[float]:
-    """질의 텍스트를 임베딩한다(017 A/B·062). ``model_name`` 미지정 시 기존대로 ``cfg.text_embedding_model``
+    """질의 텍스트를 임베딩한다(017 A/B·062). ``model_name`` 미지정 시 기존대로 ``cfg.embed.model``
     (KoSimCSE)을 쓴다 — 기본 경로 완전 동치. ``model_name`` 을 주면 그 모델로 질의를 임베딩해 해당 채널의
     문서 임베딩과 같은 벡터 공간에서 비교한다(FR-004 질의-문서 모델 일치).
 
@@ -31,9 +31,9 @@ def embed_query_for_media_search(
         q = " "
     if channel is not None and backend_for_channel(channel, cfg) == "api":
         row = embed_texts_for(
-            [q], channel=channel, settings=cfg, normalize_embeddings=cfg.text_embedding_normalize
+            [q], channel=channel, settings=cfg, normalize_embeddings=cfg.embed.normalize
         )[0]
     else:
-        mn = model_name if model_name is not None else cfg.text_embedding_model
-        row = embed_texts([q], model_name=mn, normalize_embeddings=cfg.text_embedding_normalize)[0]
+        mn = model_name if model_name is not None else cfg.embed.model
+        row = embed_texts([q], model_name=mn, normalize_embeddings=cfg.embed.normalize)[0]
     return pad_embedding_to_storage_dim(row)

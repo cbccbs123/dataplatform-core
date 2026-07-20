@@ -45,20 +45,17 @@ class TestOverlapThreading(unittest.TestCase):
         self.assertEqual(cap, [0])
 
     def test_overlap_from_settings_field(self) -> None:
-        # settings.text_embedding_chunk_overlap=64 → iter_document_chunks 로 64 전달.
+        # settings.embed.chunk_overlap=64 → iter_document_chunks 로 64 전달.
         cap: list = []
-        fake_settings = mock.MagicMock(text_embedding_chunk_overlap=64)
+        fake_settings = mock.MagicMock(embed=mock.MagicMock(chunk_overlap=64))
         self._run_with(settings=fake_settings, overlap_capture=cap)
         self.assertEqual(cap, [64])
 
-    def test_missing_field_falls_back_to_zero(self) -> None:
-        # settings 에 필드가 없어도(구 객체) getattr 폴백 0(안전).
+    def test_none_settings_falls_back_to_zero(self) -> None:
+        # PR4b·③: 방어 getattr 폐지 — settings=None(미전달)만 overlap 0 폴백. 완전한 settings 는
+        #         embed.chunk_overlap 을 항상 보유(malformed 는 fail-fast).
         cap: list = []
-
-        class _NoField:
-            pass
-
-        self._run_with(settings=_NoField(), overlap_capture=cap)
+        self._run_with(settings=None, overlap_capture=cap)
         self.assertEqual(cap, [0])
 
 
@@ -137,12 +134,14 @@ class TestOverlapFailFast(unittest.TestCase):
     def _fake_settings(self, *, overlap: int, chunk_size: int = 512):
         # _validate_settings_consistency 가 보는 필드만 갖춘 경량 목(전체 settings 빌드 회피).
         return types.SimpleNamespace(
-            search_backend="opensearch",
-            opensearch_sync_enabled=True,
-            active_embed_channel="st",  # 로컬 → API base_url 검증 우회
-            embed_api_base_url="",
-            text_embedding_chunk_size=chunk_size,
-            text_embedding_chunk_overlap=overlap,
+            search=types.SimpleNamespace(backend="opensearch"),
+            opensearch=types.SimpleNamespace(sync_enabled=True),
+            embed=types.SimpleNamespace(
+                active_channel="st",  # 로컬 → API base_url 검증 우회
+                api_base_url="",
+                chunk_size=chunk_size,
+                chunk_overlap=overlap,
+            ),
         )
 
     def test_overlap_ge_chunk_size_raises(self) -> None:

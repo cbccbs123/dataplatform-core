@@ -79,12 +79,12 @@ class TestSearchBackend(unittest.TestCase):
         # 037: PG 검색 경로 제거로 기본값이 'pg'→'opensearch' 로 전환됐다.
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_backend, "opensearch")
+        self.assertEqual(settings.search.backend, "opensearch")
 
     def test_env_override_opensearch(self) -> None:
         with _env(SEARCH_BACKEND="opensearch"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_backend, "opensearch")
+        self.assertEqual(settings.search.backend, "opensearch")
 
     def test_invalid_backend_raises_fail_fast(self) -> None:
         # 화이트리스트 밖 값은 init_settings(=_build_settings) 에서 즉시 ValueError — 런타임까지 숨지 않게.
@@ -102,7 +102,7 @@ class TestSearchBackend(unittest.TestCase):
         # 공백만 있으면 _env_str_default 관례상 미설정 취급 → 기본 'opensearch'(빈 문자열로 검증 실패시키지 않음).
         with _env(SEARCH_BACKEND="   "):
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_backend, "opensearch")
+        self.assertEqual(settings.search.backend, "opensearch")
 
 
 class TestOpenSearchFusionWeights(unittest.TestCase):
@@ -111,22 +111,22 @@ class TestOpenSearchFusionWeights(unittest.TestCase):
     def test_default_is_half_half(self) -> None:
         with _env():
             settings = _build_settings("dev")
-        self.assertEqual(settings.opensearch_fusion_weights, (0.5, 0.5))
+        self.assertEqual(settings.search.fusion_weights, (0.5, 0.5))
 
     def test_env_override_parses_tuple(self) -> None:
         with _env(OPENSEARCH_FUSION_WEIGHTS="0.3,0.7"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.opensearch_fusion_weights, (0.3, 0.7))
+        self.assertEqual(settings.search.fusion_weights, (0.3, 0.7))
 
     def test_whitespace_around_values_tolerated(self) -> None:
         with _env(OPENSEARCH_FUSION_WEIGHTS=" 0.4 , 0.6 "):
             settings = _build_settings("dev")
-        self.assertEqual(settings.opensearch_fusion_weights, (0.4, 0.6))
+        self.assertEqual(settings.search.fusion_weights, (0.4, 0.6))
 
     def test_boundary_values_zero_one_ok(self) -> None:
         with _env(OPENSEARCH_FUSION_WEIGHTS="0,1"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.opensearch_fusion_weights, (0.0, 1.0))
+        self.assertEqual(settings.search.fusion_weights, (0.0, 1.0))
 
     def test_above_one_raises(self) -> None:
         with _env(OPENSEARCH_FUSION_WEIGHTS="1.5,0.5"):
@@ -173,30 +173,30 @@ class TestSearchOsCutoffSettings(unittest.TestCase):
     def test_defaults_when_unset(self) -> None:
         with _env():
             settings = _build_settings("dev")
-        self.assertIs(settings.search_os_cutoff_enabled, search_constants.OS_CUTOFF_ENABLED_DEFAULT)
-        self.assertEqual(settings.search_os_cutoff_eps, search_constants.OS_CUTOFF_EPS_DEFAULT)
-        self.assertEqual(settings.search_os_cutoff_floor, search_constants.OS_CUTOFF_FLOOR_DEFAULT)
+        self.assertIs(settings.search.os_cutoff_enabled, search_constants.OS_CUTOFF_ENABLED_DEFAULT)
+        self.assertEqual(settings.search.os_cutoff_eps, search_constants.OS_CUTOFF_EPS_DEFAULT)
+        self.assertEqual(settings.search.os_cutoff_floor, search_constants.OS_CUTOFF_FLOOR_DEFAULT)
 
     # (b) 환경 오버라이드.
     def test_enabled_env_override_false(self) -> None:
         with _env(SEARCH_OS_CUTOFF_ENABLED="false"):
             settings = _build_settings("dev")
-        self.assertIs(settings.search_os_cutoff_enabled, False)
+        self.assertIs(settings.search.os_cutoff_enabled, False)
 
     def test_eps_env_override(self) -> None:
         with _env(SEARCH_OS_CUTOFF_EPS="0.2"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_os_cutoff_eps, 0.2)
+        self.assertEqual(settings.search.os_cutoff_eps, 0.2)
 
     def test_floor_env_override(self) -> None:
         with _env(SEARCH_OS_CUTOFF_FLOOR="0.7"):
             settings = _build_settings("dev")
-        self.assertEqual(settings.search_os_cutoff_floor, 0.7)
+        self.assertEqual(settings.search.os_cutoff_floor, 0.7)
 
     # 경계 포함/제외 — eps∈[0,1)·floor∈[-1,1].
     def test_eps_boundary_zero_ok_one_excluded(self) -> None:
         with _env(SEARCH_OS_CUTOFF_EPS="0"):
-            self.assertEqual(_build_settings("dev").search_os_cutoff_eps, 0.0)
+            self.assertEqual(_build_settings("dev").search.os_cutoff_eps, 0.0)
         with _env(SEARCH_OS_CUTOFF_EPS="1"):  # 1.0 은 범위 밖([0,1))
             with self.assertRaises(ValueError):
                 _build_settings("dev")
@@ -234,15 +234,15 @@ class TestSearchOsRerank(unittest.TestCase):
     def test_defaults(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertIs(s.search_os_rerank_enabled, False)
-        self.assertEqual(s.search_os_rerank_model, "BAAI/bge-reranker-v2-m3")
-        self.assertEqual(s.search_os_rerank_top_r, 10)
+        self.assertIs(s.search.os_rerank_enabled, False)
+        self.assertEqual(s.search.os_rerank_model, "BAAI/bge-reranker-v2-m3")
+        self.assertEqual(s.search.os_rerank_top_r, 10)
 
     def test_override_and_fail_fast(self) -> None:
         with _env(SEARCH_OS_RERANK_ENABLED="true", SEARCH_OS_RERANK_TAU="0.1"):
             s = _build_settings("dev")
-        self.assertIs(s.search_os_rerank_enabled, True)
-        self.assertEqual(s.search_os_rerank_tau, 0.1)
+        self.assertIs(s.search.os_rerank_enabled, True)
+        self.assertEqual(s.search.os_rerank_tau, 0.1)
         with _env(SEARCH_OS_RERANK_TAU="1.5"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
@@ -262,19 +262,19 @@ class TestSearchOsQueryNorm(unittest.TestCase):
         with _env():
             s = _build_settings("dev")
         self.assertIs(
-            s.search_os_query_norm_enabled, search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
+            s.search.os_query_norm_enabled, search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
         )
-        self.assertIs(s.search_os_query_norm_enabled, False)
+        self.assertIs(s.search.os_query_norm_enabled, False)
 
     def test_env_override_true(self) -> None:
         with _env(SEARCH_OS_QUERY_NORM_ENABLED="true"):
             s = _build_settings("dev")
-        self.assertIs(s.search_os_query_norm_enabled, True)
+        self.assertIs(s.search.os_query_norm_enabled, True)
 
     def test_env_override_false_explicit(self) -> None:
         with _env(SEARCH_OS_QUERY_NORM_ENABLED="off"):
             s = _build_settings("dev")
-        self.assertIs(s.search_os_query_norm_enabled, False)
+        self.assertIs(s.search.os_query_norm_enabled, False)
 
     def test_invalid_bool_fail_fast(self) -> None:
         # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 검색하지 않게).
@@ -289,18 +289,18 @@ class TestSearchOsQueryNormMethod(unittest.TestCase):
     def test_default_is_morph(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(s.search_os_query_norm_method, search_constants.OS_QUERY_NORM_METHOD_DEFAULT)
-        self.assertEqual(s.search_os_query_norm_method, "morph")
+        self.assertEqual(s.search.os_query_norm_method, search_constants.OS_QUERY_NORM_METHOD_DEFAULT)
+        self.assertEqual(s.search.os_query_norm_method, "morph")
 
     def test_env_override_llm(self) -> None:
         with _env(SEARCH_OS_QUERY_NORM_METHOD="llm"):
             s = _build_settings("dev")
-        self.assertEqual(s.search_os_query_norm_method, "llm")
+        self.assertEqual(s.search.os_query_norm_method, "llm")
 
     def test_case_insensitive(self) -> None:
         with _env(SEARCH_OS_QUERY_NORM_METHOD="LLM"):
             s = _build_settings("dev")
-        self.assertEqual(s.search_os_query_norm_method, "llm")
+        self.assertEqual(s.search.os_query_norm_method, "llm")
 
     def test_invalid_method_fail_fast(self) -> None:
         # 화이트리스트 {morph, llm} 밖 값은 즉시 ValueError(_resolve_os_bm25_operator 동형).
@@ -320,12 +320,12 @@ class TestSearchOsResultFloor(unittest.TestCase):
     def test_default_when_unset(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(s.search_os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
+        self.assertEqual(s.search.os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
 
     def test_env_override(self) -> None:
         with _env(SEARCH_OS_RESULT_FLOOR="0.55"):
             s = _build_settings("dev")
-        self.assertEqual(s.search_os_result_floor, 0.55)
+        self.assertEqual(s.search.os_result_floor, 0.55)
 
     def test_boundary_inclusive(self) -> None:
         for v in ("-1", "1"):
@@ -354,11 +354,11 @@ class TestSearchOsBm25Operator(unittest.TestCase):
     def test_default_and(self) -> None:
         # 027 리뷰 후속: 기본값 = 운영 검증값 'and'(F1 — 코드 기본=운영 보정값·어휘 구제 전제).
         with _env():
-            self.assertEqual(_build_settings("dev").search_os_bm25_operator, "and")
+            self.assertEqual(_build_settings("dev").search.os_bm25_operator, "and")
 
     def test_override_and(self) -> None:
         with _env(SEARCH_OS_BM25_OPERATOR="and"):
-            self.assertEqual(_build_settings("dev").search_os_bm25_operator, "and")
+            self.assertEqual(_build_settings("dev").search.os_bm25_operator, "and")
 
     def test_whitelist_fail_fast(self) -> None:
         with _env(SEARCH_OS_BM25_OPERATOR="xor"):
@@ -377,14 +377,14 @@ class TestOpenSearchNoriUserWords(unittest.TestCase):
         with _env():
             s = _build_settings("dev")
         self.assertEqual(
-            s.opensearch_nori_user_words,
+            s.opensearch.nori_user_words,
             ("아이패드", "아이폰", "스마트워치", "맥세이프", "에어팟", "갤럭시", "애플워치"),
         )
 
     def test_csv_override(self) -> None:
         with _env(OPENSEARCH_NORI_USER_WORDS="갤럭시탭, 버즈 ,에어팟맥스"):
             s = _build_settings("dev")
-        self.assertEqual(s.opensearch_nori_user_words, ("갤럭시탭", "버즈", "에어팟맥스"))
+        self.assertEqual(s.opensearch.nori_user_words, ("갤럭시탭", "버즈", "에어팟맥스"))
 
     def test_blank_entry_fail_fast(self) -> None:
         with _env(OPENSEARCH_NORI_USER_WORDS="아이폰,,갤럭시"):
@@ -404,7 +404,7 @@ class TestOpenSearchNoriUserWords(unittest.TestCase):
             "nori_user_tokenizer"
         ]["user_dictionary_rules"]
         self.assertEqual(
-            tuple(s.opensearch_nori_user_words), search_constants.NORI_USER_WORDS_DEFAULT
+            tuple(s.opensearch.nori_user_words), search_constants.NORI_USER_WORDS_DEFAULT
         )
         self.assertEqual(tuple(rules), search_constants.NORI_USER_WORDS_DEFAULT)
 
@@ -428,12 +428,12 @@ class TestOpenSearchFilenameNoisePatterns(unittest.TestCase):
     def test_default_empty(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(s.opensearch_filename_noise_patterns, ())
+        self.assertEqual(s.opensearch.filename_noise_patterns, ())
 
     def test_csv_override(self) -> None:
         with _env(OPENSEARCH_FILENAME_NOISE_PATTERNS=r"^shorts$, ^clip\d+$"):
             s = _build_settings("dev")
-        self.assertEqual(s.opensearch_filename_noise_patterns, (r"^shorts$", r"^clip\d+$"))
+        self.assertEqual(s.opensearch.filename_noise_patterns, (r"^shorts$", r"^clip\d+$"))
 
     def test_blank_entry_fail_fast(self) -> None:
         with _env(OPENSEARCH_FILENAME_NOISE_PATTERNS="^a$,,^b$"):
@@ -448,12 +448,11 @@ class TestOpenSearchFilenameNoisePatterns(unittest.TestCase):
 
 
 class TestG3FieldNameContract(unittest.TestCase):
-    """search_service.search_hybrid getattr 계약 봉인 — 필드명·기본값 정확 일치.
+    """search_service 검색 튜닝 필드 계약 봉인 — 필드명·기본값 정확 일치.
 
-    OS 경로가 ``getattr(cfg, "opensearch_fusion_weights", search_constants.OS_FUSION_WEIGHTS_DEFAULT)``
-    / ``getattr(cfg, "search_os_result_floor", search_constants.OS_RESULT_FLOOR_DEFAULT)`` 등으로 cfg
-    필드를 읽으므로, 정식화된 필드명·기본값이 그 폴백값과 어긋나면 동작이 갈라진다(회귀). 이 계약을
-    직접 봉인한다. 037: search_backend 는 settings 단일 경로 결정 필드로, 기본값이 'pg'→'opensearch' 로
+    PR4b: OS 경로가 ``SearchTuning.from_settings(cfg)`` → ``cfg.search.<field>`` 직접 중첩 접근으로 융합·
+    게이트·컷 필드를 읽으므로, 하위 dataclass 필드명·기본값이 어긋나면 동작이 갈라진다(회귀). 이 계약을
+    직접 봉인한다. 037: search.backend 는 settings 단일 경로 결정 필드로, 기본값이 'pg'→'opensearch' 로
     전환됐다(아래 단언). 027: 서버 파이프라인 메타 필드는 클라이언트 융합 전환으로 제거됐다 —
     제거 봉인은 아래 '제거된 필드 부재' 단언이 담당한다.
     """
@@ -477,17 +476,17 @@ class TestG3FieldNameContract(unittest.TestCase):
     def test_field_names_and_defaults_match_g3_getattr(self) -> None:
         with _env():
             settings = _build_settings("dev")
-        # 필드명(getattr 키) 일치
-        self.assertTrue(hasattr(settings, "search_backend"))
-        self.assertTrue(hasattr(settings, "opensearch_fusion_weights"))
-        self.assertTrue(hasattr(settings, "search_os_result_floor"))
+        # 필드명 일치(PR4b: 검색 튜닝 필드는 settings.search 하위로 중첩 — SearchTuning.from_settings 소비 계약)
+        self.assertTrue(hasattr(settings.search, "backend"))
+        self.assertTrue(hasattr(settings.search, "fusion_weights"))
+        self.assertTrue(hasattr(settings.search, "os_result_floor"))
         # 027: 제거된 필드들은 더 이상 존재하지 않는다(서버 융합 파이프라인·정규화 스케일 임계 0)
         for removed in self._REMOVED_FIELDS:
             self.assertFalse(hasattr(settings, removed), f"제거된 필드가 잔존: {removed}")
         # 037: 기본 search_backend 가 'pg'→'opensearch' 로 전환됐다(PG 검색 경로 제거).
-        self.assertEqual(settings.search_backend, "opensearch")
-        self.assertEqual(settings.opensearch_fusion_weights, search_constants.OS_FUSION_WEIGHTS_DEFAULT)
-        self.assertEqual(settings.search_os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
+        self.assertEqual(settings.search.backend, "opensearch")
+        self.assertEqual(settings.search.fusion_weights, search_constants.OS_FUSION_WEIGHTS_DEFAULT)
+        self.assertEqual(settings.search.os_result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
 
 
 class TestRelationAutoApproveEmbMin(unittest.TestCase):
@@ -500,12 +499,12 @@ class TestRelationAutoApproveEmbMin(unittest.TestCase):
     def test_default_zero_when_unset(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(s.relation_auto_approve_emb_min, 0.0)
+        self.assertEqual(s.relations.auto_approve_emb_min, 0.0)
 
     def test_env_override(self) -> None:
         with _env(RELATION_AUTO_APPROVE_EMB_MIN="0.5"):
             s = _build_settings("dev")
-        self.assertEqual(s.relation_auto_approve_emb_min, 0.5)
+        self.assertEqual(s.relations.auto_approve_emb_min, 0.5)
 
 
 class TestSearchBackendWiring(unittest.TestCase):
@@ -535,7 +534,7 @@ class TestSearchBackendWiring(unittest.TestCase):
             # 목적이라 OS 경로가 호출부 필터를 적용하지 않으므로 행은 그대로 보존된다.
             return {"text": [{"id": "os_t", "similarity": 0.9}]}, {}
 
-        # backend 인자 미전달(진입점 호출부와 동일) → settings.search_backend 가 경로를 결정한다.
+        # backend 인자 미전달(진입점 호출부와 동일) → settings.search.backend 가 경로를 결정한다.
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             out = svc.search_hybrid(
                 "질의",
@@ -552,7 +551,7 @@ class TestSearchBackendWiring(unittest.TestCase):
 
         with _env():  # SEARCH_BACKEND 미설정 → 기본 'opensearch'
             cfg = _build_settings("dev")
-        self.assertEqual(cfg.search_backend, "opensearch")
+        self.assertEqual(cfg.search.backend, "opensearch")
 
         os_calls: list[object] = []
 
@@ -588,7 +587,7 @@ class TestOpenSearchSyncGuard(unittest.TestCase):
         # SC-001: 미설정 → 기본 True(037 후 적재=색인). _BACKEND_KEYS 가 비워 실행 환경과 격리.
         with _env():
             settings = _build_settings("dev")
-        self.assertIs(settings.opensearch_sync_enabled, True)
+        self.assertIs(settings.opensearch.sync_enabled, True)
 
     def test_opensearch_backend_with_sync_off_raises(self) -> None:
         # SC-002: backend=opensearch(기본) ∧ sync=false → 빌드 시 즉시 ValueError(반쪽 마이그레이션 차단).
@@ -603,8 +602,8 @@ class TestOpenSearchSyncGuard(unittest.TestCase):
         # SC-002: 둘 다 일관(opensearch + true)이면 정상 빌드.
         with _env(OPENSEARCH_SYNC_ENABLED="true"):
             settings = _build_settings("dev")
-        self.assertIs(settings.opensearch_sync_enabled, True)
-        self.assertEqual(settings.search_backend, "opensearch")
+        self.assertIs(settings.opensearch.sync_enabled, True)
+        self.assertEqual(settings.search.backend, "opensearch")
 
 
 class TestGenericTermSeedExtra(unittest.TestCase):
@@ -614,14 +613,14 @@ class TestGenericTermSeedExtra(unittest.TestCase):
         with _env():
             settings = _build_settings("dev")
         self.assertEqual(
-            settings.search_generic_term_seed,
+            settings.search.generic_term_seed,
             search_constants.GENERIC_SINGLE_TERM_SEED,
         )
 
     def test_extra_env_merges_and_dedups(self) -> None:
         with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,bar,TEST"):
             settings = _build_settings("dev")
-        seed = settings.search_generic_term_seed
+        seed = settings.search.generic_term_seed
         self.assertIn("foo", seed)
         self.assertIn("bar", seed)
         self.assertEqual(len(seed), len(search_constants.GENERIC_SINGLE_TERM_SEED) + 2)
@@ -635,7 +634,7 @@ class TestGenericTermSeedExtra(unittest.TestCase):
         with mock.patch.object(
             query_plan,
             "resolve_generic_term_seed",
-            return_value=settings.search_generic_term_seed,
+            return_value=settings.search.generic_term_seed,
         ):
             p = build_search_policy("foo")
         self.assertTrue(p.generic_single_term)
@@ -666,18 +665,18 @@ class TestVideoKeyframeDedupSettings(unittest.TestCase):
     def test_defaults_when_unset(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertIs(s.video_keyframe_dedup_enabled, True)
-        self.assertEqual(s.video_keyframe_dedup_hash_max, 7)
-        self.assertEqual(s.video_keyframe_dedup_ssim_min, 0.94)
-        self.assertEqual(s.video_keyframe_dedup_ssim_gray_lo, 0.90)
-        self.assertEqual(s.video_keyframe_dedup_hist_min, 0.97)
-        self.assertEqual(s.video_keyframe_dedup_compare_mode, "recent")
-        self.assertEqual(s.video_keyframe_dedup_recent_window, 4)
+        self.assertIs(s.video.dedup_enabled, True)
+        self.assertEqual(s.video.dedup_hash_max, 7)
+        self.assertEqual(s.video.dedup_ssim_min, 0.94)
+        self.assertEqual(s.video.dedup_ssim_gray_lo, 0.90)
+        self.assertEqual(s.video.dedup_hist_min, 0.97)
+        self.assertEqual(s.video.dedup_compare_mode, "recent")
+        self.assertEqual(s.video.dedup_recent_window, 4)
 
     def test_enabled_env_override_false(self) -> None:
         with _env(VIDEO_KEYFRAME_DEDUP_ENABLED="false"):
             s = _build_settings("dev")
-        self.assertIs(s.video_keyframe_dedup_enabled, False)
+        self.assertIs(s.video.dedup_enabled, False)
 
     def test_numeric_env_overrides(self) -> None:
         with _env(
@@ -688,16 +687,16 @@ class TestVideoKeyframeDedupSettings(unittest.TestCase):
             VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW="2",
         ):
             s = _build_settings("dev")
-        self.assertEqual(s.video_keyframe_dedup_hash_max, 5)
-        self.assertEqual(s.video_keyframe_dedup_ssim_min, 0.9)
-        self.assertEqual(s.video_keyframe_dedup_ssim_gray_lo, 0.85)
-        self.assertEqual(s.video_keyframe_dedup_hist_min, 0.95)
-        self.assertEqual(s.video_keyframe_dedup_recent_window, 2)
+        self.assertEqual(s.video.dedup_hash_max, 5)
+        self.assertEqual(s.video.dedup_ssim_min, 0.9)
+        self.assertEqual(s.video.dedup_ssim_gray_lo, 0.85)
+        self.assertEqual(s.video.dedup_hist_min, 0.95)
+        self.assertEqual(s.video.dedup_recent_window, 2)
 
     def test_compare_mode_env_override(self) -> None:
         with _env(VIDEO_KEYFRAME_DEDUP_COMPARE_MODE="global"):
             s = _build_settings("dev")
-        self.assertEqual(s.video_keyframe_dedup_compare_mode, "global")
+        self.assertEqual(s.video.dedup_compare_mode, "global")
 
     def test_invalid_bool_fail_fast(self) -> None:
         # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 추출하지 않게).
@@ -727,23 +726,23 @@ class TestVlmSummaryPromptV2Settings(unittest.TestCase):
         # 미설정 → 둘 다 기본 False(v1 바이트 동일·회귀 안전판). _BACKEND_KEYS 가 비워 실행 환경과 격리.
         with _env():
             s = _build_settings("dev")
-        self.assertIs(s.vlm_summary_prompt_v2, False)
-        self.assertIs(s.vlm_summary_ab_judge, False)
+        self.assertIs(s.vlm.summary_prompt_v2, False)
+        self.assertIs(s.vlm.summary_ab_judge, False)
 
     def test_prompt_v2_env_override_true(self) -> None:
         with _env(VLM_SUMMARY_PROMPT_V2="true"):
             s = _build_settings("dev")
-        self.assertIs(s.vlm_summary_prompt_v2, True)
+        self.assertIs(s.vlm.summary_prompt_v2, True)
 
     def test_ab_judge_env_override_true(self) -> None:
         with _env(VLM_SUMMARY_AB_JUDGE="1"):
             s = _build_settings("dev")
-        self.assertIs(s.vlm_summary_ab_judge, True)
+        self.assertIs(s.vlm.summary_ab_judge, True)
 
     def test_prompt_v2_env_override_false_explicit(self) -> None:
         with _env(VLM_SUMMARY_PROMPT_V2="off"):
             s = _build_settings("dev")
-        self.assertIs(s.vlm_summary_prompt_v2, False)
+        self.assertIs(s.vlm.summary_prompt_v2, False)
 
     def test_invalid_bool_fail_fast(self) -> None:
         # 불리언 형식 오류는 _env_bool_default 가 즉시 ValueError(잘못된 토글로 추출하지 않게).
@@ -764,17 +763,17 @@ class TestTopicCanonicalizeEnabledSettings(unittest.TestCase):
         # 미설정 → 기본 False(동작 불변·시드 전 동치). _BACKEND_KEYS 가 비워 실행 환경과 격리.
         with _env():
             s = _build_settings("dev")
-        self.assertIs(s.topic_canonicalize_enabled, False)
+        self.assertIs(s.topic.canonicalize_enabled, False)
 
     def test_env_override_true(self) -> None:
         with _env(TOPIC_CANONICALIZE_ENABLED="true"):
             s = _build_settings("dev")
-        self.assertIs(s.topic_canonicalize_enabled, True)
+        self.assertIs(s.topic.canonicalize_enabled, True)
 
     def test_env_override_false_explicit(self) -> None:
         with _env(TOPIC_CANONICALIZE_ENABLED="off"):
             s = _build_settings("dev")
-        self.assertIs(s.topic_canonicalize_enabled, False)
+        self.assertIs(s.topic.canonicalize_enabled, False)
 
     def test_invalid_bool_fail_fast(self) -> None:
         with _env(TOPIC_CANONICALIZE_ENABLED="maybe"):
@@ -793,17 +792,17 @@ class TestEmbedEnableClipSettings(unittest.TestCase):
         # 미설정 → 기본 True(회귀 0). _BACKEND_KEYS 가 비워 실행 환경과 격리.
         with _env():
             s = _build_settings("dev")
-        self.assertIs(s.embed_enable_clip, True)
+        self.assertIs(s.embed.enable_clip, True)
 
     def test_env_override_false(self) -> None:
         with _env(EMBED_ENABLE_CLIP="false"):
             s = _build_settings("dev")
-        self.assertIs(s.embed_enable_clip, False)
+        self.assertIs(s.embed.enable_clip, False)
 
     def test_env_override_true_explicit(self) -> None:
         with _env(EMBED_ENABLE_CLIP="on"):
             s = _build_settings("dev")
-        self.assertIs(s.embed_enable_clip, True)
+        self.assertIs(s.embed.enable_clip, True)
 
     def test_invalid_bool_fail_fast(self) -> None:
         with _env(EMBED_ENABLE_CLIP="maybe"):
@@ -812,22 +811,33 @@ class TestEmbedEnableClipSettings(unittest.TestCase):
 
 
 class TestFieldSpecsSSOT(unittest.TestCase):
-    """069 US-E FR-E4(PR4a) — 필드 명세 단일 출처(``_FIELD_SPECS``).
+    """069 US-E FR-E4 — 필드 명세 단일 출처(``_FIELD_SPECS``·그룹 포함).
 
-    build 조립·테스트 격리키(``_BACKEND_KEYS``)·커버리지가 모두 이 한 테이블에서 파생돼야 한다.
-    새 env 필드 추가 시 테이블 한 행만 늘리면 build·격리·검증이 자동 반영된다(SC-E: 필드 추가 시
-    테스트 수정 0). 이 계약이 깨지면(테이블 누락/드리프트) 아래 두 테스트가 즉시 실패한다."""
+    build 조립(그룹별 하위 dataclass)·테스트 격리키(``_BACKEND_KEYS``)·커버리지가 모두 이 한 테이블에서
+    파생돼야 한다. 새 env 필드 추가 시 테이블 한 행만 늘리면 build·격리·검증이 자동 반영된다(SC-E: 필드
+    추가 시 테스트 수정 0). 이 계약이 깨지면(테이블 누락/드리프트) 아래 테스트가 즉시 실패한다."""
 
-    def test_specs_cover_all_env_backed_fields(self) -> None:
-        # PipelineSettings 의 env 유래 필드(=profile 제외 전부) 와 _FIELD_SPECS 가 정확히 1:1.
+    def test_specs_cover_all_dataclass_fields(self) -> None:
+        # 각 하위 dataclass 필드 ↔ 해당 그룹 spec 이 정확히 1:1, 상위 공통(group="")도 1:1(PR4b 중첩).
         from dataclasses import fields
 
-        from src.config.settings import _FIELD_SPECS, PipelineSettings
+        from src.config.settings import _FIELD_SPECS, _GROUP_CLASSES, PipelineSettings
 
-        spec_attrs = [s.attr for s in _FIELD_SPECS]
-        self.assertEqual(len(spec_attrs), len(set(spec_attrs)), "_FIELD_SPECS 중복 attr")
-        dc_attrs = {f.name for f in fields(PipelineSettings)} - {"profile"}
-        self.assertEqual(set(spec_attrs), dc_attrs)
+        by_group: dict[str, list[str]] = {}
+        for s in _FIELD_SPECS:
+            by_group.setdefault(s.group, []).append(s.attr)
+        for g, attrs in by_group.items():
+            self.assertEqual(len(attrs), len(set(attrs)), f"그룹 {g!r} 중복 attr")
+        # 하위 dataclass 그룹
+        for name, cls in _GROUP_CLASSES.items():
+            self.assertEqual(
+                set(by_group.get(name, [])),
+                {f.name for f in fields(cls)},
+                f"그룹 {name!r} spec ↔ dataclass 불일치",
+            )
+        # 상위 공통 = PipelineSettings 필드 - profile - 그룹 필드
+        common = {f.name for f in fields(PipelineSettings)} - {"profile"} - set(_GROUP_CLASSES)
+        self.assertEqual(set(by_group.get("", [])), common, "상위 공통 spec ↔ dataclass 불일치")
 
     def test_backend_keys_derived_from_specs(self) -> None:
         # 테스트 격리키(선택 env)는 수동 나열이 아니라 테이블의 required=False 행에서 파생된다.

@@ -69,7 +69,7 @@ class TestVideoReducePromptV2(unittest.TestCase):
 
 def _build_cfg_stub(*, v2: bool, top_k: int = 10, summary_max: int = 500) -> mock.Mock:
     cfg = mock.Mock()
-    cfg.vlm_summary_prompt_v2 = v2
+    cfg.vlm.summary_prompt_v2 = v2
     cfg.top_k_keywords = top_k
     cfg.summary_max_chars = summary_max
     return cfg

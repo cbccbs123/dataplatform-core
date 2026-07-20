@@ -98,21 +98,22 @@ class TestApiChannelFailFast(unittest.TestCase):
 
     def test_st_api_without_base_url_raises(self) -> None:
         base = _settings(EMBED_API_BASE_URL="http://x/v1")
-        bad = dataclasses.replace(base, active_embed_channel="st_api", embed_api_base_url="")
+        bad = dataclasses.replace(base, embed=dataclasses.replace(
+            base.embed, active_channel="st_api", api_base_url=""))
         with self.assertRaises(ValueError):
             _validate_settings_consistency(bad)
 
     def test_st_api_with_base_url_ok(self) -> None:
         base = _settings(EMBED_API_BASE_URL="http://x/v1")
-        ok = dataclasses.replace(
-            base, active_embed_channel="st_api", embed_api_base_url="http://x/v1"
-        )
+        ok = dataclasses.replace(base, embed=dataclasses.replace(
+            base.embed, active_channel="st_api", api_base_url="http://x/v1"))
         _validate_settings_consistency(ok)  # 예외 없음
 
     def test_local_channel_without_base_url_ok(self) -> None:
         # 기본 로컬 채널은 base_url 없어도 정상(회귀 0).
         base = _settings()
-        local = dataclasses.replace(base, active_embed_channel="st", embed_api_base_url="")
+        local = dataclasses.replace(base, embed=dataclasses.replace(
+            base.embed, active_channel="st", api_base_url=""))
         _validate_settings_consistency(local)
 
 

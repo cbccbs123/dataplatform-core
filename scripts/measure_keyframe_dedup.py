@@ -50,12 +50,12 @@ def main() -> int:
 
     dedup_on = KeyframeDedupConfig(
         enabled=True,
-        hash_max=cfg.video_keyframe_dedup_hash_max,
-        ssim_min=cfg.video_keyframe_dedup_ssim_min,
-        ssim_gray_lo=cfg.video_keyframe_dedup_ssim_gray_lo,
-        hist_min=cfg.video_keyframe_dedup_hist_min,
-        compare_mode=cfg.video_keyframe_dedup_compare_mode,
-        recent_window=cfg.video_keyframe_dedup_recent_window,
+        hash_max=cfg.video.dedup_hash_max,
+        ssim_min=cfg.video.dedup_ssim_min,
+        ssim_gray_lo=cfg.video.dedup_ssim_gray_lo,
+        hist_min=cfg.video.dedup_hist_min,
+        compare_mode=cfg.video.dedup_compare_mode,
+        recent_window=cfg.video.dedup_recent_window,
     )
 
     videos = _collect_videos(args)

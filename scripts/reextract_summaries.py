@@ -202,7 +202,7 @@ def main() -> int:
 
     # 050 FR-101: stage-2(video v2 재캡션)는 049 v2 토글 on 전제. off 면 v1 재캡션 = 무의미라
     # DB 연결 전에 중단한다(--force 로만 강행 가능). 게이트가 가장 먼저라 mock 단위로 검증 가능.
-    if args.stage2 and not cfg.vlm_summary_prompt_v2 and not args.force:
+    if args.stage2 and not cfg.vlm.summary_prompt_v2 and not args.force:
         _LOG.error("VLM_SUMMARY_PROMPT_V2=off — v1 재캡션은 무의미. --force 로만 강행.")
         return 2
 
@@ -285,7 +285,7 @@ def main() -> int:
                     cur.execute(_UPDATE, (json.dumps(merged, ensure_ascii=False), asset_id))
                 if modality == "image":
                     counts["reembedded_images"] += _reembed_image(
-                        conn, asset_id, merged, normalize=cfg.text_embedding_normalize
+                        conn, asset_id, merged, normalize=cfg.embed.normalize
                     )
                 conn.commit()
                 counts["processed"] += 1

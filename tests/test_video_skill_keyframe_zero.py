@@ -17,16 +17,18 @@ from src.skills import video_skill
 def _cfg() -> mock.Mock:
     # _extract_video_meta 가 읽는 설정 속성만 채운 대역(dedup config·상한·라벨 필터).
     return mock.Mock(
-        video_keyframe_dedup_enabled=False,
-        video_keyframe_dedup_hash_max=7,
-        video_keyframe_dedup_ssim_min=0.94,
-        video_keyframe_dedup_ssim_gray_lo=0.0,
-        video_keyframe_dedup_hist_min=0.0,
-        video_keyframe_dedup_compare_mode="recent",
-        video_keyframe_dedup_recent_window=4,
-        video_max_keyframes=8,
-        labels_score_min=0.0,
-        video_keyframe_labels_meta_top_k=5,
+        video=mock.Mock(
+            dedup_enabled=False,
+            dedup_hash_max=7,
+            dedup_ssim_min=0.94,
+            dedup_ssim_gray_lo=0.0,
+            dedup_hist_min=0.0,
+            dedup_compare_mode="recent",
+            dedup_recent_window=4,
+            max_keyframes=8,
+            labels_meta_top_k=5,
+        ),
+        vlm=mock.Mock(labels_score_min=0.0),
     )
 
 

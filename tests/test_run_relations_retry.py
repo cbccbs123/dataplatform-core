@@ -173,7 +173,7 @@ class TestRunRelationsQueueWiring(unittest.TestCase):
     def test_max_attempts_from_settings_when_none(self) -> None:
         # max_attempts 미지정 시 현재 설정값을 사용한다(여기선 1로 주입).
         db = _FakeDB(attempts={})
-        fake_settings = mock.MagicMock(relation_retry_max_attempts=1)
+        fake_settings = mock.MagicMock(relations=mock.MagicMock(retry_max_attempts=1))
 
         def propose(db_, aid, *, top_k=None, embedding_kind="both"):
             raise RuntimeError("boom")  # 첫 실패 → attempts 0→1 == max(1) → failed

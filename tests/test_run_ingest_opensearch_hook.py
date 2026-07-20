@@ -30,10 +30,13 @@ _ASSET = uuid.UUID("018f0000-0000-7000-8000-000000000019")
 def _settings(*, enabled: bool, channel: str = "st") -> types.SimpleNamespace:
     """run_ingest 가 cfg 로 쓰는 설정 대역(필요 필드만)."""
     return types.SimpleNamespace(
-        opensearch_sync_enabled=enabled,
-        opensearch_url="http://localhost:9200",
-        opensearch_index="assets",
-        active_embed_channel=channel,
+        opensearch=types.SimpleNamespace(
+            sync_enabled=enabled,
+            url="http://localhost:9200",
+            index="assets",
+            filename_noise_patterns=(),
+        ),
+        embed=types.SimpleNamespace(active_channel=channel),
     )
 
 
@@ -90,12 +93,12 @@ class TestOpenSearchIndexerFactory(unittest.TestCase):
         # DB 트랜잭션도 열지 않음(읽기 conn 미오픈)
         self.db.transaction.assert_not_called()
 
-    # (a') 설정에 필드가 아예 없어도(레거시 settings) off 로 간주, 안전 반환(getattr 폴백)
-    def test_missing_flag_attr_treated_as_off(self) -> None:
-        with _patched_os_sync() as fake:
-            self._indexer(object())(_ASSET)  # opensearch_sync_enabled 속성 없음
-        fake.index_asset.assert_not_called()
-        self.assertEqual(fake.accessed, [])
+    # (a') PR4b·③: 방어적 getattr 폐지 — 색인기는 완전한 PipelineSettings(.opensearch 보유)를
+    #      요구한다. malformed settings(.opensearch 없음)는 조용히 off 가 아니라 팩토리에서
+    #      즉시 AttributeError(fail-fast — 오설정이 런타임까지 숨지 않게).
+    def test_malformed_settings_without_opensearch_raises(self) -> None:
+        with self.assertRaises(AttributeError):
+            self._indexer(object())
 
     # (b) enabled + 색인 예외 → 삼킴(warning) + 무중단 반환
     def test_enabled_index_error_is_swallowed_with_warning(self) -> None:

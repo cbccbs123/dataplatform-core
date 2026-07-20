@@ -77,7 +77,7 @@ class TestImageCaptionPromptV2(unittest.TestCase):
 def _build_cfg_stub(*, v2: bool, top_k: int = 10, summary_max: int = 500) -> mock.Mock:
     """summarize 함수가 읽는 settings 의 필요한 필드만 가진 stub(순수 단위 — 실 settings 미초기화)."""
     cfg = mock.Mock()
-    cfg.vlm_summary_prompt_v2 = v2
+    cfg.vlm.summary_prompt_v2 = v2
     cfg.top_k_keywords = top_k
     cfg.summary_max_chars = summary_max
     return cfg

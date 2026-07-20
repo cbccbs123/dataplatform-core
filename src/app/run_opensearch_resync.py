@@ -117,12 +117,12 @@ def main() -> int:
 
     cfg = get_current_settings()
     channel = resolve_channel(args.channel)  # 미지정=활성 프로파일(018)
-    index = args.index or cfg.opensearch_index  # 미지정=OPENSEARCH_INDEX
+    index = args.index or cfg.opensearch.index  # 미지정=OPENSEARCH_INDEX
 
     client = get_client()
     info = client.info()
     print(
-        f"[OpenSearch 복구 재색인] {cfg.opensearch_url} (v{info['version']['number']}) "
+        f"[OpenSearch 복구 재색인] {cfg.opensearch.url} (v{info['version']['number']}) "
         f"→ index='{index}' channel='{channel}' recreate={args.recreate}"
     )
 
@@ -134,8 +134,8 @@ def main() -> int:
         check_pgvector_version(conn)
         return run_resync(
             client, conn, channel=channel, index=index, recreate=args.recreate,
-            nori_user_words=getattr(cfg, "opensearch_nori_user_words", None),
-            noise_patterns=getattr(cfg, "opensearch_filename_noise_patterns", ()),
+            nori_user_words=cfg.opensearch.nori_user_words,
+            noise_patterns=cfg.opensearch.filename_noise_patterns,
         )
 
     with db:

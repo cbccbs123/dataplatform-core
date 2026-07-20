@@ -65,13 +65,19 @@ def _route(modality="txt", domain="general", routable=True, reason=""):
     return RouteResult("/d/a." + modality, modality, domain, routable, reason)
 
 
+_NO_OS_SETTINGS = types.SimpleNamespace(opensearch=types.SimpleNamespace(sync_enabled=False))
+
+
 def _os_settings(*, enabled: bool, channel: str = "st") -> types.SimpleNamespace:
     """process_received_batch 가 ``_make_opensearch_indexer`` 로 넘길 설정 대역(필요 필드만)."""
     return types.SimpleNamespace(
-        opensearch_sync_enabled=enabled,
-        opensearch_url="http://localhost:9200",
-        opensearch_index="assets",
-        active_embed_channel=channel,
+        opensearch=types.SimpleNamespace(
+            sync_enabled=enabled,
+            url="http://localhost:9200",
+            index="assets",
+            filename_noise_patterns=(),
+        ),
+        embed=types.SimpleNamespace(active_channel=channel),
     )
 
 
@@ -225,7 +231,7 @@ class TestProcessReceivedBatch(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
             self._patch_common(stack, [(_A1, "/d/a"), (_A2, "/d/b"), (_A3, "/d/c")], process_side=_process)
-            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=object())
+            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=_NO_OS_SETTINGS)
 
         self.assertEqual(calls["n"], 1)               # 3자산 처리에도 로더 1회
         self.assertEqual(set(rep.registered), {_A1, _A2, _A3})
@@ -243,7 +249,7 @@ class TestProcessReceivedBatch(unittest.TestCase):
             stack.enter_context(mock.patch.object(br, "record_lineage"))
             stack.enter_context(mock.patch.object(br, "failure_count", return_value=1))  # cap 미만
             mf = stack.enter_context(mock.patch.object(br, "mark_failed"))
-            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=object())
+            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=_NO_OS_SETTINGS)
 
         # 실패 1건이 격리되고 나머지는 정상 등록(배치 무중단)
         self.assertEqual(set(rep.registered), {_A1, _A3})
@@ -265,7 +271,7 @@ class TestProcessReceivedBatch(unittest.TestCase):
             fc = stack.enter_context(mock.patch.object(br, "failure_count", return_value=99))
             mf = stack.enter_context(mock.patch.object(br, "mark_failed"))
             stack.enter_context(mock.patch.object(br, "record_lineage"))
-            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=object())
+            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=_NO_OS_SETTINGS)
 
         self.assertEqual(rep.registered, [_A1])
         self.assertEqual(rep.skipped, [_A2])           # 경쟁 점유 흡수 — 실패 아님
@@ -279,7 +285,7 @@ class TestProcessReceivedBatch(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
             self._patch_common(stack, [(_A1, "/d/a")], process_side=lambda asset_id, **kw: "deferred")
-            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=object())
+            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=_NO_OS_SETTINGS)
 
         self.assertEqual(rep.deferred, [_A1])
         self.assertEqual(rep.registered, [])
@@ -376,7 +382,7 @@ class TestSettingsFallback(unittest.TestCase):
     """
 
     def test_none_settings_falls_back_to_current_settings(self) -> None:
-        sentinel = types.SimpleNamespace(opensearch_sync_enabled=False)
+        sentinel = types.SimpleNamespace(opensearch=types.SimpleNamespace(sync_enabled=False))
         captured: dict = {}
 
         def _fake_indexer(*, db, settings):
@@ -424,7 +430,7 @@ class TestRetryCapTerminalIsolation(unittest.TestCase):
         rl = stack.enter_context(mock.patch.object(br, "record_lineage"))
         stack.enter_context(mock.patch.object(br, "failure_count", return_value=fail_count))
         mf = stack.enter_context(mock.patch.object(br, "mark_failed"))
-        rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=object())
+        rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=_NO_OS_SETTINGS)
         return rep, rl, mf
 
     def test_cap_reached_isolates_to_failed_terminal(self) -> None:
@@ -461,7 +467,7 @@ class TestRetryCapTerminalIsolation(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(br, "mark_failed", side_effect=InvalidTransitionError("이미 종료"))
             )
-            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=object())
+            rep = br.process_received_batch(mock.MagicMock(), limit=50, max_failures=3, settings=_NO_OS_SETTINGS)
         self.assertEqual(rep.failed_terminal, [_A1])    # 충돌 흡수돼도 종료 격리로 집계
 
 

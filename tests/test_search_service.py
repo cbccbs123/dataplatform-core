@@ -16,6 +16,60 @@ from src.config import search_constants
 from src.search.search_service import search_hybrid
 
 
+def _cfg(**flat):
+    """검색 테스트용 cfg fake (069 US-E FR-E4·PR4b 중첩).
+
+    SearchTuning.from_settings(cfg) 가 cfg.search 13필드를 전부 읽으므로 search 는 **완전한
+    SearchConfig**(기본=search_constants + override)여야 한다. flat 키('search_*'·'opensearch_index'·
+    'opensearch_fusion_weights')는 해당 그룹 필드로 매핑한다.
+
+    ⚠️ 지원 키(search_*·opensearch_index·opensearch_fusion_weights) 밖은 상위 속성(top)으로 떨어진다 —
+    즉 ``opensearch_sync_enabled=``·``embed_api_*=`` 같은 다른 그룹 키를 무심코 넣어도 .opensearch/.embed
+    하위로 안 가고 조용히 최상위에 붙는다. 이 헬퍼는 검색 경로(search·opensearch.index) 전용이니 다른
+    그룹이 필요하면 중첩 SimpleNamespace 를 직접 구성할 것."""
+    from dataclasses import replace
+
+    from src.config.settings import SearchConfig
+
+    sc = SearchConfig(
+        backend="opensearch",
+        fusion_weights=search_constants.OS_FUSION_WEIGHTS_DEFAULT,
+        os_cutoff_enabled=search_constants.OS_CUTOFF_ENABLED_DEFAULT,
+        os_cutoff_eps=search_constants.OS_CUTOFF_EPS_DEFAULT,
+        os_cutoff_floor=search_constants.OS_CUTOFF_FLOOR_DEFAULT,
+        os_result_floor=search_constants.OS_RESULT_FLOOR_DEFAULT,
+        os_rerank_enabled=search_constants.OS_RERANK_ENABLED_DEFAULT,
+        os_rerank_model=search_constants.OS_RERANK_MODEL_DEFAULT,
+        os_rerank_top_r=search_constants.OS_RERANK_TOP_R_DEFAULT,
+        os_rerank_tau=search_constants.OS_RERANK_TAU_DEFAULT,
+        os_query_norm_enabled=search_constants.OS_QUERY_NORM_ENABLED_DEFAULT,
+        os_query_norm_method=search_constants.OS_QUERY_NORM_METHOD_DEFAULT,
+        about_filter_enabled=search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT,
+        llm_verify_enabled=search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT,
+        os_bm25_operator=search_constants.OS_BM25_OPERATOR_DEFAULT,
+        evidence_rescue_enabled=search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
+        evidence_debug=search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT,
+        generic_term_seed=(),
+    )
+    index = "assets"
+    over: dict = {}
+    top: dict = {}
+    for k, v in flat.items():
+        if k == "opensearch_index":
+            index = v
+        elif k == "opensearch_fusion_weights":
+            over["fusion_weights"] = v
+        elif k.startswith("search_"):
+            over[k[len("search_") :]] = v
+        else:
+            top[k] = v
+    return types.SimpleNamespace(
+        search=replace(sc, **over) if over else sc,
+        opensearch=types.SimpleNamespace(index=index),
+        **top,
+    )
+
+
 def _recording_os(
     buckets: dict[str, list[dict[str, object]]],
     gate_meta: dict[str, dict[str, object]] | None = None,
@@ -177,7 +231,7 @@ class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
     def test_morph_norm_applied_when_enabled(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch", search_os_query_norm_enabled=True, opensearch_index="assets",
         )
         client = self._analyze_client([
@@ -198,7 +252,7 @@ class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
     def test_word_query_passthrough_no_analyze(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch", search_os_query_norm_enabled=True, opensearch_index="assets",
         )
         client = self._analyze_client([])
@@ -214,7 +268,7 @@ class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
     def test_off_passthrough_no_analyze(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch", search_os_query_norm_enabled=False,
         )
         client = self._analyze_client([])
@@ -230,7 +284,7 @@ class TestBackendOsMorphQueryNormWiring(unittest.TestCase):
         # 075: method 미지정(getattr 폴백) → 형태소 경로·meta.query_norm.method="morph".
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch", search_os_query_norm_enabled=True, opensearch_index="assets",
         )
         client = self._analyze_client([{"token": "김밥", "leftPOS": "NNG(General Noun)"}])
@@ -252,7 +306,7 @@ class TestBackendOsLlmQueryNormWiring(unittest.TestCase):
         import src.search.query_preprocess as qp
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch", search_os_query_norm_enabled=True,
             search_os_query_norm_method="llm", opensearch_index="assets",
         )
@@ -278,7 +332,7 @@ class TestBackendOsAboutFilterWiring(unittest.TestCase):
     def test_toggle_forwarded_from_cfg(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch", search_about_filter_enabled=True)
+        cfg = _cfg(search_backend="opensearch", search_about_filter_enabled=True)
         fake_os, cap = _recording_os({"text": [{"id": "t"}]})
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             svc.search_hybrid("질의", modalities=["text"], _os_search_fn=fake_os, _os_client_fn=lambda: "C")
@@ -304,7 +358,7 @@ class TestBackendOsLlmVerifyWiring(unittest.TestCase):
     def test_enabled_nl_query_drops_judged_irrelevant(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch", search_llm_verify_enabled=True)
+        cfg = _cfg(search_backend="opensearch", search_llm_verify_enabled=True)
         fake_os, _ = _recording_os(self._buckets())
         calls: list[str] = []
 
@@ -326,7 +380,7 @@ class TestBackendOsLlmVerifyWiring(unittest.TestCase):
         # 어절<3(단어 질의) → 검증 경로 무접촉(judge 미호출·meta 키 부재·FR-001).
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch", search_llm_verify_enabled=True)
+        cfg = _cfg(search_backend="opensearch", search_llm_verify_enabled=True)
         fake_os, _ = _recording_os(self._buckets())
         calls: list[str] = []
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
@@ -366,7 +420,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         import src.search.search_service as svc
 
         # 컷오프 값을 search_constants 기본값과 다르게 둔 가짜 cfg — 전달이 폴백이 아니라 cfg 에서 옴을 증명.
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch",
             search_os_cutoff_enabled=True,
             search_os_cutoff_eps=0.22,
@@ -411,7 +465,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         # 로 강제 전달(게이트·per-result 컷 모두 off → 약한 후보까지 노출).
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch",
             search_os_cutoff_enabled=True,
             search_os_cutoff_eps=0.22,
@@ -433,7 +487,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
         # disable_os_cutoff 기본 False → cfg 의 enabled 가 그대로 전달(우회 미적용).
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch", search_os_cutoff_enabled=True,
         )
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
@@ -455,7 +509,7 @@ class TestBackendOsPerResultCutDelegation(unittest.TestCase):
         # (F4 관측성) search_assets_os 가 돌려준 gate_meta 가 응답 meta["os_gate"] 로 합류한다.
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch")
+        cfg = _cfg(search_backend="opensearch")
         gate = {"text": {"top": 0.7, "baseline": 0.2, "gate_passed": True, "cut_count": 1}}
         fake_os, _cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]}, gate)
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
@@ -479,7 +533,7 @@ class TestBackendOsRerankWiring(unittest.TestCase):
     def test_rerank_settings_forwarded_from_cfg(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(
+        cfg = _cfg(
             search_backend="opensearch",
             search_os_rerank_enabled=True,
             search_os_rerank_top_r=7,
@@ -523,7 +577,7 @@ class TestBackendOsQueryNormWiring(unittest.TestCase):
     def test_query_norm_on_passes_normalized_query_and_exposes_meta(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch", search_os_query_norm_enabled=True)
+        cfg = _cfg(search_backend="opensearch", search_os_query_norm_enabled=True)
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
         calls: list[str] = []
 
@@ -549,7 +603,7 @@ class TestBackendOsQueryNormWiring(unittest.TestCase):
         # off(기본): 원문 그대로 OS seam 에 전달·noun_phrase_query 미호출·meta 표식 없음(027 바이트 동일).
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch", search_os_query_norm_enabled=False)
+        cfg = _cfg(search_backend="opensearch", search_os_query_norm_enabled=False)
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
 
         def boom(q: str) -> str:
@@ -587,7 +641,7 @@ class TestBackendOsBm25OperatorWiring(unittest.TestCase):
     def test_operator_forwarded_from_cfg(self) -> None:
         import src.search.search_service as svc
 
-        cfg = types.SimpleNamespace(search_backend="opensearch", search_os_bm25_operator="and")
+        cfg = _cfg(search_backend="opensearch", search_os_bm25_operator="and")
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             svc.search_hybrid(

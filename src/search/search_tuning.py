@@ -49,32 +49,27 @@ class SearchTuning:
 
     @classmethod
     def from_settings(cls, cfg: Any) -> SearchTuning:
-        """PipelineSettings(또는 유사 cfg)에서 튜닝값을 **1회** 해소한다(getattr 릴레이 대체).
+        """PipelineSettings 에서 검색 튜닝값을 **1회** 해소한다.
 
-        미초기화·미보유 속성은 ``search_constants`` 기본으로 폴백한다(순수 단위 방어 — settings 미초기화
-        환경에서도 안전). ``cutoff_enabled`` 의 디버그 우회(``disable_os_cutoff``)는 호출부가
+        069 US-E FR-E4(PR4b): 검색 튜닝 필드는 ``cfg.search`` 하위로 중첩됐다 — ``cfg.search.<field>``
+        직접 접근으로 읽는다(종전 getattr 릴레이 폐지; 오타는 정적 검사로 잡힌다). SearchTuning 의 짧은
+        이름(weights·cutoff_eps 등)과 SearchConfig 의 필드명(fusion_weights·os_cutoff_eps 등)이 달라
+        매핑은 명시한다. ``cutoff_enabled`` 의 디버그 우회(``disable_os_cutoff``)는 호출부가
         ``dataclasses.replace(tuning, cutoff_enabled=False)`` 로 덮으므로 여기선 cfg 값만 읽는다.
         """
-        g = getattr  # 아래 12회 getattr(cfg, key, 상수기본) 반복을 짧게 — 릴레이 대체의 단일 지점
+        s = cfg.search
         return cls(
-            weights=g(cfg, "opensearch_fusion_weights", search_constants.OS_FUSION_WEIGHTS_DEFAULT),
-            cutoff_enabled=g(cfg, "search_os_cutoff_enabled", search_constants.OS_CUTOFF_ENABLED_DEFAULT),
-            cutoff_eps=g(cfg, "search_os_cutoff_eps", search_constants.OS_CUTOFF_EPS_DEFAULT),
-            cutoff_floor=g(cfg, "search_os_cutoff_floor", search_constants.OS_CUTOFF_FLOOR_DEFAULT),
-            result_floor=g(cfg, "search_os_result_floor", search_constants.OS_RESULT_FLOOR_DEFAULT),
-            bm25_operator=g(cfg, "search_os_bm25_operator", search_constants.OS_BM25_OPERATOR_DEFAULT),
-            rerank_enabled=g(cfg, "search_os_rerank_enabled", search_constants.OS_RERANK_ENABLED_DEFAULT),
-            rerank_top_r=g(cfg, "search_os_rerank_top_r", search_constants.OS_RERANK_TOP_R_DEFAULT),
-            rerank_tau=g(cfg, "search_os_rerank_tau", search_constants.OS_RERANK_TAU_DEFAULT),
-            rerank_model=g(cfg, "search_os_rerank_model", search_constants.OS_RERANK_MODEL_DEFAULT),
-            about_filter_enabled=g(
-                cfg, "search_about_filter_enabled", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT
-            ),
-            evidence_rescue_enabled=g(
-                cfg, "search_evidence_rescue_enabled",
-                search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
-            ),
-            evidence_debug=g(
-                cfg, "search_evidence_debug", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
-            ),
+            weights=s.fusion_weights,
+            cutoff_enabled=s.os_cutoff_enabled,
+            cutoff_eps=s.os_cutoff_eps,
+            cutoff_floor=s.os_cutoff_floor,
+            result_floor=s.os_result_floor,
+            bm25_operator=s.os_bm25_operator,
+            rerank_enabled=s.os_rerank_enabled,
+            rerank_top_r=s.os_rerank_top_r,
+            rerank_tau=s.os_rerank_tau,
+            rerank_model=s.os_rerank_model,
+            about_filter_enabled=s.about_filter_enabled,
+            evidence_rescue_enabled=s.evidence_rescue_enabled,
+            evidence_debug=s.evidence_debug,
         )

@@ -28,7 +28,7 @@ def _topic_canonicalize_enabled() -> bool:
     from src.config.settings import get_current_settings
 
     try:
-        return bool(get_current_settings().topic_canonicalize_enabled)
+        return bool(get_current_settings().topic.canonicalize_enabled)
     except RuntimeError:
         return False
 

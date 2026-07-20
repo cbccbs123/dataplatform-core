@@ -71,7 +71,7 @@ def main() -> None:
     texts = [q["query"] for q in queries]
     qvecs: dict[str, list[str]] = {}
     for _name, ch, model in CHANNELS:
-        raws = embed_texts(texts, model_name=model, normalize_embeddings=cfg.text_embedding_normalize)
+        raws = embed_texts(texts, model_name=model, normalize_embeddings=cfg.embed.normalize)
         qvecs[ch] = [
             "[" + ",".join(repr(float(x)) for x in pad_embedding_to_storage_dim(list(r))) + "]"
             for r in raws

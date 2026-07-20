@@ -164,7 +164,7 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     # 049: 토글(vlm_summary_prompt_v2)을 빌더에 v2= 로 전달한다. False(기본)면 v1 프롬프트·v1 키워드
     # 루프가 그대로 돌아 출력이 현행과 바이트 동일하다(FR-102 회귀 안전판). 빌더 자체는 settings 를
     # 모르는 순수 함수라, 토글 해소는 여기(summarize 함수)에서만 한다(plan P2).
-    v2 = cfg.vlm_summary_prompt_v2
+    v2 = cfg.vlm.summary_prompt_v2
     prompt = _build_image_caption_prompt(
         summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords, v2=v2
     )

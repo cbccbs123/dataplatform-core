@@ -93,11 +93,11 @@ def _read_prompts(
             continue
         summary = str(src.get("summary") or "")
         emb = find_embedding_candidates(
-            conn, source_asset_id=sid, top_k=cfg.relation_top_k,
-            embedding_kind="st", min_sim=cfg.relation_min_sim,
+            conn, source_asset_id=sid, top_k=cfg.relations.top_k,
+            embedding_kind="st", min_sim=cfg.relations.min_sim,
         )
         path = find_path_signal_candidates(
-            conn, source_asset_id=sid, limit=cfg.relation_path_top_k,
+            conn, source_asset_id=sid, limit=cfg.relations.path_top_k,
         )
         candidates = union_candidates(emb, path)
         prompt = build_relation_proposal_prompt(

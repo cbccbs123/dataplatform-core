@@ -56,9 +56,9 @@ def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         raise RuntimeError("_embed_audio: ctx.scratch['stt_text'] 없음 — _extract_audio_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     chunks = embedding_plain_text_chunks(
         stt_text,
-        chunk_size=cfg.text_embedding_chunk_size,
+        chunk_size=cfg.embed.chunk_size,
         embedding_model_name=model,
-        normalize_embeddings=cfg.text_embedding_normalize,
+        normalize_embeddings=cfg.embed.normalize,
         channel=channel,   # 062: 채널 백엔드(로컬/API)로 라우팅. 기본 st=로컬(동작 불변).
         settings=cfg,
     )

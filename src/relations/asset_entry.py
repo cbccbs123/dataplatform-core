@@ -112,7 +112,7 @@ def propose_relations_for_asset(
         (``kinds_registered``, ``kinds_skipped``, ``edges_upserted``, ``edges_skipped``)
     """
     cfg = get_current_settings()
-    k = top_k if top_k is not None else cfg.relation_top_k
+    k = top_k if top_k is not None else cfg.relations.top_k
 
     def _run(conn: Connection[Any]) -> tuple[int, int, int, int]:
         src = _fetch_source_row(conn, source_asset_id)
@@ -135,13 +135,13 @@ def propose_relations_for_asset(
         summary = str(src.get("summary") or "")
         emb_candidates = find_embedding_candidates(
             conn, source_asset_id=source_asset_id, top_k=k,
-            embedding_kind=embedding_kind, min_sim=cfg.relation_min_sim,
+            embedding_kind=embedding_kind, min_sim=cfg.relations.min_sim,
         )
         # 레버 B(FR-004·005): 동일 폴더·파일명 stem 신호로 결정적 후보를 보강한다.
         # 임베딩 유사도가 min_sim 미만이라 emb_candidates 에 없던 same_series/derived_from/
         # references 후보가 여기서 합류한다. path_top_k 는 임베딩 top_k 와 별도 한도(C-2).
         path_candidates = find_path_signal_candidates(
-            conn, source_asset_id=source_asset_id, limit=cfg.relation_path_top_k,
+            conn, source_asset_id=source_asset_id, limit=cfg.relations.path_top_k,
         )
         # C-3: 겹치면 임베딩 후보(실측 emb_score) 유지. 프롬프트·환각 화이트리스트 모두 이 union 을 쓴다.
         candidates = union_candidates(emb_candidates, path_candidates)
@@ -174,9 +174,9 @@ def propose_relations_for_asset(
         upserted_pairs: list[dict[str, Any]] = []
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
-            allowed_target_ids=candidate_ids, auto_approve_min=cfg.relation_auto_approve_min,
+            allowed_target_ids=candidate_ids, auto_approve_min=cfg.relations.auto_approve_min,
             target_emb_scores=target_emb_score_map(candidates),
-            auto_approve_emb_min=cfg.relation_auto_approve_emb_min,
+            auto_approve_emb_min=cfg.relations.auto_approve_emb_min,
             collect=upserted_pairs)
         # 계보 기록: 이 자산에 대해 관계 제안이 실행되었음을 asset_lineage에 남긴다.
         # run_relations.py 가 재실행될 때 이중 기록이 생길 수 있으나, idempotent=False로
