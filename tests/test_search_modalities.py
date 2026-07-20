@@ -47,8 +47,8 @@ class TestValidModalitiesSingleSource(unittest.TestCase):
     def test_entrypoints_reference_shared_constant(self) -> None:
         # 검색 진입점 모듈이 자체 튜플을 복제하지 않고 공유 상수를 참조(객체 동일성).
         # 069 T407: 3번째 진입점 sample_search_api 는 삭제됨(디버그 3종 portal /search 로 이관).
-        import src.app.portal_api as portal
         import src.app.run_search as run_search
+        from src.app.portal import routes_search as portal
 
         self.assertIs(portal.VALID_SEARCH_MODALITIES, VALID_SEARCH_MODALITIES)
         self.assertIs(run_search.VALID_SEARCH_MODALITIES, VALID_SEARCH_MODALITIES)

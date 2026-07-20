@@ -26,7 +26,7 @@ def _enable_bypass(tc: unittest.TestCase) -> None:
     env = patch.dict(os.environ, _AUTH_DISABLED_ENV, clear=False)
     env.start()
     tc.addCleanup(env.stop)
-    p = patch("src.app.portal_api._run_in_db", _passthrough_db)
+    p = patch("src.app.portal._infra._run_in_db", _passthrough_db)
     p.start()
     tc.addCleanup(p.stop)
 
@@ -39,7 +39,7 @@ class TestDashboardSummary(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.build_dashboard_summary")
+    @patch("src.app.portal.routes_admin.build_dashboard_summary")
     def test_summary_200_passes_months_and_now(self, mock_build) -> None:
         mock_build.return_value = _SENTINEL
         resp = self.client.get("/admin/dashboard/summary", params={"months": 3})
@@ -50,21 +50,21 @@ class TestDashboardSummary(unittest.TestCase):
         self.assertIsInstance(now, datetime)
         self.assertIsNotNone(now.tzinfo)  # 서버 now 는 tz-aware(UTC)
 
-    @patch("src.app.portal_api.build_dashboard_summary")
+    @patch("src.app.portal.routes_admin.build_dashboard_summary")
     def test_summary_default_months_6(self, mock_build) -> None:
         mock_build.return_value = _SENTINEL
         resp = self.client.get("/admin/dashboard/summary")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_build.call_args.kwargs["months"], 6)
 
-    @patch("src.app.portal_api.build_dashboard_summary")
+    @patch("src.app.portal.routes_admin.build_dashboard_summary")
     def test_months_out_of_range_422(self, mock_build) -> None:
         for bad in (0, 25):
             resp = self.client.get("/admin/dashboard/summary", params={"months": bad})
             self.assertEqual(resp.status_code, 422, f"months={bad}")
         mock_build.assert_not_called()
 
-    @patch("src.app.portal_api.build_dashboard_summary")
+    @patch("src.app.portal.routes_admin.build_dashboard_summary")
     def test_monthly_interval_month_passthrough(self, mock_build) -> None:
         # 057 FR-303: monthly_interval=month 를 200 으로 허용·서비스에 전달(프론트 일→월 롤업 제거).
         mock_build.return_value = _SENTINEL
@@ -72,7 +72,7 @@ class TestDashboardSummary(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_build.call_args.kwargs["monthly_interval"], "month")
 
-    @patch("src.app.portal_api.build_dashboard_summary")
+    @patch("src.app.portal.routes_admin.build_dashboard_summary")
     def test_monthly_interval_default_day(self, mock_build) -> None:
         # 하위호환: 미지정 시 monthly_interval=day 로 전달(기존 동작 불변).
         mock_build.return_value = _SENTINEL
@@ -80,7 +80,7 @@ class TestDashboardSummary(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_build.call_args.kwargs["monthly_interval"], "day")
 
-    @patch("src.app.portal_api.build_dashboard_summary")
+    @patch("src.app.portal.routes_admin.build_dashboard_summary")
     def test_monthly_interval_bad_value_422(self, mock_build) -> None:
         # 월별 슬라이스는 day|month 만 허용(hour 는 월 범위에 부적합) — 그 외 422.
         for bad in ("hour", "year"):

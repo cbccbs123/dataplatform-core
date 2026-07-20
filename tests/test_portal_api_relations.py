@@ -48,7 +48,7 @@ def _enable_bypass(test_case: unittest.TestCase) -> None:
     env.start()
     test_case.addCleanup(env.stop)
     for target in ("_run_in_db", "_run_in_db_write"):
-        p = patch(f"src.app.portal_api.{target}", _passthrough_db)
+        p = patch(f"src.app.portal._infra.{target}", _passthrough_db)
         p.start()
         test_case.addCleanup(p.stop)
 
@@ -60,7 +60,7 @@ class TestRelationsList(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_list_passes_status_limit_offset(self, mock_list) -> None:
         mock_list.return_value = {"rows": [], "total": 0, "status": "proposed",
                                   "limit": 50, "offset": 0}
@@ -73,7 +73,7 @@ class TestRelationsList(unittest.TestCase):
         self.assertEqual(kwargs["offset"], 10)
         self.assertEqual(resp.json()["status"], "proposed")
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_list_default_status_proposed(self, mock_list) -> None:
         mock_list.return_value = {"rows": [], "total": 0, "status": "proposed",
                                   "limit": 50, "offset": 0}
@@ -81,7 +81,7 @@ class TestRelationsList(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_list.call_args[1]["status"], "proposed")
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_list_bogus_status_400(self, mock_list) -> None:
         resp = self.client.get("/admin/relations", params={"status": "bogus"})
         self.assertEqual(resp.status_code, 400)
@@ -95,7 +95,7 @@ class TestRelationsListFilters(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_filters_passed_through(self, mock_list) -> None:
         mock_list.return_value = {"rows": [], "total": 0, "status": "active",
                                   "limit": 50, "offset": 0}
@@ -118,7 +118,7 @@ class TestRelationsListFilters(unittest.TestCase):
         self.assertIsNotNone(kw["since"])
         self.assertIsNotNone(kw["until"])
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_no_filters_backward_compatible(self, mock_list) -> None:
         # SC-011 — 확장 파라미터 미지정 시 전부 None(현행 동작). date_col 은 status별 자동.
         mock_list.return_value = {"rows": [], "total": 0, "status": "proposed",
@@ -131,7 +131,7 @@ class TestRelationsListFilters(unittest.TestCase):
             self.assertIsNone(kw[key], key)
         self.assertEqual(kw["date_col"], "created_at")  # proposed → created_at
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_date_col_auto_by_status(self, mock_list) -> None:
         # FR-752 — date_on 생략 시 active/rejected → reviewed_at.
         mock_list.return_value = {"rows": [], "total": 0, "status": "active",
@@ -140,7 +140,7 @@ class TestRelationsListFilters(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_list.call_args[1]["date_col"], "reviewed_at")
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_blank_q_ignored(self, mock_list) -> None:
         # 빈/공백 q → None(필터 비활성·팀 결정).
         mock_list.return_value = {"rows": [], "total": 0, "status": "proposed",
@@ -149,14 +149,14 @@ class TestRelationsListFilters(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(mock_list.call_args[1]["q"])
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_min_greater_than_max_400(self, mock_list) -> None:
         resp = self.client.get("/admin/relations", params={
             "status": "proposed", "min_confidence": 0.9, "max_confidence": 0.1})
         self.assertEqual(resp.status_code, 400)
         mock_list.assert_not_called()
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_confidence_out_of_range_400(self, mock_list) -> None:
         resp = self.client.get("/admin/relations", params={
             "status": "proposed", "min_confidence": 1.5})
@@ -166,14 +166,14 @@ class TestRelationsListFilters(unittest.TestCase):
         self.assertEqual(resp2.status_code, 400)
         mock_list.assert_not_called()
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_bogus_date_on_400(self, mock_list) -> None:
         resp = self.client.get("/admin/relations", params={
             "status": "proposed", "date_on": "bogus"})
         self.assertEqual(resp.status_code, 400)
         mock_list.assert_not_called()
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_bad_date_format_422(self, mock_list) -> None:
         # 013 _parse_dt 관례 — 형식 오류는 422.
         resp = self.client.get("/admin/relations", params={
@@ -181,14 +181,14 @@ class TestRelationsListFilters(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
         mock_list.assert_not_called()
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_from_after_to_400(self, mock_list) -> None:
         resp = self.client.get("/admin/relations", params={
             "status": "proposed", "from": "2026-07-01", "to": "2026-06-01"})
         self.assertEqual(resp.status_code, 400)
         mock_list.assert_not_called()
 
-    @patch("src.app.portal_api.list_edges_for_review")
+    @patch("src.app.portal.routes_admin.list_edges_for_review")
     def test_q_over_max_length_422(self, mock_list) -> None:
         # FR-702 — q 는 최대 200자. Query(max_length=200) 초과 시 FastAPI 검증 422.
         resp = self.client.get("/admin/relations", params={
@@ -204,7 +204,7 @@ class TestRelationKindsList(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.list_relation_kinds")
+    @patch("src.app.portal.routes_admin.list_relation_kinds")
     def test_list_all(self, mock_kinds) -> None:
         mock_kinds.return_value = {"rows": [
             {"kind_code": "same_domain", "kind_name_ko": "동일 도메인", "status": "active"}],
@@ -214,14 +214,14 @@ class TestRelationKindsList(unittest.TestCase):
         self.assertEqual(mock_kinds.call_args[1]["status"], None)
         self.assertEqual(resp.json()["total"], 1)
 
-    @patch("src.app.portal_api.list_relation_kinds")
+    @patch("src.app.portal.routes_admin.list_relation_kinds")
     def test_list_status_active(self, mock_kinds) -> None:
         mock_kinds.return_value = {"rows": [], "total": 0}
         resp = self.client.get("/admin/relation-kinds", params={"status": "active"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_kinds.call_args[1]["status"], "active")
 
-    @patch("src.app.portal_api.list_relation_kinds")
+    @patch("src.app.portal.routes_admin.list_relation_kinds")
     def test_list_bogus_status_400(self, mock_kinds) -> None:
         resp = self.client.get("/admin/relation-kinds", params={"status": "bogus"})
         self.assertEqual(resp.status_code, 400)
@@ -283,8 +283,8 @@ class TestRelationsApproveReject(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.bulk_review")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.bulk_review")
     def test_approve_returns_results_and_audits_ok(self, mock_bulk, mock_audit) -> None:
         mock_bulk.return_value = [{"edge_id": "e1", "ok": True}, {"edge_id": "e2", "ok": False}]
         resp = self.client.post("/admin/relations/approve",
@@ -304,8 +304,8 @@ class TestRelationsApproveReject(unittest.TestCase):
         self.assertEqual(approve_calls[0].kwargs["user_id"], "anonymous")
         self.assertEqual(approve_calls[0].kwargs["detail"], {"edge_id": "e1"})
 
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.bulk_review")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.bulk_review")
     def test_reject_dispatches_reject_action(self, mock_bulk, mock_audit) -> None:
         mock_bulk.return_value = [{"edge_id": "e1", "ok": True}]
         resp = self.client.post("/admin/relations/reject", json={"edge_ids": ["e1"]})
@@ -314,7 +314,7 @@ class TestRelationsApproveReject(unittest.TestCase):
         actions = [c.kwargs.get("action") for c in mock_audit.call_args_list]
         self.assertIn("relation.reject", actions)
 
-    @patch("src.app.portal_api.bulk_review")
+    @patch("src.app.portal.routes_review.bulk_review")
     def test_empty_edge_ids_400(self, mock_bulk) -> None:
         resp = self.client.post("/admin/relations/approve", json={"edge_ids": []})
         self.assertEqual(resp.status_code, 400)
@@ -328,8 +328,8 @@ class TestRelationsRevise(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.revise_edge")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.revise_edge")
     def test_revise_calls_and_audits(self, mock_revise, mock_audit) -> None:
         mock_revise.return_value = True
         resp = self.client.post("/admin/relations/revise",
@@ -346,8 +346,8 @@ class TestRelationsRevise(unittest.TestCase):
         self.assertEqual(revise_calls[0].kwargs["detail"],
                          {"edge_id": "e1", "to_status": "rejected"})
 
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.revise_edge")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.revise_edge")
     def test_revise_ok_false_no_audit(self, mock_revise, mock_audit) -> None:
         mock_revise.return_value = False
         resp = self.client.post("/admin/relations/revise",
@@ -358,7 +358,7 @@ class TestRelationsRevise(unittest.TestCase):
                         if c.kwargs.get("action") == "relation.revise"]
         self.assertEqual(len(revise_calls), 0)
 
-    @patch("src.app.portal_api.revise_edge")
+    @patch("src.app.portal.routes_review.revise_edge")
     def test_revise_bogus_to_status_400(self, mock_revise) -> None:
         resp = self.client.post("/admin/relations/revise",
                                 json={"edge_id": "e1", "to_status": "bogus"})
@@ -373,8 +373,8 @@ class TestRelationKindPromote(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.promote_relation_kind")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.promote_relation_kind")
     def test_promote_calls_and_audits(self, mock_promote, mock_audit) -> None:
         mock_promote.return_value = True
         resp = self.client.post("/admin/relation-kinds/gaming_hardware/promote")
@@ -387,8 +387,8 @@ class TestRelationKindPromote(unittest.TestCase):
         self.assertEqual(len(promote_calls), 1)
         self.assertEqual(promote_calls[0].kwargs["detail"], {"kind_code": "gaming_hardware"})
 
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.promote_relation_kind")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.promote_relation_kind")
     def test_promote_ok_false_no_audit(self, mock_promote, mock_audit) -> None:
         mock_promote.return_value = False
         resp = self.client.post("/admin/relation-kinds/already_active/promote")
@@ -403,7 +403,7 @@ class TestRelationAuditBestEffort(unittest.TestCase):
     """FR-502 — 감사 기록 실패가 결정 트랜잭션을 깨지 않는다(best-effort·savepoint)."""
 
     def test_record_relation_audit_swallows_failure(self) -> None:
-        from src.app.portal_api import _record_relation_audit
+        from src.app.portal.routes_review import _record_relation_audit
         conn = MagicMock()
         # conn.transaction() 컨텍스트 진입 시 예외 → best-effort 로 삼켜야 한다.
         conn.transaction.side_effect = RuntimeError("db down")
@@ -429,9 +429,9 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 승인 — ok=True(e1)만 감사 기록·응답 봉투 불변. 재색인용 PostgresUtil 미생성(065 로 재색인 훅 제거).
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api._record_relation_audit")
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.bulk_review")
+    @patch("src.app.portal.routes_review._record_relation_audit")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.bulk_review")
     def test_approve_records_audit_and_no_reindex(
         self, m_bulk, m_access, m_audit, m_pgutil
     ) -> None:
@@ -451,9 +451,9 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 반려 — 감사 기록·봉투 불변, 재색인 없음.
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api._record_relation_audit")
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.bulk_review")
+    @patch("src.app.portal.routes_review._record_relation_audit")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.bulk_review")
     def test_reject_records_audit_and_no_reindex(
         self, m_bulk, m_access, m_audit, m_pgutil
     ) -> None:
@@ -467,9 +467,9 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 전건 ok=False → 감사 미기록·재색인 없음(변경 없음).
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api._record_relation_audit")
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.bulk_review")
+    @patch("src.app.portal.routes_review._record_relation_audit")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.bulk_review")
     def test_approve_all_ok_false_no_audit_no_reindex(
         self, m_bulk, m_access, m_audit, m_pgutil
     ) -> None:
@@ -481,9 +481,9 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 정정(revise) 성공(ok=True) → 감사 기록·봉투 불변, 재색인 없음.
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api._record_relation_audit")
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.revise_edge")
+    @patch("src.app.portal.routes_review._record_relation_audit")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.revise_edge")
     def test_revise_ok_records_audit_and_no_reindex(
         self, m_revise, m_access, m_audit, m_pgutil
     ) -> None:
@@ -500,9 +500,9 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     # 정정 실패(ok=False·변경 없음) → 감사 미기록·재색인 없음.
     @patch("src.database.postgres_util.PostgresUtil")
-    @patch("src.app.portal_api._record_relation_audit")
-    @patch("src.app.portal_api.record_access")
-    @patch("src.app.portal_api.revise_edge")
+    @patch("src.app.portal.routes_review._record_relation_audit")
+    @patch("src.app.portal.routes_review.record_access")
+    @patch("src.app.portal.routes_review.revise_edge")
     def test_revise_ok_false_no_audit_no_reindex(
         self, m_revise, m_access, m_audit, m_pgutil
     ) -> None:
@@ -516,7 +516,7 @@ class TestReviewDecisionNoReindex(unittest.TestCase):
 
     def test_reindex_hook_symbols_removed(self) -> None:
         # FR-404: 관계발 주제 재색인 훅/헬퍼가 포탈에서 완전히 제거됐다(주제 소스 정본 단일화).
-        import src.app.portal_api as pa
+        from src.app.portal import routes_assets as pa
 
         self.assertFalse(hasattr(pa, "reindex_asset_topics"))
         self.assertFalse(hasattr(pa, "_reindex_review_topics"))

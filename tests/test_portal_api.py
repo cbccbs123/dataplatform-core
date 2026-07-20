@@ -52,7 +52,7 @@ def _enable_portal_test_auth_bypass(test_case: unittest.TestCase) -> None:
     env = patch.dict(os.environ, _AUTH_DISABLED_ENV, clear=False)
     env.start()
     test_case.addCleanup(env.stop)
-    db = patch("src.app.portal_api._run_in_db", _passthrough_db)
+    db = patch("src.app.portal._infra._run_in_db", _passthrough_db)
     db.start()
     test_case.addCleanup(db.stop)
 
@@ -105,14 +105,14 @@ class TestSearch(unittest.TestCase):
 
     def setUp(self) -> None:
         _enable_portal_test_auth_bypass(self)
-        tiers = patch("src.app.portal_api.fetch_access_tiers", side_effect=_empty_tiers)
+        tiers = patch("src.app.portal.routes_search.fetch_access_tiers", side_effect=_empty_tiers)
         tiers.start()
         self.addCleanup(tiers.stop)
         # 057-후속/065: /search 주제 패싯(FR-503)은 결과 행의 **색인 topics**(=필터 소스)로 계산하며
         # 별도 DB 주제 seam 을 호출하지 않는다(라이브 투영 미사용). 패싯 자체 검증은 test_portal_topics.
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_returns_grouped_contract(self, mock_search) -> None:
         # 정상 검색: query + results(모달리티별 dict) + meta(counts). cursor/평탄 items 없음.
         mock_search.return_value = _fake_search_result()
@@ -128,7 +128,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(body["meta"]["counts"], {"text": 3, "image": 0})
         self.assertEqual(body["meta"]["size"], 10)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_meta_propagates_observability_when_present(self, mock_search) -> None:
         # 069 P1-4: search_hybrid meta 의 관측성 3종(os_gate·llm_verify·query_norm)을 포탈이 전파.
         r = _fake_search_result()
@@ -143,7 +143,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(body["meta"]["llm_verify"]["dropped"], 1)
         self.assertEqual(body["meta"]["query_norm"]["method"], "morph")
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_meta_observability_keys_absent_when_off(self, mock_search) -> None:
         # off 관례: search_hybrid meta 에 없으면 포탈 meta 에도 키 부재(빈 값 주입 금지).
         mock_search.return_value = _fake_search_result()
@@ -151,7 +151,7 @@ class TestSearch(unittest.TestCase):
         for k in ("os_gate", "llm_verify", "query_norm"):
             self.assertNotIn(k, body["meta"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_os_connection_error_returns_503(self, mock_search) -> None:
         # 069 P1-4 권고: OS 연결 실패(인프라)는 503 — 코드버그 500 과 구분(운영 알람 분리).
         from opensearchpy.exceptions import ConnectionError as OSConnectionError
@@ -161,7 +161,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
         self.assertIn("OpenSearch", resp.json()["detail"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_limit_per_bucket_param_and_default(self, mock_search) -> None:
         # 후보 풀(limit_per_bucket) 요청 파라미터화: 미지정=기본 50, 지정 시 그 값이 search_hybrid 에 전달.
         mock_search.return_value = _fake_search_result()
@@ -170,21 +170,21 @@ class TestSearch(unittest.TestCase):
         self.client.get("/search", params={"q": "회식", "size": 10, "limit_per_bucket": 200})
         self.assertEqual(mock_search.call_args.kwargs["limit_per_bucket"], 200)  # 요청 지정
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_pool_floored_to_size(self, mock_search) -> None:
         # size 계약 보장: 요청 풀이 size 보다 얕으면 max(풀, size) 로 끌어올린다(풀<size 회귀 방지).
         mock_search.return_value = _fake_search_result()
         self.client.get("/search", params={"q": "회식", "size": 80, "limit_per_bucket": 20})
         self.assertEqual(mock_search.call_args.kwargs["limit_per_bucket"], 80)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_limit_per_bucket_bounds(self, mock_search) -> None:
         # 상한(500) 초과·하한(1) 미만은 422(Query ge/le 계약).
         mock_search.return_value = _fake_search_result()
         self.assertEqual(self.client.get("/search", params={"q": "x", "limit_per_bucket": 501}).status_code, 422)
         self.assertEqual(self.client.get("/search", params={"q": "x", "limit_per_bucket": 0}).status_code, 422)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_response_rows_include_topic_pairs(self, mock_search) -> None:
         # 059 FR-104: /search 응답 행에 topic_pairs(부모>자식 짝) 포함(하위호환 필드·프론트 트리용).
         # 짝 없는 행은 [] 폴백. os_hit_to_row→_shape→_project_grouped_search 경유로 전달된다.
@@ -211,7 +211,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(rows[0]["topic_pairs"], ["음식·요리>먹방", "IT·기술>데이터"])
         self.assertEqual(rows[1]["topic_pairs"], [])  # 짝 없는 행 → [] 폴백(하위호환)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_excludes_medical_per_bucket(self, mock_search) -> None:
         # FR-014: domain_label='medical' 은 해당 버킷에서 배제된다(image 섹션에서 med1 사라짐).
         mock_search.return_value = _fake_search_result()
@@ -219,25 +219,25 @@ class TestSearch(unittest.TestCase):
         all_ids = [r["asset_id"] for rows in body["results"].values() for r in rows]
         self.assertNotIn("med1", all_ids)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_passes_exclude_and_size_to_group(self, mock_search) -> None:
         # 배선: group_ranked 가 exclude_domains={'medical'} · limit_per_modality=size 로 호출되는지.
         mock_search.return_value = _fake_search_result()
-        with patch("src.app.portal_api.group_ranked", return_value={}) as mock_group:
+        with patch("src.app.portal.routes_search.group_ranked", return_value={}) as mock_group:
             self.client.get("/search", params={"q": "x", "size": 7})
         self.assertEqual(
             mock_group.call_args.kwargs["exclude_domains"], frozenset({"medical"})
         )
         self.assertEqual(mock_group.call_args.kwargs["limit_per_modality"], 7)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_size_caps_per_modality(self, mock_search) -> None:
         # size=2 → 각 모달리티 섹션이 상위 2건으로 제한된다(섹션별 독립 top-N).
         mock_search.return_value = _fake_search_result()
         body = self.client.get("/search", params={"q": "회식", "size": 2}).json()
         self.assertEqual([r["asset_id"] for r in body["results"]["text"]], ["a1", "a2"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_passes_mode_and_exposes_search_plan(self, mock_search) -> None:
         mock_search.return_value = {
             **_fake_search_result(),
@@ -258,27 +258,27 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(plan["lexical_rescue"], "restricted")
         self.assertTrue(plan["generic_single_term"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_invalid_mode_400(self, mock_search) -> None:
         resp = self.client.get("/search", params={"q": "x", "mode": "invalid"})
         self.assertEqual(resp.status_code, 400)
         mock_search.assert_not_called()
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_unknown_modality_400(self, mock_search) -> None:
         # 069 T301: 포탈은 미지 모달리티를 현행대로 HTTPException 400 으로 거부(공유 상수 검증·계약 보존).
         resp = self.client.get("/search", params={"q": "x", "modalities": "bogus"})
         self.assertEqual(resp.status_code, 400)
         mock_search.assert_not_called()
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_valid_modalities_passthrough(self, mock_search) -> None:
         # 069 T301: 유효 모달리티(공유 파서)는 그대로 search_hybrid 로 전달(valid 입력 결과 불변).
         mock_search.return_value = _fake_search_result()
         self.client.get("/search", params={"q": "회식", "modalities": "text,image"})
         self.assertEqual(mock_search.call_args.kwargs["modalities"], ["text", "image"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_passes_v1_filters(self, mock_search) -> None:
         mock_search.return_value = _fake_search_result()
         resp = self.client.get(
@@ -300,7 +300,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(meta_filters["file_ext"], ["pdf", "txt"])
         self.assertEqual(meta_filters["source_dataset"], ["wikipedia"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_passes_must_include_exclude(self, mock_search) -> None:
         # 057 FR-202: 반복 쿼리 파라미터 must_include/must_exclude 를 search_hybrid 에 배선한다.
         mock_search.return_value = _fake_search_result()
@@ -317,7 +317,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(mock_search.call_args.kwargs["must_include"], ["배터리", "고속"])
         self.assertEqual(mock_search.call_args.kwargs["must_exclude"], ["광고"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_no_lexical_filters_forwards_empty(self, mock_search) -> None:
         # 미지정이면 빈 리스트로 전달(하위호환 — OS 본문 무변경).
         mock_search.return_value = _fake_search_result()
@@ -325,7 +325,7 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(mock_search.call_args.kwargs["must_include"], [])
         self.assertEqual(mock_search.call_args.kwargs["must_exclude"], [])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_invalid_date_returns_422(self, mock_search) -> None:
         resp = self.client.get(
             "/search",
@@ -338,21 +338,21 @@ class TestSearch(unittest.TestCase):
     # 전부 기본 off = 기존 응답 불변. no_cutoff 는 search_hybrid 배선, compact/group_by_relation 은
     # 이미 group_ranked 로 의료 배제·projection 된 grouped 결과 위에서 축약/묶음 뷰를 만든다.
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_no_cutoff_default_off_not_disabled(self, mock_search) -> None:
         # 기본(off): disable_os_cutoff=True 를 전달하지 않는다(동작 불변).
         mock_search.return_value = _fake_search_result()
         self.client.get("/search", params={"q": "회식"})
         self.assertNotEqual(mock_search.call_args.kwargs.get("disable_os_cutoff"), True)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_no_cutoff_true_wires_disable_os_cutoff(self, mock_search) -> None:
         # no_cutoff=true → search_hybrid(disable_os_cutoff=True) 배선(027 디버그 우회).
         mock_search.return_value = _fake_search_result()
         self.client.get("/search", params={"q": "회식", "no_cutoff": "true"})
         self.assertIs(mock_search.call_args.kwargs["disable_os_cutoff"], True)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_compact_default_off_returns_grouped(self, mock_search) -> None:
         # 기본(off): 기존 grouped 응답 계약 불변.
         mock_search.return_value = _fake_search_result()
@@ -360,7 +360,7 @@ class TestSearch(unittest.TestCase):
         self.assertIn("results", body)
         self.assertNotIn("결과", body)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_compact_true_returns_flat_ranking(self, mock_search) -> None:
         # compact=true → {query, 건수, 결과} 축약 뷰(전 모달리티 합쳐 점수순·의료 배제 후).
         mock_search.return_value = _fake_search_result()
@@ -381,8 +381,8 @@ class TestSearch(unittest.TestCase):
         # 의료 자산 파일명이 축약 뷰로 새지 않는다(헌법 10조·FR-014).
         self.assertNotIn("m.png", [r["파일명"] for r in rows])
 
-    @patch("src.app.portal_api.fetch_active_relations_for_asset")
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.fetch_active_relations_for_asset")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_group_by_relation_folds_same_source(self, mock_search, mock_edges) -> None:
         # group_by_relation=true → 같은 소스 엣지(active duplicate_near/derived_from)로 묶음.
         # a1(text)·v1(video)이 duplicate_near 로 이어져 한 묶음, a2 는 별도 묶음.
@@ -425,8 +425,8 @@ class TestSearch(unittest.TestCase):
         second = body["묶음"][1]
         self.assertEqual([m["파일명"] for m in second["구성"]], ["a2.txt"])
 
-    @patch("src.app.portal_api.fetch_active_relations_for_asset")
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.fetch_active_relations_for_asset")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_group_by_relation_priority_over_compact(self, mock_search, mock_edges) -> None:
         # 조합 우선순위(sample 보존): group_by_relation 이 compact 보다 우선.
         mock_search.return_value = _fake_search_result()
@@ -438,8 +438,8 @@ class TestSearch(unittest.TestCase):
         self.assertIn("묶음", body)   # group 뷰
         self.assertNotIn("결과", body)  # compact 뷰 아님
 
-    @patch("src.app.portal_api.fetch_active_relations_for_asset")
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.fetch_active_relations_for_asset")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_group_by_relation_excludes_manifest_hub(self, mock_search, mock_edges) -> None:
         # manifest.json 허브는 묶음에서 제외(sample 보존).
         result = {
@@ -467,12 +467,12 @@ class TestAssetDetail(unittest.TestCase):
         # fetch_asset_topic/find_same_topic_groups(자기주제 정본 seam)를 호출한다. object() conn 단위
         # 테스트에선 fetch_asset_detail 과 동일하게 이 seam 들을 스텁한다(보강 검증은 test_portal_topics).
         for name in ("fetch_asset_topic", "find_same_topic_groups"):
-            p = patch(f"src.app.portal_api.{name}", return_value=[])
+            p = patch(f"src.app.portal.routes_assets.{name}", return_value=[])
             p.start()
             self.addCleanup(p.stop)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.fetch_asset_detail")
+    @patch("src.app.portal.routes_assets.fetch_asset_detail")
     def test_detail_returns_200(self, mock_detail) -> None:
         detail = {
             "asset_id": "a1",
@@ -491,7 +491,7 @@ class TestAssetDetail(unittest.TestCase):
         self.assertEqual(resp.json()["asset_id"], "a1")
         self.assertEqual(resp.json()["embedding_channels"][0]["chunk_count"], 3)
 
-    @patch("src.app.portal_api.fetch_asset_detail")
+    @patch("src.app.portal.routes_assets.fetch_asset_detail")
     def test_detail_none_returns_404(self, mock_detail) -> None:
         # 없음/비registered/의료(FR-014) → fetch_asset_detail None → 404.
         mock_detail.return_value = None
@@ -521,7 +521,7 @@ class TestDownload(unittest.TestCase):
             "file_name": "sample.txt",
         }
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_download_full_returns_200(self, mock_resolve) -> None:
         mock_resolve.return_value = self._target(self.tmp.name)
         resp = self.client.get("/assets/a1/download")
@@ -530,7 +530,7 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(resp.headers["accept-ranges"], "bytes")
         self.assertIn("sample.txt", resp.headers["content-disposition"])
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_download_range_returns_206(self, mock_resolve) -> None:
         # Range 부분 요청 → 206 + Content-Range + 정확한 바이트 구간(SC-004 단위 근사).
         mock_resolve.return_value = self._target(self.tmp.name)
@@ -542,7 +542,7 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(resp.content, b"2345")
         self.assertEqual(resp.headers["accept-ranges"], "bytes")
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_download_range_unsatisfiable_returns_416(self, mock_resolve) -> None:
         # 파일 크기 초과 범위 → parse_range_header ValueError → 416.
         mock_resolve.return_value = self._target(self.tmp.name)
@@ -551,14 +551,14 @@ class TestDownload(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 416)
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_download_missing_file_returns_404_or_410(self, mock_resolve) -> None:
         # FR-009: DB 엔 있으나 원본 파일이 사라짐 → 자산 노출 없이 404/410.
         mock_resolve.return_value = self._target("/no/such/file/at/all.txt")
         resp = self.client.get("/assets/a1/download")
         self.assertIn(resp.status_code, (404, 410))
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_download_none_returns_404(self, mock_resolve) -> None:
         # 비registered/의료/없음 게이트 → None → 404.
         mock_resolve.return_value = None
@@ -579,9 +579,9 @@ class TestBundle(unittest.TestCase):
         TestBundle._last_stream = s
         return s
 
-    @patch("src.app.portal_api.build_bundle_zip_stream", side_effect=_mk_stream.__func__)
-    @patch("src.app.portal_api.collect_bundle_assets")
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.build_bundle_zip_stream", side_effect=_mk_stream.__func__)
+    @patch("src.app.portal.routes_assets.collect_bundle_assets")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_bundle_returns_zip(self, mock_resolve, mock_collect, mock_zip) -> None:
         # seed 가 게이트(registered·비의료) 통과 → ego-network zip 스트리밍(069 P1-2: StreamingResponse).
         mock_resolve.return_value = {"asset_id": "seed", "fs_path": "/x/seed.txt"}
@@ -597,8 +597,8 @@ class TestBundle(unittest.TestCase):
         # 리뷰 🟡2 회귀: 응답 송신 후 BackgroundTask 가 스트림을 명시 close(FD 정리 — GC 의존 금지).
         self.assertTrue(TestBundle._last_stream.closed)
 
-    @patch("src.app.portal_api.collect_bundle_assets")
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.collect_bundle_assets")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_bundle_seed_gated_returns_404(self, mock_resolve, mock_collect) -> None:
         # 의료/비registered/없는 seed → resolve None → 404, collect 미호출.
         mock_resolve.return_value = None
@@ -700,8 +700,8 @@ class TestAssetThumbnail(unittest.TestCase):
         _enable_portal_test_auth_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.cached_thumbnail", return_value=b"\xff\xd8\xff\xe0JPG")
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.cached_thumbnail", return_value=b"\xff\xd8\xff\xe0JPG")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_image_returns_jpeg(self, mock_resolve, _gen) -> None:
         import tempfile
 
@@ -714,8 +714,8 @@ class TestAssetThumbnail(unittest.TestCase):
         self.assertEqual(r.content, b"\xff\xd8\xff\xe0JPG")
         self.assertIn("max-age", r.headers.get("cache-control", ""))
 
-    @patch("src.app.portal_api.cached_thumbnail", return_value=b"HERO")
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.cached_thumbnail", return_value=b"HERO")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_size_query_passed_through(self, mock_resolve, mock_cached) -> None:
         # ?size=detail → cached_thumbnail(size="detail") 로 전달(상세 히어로 640).
         import tempfile
@@ -726,24 +726,24 @@ class TestAssetThumbnail(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(mock_cached.call_args.kwargs.get("size"), "detail")
 
-    @patch("src.app.portal_api.resolve_download_target", return_value=None)
+    @patch("src.app.portal.routes_assets.resolve_download_target", return_value=None)
     def test_medical_or_missing_returns_404(self, _resolve) -> None:
         # 의료/비registered/없음 → resolve_download_target None → 404 (의료 썸네일=PHI 원천 차단)
         self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 404)
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_audio_returns_404(self, mock_resolve) -> None:
         mock_resolve.return_value = {"asset_id": "a1", "fs_path": "/x/a.mp3", "modality": "audio"}
         self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 404)
 
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_missing_file_returns_410(self, mock_resolve) -> None:
         mock_resolve.return_value = {
             "asset_id": "a1", "fs_path": "/nonexistent/x.png", "modality": "image"}
         self.assertEqual(self.client.get("/assets/a1/thumbnail").status_code, 410)
 
-    @patch("src.app.portal_api.cached_thumbnail", return_value=None)
-    @patch("src.app.portal_api.resolve_download_target")
+    @patch("src.app.portal.routes_assets.cached_thumbnail", return_value=None)
+    @patch("src.app.portal.routes_assets.resolve_download_target")
     def test_generation_failure_returns_404(self, mock_resolve, _gen) -> None:
         import tempfile
 

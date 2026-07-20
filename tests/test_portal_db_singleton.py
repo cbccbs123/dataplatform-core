@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-import src.app.portal_api as papi
+from src.app.portal import _infra as papi
 
 
 class TestPortalDbSingleton(unittest.TestCase):

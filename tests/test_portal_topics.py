@@ -43,7 +43,7 @@ def _enable_bypass(test_case: unittest.TestCase) -> None:
     env = patch.dict(os.environ, _AUTH_DISABLED_ENV, clear=False)
     env.start()
     test_case.addCleanup(env.stop)
-    db = patch("src.app.portal_api._run_in_db", _passthrough_db)
+    db = patch("src.app.portal._infra._run_in_db", _passthrough_db)
     db.start()
     test_case.addCleanup(db.stop)
 
@@ -74,9 +74,9 @@ class TestAssetDetailTopics(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.find_same_topic_groups")
-    @patch("src.app.portal_api.fetch_asset_topic")
-    @patch("src.app.portal_api.fetch_asset_detail")
+    @patch("src.app.portal.routes_assets.find_same_topic_groups")
+    @patch("src.app.portal.routes_assets.fetch_asset_topic")
+    @patch("src.app.portal.routes_assets.fetch_asset_detail")
     def test_detail_includes_topics_and_same_topic(
         self, mock_detail, mock_project, mock_groups
     ) -> None:
@@ -114,9 +114,9 @@ class TestAssetDetailTopics(unittest.TestCase):
         self.assertEqual(mock_project.call_args.kwargs["asset_id"], "a1")
         self.assertEqual(mock_groups.call_args.kwargs["asset_id"], "a1")
 
-    @patch("src.app.portal_api.find_same_topic_groups")
-    @patch("src.app.portal_api.fetch_asset_topic")
-    @patch("src.app.portal_api.fetch_asset_detail")
+    @patch("src.app.portal.routes_assets.find_same_topic_groups")
+    @patch("src.app.portal.routes_assets.fetch_asset_topic")
+    @patch("src.app.portal.routes_assets.fetch_asset_detail")
     def test_detail_none_returns_404_no_topic_calls(
         self, mock_detail, mock_project, mock_groups
     ) -> None:
@@ -135,7 +135,7 @@ class TestTopicsList(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.list_topics")
+    @patch("src.app.portal.routes_assets.list_topics")
     def test_list_topics(self, mock_list) -> None:
         mock_list.return_value = [
             {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_count": 12},
@@ -154,7 +154,7 @@ class TestTopicAssets(unittest.TestCase):
         _enable_bypass(self)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.assets_in_topic")
+    @patch("src.app.portal.routes_assets.assets_in_topic")
     def test_topic_assets_paging(self, mock_assets) -> None:
         mock_assets.return_value = {
             "rows": [{"asset_id": "a1", "fs_uri": "/x/a1.txt", "file_name": "a1.txt"}],
@@ -171,7 +171,7 @@ class TestTopicAssets(unittest.TestCase):
         self.assertEqual(kw["limit"], 10)
         self.assertEqual(kw["offset"], 5)
 
-    @patch("src.app.portal_api.assets_in_topic")
+    @patch("src.app.portal.routes_assets.assets_in_topic")
     def test_topic_assets_no_subtopic(self, mock_assets) -> None:
         mock_assets.return_value = {"rows": [], "total": 0}
         resp = self.client.get("/topics/스포츠")
@@ -184,12 +184,12 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
 
     def setUp(self) -> None:
         _enable_bypass(self)
-        tiers = patch("src.app.portal_api.fetch_access_tiers", side_effect=_empty_tiers)
+        tiers = patch("src.app.portal.routes_search.fetch_access_tiers", side_effect=_empty_tiers)
         tiers.start()
         self.addCleanup(tiers.stop)
         self.client = TestClient(app)
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_returns_topic_facet(self, mock_search) -> None:
         # 057-후속: 패싯은 결과 행의 **색인 topics**(=필터 소스)로 집계 — project_asset_topics 미사용
         # (라이브 투영 대비 소스 불일치·N+1 제거). 프론트는 이 행 topics 로 클라 좁히기.
@@ -211,7 +211,7 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
         rows = [r for bucket in body["results"].values() for r in bucket]
         self.assertTrue(any(r.get("topics") == ["요리"] for r in rows))
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_facet_pairs_no_cross_product(self, mock_search) -> None:
         # 060 SC-01: 멀티토픽 자산 — 평면 topics=[요리,IT·기술]×subtopics=[제빵,데이터] 를 교차곱하면
         # 요리>데이터·IT·기술>제빵 오배치가 난다. topic_pairs 짝으로 집계하면 각자 올바른 부모 아래로만.
@@ -240,7 +240,7 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
         self.assertNotIn("데이터", by_topic["요리"])
         self.assertNotIn("제빵", by_topic["IT·기술"])
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_facet_fallback_without_pairs(self, mock_search) -> None:
         # 060 SC-03: topic_pairs 부재(미재색인 인덱스) → topic 카운트만·nested 비움·예외 없음(오배치 0).
         mock_search.return_value = {
@@ -257,7 +257,7 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
             [{"topic_ko": "요리", "asset_count": 1, "subtopics": []}],
         )
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_facet_pair_splits_on_first_gt(self, mock_search) -> None:
         # 060/059 계약(PR #85 리뷰 🟡): 첫 '>' 로만 분할 — subtopic 에 '>' 가 섞여도 부모(topic)는
         # 항상 정확(topic 층은 닫힌 통제어휘·'>' 미포함)·부모 오배치 없음. subtopic 표기는 그대로 보존.
@@ -276,7 +276,7 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
               "subtopics": [{"subtopic_ko": "제빵>홈베이킹", "asset_count": 1}]}],
         )
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_facet_mixed_index_pairs_and_fallback(self, mock_search) -> None:
         # 060(PR #85 리뷰 🟡): 재색인 도중 신/구 인덱스 혼합 — 같은 topic 이 한 행은 짝 기준(제빵 nested),
         # 다른 행은 topic_pairs 부재(폴백·nested 미기여). topic 카운트는 두 자산 합산, nested 는 짝 있는 자산만.
@@ -296,7 +296,7 @@ class TestSearchTopicFacetAndFilter(unittest.TestCase):
               "subtopics": [{"subtopic_ko": "제빵", "asset_count": 1}]}],
         )
 
-    @patch("src.app.portal_api.search_hybrid")
+    @patch("src.app.portal.routes_search.search_hybrid")
     def test_search_passes_topic_filter(self, mock_search) -> None:
         mock_search.return_value = _fake_search_result()
         resp = self.client.get(
