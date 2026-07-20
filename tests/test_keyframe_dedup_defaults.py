@@ -48,9 +48,12 @@ class TestKeyframeDedupDefaultsSingleSource(unittest.TestCase):
         settings_src = (
             pathlib.Path(__file__).resolve().parents[1] / "src" / "config" / "settings.py"
         ).read_text(encoding="utf-8")
+        # FR-E4(PR4a): dedup fallback 은 _build_settings 손나열 → _FIELD_SPECS 테이블로 이관됐다.
+        # 대문자 env 키 ``VIDEO_KEYFRAME_DEDUP_*`` 는 이제 7개 스펙 행에만 등장한다(소속 attr 은 소문자).
+        # 봉인 의도(리터럴 금지·상수 참조)는 그대로 — 탐지 패턴만 새 형태에 맞춘다.
         dedup_lines = [
             ln for ln in settings_src.splitlines()
-            if "VIDEO_KEYFRAME_DEDUP_" in ln and "_env_" in ln
+            if "VIDEO_KEYFRAME_DEDUP_" in ln and "_Spec(" in ln
         ]
         self.assertEqual(len(dedup_lines), 7, "dedup fallback 라인 7개(enabled+6)")
         for ln in dedup_lines:

@@ -30,7 +30,7 @@ import unittest
 from unittest import mock
 
 from src.config import search_constants
-from src.config.settings import _build_settings
+from src.config.settings import _FIELD_SPECS, _build_settings
 
 # _build_settings 가 _require_env* 로 읽는 필수 env 최소 집합(값은 형식만 맞으면 됨).
 _REQUIRED_ENV = {
@@ -47,48 +47,9 @@ _REQUIRED_ENV = {
     "TEXT_EMBED_NORMALIZE": "true",
 }
 
-# 021 G4 가 추가하는 검색 백엔드 선택 env 키(테스트 격리를 위해 매 케이스 깨끗이 비운다).
-# 023 G3 가 추가하는 OS 검색 컷오프(probe 게이트) 선택 env 키도 함께 비워, 실행 환경에 남은 값이
-# 기본값 단언을 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
-_BACKEND_KEYS = (
-    "SEARCH_BACKEND",
-    "OPENSEARCH_FUSION_WEIGHTS",
-    "SEARCH_OS_CUTOFF_ENABLED",
-    "SEARCH_OS_CUTOFF_EPS",
-    "SEARCH_OS_CUTOFF_FLOOR",
-    # 027: per-result 컷 코사인 하한(probe_k·정규화 스케일 4종을 대체). 잔존값 오염 방지로 비운다.
-    "SEARCH_OS_RESULT_FLOOR",
-    # 029: LLM 질의 명사구 정규화 토글(기본 off). 실행 환경 잔존값이 기본 off 단언을 오염시키지 않게 비운다.
-    "SEARCH_OS_QUERY_NORM_ENABLED",
-    # 026 T006/T004 가 추가하는 색인 빌더 선택 env 키도 함께 비워, 실행 환경 잔존값이 기본값 단언을
-    # 오염시키지 않게 한다(021 백엔드 키와 동형 격리).
-    "OPENSEARCH_NORI_USER_WORDS",
-    "OPENSEARCH_FILENAME_NOISE_PATTERNS",
-    # 033 T002: 자동승인 emb_score 하한 선택 env 키도 비워, 실행 환경 잔존값이 기본 0.0 단언을 오염시키지 않게 한다.
-    "RELATION_AUTO_APPROVE_EMB_MIN",
-    # 038: OS 증분 색인 토글. 기본 True(037 후 적재=색인) 단언을 실행 환경 잔존값이 오염시키지 않게 비운다.
-    # 또한 정합 가드(backend=opensearch ∧ ¬sync → ValueError)가 _build_settings 를 부르는 모든 케이스에
-    # 결정적으로 통과하도록(미설정 → 기본 True) 격리한다.
-    "OPENSEARCH_SYNC_ENABLED",
-    "SEARCH_GENERIC_TERM_SEED_EXTRA",
-    # 048: 영상 키프레임 near-dup 제거 7종 선택 env. 실행 환경 잔존값이 기본값 단언을 오염시키지 않게 비운다.
-    "VIDEO_KEYFRAME_DEDUP_ENABLED",
-    "VIDEO_KEYFRAME_DEDUP_HASH_MAX",
-    "VIDEO_KEYFRAME_DEDUP_SSIM_MIN",
-    "VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO",
-    "VIDEO_KEYFRAME_DEDUP_HIST_MIN",
-    "VIDEO_KEYFRAME_DEDUP_COMPARE_MODE",
-    "VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW",
-    # 049: VLM 요약 프롬프트 v2 토글 2종. 기본 False(v1 바이트 동일) 단언을 실행 환경 잔존값이
-    # 오염시키지 않게 비운다(048 키와 동형 격리).
-    "VLM_SUMMARY_PROMPT_V2",
-    "VLM_SUMMARY_AB_JUDGE",
-    # 058: 관계 topic 정본화 배선 토글. 기본 False(동작 불변·시드 전 동치) 단언을 실행 환경 잔존값이
-    # 오염시키지 않게 비운다(049 키와 동형 격리).
-    "TOPIC_CANONICALIZE_ENABLED",
-    # 063: CLIP 임베딩 토글. 기본 True(회귀 0) 단언을 실행 환경 잔존값이 오염시키지 않게 비운다.
-    "EMBED_ENABLE_CLIP",
-)
+# 069 US-E FR-E4(PR4a): 격리할 선택 env 키는 수동 나열 대신 settings 의 _FIELD_SPECS 단일 출처에서
+# 파생한다(required=False 행의 env 키). 새 선택 필드 추가 시 이 목록이 자동 갱신 — 테스트 수정 0(SC-E).
+_BACKEND_KEYS = tuple(_s.env for _s in _FIELD_SPECS if not _s.required)
 
 
 @contextlib.contextmanager
@@ -848,6 +809,48 @@ class TestEmbedEnableClipSettings(unittest.TestCase):
         with _env(EMBED_ENABLE_CLIP="maybe"):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
+
+
+class TestFieldSpecsSSOT(unittest.TestCase):
+    """069 US-E FR-E4(PR4a) — 필드 명세 단일 출처(``_FIELD_SPECS``).
+
+    build 조립·테스트 격리키(``_BACKEND_KEYS``)·커버리지가 모두 이 한 테이블에서 파생돼야 한다.
+    새 env 필드 추가 시 테이블 한 행만 늘리면 build·격리·검증이 자동 반영된다(SC-E: 필드 추가 시
+    테스트 수정 0). 이 계약이 깨지면(테이블 누락/드리프트) 아래 두 테스트가 즉시 실패한다."""
+
+    def test_specs_cover_all_env_backed_fields(self) -> None:
+        # PipelineSettings 의 env 유래 필드(=profile 제외 전부) 와 _FIELD_SPECS 가 정확히 1:1.
+        from dataclasses import fields
+
+        from src.config.settings import _FIELD_SPECS, PipelineSettings
+
+        spec_attrs = [s.attr for s in _FIELD_SPECS]
+        self.assertEqual(len(spec_attrs), len(set(spec_attrs)), "_FIELD_SPECS 중복 attr")
+        dc_attrs = {f.name for f in fields(PipelineSettings)} - {"profile"}
+        self.assertEqual(set(spec_attrs), dc_attrs)
+
+    def test_backend_keys_derived_from_specs(self) -> None:
+        # 테스트 격리키(선택 env)는 수동 나열이 아니라 테이블의 required=False 행에서 파생된다.
+        from src.config.settings import _FIELD_SPECS
+
+        optional_env = {s.env for s in _FIELD_SPECS if not s.required}
+        self.assertEqual(set(_BACKEND_KEYS), optional_env)
+
+    def test_required_flag_matches_reader(self) -> None:
+        # required 플래그 ⇔ read 함수 계열 봉인: 필수 필드는 _require_env* 로, 선택 필드는 그 외
+        # (_opt_*/resolver/특이 read)로 읽어야 한다. 종전엔 _require_env* 호출 자체가 곧 필수 여부라
+        # 메타-동작이 붙어 있었으나, 테이블화로 분리되며 "required=True 인데 _opt_*" 같은 오설정
+        # 여지가 생긴다 — 이 상관을 명시적으로 잠가 미래 footgun 을 차단한다(리뷰 반영).
+        from src.config.settings import _FIELD_SPECS
+
+        for s in _FIELD_SPECS:
+            uses_require_reader = s.read.__name__.startswith("_require_")
+            self.assertEqual(
+                s.required,
+                uses_require_reader,
+                f"{s.attr}: required={s.required} 인데 read={s.read.__name__} "
+                "(필수 필드는 _require_env* 로 읽어야 한다)",
+            )
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, NamedTuple
 
 from src.config import keyframe_dedup_defaults as _kf
 from src.config import search_constants
@@ -472,131 +473,140 @@ def _resolve_os_rerank_tau() -> float:
     return value
 
 
+def _opt_int(default: int) -> Callable[[str], int]:
+    return lambda key: _env_int_default(key, default)
+
+
+def _opt_str(default: str) -> Callable[[str], str]:
+    return lambda key: _env_str_default(key, default)
+
+
+def _opt_float(default: float) -> Callable[[str], float]:
+    return lambda key: _env_float_default(key, default)
+
+
+def _opt_bool(default: bool) -> Callable[[str], bool]:
+    return lambda key: _env_bool_default(key, default)
+
+
+def _video_max_keyframes(key: str) -> int:
+    # 0/음수 입력은 48 로 보정(현행 동작 보존) — 특이 로직이라 전용 read.
+    vk = _env_int_default(key, 48)
+    return 48 if vk <= 0 else vk
+
+
+class _Spec(NamedTuple):
+    """한 필드 = 한 행: 속성명·env 키·읽기함수·필수여부."""
+
+    attr: str
+    env: str
+    read: Callable[[str], Any]
+    required: bool = False
+
+
+# ── 069 US-E FR-E4(PR4a): 필드 명세 단일 출처 ──────────────────────────────────
+# 종전 _build_settings 는 64필드를 손으로 나열했고 테스트는 격리할 선택 env 키를 또 따로 나열했다
+# (두 곳 드리프트 위험). 아래 _FIELD_SPECS 한 테이블에서 build 조립·테스트 격리키·커버리지가 모두
+# 파생된다 — 새 필드 추가 시 이 테이블 한 행만 늘리면 된다(SC-E). 위 dataclass 필드 정의와 이 테이블은
+# test_settings.TestFieldSpecsSSOT 가 1:1 로 봉인한다.
+#
+# read 는 env 키 하나를 받아 값을 돌려주는 함수다(기본값·범위검증 캡슐화). 세 종류:
+#   - 필수(_require_env*)       : 미설정 시 ValueError. required=True.
+#   - 선택(_opt_*(기본값))       : 미설정 시 기본값. required=False.
+#   - 검증 resolver(_resolve_*) : 화이트리스트·범위 fail-fast 를 자체 수행(env 키가 내부 하드코드라
+#                                 read 는 인자를 무시하고 호출만; spec 의 env 는 격리키 파생용 메타).
+_FIELD_SPECS: tuple[_Spec, ...] = (
+    # 필수(_require_env*) — 미설정 시 ValueError.
+    _Spec("meta_model", "META_MODEL", _require_env, required=True),
+    _Spec("openai_base_url", "OPENAI_BASE_URL", _require_env, required=True),
+    _Spec("openai_api_key", "OPENAI_API_KEY", _require_env, required=True),
+    _Spec("summary_max_chars", "SUMMARY_MAX_CHARS", _require_env_int, required=True),
+    _Spec("top_k_keywords", "TOP_K_KEYWORDS", _require_env_int, required=True),
+    _Spec("chunk_size", "CHUNK_SIZE", _require_env_int, required=True),
+    _Spec("overlap_size", "OVERLAP_SIZE", _require_env_int, required=True),
+    _Spec("encoding", "ENCODING", _require_env, required=True),
+    _Spec("text_embedding_model", "TEXT_EMBED_MODEL", _require_env, required=True),
+    _Spec("text_embedding_chunk_size", "TEXT_EMBED_CHUNK_SIZE", _require_env_int, required=True),
+    _Spec("text_embedding_normalize", "TEXT_EMBED_NORMALIZE", _require_env_bool, required=True),
+    # 017/018/062: 임베딩 채널·API 백엔드(기본 로컬 'st' — 미설정 무영향).
+    _Spec("text_embedding_model_bge", "TEXT_EMBED_MODEL_BGE", _opt_str("BAAI/bge-m3")),
+    _Spec("active_embed_channel", "EMBED_ACTIVE_CHANNEL", _opt_str("st")),
+    _Spec("embed_api_base_url", "EMBED_API_BASE_URL", _opt_str("")),
+    _Spec("embed_api_model", "EMBED_API_MODEL", _opt_str("BAAI/bge-m3")),
+    _Spec("embed_api_key", "EMBED_API_KEY", _opt_str("")),
+    _Spec("embed_api_timeout_s", "EMBED_API_TIMEOUT_S", _opt_float(30.0)),
+    _Spec("embed_api_batch_size", "EMBED_API_BATCH_SIZE", _opt_int(32)),
+    _Spec("embed_api_max_retries", "EMBED_API_MAX_RETRIES", _opt_int(2)),
+    # 063: clip 임베딩 토글(기본 True=회귀 0).
+    _Spec("embed_enable_clip", "EMBED_ENABLE_CLIP", _opt_bool(True)),
+    # 069 D8: 임베딩 청크 overlap(기본 0=현행). chunk_size 와의 관계는 _validate 가 fail-fast.
+    _Spec("text_embedding_chunk_overlap", "TEXT_EMBED_CHUNK_OVERLAP", _opt_int(0)),
+    # video_max_keyframes: 0/음수 보정 특이 로직(전용 read).
+    _Spec("video_max_keyframes", "VIDEO_MAX_KEYFRAMES", _video_max_keyframes),
+    _Spec("image_labels_meta_top_k", "IMAGE_LABELS_META_TOP_K", _opt_int(10)),
+    _Spec("video_keyframe_labels_meta_top_k", "VIDEO_KEYFRAME_LABELS_META_TOP_K", _opt_int(5)),
+    _Spec("labels_score_min", "LABELS_SCORE_MIN", _opt_float(0.1)),
+    # 관계 제안 게이트(032/033/008/009).
+    _Spec("relation_top_k", "RELATION_TOP_K", _opt_int(10)),
+    _Spec("relation_min_sim", "RELATION_MIN_SIM", _opt_float(0.2)),
+    _Spec("relation_auto_approve_min", "RELATION_AUTO_APPROVE_MIN", _opt_float(0.9)),
+    _Spec("relation_auto_approve_emb_min", "RELATION_AUTO_APPROVE_EMB_MIN", _opt_float(0.0)),
+    _Spec("relation_path_top_k", "RELATION_PATH_TOP_K", _opt_int(10)),
+    _Spec("relation_retry_max_attempts", "RELATION_RETRY_MAX_ATTEMPTS", _opt_int(3)),
+    # 020/038: OpenSearch 동기화(기본 sync=True — backend=opensearch ∧ ¬sync 는 _validate 가 차단).
+    _Spec("opensearch_url", "OPENSEARCH_URL", _opt_str("http://localhost:9200")),
+    _Spec("opensearch_index", "OPENSEARCH_INDEX", _opt_str("assets")),
+    _Spec("opensearch_sync_enabled", "OPENSEARCH_SYNC_ENABLED", _opt_bool(True)),
+    # 021/037/027: 검색 백엔드·융합·게이트(검증 resolver — 화이트리스트·범위 fail-fast).
+    _Spec("search_backend", "SEARCH_BACKEND", lambda _k: _resolve_search_backend()),
+    _Spec("opensearch_fusion_weights", "OPENSEARCH_FUSION_WEIGHTS", lambda _k: _resolve_opensearch_fusion_weights()),
+    _Spec("search_os_cutoff_enabled", "SEARCH_OS_CUTOFF_ENABLED", lambda _k: _resolve_os_cutoff_enabled()),
+    _Spec("search_os_cutoff_eps", "SEARCH_OS_CUTOFF_EPS", lambda _k: _resolve_os_cutoff_eps()),
+    _Spec("search_os_cutoff_floor", "SEARCH_OS_CUTOFF_FLOOR", lambda _k: _resolve_os_cutoff_floor()),
+    _Spec("search_os_result_floor", "SEARCH_OS_RESULT_FLOOR", lambda _k: _resolve_os_result_floor()),
+    # 028: rerank 평가(기본 off).
+    _Spec("search_os_rerank_enabled", "SEARCH_OS_RERANK_ENABLED", _opt_bool(search_constants.OS_RERANK_ENABLED_DEFAULT)),
+    _Spec("search_os_rerank_model", "SEARCH_OS_RERANK_MODEL", _opt_str(search_constants.OS_RERANK_MODEL_DEFAULT)),
+    _Spec("search_os_rerank_top_r", "SEARCH_OS_RERANK_TOP_R", lambda _k: _resolve_os_rerank_top_r()),
+    _Spec("search_os_rerank_tau", "SEARCH_OS_RERANK_TAU", lambda _k: _resolve_os_rerank_tau()),
+    # 029/075: 질의 정규화 토글·방식.
+    _Spec("search_os_query_norm_enabled", "SEARCH_OS_QUERY_NORM_ENABLED", _opt_bool(search_constants.OS_QUERY_NORM_ENABLED_DEFAULT)),
+    _Spec("search_os_query_norm_method", "SEARCH_OS_QUERY_NORM_METHOD", lambda _k: _resolve_os_query_norm_method()),
+    # 073/074: aboutness 필터·LLM 검증(기본 off).
+    _Spec("search_about_filter_enabled", "SEARCH_ABOUT_FILTER_ENABLED", _opt_bool(search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT)),
+    _Spec("search_llm_verify_enabled", "SEARCH_LLM_VERIFY_ENABLED", _opt_bool(search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT)),
+    # 025: BM25 operator(기본 or·화이트리스트 fail-fast).
+    _Spec("search_os_bm25_operator", "SEARCH_OS_BM25_OPERATOR", lambda _k: _resolve_os_bm25_operator()),
+    # 044: evidence rescue/debug.
+    _Spec("search_evidence_rescue_enabled", "SEARCH_EVIDENCE_RESCUE_ENABLED", _opt_bool(search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT)),
+    _Spec("search_evidence_debug", "SEARCH_EVIDENCE_DEBUG", _opt_bool(search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT)),
+    # 045: generic term seed(core + env extra merge). env 키는 격리키 파생용 메타.
+    _Spec("search_generic_term_seed", search_constants.SEARCH_GENERIC_TERM_SEED_EXTRA_ENV, lambda _k: resolve_search_generic_term_seed()),
+    # 026: OS 색인 빌더 교정(빈 항목·컴파일 불가 fail-fast).
+    _Spec("opensearch_nori_user_words", "OPENSEARCH_NORI_USER_WORDS", lambda _k: resolve_opensearch_nori_user_words()),
+    _Spec("opensearch_filename_noise_patterns", "OPENSEARCH_FILENAME_NOISE_PATTERNS", lambda _k: resolve_opensearch_filename_noise_patterns()),
+    # 048: 영상 키프레임 near-dup 제거 7필드(기본값 keyframe_dedup_defaults 단일 출처).
+    _Spec("video_keyframe_dedup_enabled", "VIDEO_KEYFRAME_DEDUP_ENABLED", _opt_bool(_kf.DEFAULT_ENABLED)),
+    _Spec("video_keyframe_dedup_hash_max", "VIDEO_KEYFRAME_DEDUP_HASH_MAX", _opt_int(_kf.DEFAULT_HASH_MAX)),
+    _Spec("video_keyframe_dedup_ssim_min", "VIDEO_KEYFRAME_DEDUP_SSIM_MIN", _opt_float(_kf.DEFAULT_SSIM_MIN)),
+    _Spec("video_keyframe_dedup_ssim_gray_lo", "VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO", _opt_float(_kf.DEFAULT_SSIM_GRAY_LO)),
+    _Spec("video_keyframe_dedup_hist_min", "VIDEO_KEYFRAME_DEDUP_HIST_MIN", _opt_float(_kf.DEFAULT_HIST_MIN)),
+    _Spec("video_keyframe_dedup_compare_mode", "VIDEO_KEYFRAME_DEDUP_COMPARE_MODE", _opt_str(_kf.DEFAULT_COMPARE_MODE)),
+    _Spec("video_keyframe_dedup_recent_window", "VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW", _opt_int(_kf.DEFAULT_RECENT_WINDOW)),
+    # 049: VLM 요약 프롬프트 v2 토글(기본 False=v1 바이트 동일).
+    _Spec("vlm_summary_prompt_v2", "VLM_SUMMARY_PROMPT_V2", _opt_bool(False)),
+    _Spec("vlm_summary_ab_judge", "VLM_SUMMARY_AB_JUDGE", _opt_bool(False)),
+    # 058: 관계 topic 정본화 토글(기본 False=동작 불변).
+    _Spec("topic_canonicalize_enabled", "TOPIC_CANONICALIZE_ENABLED", _opt_bool(False)),
+)
+
+
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
-    settings = PipelineSettings(
-        profile=profile,
-        meta_model=_require_env("META_MODEL"),
-        openai_base_url=_require_env("OPENAI_BASE_URL"),
-        openai_api_key=_require_env("OPENAI_API_KEY"),
-        summary_max_chars=_require_env_int("SUMMARY_MAX_CHARS"),
-        top_k_keywords=_require_env_int("TOP_K_KEYWORDS"),
-        chunk_size=_require_env_int("CHUNK_SIZE"),
-        overlap_size=_require_env_int("OVERLAP_SIZE"),
-        encoding=_require_env("ENCODING"),
-        text_embedding_model=_require_env("TEXT_EMBED_MODEL"),
-        text_embedding_model_bge=_env_str_default("TEXT_EMBED_MODEL_BGE", "BAAI/bge-m3"),
-        active_embed_channel=_env_str_default("EMBED_ACTIVE_CHANNEL", "st"),
-        # 062: API 임베딩 백엔드 설정(기본 로컬이라 미설정 무영향). base_url 미설정 시 'st_api' 활성화하면
-        #   backend 라우팅이 빈 base_url 로 실패 → 활성화는 base_url 주입과 함께(사람 게이트).
-        embed_api_base_url=_env_str_default("EMBED_API_BASE_URL", ""),
-        embed_api_model=_env_str_default("EMBED_API_MODEL", "BAAI/bge-m3"),
-        embed_api_key=_env_str_default("EMBED_API_KEY", ""),
-        embed_api_timeout_s=_env_float_default("EMBED_API_TIMEOUT_S", 30.0),
-        embed_api_batch_size=_env_int_default("EMBED_API_BATCH_SIZE", 32),
-        embed_api_max_retries=_env_int_default("EMBED_API_MAX_RETRIES", 2),
-        # 063: clip 임베딩 토글(기본 True=회귀 0). 신규 셋업서 false 로 opt-out.
-        embed_enable_clip=_env_bool_default("EMBED_ENABLE_CLIP", True),
-        text_embedding_chunk_size=_require_env_int("TEXT_EMBED_CHUNK_SIZE"),
-        # 069 D8: 선택 필드(_env_int_default) — 미설정 시 0(overlap 없음·하드코딩과 동일·동작 불변).
-        text_embedding_chunk_overlap=_env_int_default("TEXT_EMBED_CHUNK_OVERLAP", 0),
-        text_embedding_normalize=_require_env_bool("TEXT_EMBED_NORMALIZE"),
-        video_max_keyframes=(
-            48 if (vk := _env_int_default("VIDEO_MAX_KEYFRAMES", 48)) <= 0 else vk
-        ),
-        image_labels_meta_top_k=_env_int_default("IMAGE_LABELS_META_TOP_K", 10),
-        video_keyframe_labels_meta_top_k=_env_int_default(
-            "VIDEO_KEYFRAME_LABELS_META_TOP_K", 5
-        ),
-        labels_score_min=_env_float_default("LABELS_SCORE_MIN", 0.1),
-        relation_top_k=_env_int_default("RELATION_TOP_K", 10),
-        relation_min_sim=_env_float_default("RELATION_MIN_SIM", 0.2),
-        relation_auto_approve_min=_env_float_default("RELATION_AUTO_APPROVE_MIN", 0.9),
-        relation_auto_approve_emb_min=_env_float_default("RELATION_AUTO_APPROVE_EMB_MIN", 0.0),
-        relation_path_top_k=_env_int_default("RELATION_PATH_TOP_K", 10),
-        relation_retry_max_attempts=_env_int_default("RELATION_RETRY_MAX_ATTEMPTS", 3),
-        # 020: OpenSearch 동기화 선택 설정. 미설정 시 url/index 기본값.
-        # 038: sync 기본 True(037 후 적재=색인 정합). backend=opensearch ∧ ¬sync 조합은 빌드 말미
-        #   _validate_settings_consistency 가 ValueError 로 차단한다(아래 return 직전).
-        opensearch_url=_env_str_default("OPENSEARCH_URL", "http://localhost:9200"),
-        opensearch_index=_env_str_default("OPENSEARCH_INDEX", "assets"),
-        opensearch_sync_enabled=_env_bool_default("OPENSEARCH_SYNC_ENABLED", True),
-        # 021/037: 검색 백엔드 선택. 037 에서 PG 경로 제거로 미설정 시 기본 'opensearch'. search_backend
-        # 화이트리스트 검증·융합 가중치 범위검증은 _resolve_* 헬퍼가 _build_settings 시점에 수행한다(fail-fast).
-        search_backend=_resolve_search_backend(),
-        opensearch_fusion_weights=_resolve_opensearch_fusion_weights(),
-        # 023/027: OS 검색 버킷 게이트 + per-result 컷. 범위 검증·fail-fast 는 _resolve_* 헬퍼가
-        # _build_settings 시점에 수행(021 fusion_weights 동형). 기본값은 search_constants 단일 출처(F1).
-        # 게이트는 OS 검색 경로(037 단일 백엔드)에 적용된다.
-        search_os_cutoff_enabled=_resolve_os_cutoff_enabled(),
-        search_os_cutoff_eps=_resolve_os_cutoff_eps(),
-        search_os_cutoff_floor=_resolve_os_cutoff_floor(),
-        # 027: OS per-result 컷 코사인 하한(024 정규화 스케일 4종을 단일 코사인 임계로 대체).
-        search_os_result_floor=_resolve_os_result_floor(),
-        # 028: rerank 평가 설정(기본 off — 평가 opt-in).
-        search_os_rerank_enabled=_env_bool_default(
-            "SEARCH_OS_RERANK_ENABLED", search_constants.OS_RERANK_ENABLED_DEFAULT
-        ),
-        search_os_rerank_model=_env_str_default(
-            "SEARCH_OS_RERANK_MODEL", search_constants.OS_RERANK_MODEL_DEFAULT
-        ),
-        search_os_rerank_top_r=_resolve_os_rerank_top_r(),
-        search_os_rerank_tau=_resolve_os_rerank_tau(),
-        # 029: LLM 질의 명사구 정규화 토글(기본 off — 회귀 0). _env_bool_default 패턴(cutoff_enabled 동형).
-        # 잘못된 불리언 문자열은 _env_bool_default 가 _build_settings 시점에 즉시 ValueError(fail-fast).
-        search_os_query_norm_enabled=_env_bool_default(
-            "SEARCH_OS_QUERY_NORM_ENABLED", search_constants.OS_QUERY_NORM_ENABLED_DEFAULT
-        ),
-        # 075: 정규화 방식(morph 기본·llm 선택). 화이트리스트 fail-fast(_resolve_os_bm25_operator 동형).
-        search_os_query_norm_method=_resolve_os_query_norm_method(),
-        # 073: aboutness OR-증거 필터(기본 off — 회귀 0). _env_bool_default 패턴(query_norm 동형).
-        search_about_filter_enabled=_env_bool_default(
-            "SEARCH_ABOUT_FILTER_ENABLED", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT
-        ),
-        # 074: 검색시점 top-3 개별 LLM 검증(기본 off — 회귀 0). 029 거버넌스 토글 선례 동형.
-        search_llm_verify_enabled=_env_bool_default(
-            "SEARCH_LLM_VERIFY_ENABLED", search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT
-        ),
-        # 025: OS BM25 operator(기본 or — 회귀 0). 화이트리스트 fail-fast.
-        search_os_bm25_operator=_resolve_os_bm25_operator(),
-        # 044: evidence rescue live 게이트. ``search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT``
-        # 가 코드 기본; .env ``SEARCH_EVIDENCE_RESCUE_ENABLED=0|1`` 로 덮어쓴다. False 이면
-        # ``opensearch_search.fuse_hybrid`` 가 legacy_lexical(전 keep) — plan meta 의 restricted 와
-        # 사용자 체감 불일치 가능(plan 만 바뀌고 drop 안 됨). _env_bool_default fail-fast 동형.
-        search_evidence_rescue_enabled=_env_bool_default(
-            "SEARCH_EVIDENCE_RESCUE_ENABLED", search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT
-        ),
-        # 044: per-hit debug meta opt-in. ``SEARCH_EVIDENCE_DEBUG=1`` — keep_reason·matched_queries
-        # 관측(q=테스트 스모크·G5). settings 미설정 시 search_constants 기본(False).
-        search_evidence_debug=_env_bool_default(
-            "SEARCH_EVIDENCE_DEBUG", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
-        ),
-        search_generic_term_seed=resolve_search_generic_term_seed(),
-        # 026: OS 색인 빌더 교정 선택 설정(OS 색인 한정·pg 무접촉). 외래어 사전 기본 7종·정제 패턴 기본 빈.
-        # 빈 항목·컴파일 불가 패턴은 resolver 가 _build_settings 시점에 즉시 ValueError(fail-fast).
-        opensearch_nori_user_words=resolve_opensearch_nori_user_words(),
-        opensearch_filename_noise_patterns=resolve_opensearch_filename_noise_patterns(),
-        # 048: 영상 키프레임 near-dup 제거 7필드(FR-501 단일 출처). 모두 선택 env — 미설정 시 spec
-        # 기본설정표 값. enabled 기본 True(2026-06-29 결정). compare_mode 'global' 은 타임라인 손실
-        # 위험이 있어 비기본(SC-008) — 화이트리스트 검증은 dedup 코어가 수행한다(잘못된 모드 = keep 폴백).
-        # 069 D2: fallback 기본값은 keyframe_dedup_defaults 상수 단일 출처(dataclass 기본값과 공유·드리프트 차단).
-        video_keyframe_dedup_enabled=_env_bool_default("VIDEO_KEYFRAME_DEDUP_ENABLED", _kf.DEFAULT_ENABLED),
-        video_keyframe_dedup_hash_max=_env_int_default("VIDEO_KEYFRAME_DEDUP_HASH_MAX", _kf.DEFAULT_HASH_MAX),
-        video_keyframe_dedup_ssim_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_MIN", _kf.DEFAULT_SSIM_MIN),
-        video_keyframe_dedup_ssim_gray_lo=_env_float_default("VIDEO_KEYFRAME_DEDUP_SSIM_GRAY_LO", _kf.DEFAULT_SSIM_GRAY_LO),
-        video_keyframe_dedup_hist_min=_env_float_default("VIDEO_KEYFRAME_DEDUP_HIST_MIN", _kf.DEFAULT_HIST_MIN),
-        video_keyframe_dedup_compare_mode=_env_str_default("VIDEO_KEYFRAME_DEDUP_COMPARE_MODE", _kf.DEFAULT_COMPARE_MODE),
-        video_keyframe_dedup_recent_window=_env_int_default("VIDEO_KEYFRAME_DEDUP_RECENT_WINDOW", _kf.DEFAULT_RECENT_WINDOW),
-        # 049: VLM 요약 프롬프트 v2 토글(기본 False — v1 바이트 동일·회귀 안전판·FR-102). 순수 토글이라
-        # _env_bool_default 가 불리언 형식 오류만 fail-fast(029/048 동형). False 면 summarize_* 가 v1
-        # 경로(현행 inline 키워드 루프)를 그대로 써 추출 결과가 바이트 동일하다.
-        vlm_summary_prompt_v2=_env_bool_default("VLM_SUMMARY_PROMPT_V2", False),
-        vlm_summary_ab_judge=_env_bool_default("VLM_SUMMARY_AB_JUDGE", False),
-        # 058: 관계 topic 정본화 배선 토글(기본 False — 동작 불변·시드 전 동치·FR-401). 순수 토글이라
-        # _env_bool_default 가 불리언 형식 오류만 fail-fast(029/049 동형). False 면 graph_persist 가
-        # 현행 경로(coerce 결과 그대로 저장)를 써 관계 저장이 바이트 동일하다(canonicalize·registry·LLM 0).
-        topic_canonicalize_enabled=_env_bool_default("TOPIC_CANONICALIZE_ENABLED", False),
-    )
-    # 038: 단일 필드 fail-fast(_resolve_*)로 못 잡는 교차필드 불변식(OS read ⇒ OS write 필수)을
+    # 종전 64필드 손나열 조립을 _FIELD_SPECS 단일 출처 루프로 대체(동작 불변 — read 별로 종전과
+    # 동일한 env 키·기본값·검증을 호출). profile 만 env 유래가 아니라 직접 주입한다.
+    values = {spec.attr: spec.read(spec.env) for spec in _FIELD_SPECS}
+    settings = PipelineSettings(profile=profile, **values)
+    # 038: 단일 필드 fail-fast(_resolve_*)로 못 잡는 교차필드 불변식(OS read ⇒ OS write 필수 등)을
     # 빌드 완료 후 검증한다 — 오설정이 런타임까지 숨지 않게(init_settings=_build_settings 검증 지점).
     _validate_settings_consistency(settings)
     return settings
