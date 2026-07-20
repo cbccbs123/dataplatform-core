@@ -10,6 +10,7 @@ from unittest import mock
 from src.search.bucket_policy import apply_bucket_policy
 from src.search.opensearch_search import cut_rows, passes_cutoff, rerank_reorder
 from src.search.query_plan import SearchPolicy
+from src.search.search_tuning import SearchTuning
 
 
 def _row(
@@ -46,31 +47,44 @@ def _policy(*, rescue: str = "restricted") -> SearchPolicy:
 
 
 class ApplyBucketPolicyTest(unittest.TestCase):
+    # 069 US-E(FR-E5②): apply_bucket_policy 튜닝 12종이 SearchTuning 한 묶음으로 축소됐다. 개별 테스트는
+    # 종전대로 cutoff_enabled=… 같은 kw 를 넘기고, 이 헬퍼가 튜닝 필드/나머지로 분리해 SearchTuning 을
+    # 조립한다(테스트 메서드 무변경). _TUNING_FIELDS 에 없는 kw(top·baseline·k·rerank_fn·policy·주입 fn)는
+    # 그대로 개별 인자로 전달.
+    _TUNING_FIELDS = {
+        "weights", "cutoff_enabled", "cutoff_eps", "cutoff_floor", "result_floor",
+        "bm25_operator", "rerank_enabled", "rerank_top_r", "rerank_tau", "rerank_model",
+        "about_filter_enabled", "evidence_rescue_enabled", "evidence_debug",
+    }
+
     def _call(self, fused: list[dict], **kw: Any):
-        defaults = {
-            "query": "테스트",
-            "top": 0.85,
-            "baseline": 0.30,
-            "k": 20,
+        tuning_kw: dict[str, Any] = {
             "cutoff_enabled": True,
             "cutoff_eps": 0.17,
             "cutoff_floor": 0.50,
             "result_floor": 0.40,
             "bm25_operator": "and",
             "rerank_enabled": False,
-            "rerank_fn": None,
             "rerank_top_r": 10,
             "rerank_tau": 0.0,
             "rerank_model": "cross-encoder",
-            "policy": _policy(),
             "evidence_rescue_enabled": False,
             "evidence_debug": False,
+        }
+        rest: dict[str, Any] = {
+            "query": "테스트",
+            "top": 0.85,
+            "baseline": 0.30,
+            "k": 20,
+            "rerank_fn": None,
+            "policy": _policy(),
             "passes_cutoff_fn": passes_cutoff,
             "cut_rows_fn": cut_rows,
             "rerank_reorder_fn": rerank_reorder,
         }
-        defaults.update(kw)
-        return apply_bucket_policy(fused, **defaults)
+        for key, val in kw.items():
+            (tuning_kw if key in self._TUNING_FIELDS else rest)[key] = val
+        return apply_bucket_policy(fused, tuning=SearchTuning(**tuning_kw), **rest)
 
     def test_cutoff_disabled_passthrough(self) -> None:
         fused = [_row("a1"), _row("a2", cos=0.1, similarity=0.1)]
@@ -322,25 +336,28 @@ class BucketPolicyLegacyInlineParityTest(unittest.TestCase):
             top=top,
             baseline=baseline,
         )
-        out = apply_bucket_policy(
-            fused_copy,
-            query=kw.get("query", "테스트"),
-            top=top,
-            baseline=baseline,
-            k=kw.get("k", 20),
+        tuning = SearchTuning(
             cutoff_enabled=kw.get("cutoff_enabled", True),
             cutoff_eps=kw.get("cutoff_eps", 0.17),
             cutoff_floor=kw.get("cutoff_floor", 0.50),
             result_floor=kw.get("result_floor", 0.40),
             bm25_operator=kw.get("bm25_operator", "and"),
             rerank_enabled=kw.get("rerank_enabled", False),
-            rerank_fn=kw.get("rerank_fn"),
             rerank_top_r=kw.get("rerank_top_r", 10),
             rerank_tau=kw.get("rerank_tau", 0.0),
             rerank_model=kw.get("rerank_model", "cross-encoder"),
-            policy=policy,
             evidence_rescue_enabled=kw.get("evidence_rescue_enabled", False),
             evidence_debug=kw.get("evidence_debug", False),
+        )
+        out = apply_bucket_policy(
+            fused_copy,
+            query=kw.get("query", "테스트"),
+            top=top,
+            baseline=baseline,
+            k=kw.get("k", 20),
+            tuning=tuning,
+            rerank_fn=kw.get("rerank_fn"),
+            policy=policy,
             passes_cutoff_fn=passes_cutoff,
             cut_rows_fn=cut_rows,
             rerank_reorder_fn=rerank_reorder,
@@ -402,7 +419,9 @@ class AboutFilterPolicyTest(unittest.TestCase):
     """073 — apply_bucket_policy 의 aboutness OR-증거 필터 배선(토글·드롭·내부키 제거)."""
 
     # ApplyBucketPolicyTest._call 과 동일 기본값(상속하면 부모 테스트가 중복 실행되므로 복제).
+    # _call 이 self._TUNING_FIELDS 를 참조하므로 그 클래스 속성도 함께 복제한다(FR-E5② tuning 분리).
     _call = ApplyBucketPolicyTest._call
+    _TUNING_FIELDS = ApplyBucketPolicyTest._TUNING_FIELDS
 
     def _about_rows(self) -> list[dict[str, Any]]:
         a = _row("guitar", cos=0.80, similarity=0.8, bm25=True)

@@ -50,6 +50,7 @@ def main() -> int:
     from src.search.golden_guard import topic_of_filename, uncovered_topics
     from src.search.opensearch_search import get_client, search_assets_os
     from src.search.query_preprocess import noun_phrase_query
+    from src.search.search_tuning import SearchTuning
 
     cfg = get_current_settings()
     fx = _REPO_ROOT / "tests" / "fixtures" / "search"
@@ -72,11 +73,13 @@ def main() -> int:
         """한 설정으로 search_assets_os 를 호출(.env 무변경·파라미터 직접 주입)."""
         return search_assets_os(
             client, query, modalities=_MODALITIES, k=20,
-            channel=cfg.active_embed_channel, weights=cfg.opensearch_fusion_weights,
-            index=cfg.opensearch_index, cutoff_enabled=cutoff,
-            cutoff_eps=cutoff_eps, cutoff_floor=cutoff_floor, result_floor=result_floor,
-            bm25_operator=bm25_op,
-            rerank_enabled=rerank, rerank_top_r=rr_top_r, rerank_tau=rr_tau, rerank_model=rr_model,
+            channel=cfg.active_embed_channel, index=cfg.opensearch_index,
+            tuning=SearchTuning(
+                weights=cfg.opensearch_fusion_weights, cutoff_enabled=cutoff,
+                cutoff_eps=cutoff_eps, cutoff_floor=cutoff_floor, result_floor=result_floor,
+                bm25_operator=bm25_op,
+                rerank_enabled=rerank, rerank_top_r=rr_top_r, rerank_tau=rr_tau, rerank_model=rr_model,
+            ),
             query_norm_enabled=qnorm,
             query_norm_fn=(noun_phrase_query if qnorm else None),
         )[0]

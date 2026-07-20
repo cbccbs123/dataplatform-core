@@ -282,14 +282,14 @@ class TestBackendOsAboutFilterWiring(unittest.TestCase):
         fake_os, cap = _recording_os({"text": [{"id": "t"}]})
         with mock.patch.object(svc, "get_current_settings", return_value=cfg):
             svc.search_hybrid("질의", modalities=["text"], _os_search_fn=fake_os, _os_client_fn=lambda: "C")
-        self.assertIs(cap["about_filter_enabled"], True)
+        self.assertIs(cap["tuning"].about_filter_enabled, True)
 
     def test_default_falls_back_to_constant_false(self) -> None:
         # settings 미초기화(순수 단위) → search_constants 기본 False 폴백(회귀 0).
         fake_os, cap = _recording_os({"text": [{"id": "t"}]})
         search_hybrid("질의", modalities=["text"], _os_search_fn=fake_os, _os_client_fn=lambda: "C")
-        self.assertIs(cap["about_filter_enabled"], search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT)
-        self.assertIs(cap["about_filter_enabled"], False)
+        self.assertIs(cap["tuning"].about_filter_enabled, search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT)
+        self.assertIs(cap["tuning"].about_filter_enabled, False)
 
 
 class TestBackendOsLlmVerifyWiring(unittest.TestCase):
@@ -382,10 +382,10 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
                 _os_client_fn=lambda: "C",
             )
         # os_search_fn 가 cfg 값 그대로 받음(search_constants 폴백 아님)
-        self.assertIs(os_cap["cutoff_enabled"], True)
-        self.assertEqual(os_cap["cutoff_eps"], 0.22)
-        self.assertEqual(os_cap["cutoff_floor"], 0.55)
-        self.assertEqual(os_cap["result_floor"], 0.33)
+        self.assertIs(os_cap["tuning"].cutoff_enabled, True)
+        self.assertEqual(os_cap["tuning"].cutoff_eps, 0.22)
+        self.assertEqual(os_cap["tuning"].cutoff_floor, 0.55)
+        self.assertEqual(os_cap["tuning"].result_floor, 0.33)
         # 027: 제거된 인자는 전달되지 않는다(probe_k·정규화 스케일 임계·pipeline_name 소멸).
         self.assertNotIn("cutoff_probe_k", os_cap)
         self.assertNotIn("pipeline_name", os_cap)
@@ -400,10 +400,10 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
             _os_search_fn=fake_os,
             _os_client_fn=lambda: "C",
         )
-        self.assertIs(os_cap["cutoff_enabled"], search_constants.OS_CUTOFF_ENABLED_DEFAULT)
-        self.assertEqual(os_cap["cutoff_eps"], search_constants.OS_CUTOFF_EPS_DEFAULT)
-        self.assertEqual(os_cap["cutoff_floor"], search_constants.OS_CUTOFF_FLOOR_DEFAULT)
-        self.assertEqual(os_cap["result_floor"], search_constants.OS_RESULT_FLOOR_DEFAULT)
+        self.assertIs(os_cap["tuning"].cutoff_enabled, search_constants.OS_CUTOFF_ENABLED_DEFAULT)
+        self.assertEqual(os_cap["tuning"].cutoff_eps, search_constants.OS_CUTOFF_EPS_DEFAULT)
+        self.assertEqual(os_cap["tuning"].cutoff_floor, search_constants.OS_CUTOFF_FLOOR_DEFAULT)
+        self.assertEqual(os_cap["tuning"].result_floor, search_constants.OS_RESULT_FLOOR_DEFAULT)
         self.assertEqual(out["results"]["text_documents"], [{"id": "os_t"}])
 
     def test_disable_os_cutoff_forces_cutoff_disabled(self) -> None:
@@ -427,7 +427,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
                 _os_search_fn=fake_os,
                 _os_client_fn=lambda: "C",
             )
-        self.assertIs(os_cap["cutoff_enabled"], False)  # cfg True 를 우회가 덮음
+        self.assertIs(os_cap["tuning"].cutoff_enabled, False)  # cfg True 를 우회가 덮음
 
     def test_default_disable_os_cutoff_false_keeps_cfg_enabled(self) -> None:
         # disable_os_cutoff 기본 False → cfg 의 enabled 가 그대로 전달(우회 미적용).
@@ -442,7 +442,7 @@ class TestBackendOpenSearchCutoffWiring(unittest.TestCase):
                 "질의", modalities=["text"],
                 _os_search_fn=fake_os, _os_client_fn=lambda: "C",
             )
-        self.assertIs(os_cap["cutoff_enabled"], True)
+        self.assertIs(os_cap["tuning"].cutoff_enabled, True)
 
 
 class TestBackendOsPerResultCutDelegation(unittest.TestCase):
@@ -492,10 +492,10 @@ class TestBackendOsRerankWiring(unittest.TestCase):
                 "질의", modalities=["text"],
                 _os_search_fn=fake_os, _os_client_fn=lambda: "C",
             )
-        self.assertIs(os_cap["rerank_enabled"], True)
-        self.assertEqual(os_cap["rerank_top_r"], 7)
-        self.assertEqual(os_cap["rerank_tau"], 0.2)
-        self.assertEqual(os_cap["rerank_model"], "가짜-reranker")
+        self.assertIs(os_cap["tuning"].rerank_enabled, True)
+        self.assertEqual(os_cap["tuning"].rerank_top_r, 7)
+        self.assertEqual(os_cap["tuning"].rerank_tau, 0.2)
+        self.assertEqual(os_cap["tuning"].rerank_model, "가짜-reranker")
 
     def test_rerank_falls_back_to_constants_when_cfg_missing(self) -> None:
         # settings 미초기화(cfg=None) → search_constants 단일 출처 폴백(기본 off — 027 동치).
@@ -504,10 +504,10 @@ class TestBackendOsRerankWiring(unittest.TestCase):
             "질의", modalities=["text"],
             _os_search_fn=fake_os, _os_client_fn=lambda: "C",
         )
-        self.assertIs(os_cap["rerank_enabled"], search_constants.OS_RERANK_ENABLED_DEFAULT)
-        self.assertEqual(os_cap["rerank_top_r"], search_constants.OS_RERANK_TOP_R_DEFAULT)
-        self.assertEqual(os_cap["rerank_tau"], search_constants.OS_RERANK_TAU_DEFAULT)
-        self.assertEqual(os_cap["rerank_model"], search_constants.OS_RERANK_MODEL_DEFAULT)
+        self.assertIs(os_cap["tuning"].rerank_enabled, search_constants.OS_RERANK_ENABLED_DEFAULT)
+        self.assertEqual(os_cap["tuning"].rerank_top_r, search_constants.OS_RERANK_TOP_R_DEFAULT)
+        self.assertEqual(os_cap["tuning"].rerank_tau, search_constants.OS_RERANK_TAU_DEFAULT)
+        self.assertEqual(os_cap["tuning"].rerank_model, search_constants.OS_RERANK_MODEL_DEFAULT)
 
 
 class TestBackendOsQueryNormWiring(unittest.TestCase):
@@ -594,7 +594,7 @@ class TestBackendOsBm25OperatorWiring(unittest.TestCase):
                 "질의", modalities=["text"],
                 _os_search_fn=fake_os, _os_client_fn=lambda: "C",
             )
-        self.assertEqual(os_cap["bm25_operator"], "and")
+        self.assertEqual(os_cap["tuning"].bm25_operator, "and")
 
     def test_operator_falls_back_to_constants_when_cfg_missing(self) -> None:
         fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
@@ -603,7 +603,7 @@ class TestBackendOsBm25OperatorWiring(unittest.TestCase):
             _os_search_fn=fake_os, _os_client_fn=lambda: "C",
         )
         # 폴백 = search_constants 단일 출처(027 리뷰 후속: 기본 'and' — 운영 검증값).
-        self.assertEqual(os_cap["bm25_operator"], "and")
+        self.assertEqual(os_cap["tuning"].bm25_operator, "and")
 
 
 class TestBackendOsLexicalFilterWiring(unittest.TestCase):

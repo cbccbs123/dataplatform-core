@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from src.config import search_constants
@@ -32,6 +33,7 @@ from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
 from src.search.query_plan import build_query_plan, search_plan_to_meta
 from src.search.search_filters import SearchFilters
+from src.search.search_tuning import SearchTuning
 
 _LOG = logging.getLogger(__name__)
 
@@ -125,12 +127,12 @@ def _grouped_via_opensearch(
 
     plan = build_query_plan(query, mode=search_mode)
 
-    # disable_os_cutoff(디버그 우회)면 게이트·컷 모두 off. 아니면 cfg 의 enabled(미초기화 폴백=운영 기본).
-    cutoff_enabled = (
-        False
-        if disable_os_cutoff
-        else getattr(cfg, "search_os_cutoff_enabled", search_constants.OS_CUTOFF_ENABLED_DEFAULT)
-    )
+    # 069 US-E(FR-E5②): OS 검색 튜닝 12종(융합·게이트·컷·rerank·evidence·about)을 cfg 에서 **1회**
+    # 해소해 SearchTuning 한 묶음으로 만든다(종전 getattr 릴레이 12줄 제거·인자 축소). disable_os_cutoff
+    # (디버그 우회)면 cutoff_enabled 만 False 로 덮는다(replace) — 게이트·per-result 컷 모두 off.
+    tuning = SearchTuning.from_settings(cfg)
+    if disable_os_cutoff:
+        tuning = replace(tuning, cutoff_enabled=False)
 
     # 072 query-norm(029 seam 재사용): cfg 토글(getattr 폴백=search_constants 단일 출처)을 읽어, on 이면
     # 검색 직전 질의를 **service 레벨에서 1회** 형태소 정규화한다. 정규화를 여기 한 곳에서 끝내는 이유:
@@ -185,35 +187,14 @@ def _grouped_via_opensearch(
         modalities=requested,  # 요청 전 모달리티(image/video 포함)를 한 번에 OS 검색
         k=limit_per_bucket,
         channel=text_channel,
-        weights=getattr(cfg, "opensearch_fusion_weights", search_constants.OS_FUSION_WEIGHTS_DEFAULT),
         index=getattr(cfg, "opensearch_index", "assets"),
         exclude_medical=True,
-        # 027: 버킷 게이트 + per-result 컷 임계를 cfg 에서 읽어 OS seam 에 전달한다(getattr 폴백은
-        # search_constants 단일 출처 — settings 미초기화 순수 단위 방어). disable_os_cutoff 면 위에서
-        # cutoff_enabled=False 로 강제돼 search_assets_os 가 게이트·컷 모두 끄고 융합 전체를 노출한다.
-        cutoff_enabled=cutoff_enabled,
-        cutoff_eps=getattr(cfg, "search_os_cutoff_eps", search_constants.OS_CUTOFF_EPS_DEFAULT),
-        cutoff_floor=getattr(cfg, "search_os_cutoff_floor", search_constants.OS_CUTOFF_FLOOR_DEFAULT),
-        result_floor=getattr(cfg, "search_os_result_floor", search_constants.OS_RESULT_FLOOR_DEFAULT),
-        # 025: BM25 operator — 'and' 면 전 토큰 매칭(F2 복합어 가짜매칭 차단). 미초기화 폴백 'or'(현행).
-        bm25_operator=getattr(cfg, "search_os_bm25_operator", search_constants.OS_BM25_OPERATOR_DEFAULT),
-        # 028: rerank 평가 설정(기본 off — 회귀 0). on 이면 게이트·컷을 대체하는 평가 경로.
-        rerank_enabled=getattr(cfg, "search_os_rerank_enabled", search_constants.OS_RERANK_ENABLED_DEFAULT),
-        rerank_top_r=getattr(cfg, "search_os_rerank_top_r", search_constants.OS_RERANK_TOP_R_DEFAULT),
-        rerank_tau=getattr(cfg, "search_os_rerank_tau", search_constants.OS_RERANK_TAU_DEFAULT),
-        rerank_model=getattr(cfg, "search_os_rerank_model", search_constants.OS_RERANK_MODEL_DEFAULT),
-        # 073: aboutness OR-증거 필터(기본 off 상수 폴백 — settings 미초기화 순수 단위 방어).
-        about_filter_enabled=getattr(
-            cfg, "search_about_filter_enabled", search_constants.SEARCH_ABOUT_FILTER_ENABLED_DEFAULT
-        ),
+        # 069 US-E(FR-E5②): 융합·게이트·컷·rerank·evidence·about 튜닝 12종을 SearchTuning 한 묶음으로
+        # 전달한다(위에서 from_settings 로 1회 해소·disable_os_cutoff 시 cutoff_enabled=False 덮음).
+        # 종전 getattr 릴레이 12줄이 이 한 줄로 대체됐다(인자 축소·오타는 정적 검사로).
+        tuning=tuning,
         search_mode=search_mode,
         search_policy=plan.policy,
-        evidence_rescue_enabled=getattr(
-            cfg, "search_evidence_rescue_enabled", search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT
-        ),
-        evidence_debug=getattr(
-            cfg, "search_evidence_debug", search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT
-        ),
         search_filters=search_filters,
         # 057 FR-202: 서버 lexical 필터(must_include/exclude)를 OS seam 에 그대로 전달한다. None 은
         # 빈 리스트로 정규화해 넘겨 미지정과 동일한 하위호환 body(바이트 동일)를 보장한다.

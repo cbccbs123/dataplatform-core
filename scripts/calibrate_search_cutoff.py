@@ -57,6 +57,7 @@ def main() -> None:
         passes_cutoff,
         search_assets_os,
     )
+    from src.search.search_tuning import SearchTuning
 
     cfg = get_current_settings()
     client = get_client()
@@ -110,12 +111,13 @@ def main() -> None:
         for q in queries:
             off, _ = search_assets_os(
                 client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
-                weights=weights, index=index, cutoff_enabled=False,
+                index=index, tuning=SearchTuning(weights=weights, cutoff_enabled=False),
             )
             on, _ = search_assets_os(
                 client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
-                weights=weights, index=index, cutoff_enabled=True,
-                cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor,
+                index=index,
+                tuning=SearchTuning(weights=weights, cutoff_enabled=True,
+                                    cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor),
             )
             off_n = {m: len(off.get(m, [])) for m in MODALITIES}
             on_n = {m: len(on.get(m, [])) for m in MODALITIES}
@@ -127,8 +129,9 @@ def main() -> None:
         t0 = time.perf_counter()
         search_assets_os(
             client, q, modalities=MODALITIES, k=20, channel=cfg.active_embed_channel,
-            weights=weights, index=index, cutoff_enabled=enabled,
-            cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor,
+            index=index,
+            tuning=SearchTuning(weights=weights, cutoff_enabled=enabled,
+                                cutoff_eps=eps, cutoff_floor=floor, result_floor=result_floor),
         )
         return (time.perf_counter() - t0) * 1000.0
 

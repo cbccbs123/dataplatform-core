@@ -14,6 +14,7 @@ from typing import Any
 from src.search.about_filter import about_or_filter
 from src.search.query_evidence import evidence_score, lexical_rescue_keep, strong_evidence_score
 from src.search.query_plan import SearchPolicy
+from src.search.search_tuning import SearchTuning
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,33 +35,26 @@ def apply_bucket_policy(
     top: float,
     baseline: float,
     k: int,
-    cutoff_enabled: bool,
-    cutoff_eps: float,
-    cutoff_floor: float,
-    result_floor: float,
-    bm25_operator: str,
-    rerank_enabled: bool,
+    tuning: SearchTuning,
     rerank_fn: Callable[..., list[float]] | None,
-    rerank_top_r: int,
-    rerank_tau: float,
-    rerank_model: str,
     policy: SearchPolicy,
-    evidence_rescue_enabled: bool,
-    evidence_debug: bool,
-    about_filter_enabled: bool = False,
     passes_cutoff_fn: Callable[..., bool],
     cut_rows_fn: Callable[..., list[dict[str, Any]]],
     rerank_reorder_fn: Callable[..., tuple[list[dict[str, Any]], list[float]]],
 ) -> BucketPolicyOutcome:
     """융합 행에 게이트·컷·rerank·lexical rescue·aboutness 필터·응답 정제를 적용한다.
 
-    분기 5종(cutoff_enabled·gate_passed·bm25_operator 로 택1):
-      1. 게이트 off(``cutoff_enabled=False``): 컷 없이 융합 전체 통과(gate_passed=True·cut_count=0·디버그).
-      2. 게이트 통과: ``cut_rows_fn`` per-result 컷 후, ``rerank_enabled`` 면 상위 head 만 재정렬(순서만).
-      3. 게이트 실패 + ``bm25_operator=='and'`` + lexical 증거: BM25 매칭 행만 ``lexical_rescue_keep``
+    069 US-E(FR-E5②): 게이트·컷·rerank·evidence·about·bm25 튜닝 12종을 ``tuning: SearchTuning`` 한
+    묶음으로 받는다(인자 21→11·getattr 릴레이 제거). per-request 값(top·baseline·k·query·policy·
+    rerank_fn)과 주입 seam(passes_cutoff_fn·cut_rows_fn·rerank_reorder_fn)은 그대로 개별 인자.
+
+    분기 5종(``tuning.cutoff_enabled``·gate_passed·``tuning.bm25_operator`` 로 택1):
+      1. 게이트 off(``tuning.cutoff_enabled=False``): 컷 없이 융합 전체 통과(gate_passed=True·cut_count=0·디버그).
+      2. 게이트 통과: ``cut_rows_fn`` per-result 컷 후, ``tuning.rerank_enabled`` 면 상위 head 만 재정렬(순서만).
+      3. 게이트 실패 + ``tuning.bm25_operator=='and'`` + lexical 증거: BM25 매칭 행만 ``lexical_rescue_keep``
          으로 선별 회수(AND 질의 구제).
       4. 그 외 게이트 실패: 전멸(빈 버킷 — no-match).
-    (+) 위 결과에 ``about_filter_enabled`` on 이면 aboutness OR-증거 필터를 추가 적용한다.
+    (+) 위 결과에 ``tuning.about_filter_enabled`` on 이면 aboutness OR-증거 필터를 추가 적용한다.
 
     ``cut_count`` 는 분기에 따라 **최대 3회 재계산**된다(컷 후·rerank 후·about 필터 후) — 매번
     ``len(fused) - len(kept)`` 로 다시 구하므로 최종값은 게이트·컷·rescue·about 로 제거된 **총량**이다
@@ -72,23 +66,23 @@ def apply_bucket_policy(
     has_lexical = any(r.get("_bm25") for r in fused)
     rerank_info: dict[str, Any] | None = None
 
-    if not cutoff_enabled:
+    if not tuning.cutoff_enabled:
         kept = fused
         gate_passed = True
         cut_count = 0
     else:
-        gate_passed = passes_cutoff_fn(top, baseline, eps=cutoff_eps, floor=cutoff_floor)
+        gate_passed = passes_cutoff_fn(top, baseline, eps=tuning.cutoff_eps, floor=tuning.cutoff_floor)
         if gate_passed:
-            kept = cut_rows_fn(fused, result_floor=result_floor)
+            kept = cut_rows_fn(fused, result_floor=tuning.result_floor)
             cut_count = len(fused) - len(kept)
-            if rerank_enabled and kept:
+            if tuning.rerank_enabled and kept:
                 kept, scores = rerank_reorder_fn(
                     kept,
                     query,
                     rerank_fn,
-                    top_r=rerank_top_r,
-                    tau=rerank_tau,
-                    model_name=rerank_model,
+                    top_r=tuning.rerank_top_r,
+                    tau=tuning.rerank_tau,
+                    model_name=tuning.rerank_model,
                 )
                 cut_count = len(fused) - len(kept)
                 rerank_info = {
@@ -97,7 +91,7 @@ def apply_bucket_policy(
                     "kept": len(kept),
                     "top": (max(scores) if scores else 0.0),
                 }
-        elif has_lexical and bm25_operator == "and":
+        elif has_lexical and tuning.bm25_operator == "and":
             kept = []
             for row in fused:
                 if not row.get("_bm25"):
@@ -105,7 +99,7 @@ def apply_bucket_policy(
                 keep, reason = lexical_rescue_keep(
                     row.get("matched_queries"),
                     policy=policy,
-                    rescue_enabled=evidence_rescue_enabled,
+                    rescue_enabled=tuning.evidence_rescue_enabled,
                 )
                 if keep:
                     tagged = dict(row)
@@ -119,7 +113,7 @@ def apply_bucket_policy(
     # 073: aboutness OR-증거 필터 — 게이트·컷·rescue 생존 행에서 질의 개체와 증거(about∪keywords)가
     # 전혀 없는 행을 걸러낸다(드롭만·순서 보존·fail-safe 는 about_or_filter 내부: 전멸 시 원행 유지).
     # cut_count 를 재계산해 관측(gate_meta.cut_count)이 실제 제거 총량을 반영한다. 토글 off 면 무접촉.
-    if about_filter_enabled and kept:
+    if tuning.about_filter_enabled and kept:
         kept = about_or_filter(kept, query)
         cut_count = len(fused) - len(kept)
 
@@ -130,7 +124,7 @@ def apply_bucket_policy(
             for key, val in row.items()
             if key not in ("_cos", "_bm25", "_rrtext", "_keep_reason", "_about", "_kwtext")
         }
-        if evidence_debug:
+        if tuning.evidence_debug:
             mq = out_row.get("matched_queries")
             out_row["evidence_score"] = evidence_score(mq)
             out_row["strong_evidence_score"] = strong_evidence_score(mq)

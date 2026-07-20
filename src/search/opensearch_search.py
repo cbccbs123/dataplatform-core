@@ -25,22 +25,9 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from src.config.search_constants import (
-    OS_BM25_OPERATOR_DEFAULT,
-    OS_CUTOFF_ENABLED_DEFAULT,
-    OS_CUTOFF_EPS_DEFAULT,
-    OS_CUTOFF_FLOOR_DEFAULT,
-    OS_FUSION_WEIGHTS_DEFAULT,
     OS_KNN_SAMPLE_K,
     OS_QUERY_NORM_DECOMPOUND,
     OS_QUERY_NORM_ENABLED_DEFAULT,
-    OS_RERANK_ENABLED_DEFAULT,
-    OS_RERANK_MODEL_DEFAULT,
-    OS_RERANK_TAU_DEFAULT,
-    OS_RERANK_TOP_R_DEFAULT,
-    OS_RESULT_FLOOR_DEFAULT,
-    SEARCH_ABOUT_FILTER_ENABLED_DEFAULT,
-    SEARCH_EVIDENCE_DEBUG_DEFAULT,
-    SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
 )
 from src.search.bucket_policy import apply_bucket_policy
 
@@ -67,6 +54,7 @@ from src.search.query_builder import (
 )
 from src.search.query_plan import SearchPolicy, build_search_policy
 from src.search.search_filters import SearchFilters
+from src.search.search_tuning import SearchTuning
 
 # 재export 공개 표면(하위호환). __all__ 등재로 순수 재export 심볼의 F401 을 억제한다(의도적 re-export).
 __all__ = [
@@ -170,27 +158,15 @@ def search_assets_os(
     modalities: Iterable[str],
     k: int = 20,
     channel: str = "st",
-    weights: tuple[float, float] = OS_FUSION_WEIGHTS_DEFAULT,
     index: str,
     exclude_medical: bool = True,
     embed_fn: Callable[..., list[float]] = embed_query,
-    cutoff_enabled: bool = OS_CUTOFF_ENABLED_DEFAULT,
-    cutoff_eps: float = OS_CUTOFF_EPS_DEFAULT,
-    cutoff_floor: float = OS_CUTOFF_FLOOR_DEFAULT,
-    result_floor: float = OS_RESULT_FLOOR_DEFAULT,
-    bm25_operator: str = OS_BM25_OPERATOR_DEFAULT,
-    rerank_enabled: bool = OS_RERANK_ENABLED_DEFAULT,
-    rerank_top_r: int = OS_RERANK_TOP_R_DEFAULT,
-    rerank_tau: float = OS_RERANK_TAU_DEFAULT,
-    rerank_model: str = OS_RERANK_MODEL_DEFAULT,
+    tuning: SearchTuning = SearchTuning(),
     rerank_fn: Callable[..., list[float]] | None = None,
     query_norm_enabled: bool = OS_QUERY_NORM_ENABLED_DEFAULT,
     query_norm_fn: Callable[[str], str] | None = None,
-    about_filter_enabled: bool = SEARCH_ABOUT_FILTER_ENABLED_DEFAULT,
     search_mode: str = "auto",
     search_policy: SearchPolicy | None = None,
-    evidence_rescue_enabled: bool = SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
-    evidence_debug: bool = SEARCH_EVIDENCE_DEBUG_DEFAULT,
     search_filters: SearchFilters | None = None,
     must_include: list[str] | None = None,
     must_exclude: list[str] | None = None,
@@ -263,7 +239,7 @@ def search_assets_os(
         )
         bm25_body = build_bm25_body(
             query, modality_values=values, k=int(k),
-            operator=bm25_operator, exclude_medical=exclude_medical,
+            operator=tuning.bm25_operator, exclude_medical=exclude_medical,
             search_filters=search_filters,
             # 057 FR-202 + T213: 서버 lexical 필터(must_include→must·must_exclude→must_not)는 BM25·kNN
             # 양쪽 서브검색 본문에 적용한다(위 build_knn_body 에도 동일 전달) — 융합이 BM25∪kNN 이라
@@ -291,7 +267,7 @@ def search_assets_os(
 
         # 융합 입력은 kNN **상위 k행만** — 게이트 표본(OS_KNN_SAMPLE_K)을 그대로 정규화에 쓰면
         # 분모가 넓어져 상위 경계(top-k) 순위가 흔들린다(서버 융합 시절의 결과셋 범위와 동치 유지).
-        fused = fuse_hybrid(bm25_hits, knn_hits[: int(k)], weights=weights)
+        fused = fuse_hybrid(bm25_hits, knn_hits[: int(k)], weights=tuning.weights)
         # 게이트 신호는 kNN 원시 코사인 **전체 표본**에서 직접(probe 추가 호출 0 — robust baseline 용).
         knn_cosines = [knn_score_to_cosine(h.get("_score")) for h in knn_hits]
         top, baseline = gate_signal(knn_cosines)
@@ -302,20 +278,9 @@ def search_assets_os(
             top=top,
             baseline=baseline,
             k=int(k),
-            cutoff_enabled=cutoff_enabled,
-            cutoff_eps=cutoff_eps,
-            cutoff_floor=cutoff_floor,
-            result_floor=result_floor,
-            bm25_operator=bm25_operator,
-            rerank_enabled=rerank_enabled,
+            tuning=tuning,
             rerank_fn=rerank_fn,
-            rerank_top_r=rerank_top_r,
-            rerank_tau=rerank_tau,
-            rerank_model=rerank_model,
-            about_filter_enabled=about_filter_enabled,
             policy=policy,
-            evidence_rescue_enabled=evidence_rescue_enabled,
-            evidence_debug=evidence_debug,
             passes_cutoff_fn=passes_cutoff,
             cut_rows_fn=cut_rows,
             rerank_reorder_fn=rerank_reorder,

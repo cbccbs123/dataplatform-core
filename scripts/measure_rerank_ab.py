@@ -72,6 +72,7 @@ def main() -> int:
     init_settings("dev")
     cfg = get_current_settings()
     from src.search.opensearch_search import get_client, search_assets_os
+    from src.search.search_tuning import SearchTuning
 
     client = get_client()
     golden = json.loads((_REPO_ROOT / "tests/fixtures/search/golden_os.json").read_text(encoding="utf-8"))
@@ -79,9 +80,14 @@ def main() -> int:
     tau = args.tau if args.tau is not None else cfg.search_os_rerank_tau
     top_r = args.top_r if args.top_r is not None else cfg.search_os_rerank_top_r
 
+    # 069 US-E(FR-E5②): 비튜닝 인자(common)와 튜닝(SearchTuning)을 분리한다. _base_tuning(weights·
+    # bm25_operator)에 호출별 cutoff/rerank 를 얹어 SearchTuning 을 조립한다.
     common = {
         "modalities": _MODALITIES, "k": 20, "channel": cfg.active_embed_channel,
-        "weights": cfg.opensearch_fusion_weights, "index": cfg.opensearch_index,
+        "index": cfg.opensearch_index,
+    }
+    _base_tuning = {
+        "weights": cfg.opensearch_fusion_weights,
         "bm25_operator": cfg.search_os_bm25_operator,
     }
 
@@ -91,7 +97,10 @@ def main() -> int:
 
         rel_scores, nonrel_scores, absent_scores = [], [], []
         for q in queries:
-            buckets, _ = search_assets_os(client, q["query"], cutoff_enabled=False, **common)
+            buckets, _ = search_assets_os(
+                client, q["query"],
+                tuning=SearchTuning(cutoff_enabled=False, **_base_tuning), **common,
+            )
             rel = set(q.get("relevant") or [])
             for b in buckets.values():
                 cands = b[:top_r]
@@ -137,10 +146,13 @@ def main() -> int:
         for q in queries:
             t0 = time.perf_counter()
             buckets, _meta = search_assets_os(
-                client, q["query"], **flags,
-                rerank_top_r=top_r, rerank_tau=tau, rerank_model=cfg.search_os_rerank_model,
-                cutoff_eps=cfg.search_os_cutoff_eps, cutoff_floor=cfg.search_os_cutoff_floor,
-                result_floor=cfg.search_os_result_floor, **common,
+                client, q["query"], **common,
+                tuning=SearchTuning(
+                    **flags, **_base_tuning,
+                    rerank_top_r=top_r, rerank_tau=tau, rerank_model=cfg.search_os_rerank_model,
+                    cutoff_eps=cfg.search_os_cutoff_eps, cutoff_floor=cfg.search_os_cutoff_floor,
+                    result_floor=cfg.search_os_result_floor,
+                ),
             )
             lat.append((time.perf_counter() - t0) * 1000)
             seen = _union_rank(buckets)

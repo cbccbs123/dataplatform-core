@@ -42,6 +42,15 @@ from src.search.opensearch_search import (
     search_assets_os,
 )
 from src.search.search_filters import SearchFilters
+from src.search.search_tuning import SearchTuning
+
+# 069 US-E(FR-E5②): search_assets_os·apply_bucket_policy 튜닝 12종이 SearchTuning 한 묶음으로 축소됐다.
+# 테스트 헬퍼가 종전 개별 kw 를 튜닝 필드/나머지로 분리해 SearchTuning 을 조립한다(테스트 의도 무변경).
+_TUNING_FIELDS = frozenset({
+    "weights", "cutoff_enabled", "cutoff_eps", "cutoff_floor", "result_floor",
+    "bm25_operator", "rerank_enabled", "rerank_top_r", "rerank_tau", "rerank_model",
+    "about_filter_enabled", "evidence_rescue_enabled", "evidence_debug",
+})
 
 # 044: named query should 절 — boost는 clause boost 로 계승. 047: cross_meta 는 multi_match cross_fields.
 _BM25_FIELD_BOOSTS = {
@@ -1025,14 +1034,19 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
 
     def _run(self, **ov):
-        kw = {
-            "modalities": ("text", "audio"), "k": 20, "channel": "st",
-            "weights": (0.5, 0.5), "index": "assets", "embed_fn": self.fake_embed,
-            "cutoff_enabled": True, "cutoff_eps": 0.17, "cutoff_floor": 0.50,
-            "result_floor": 0.40, "bm25_operator": "or",
+        tuning_kw = {
+            "weights": (0.5, 0.5), "cutoff_enabled": True, "cutoff_eps": 0.17,
+            "cutoff_floor": 0.50, "result_floor": 0.40, "bm25_operator": "or",
         }
-        kw.update(ov)
-        return search_assets_os(self.client, self.query, **kw)
+        rest = {
+            "modalities": ("text", "audio"), "k": 20, "channel": "st",
+            "index": "assets", "embed_fn": self.fake_embed,
+        }
+        for key, val in ov.items():
+            (tuning_kw if key in _TUNING_FIELDS else rest)[key] = val
+        return search_assets_os(
+            self.client, self.query, tuning=SearchTuning(**tuning_kw), **rest
+        )
 
     def test_embeds_query_once(self) -> None:
         # (a) 질의 1회만 임베딩해 전 모달리티 재사용(중복 임베딩 0) — 활성 채널 전달.
@@ -1149,7 +1163,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, gate_meta = search_assets_os(
             client, self.query, modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40),
         )
         self.assertEqual(buckets["text"], [])
         self.assertFalse(gate_meta["text"]["gate_passed"])
@@ -1168,7 +1182,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, gate_meta = search_assets_os(
             client, self.query, modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40),
         )
         kept_ids = {r["id"] for r in buckets["text"]}
         self.assertIn("n2", kept_ids)     # cos 0.80 ≥ floor
@@ -1190,7 +1204,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             return [0.9]*len(texts)
         buckets,_=search_assets_os(
             client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            rerank_enabled=True, rerank_tau=0.0, rerank_fn=spy,
+            tuning=SearchTuning(rerank_enabled=True, rerank_tau=0.0), rerank_fn=spy,
         )
         self.assertEqual(seen, ["요약: 요약문\n키워드: 키워드 라벨"])  # 구조화 입력(실측 최선)
         self.assertNotIn("_rrtext", buckets["text"][0])  # 내부키 제거
@@ -1214,9 +1228,9 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, meta = search_assets_os(
             weak, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
-            rerank_enabled=True, rerank_top_r=10, rerank_tau=0.0,
-            rerank_model="가짜", rerank_fn=fake_rerank,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
+                                rerank_enabled=True, rerank_top_r=10, rerank_tau=0.0, rerank_model="가짜"),
+            rerank_fn=fake_rerank,
         )
         self.assertEqual(buckets["text"], [])             # 게이트가 먼저 비움(rerank 무관)
         self.assertEqual(calls, [])                        # rerank_fn 미호출(augment — 대체 아님)
@@ -1232,9 +1246,9 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, meta = search_assets_os(
             strong, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.55,
-            rerank_enabled=True, rerank_top_r=10, rerank_tau=0.0,
-            rerank_model="가짜", rerank_fn=fake_rerank,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.55,
+                                rerank_enabled=True, rerank_top_r=10, rerank_tau=0.0, rerank_model="가짜"),
+            rerank_fn=fake_rerank,
         )
         rows = buckets["text"]
         # 드롭 0 — cut_rows 생존 4행 전부 유지(τ=0), rerank 점수 순서로 재정렬(a>c>d>b).
@@ -1272,7 +1286,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             return "천체 관측"
         buckets, _ = search_assets_os(
             self.client, "별 보는 방법", modalities=("text",), index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=False,
+            embed_fn=self.fake_embed, tuning=SearchTuning(cutoff_enabled=False),
             query_norm_enabled=True, query_norm_fn=fake_norm,
         )
         self.assertEqual(norm_calls, ["별 보는 방법"])               # 정규화 1회
@@ -1286,7 +1300,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             raise AssertionError("off 면 query_norm_fn 을 호출하지 않아야 한다")
         search_assets_os(
             self.client, "별 보는 방법", modalities=("text",), index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=False,
+            embed_fn=self.fake_embed, tuning=SearchTuning(cutoff_enabled=False),
             query_norm_enabled=False, query_norm_fn=boom,
         )
         self.assertEqual(self.embed_calls, [("별 보는 방법", "st")])  # 원문 임베딩
@@ -1307,7 +1321,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         with mock.patch.object(qp, "noun_phrase_query", return_value="천체 관측") as m:
             search_assets_os(
                 self.client, "별 보는 방법", modalities=("text",), index="assets",
-                embed_fn=self.fake_embed, cutoff_enabled=False, query_norm_enabled=True,
+                embed_fn=self.fake_embed, tuning=SearchTuning(cutoff_enabled=False), query_norm_enabled=True,
             )
         m.assert_called_once_with("별 보는 방법")
         self.assertEqual(self.embed_calls, [("천체 관측", "st")])
@@ -1324,7 +1338,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, _meta = search_assets_os(
             client, self.query, modalities=("text",), k=2, index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=False,
+            embed_fn=self.fake_embed, tuning=SearchTuning(cutoff_enabled=False),
         )
         rows = buckets["text"]
         self.assertEqual([r["id"] for r in rows], ["n1", "n2"])
@@ -1340,10 +1354,9 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             bm25_by_label={"text": [_bm25_hit_os("b1", 3.2)]},
         )
         buckets, meta = search_assets_os(
-            client, "질의", modalities=("text",), index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=True,
-            cutoff_eps=0.9, cutoff_floor=0.9, result_floor=0.99,
-            bm25_operator="or",  # 전제 불충족 → 구제 미적용
+            client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9, result_floor=0.99,
+                                bm25_operator="or"),  # 전제 불충족 → 구제 미적용
         )
         self.assertEqual(buckets["text"], [])
         self.assertTrue(meta["text"]["lexical_evidence"])  # 증거는 있었으나 전제 미충족
@@ -1358,7 +1371,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
                                       {"hits": {"hits": []}}]}
         buckets, meta = search_assets_os(
             _PartialFailClient(), "질의", modalities=("text",), index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=True,
+            embed_fn=self.fake_embed, tuning=SearchTuning(cutoff_enabled=True),
         )
         self.assertEqual(buckets["text"], [])
         self.assertTrue(meta["text"]["error"])
@@ -1373,10 +1386,9 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             bm25_by_label={"text": [_bm25_hit_os("b1", 3.2)]},  # 어휘 증거
         )
         buckets, meta = search_assets_os(
-            client, "회식 술자리", modalities=("text",), index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=True,
-            cutoff_eps=0.9, cutoff_floor=0.9,  # 게이트 확실 실패
-            result_floor=0.99,  # cos 행은 전부 컷 — 어휘 행만 생존해야 함
+            client, "회식 술자리", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,  # 게이트 확실 실패
+                                result_floor=0.99),  # cos 행은 전부 컷 — 어휘 행만 생존해야 함
         )
         self.assertEqual([r["id"] for r in buckets["text"]], ["b1"])  # 어휘 증거 행만
         self.assertFalse(meta["text"]["gate_passed"])
@@ -1388,9 +1400,8 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
             knn_by_label={"text": [_knn_hit_os("n1", 0.70)]}, bm25_by_label={"text": []}
         )
         buckets, meta = search_assets_os(
-            client, "아이패드", modalities=("text",), index="assets",
-            embed_fn=self.fake_embed, cutoff_enabled=True,
-            cutoff_eps=0.9, cutoff_floor=0.9, result_floor=0.0,
+            client, "아이패드", modalities=("text",), index="assets", embed_fn=self.fake_embed,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9, result_floor=0.0),
         )
         self.assertEqual(buckets["text"], [])
         self.assertFalse(meta["text"]["lexical_evidence"])
@@ -1434,9 +1445,9 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, meta = search_assets_os(
             client, "질의", modalities=("text",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.55,
-            rerank_enabled=True, rerank_top_r=2, rerank_tau=0.0,
-            rerank_model="가짜", rerank_fn=fake_rerank,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.55,
+                                rerank_enabled=True, rerank_top_r=2, rerank_tau=0.0, rerank_model="가짜"),
+            rerank_fn=fake_rerank,
         )
         self.assertTrue(meta["text"]["gate_passed"])
         self.assertEqual(meta["text"]["rerank"], {"enabled": True, "scored": 2, "kept": 2, "top": 0.9})
@@ -1452,7 +1463,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, _ = search_assets_os(
             client, self.query, modalities=("text",), k=3, index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40,
+            tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.17, cutoff_floor=0.50, result_floor=0.40),
         )
         self.assertLessEqual(len(buckets["text"]), 3)
 
@@ -1478,7 +1489,7 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
         )
         buckets, _ = search_assets_os(
             client, self.query, modalities=("image",), index="assets", embed_fn=self.fake_embed,
-            cutoff_enabled=False,
+            tuning=SearchTuning(cutoff_enabled=False),
         )
         # 전 동점(코사인 동일 → min-max 전원 1.0) → similarity 동일 → id asc.
         self.assertEqual([r["id"] for r in buckets["image"]], ["a", "b", "c"])

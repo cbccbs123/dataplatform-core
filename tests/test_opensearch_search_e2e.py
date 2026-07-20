@@ -210,6 +210,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         (게이트·per-result 컷 미적용)로 회수 자체를 본다 — 게이트 분기 검증은 별도 테스트에서 켠다.
         """
         from src.search.opensearch_search import search_assets_os
+        from src.search.search_tuning import SearchTuning
 
         buckets, _meta = search_assets_os(
             self.client,
@@ -219,7 +220,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
             channel=self.channel,
             index=_INDEX,
             exclude_medical=True,
-            cutoff_enabled=False,
+            tuning=SearchTuning(cutoff_enabled=False),
         )
         return buckets
 
@@ -447,18 +448,20 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         분기만 격리). cutoff off 면 둘 다 비지 않음(게이트가 원인임을 격리).
         """
         from src.search.opensearch_search import search_assets_os
+        from src.search.search_tuning import SearchTuning
 
         present_top, _ = self._knn_signal("강아지 키우기 사료", "text")
         foreign_top, _ = self._knn_signal("양자역학 입자 가속기 실험", "text")
         floor = (present_top + foreign_top) / 2.0  # 두 top 사이 → 매칭 유지·무관 차단
 
         def buckets(query: str, enabled: bool) -> dict:
+            # bm25_operator='and': production(.env) 동일 — 'or'면 부분 토큰 어휘가 구제 규칙을 타서
+            # 게이트 메커니즘 검증이 흐려진다(027 어휘 구제는 전 토큰 증거 기준).
             out, _meta = search_assets_os(
                 self.client, query, modalities=["text"], k=10, channel=self.channel,
-                index=_INDEX, cutoff_enabled=enabled,
-                cutoff_eps=0.0, cutoff_floor=floor, result_floor=-1.0,
-                bm25_operator="and",  # production(.env) 동일 — 'or'면 부분 토큰 어휘가 구제 규칙을 타서
-                # 게이트 메커니즘 검증이 흐려진다(027 어휘 구제는 전 토큰 증거 기준).
+                index=_INDEX,
+                tuning=SearchTuning(cutoff_enabled=enabled, cutoff_eps=0.0, cutoff_floor=floor,
+                                    result_floor=-1.0, bm25_operator="and"),
             )
             return out
 
@@ -471,6 +474,7 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
     def test_cutoff_deterministic(self) -> None:
         """결정성(헌법 3조·SC-004): 같은 질의·게이트 2회 → 동일 버킷(빈/유지)."""
         from src.search.opensearch_search import search_assets_os
+        from src.search.search_tuning import SearchTuning
 
         foreign_top, _ = self._knn_signal("양자역학 입자 가속기 실험", "text")
         present_top, _ = self._knn_signal("강아지 키우기 사료", "text")
@@ -479,9 +483,9 @@ class TestOpenSearchSearchE2E(unittest.TestCase):
         def run(query: str) -> list:
             out, _meta = search_assets_os(
                 self.client, query, modalities=["text"], k=10, channel=self.channel,
-                index=_INDEX, cutoff_enabled=True,
-                cutoff_eps=0.0, cutoff_floor=floor, result_floor=-1.0,
-                bm25_operator="and",
+                index=_INDEX,
+                tuning=SearchTuning(cutoff_enabled=True, cutoff_eps=0.0, cutoff_floor=floor,
+                                    result_floor=-1.0, bm25_operator="and"),
             )
             return [r["id"] for r in out["text"]]
 

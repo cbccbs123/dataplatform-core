@@ -11,6 +11,7 @@ from src.search.opensearch_search import (
     os_hit_to_row,
     search_assets_os,
 )
+from src.search.search_tuning import SearchTuning
 from tests.test_opensearch_search import _bm25_hit_os, _FakeMsearchClient, _knn_hit_os
 
 
@@ -116,11 +117,10 @@ class EvidenceRescueIntegrationTest(unittest.TestCase):
             modalities=("text",),
             index="assets",
             embed_fn=lambda q, channel: [0.1] * 8,
-            cutoff_enabled=True,
-            cutoff_eps=0.9,
-            cutoff_floor=0.9,
-            result_floor=0.99,
-            evidence_rescue_enabled=False,
+            tuning=SearchTuning(
+                cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
+                result_floor=0.99, evidence_rescue_enabled=False,
+            ),
         )
         self.assertEqual([r["id"] for r in buckets["text"]], ["w1"])
 
@@ -134,11 +134,10 @@ class EvidenceRescueIntegrationTest(unittest.TestCase):
             modalities=("text",),
             index="assets",
             embed_fn=lambda q, channel: [0.1] * 8,
-            cutoff_enabled=True,
-            cutoff_eps=0.9,
-            cutoff_floor=0.9,
-            result_floor=0.99,
-            evidence_rescue_enabled=True,
+            tuning=SearchTuning(
+                cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
+                result_floor=0.99, evidence_rescue_enabled=True,
+            ),
         )
         self.assertEqual(buckets["text"], [])
 
@@ -152,11 +151,10 @@ class EvidenceRescueIntegrationTest(unittest.TestCase):
             modalities=("text",),
             index="assets",
             embed_fn=lambda q, channel: [0.1] * 8,
-            cutoff_enabled=True,
-            cutoff_eps=0.9,
-            cutoff_floor=0.9,
-            result_floor=0.99,
-            evidence_rescue_enabled=True,
+            tuning=SearchTuning(
+                cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
+                result_floor=0.99, evidence_rescue_enabled=True,
+            ),
         )
         self.assertEqual([r["id"] for r in buckets["text"]], ["k1"])
 
@@ -170,12 +168,10 @@ class EvidenceRescueIntegrationTest(unittest.TestCase):
             modalities=("text",),
             index="assets",
             embed_fn=lambda q, channel: [0.1] * 8,
-            cutoff_enabled=True,
-            cutoff_eps=0.9,
-            cutoff_floor=0.9,
-            result_floor=0.99,
-            evidence_rescue_enabled=False,
-            evidence_debug=True,
+            tuning=SearchTuning(
+                cutoff_enabled=True, cutoff_eps=0.9, cutoff_floor=0.9,
+                result_floor=0.99, evidence_rescue_enabled=False, evidence_debug=True,
+            ),
         )
         row = buckets["text"][0]
         self.assertEqual(row["matched_queries"], ["hit_summary"])
