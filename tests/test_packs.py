@@ -31,8 +31,10 @@ class TestDomainPackFrozen(unittest.TestCase):
 
     def test_equality_semantics_preserved(self) -> None:
         # MappingProxyType 은 == 를 원본 매핑에 위임 — run_relations 라우팅 비교 의미 보존.
-        same = DomainPack(name="x", per_asset={"a": "1"}, cross_asset=dict(GENERAL_PACK.cross_asset),
-                          policy="general_default")
+        same = DomainPack(
+            name="x", per_asset={"a": "1"},
+            cross_asset=dict(GENERAL_PACK.cross_asset), policy="general_default",
+        )
         self.assertEqual(same.cross_asset, GENERAL_PACK.cross_asset)  # proxy == proxy
         self.assertEqual(same.cross_asset, dict(GENERAL_PACK.cross_asset))  # proxy == dict
         self.assertEqual(dict(GENERAL_PACK.per_asset),

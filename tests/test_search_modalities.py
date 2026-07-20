@@ -69,7 +69,8 @@ class TestValidModalitiesSingleSource(unittest.TestCase):
 
 # 069 T407: TestSampleSearchModalityContract(sample 미지 모달리티 200+{"error"} 보존)를 제거했다 —
 # sample_search_api 삭제로 그 응답 계약이 소멸(CR-13 moot). 미지 모달리티 거부는 이제 포탈
-# _parse_modalities 의 HTTPException(400)이 담당(tests.test_portal_api.test_search_unknown_modality_400).
+# _parse_modalities 의 HTTPException(400)이 담당
+# (tests.test_portal_api.test_search_unknown_modality_400).
 
 
 if __name__ == "__main__":

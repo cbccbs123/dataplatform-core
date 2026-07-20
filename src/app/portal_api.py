@@ -1158,6 +1158,12 @@ def _fetch_same_source_edges(asset_ids: list[str]) -> list[tuple[str, str]]:
     read(``fetch_active_relations_for_asset``·대칭 엣지 양방향 정규화)로 교체한다. 히트 집합 내부
     이웃 중 kind 가 same-source(duplicate_near/derived_from)인 쌍만 모은다. union-find 는 방향을
     쓰지 않으므로 쌍만 돌려주면 충분하다. status='active' 만·양끝 의료 배제는 seam 이 보장한다.
+
+    트레이드오프(seam 재사용의 대가): sample 원본은 ``sn.asset_id = ANY(ids) AND dn...`` 단일 SQL
+    1회였으나, 여기선 asset 수만큼 seam 을 순차 호출(N 왕복)한다. 정확성·의료배제·대칭성을 seam 에
+    위임하는 대신 왕복이 늘어난다 — 단, ``group_by_relation`` 은 opt-in 디버그 뷰이고 히트 상한이
+    작아(size×모달리티) 문제되지 않는다. 대량화되면 graph_query 에 다중 asset_id 배치 read 오버로드
+    추가를 검토(069 코드리뷰 2026-07-15 🟡).
     """
     ids = [a for a in asset_ids if a]
     if not ids:

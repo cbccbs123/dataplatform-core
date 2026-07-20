@@ -10,6 +10,11 @@ OM 039~042 에서 쓰이는 어휘
     ``RelationResolutionStatus``— 관계 큐 (v250/v260, 042에서 타입 정본화만)
 
 ``AssetStatus`` 정본은 ``src.ingest.status``(FSM 전이) — 여기서는 CHECK 집합 교차 검증만.
+
+주의(US-F 스코프): ``GraphEdgeStatus``/``RelationResolutionStatus`` 는 prod 코드가 값을 직접
+참조하지 않고 ``tests/test_status_vocab.py`` 의 DDL 교차검증만 소비한다. 그럼에도 삭제하지 않는다
+— DB CHECK 제약과 동기화되는 '닫힌 어휘의 정본'이므로 소비처가 테스트뿐이어도 스키마 계약 자체다
+(US-F 죽은코드 청소에서 의도적으로 제외·069 코드리뷰 2026-07-15).
 """
 
 from __future__ import annotations
