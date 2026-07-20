@@ -38,7 +38,7 @@ from typing import Any
 
 from psycopg import Connection
 
-from src.app.run_ingest import OsIndexFn, _make_opensearch_indexer, process_asset
+from src.ingest.pipeline_steps import OsIndexFn, _make_opensearch_indexer, process_asset
 from src.ingest.router import route_file
 from src.ingest.status import AssetStatus, InvalidTransitionError, mark_failed
 from src.pipeline.registry import DEFAULT_REGISTRY

@@ -9,6 +9,7 @@ from unittest import mock
 from src.app import run_ingest as ri
 from src.classify.types import ClassificationResult
 from src.dispatch.types import AssetRecord, EmbeddingItem
+from src.ingest import pipeline_steps as ps  # FR-E3: 스텝 정본(seam patch)
 from src.ingest.router import RouteResult
 from src.pipeline.registry import StrategyRegistry
 
@@ -36,20 +37,20 @@ def _fake_registry(captured):
 
 class TestRunIngestPackPath(unittest.TestCase):
     def _patch(self, stack):
-        stack.enter_context(mock.patch.object(ri, "route_file", return_value=_route()))
-        stack.enter_context(mock.patch.object(ri, "file_hash_and_size", return_value=("h", 1)))
-        stack.enter_context(mock.patch.object(ri, "find_registered_asset_by_hash", return_value=None))
-        stack.enter_context(mock.patch.object(ri, "create_asset", return_value=uuid.UUID(int=1)))
-        stack.enter_context(mock.patch.object(ri, "record_classification"))
-        stack.enter_context(mock.patch.object(ri, "set_status"))
-        stack.enter_context(mock.patch.object(ri, "finalize_asset"))
+        stack.enter_context(mock.patch.object(ps, "route_file", return_value=_route()))
+        stack.enter_context(mock.patch.object(ps, "file_hash_and_size", return_value=("h", 1)))
+        stack.enter_context(mock.patch.object(ps, "find_registered_asset_by_hash", return_value=None))
+        stack.enter_context(mock.patch.object(ps, "create_asset", return_value=uuid.UUID(int=1)))
+        stack.enter_context(mock.patch.object(ps, "record_classification"))
+        stack.enter_context(mock.patch.object(ps, "set_status"))
+        stack.enter_context(mock.patch.object(ps, "finalize_asset"))
 
     def test_pack_path_runs_extract_embed_and_validates_policy(self) -> None:
         captured: dict = {}
         reg = _fake_registry(captured)
         with contextlib.ExitStack() as stack:
             self._patch(stack)
-            with mock.patch.object(ri, "policy_validate") as mval:
+            with mock.patch.object(ps, "policy_validate") as mval:
                 res = ri.run_ingest(["/d/a.txt"], db=mock.MagicMock(), registry=reg, settings=object())
         self.assertEqual(len(res["registered"]), 1)
         self.assertTrue(captured["embed_called"])      # embed 슬롯 호출됨(분리 경로)
@@ -85,7 +86,7 @@ class TestRunIngestPackPath(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
             self._patch(stack)
-            stack.enter_context(mock.patch.object(ri, "record_lineage"))
+            stack.enter_context(mock.patch.object(ps, "record_lineage"))
             res = ri.run_ingest(
                 ["/d/a.dcm"],
                 db=mock.MagicMock(),

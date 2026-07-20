@@ -28,15 +28,12 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 # sync_all 은 opensearch_sync 의 순수/지연 import 설계상 모듈 상단에서 안전하게 가져올 수 있다
 # (opensearch-py 는 sync_all 내부에서 실제 호출 시에만 지연 import). 따라서 본 모듈 import 만으로는
 # opensearch-py 미설치 환경에서도 깨지지 않는다 — 단위 테스트가 OS 없이 run_resync 를 덮을 수 있는 이유.
 from src.search.opensearch_sync import sync_all
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -110,16 +107,13 @@ def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> st
 def main() -> int:
     args = _build_parser().parse_args()
 
-    from dotenv import load_dotenv
 
-    from src.config.settings import get_current_settings, init_settings
+    from src.config.bootstrap import bootstrap_env
+    from src.config.settings import get_current_settings
     from src.database.postgres_util import PostgresUtil
     from src.search.opensearch_sync import check_pgvector_version, get_client, resolve_channel
 
-    dotenv_path = _REPO_ROOT / f".env.{args.env}"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
-    init_settings(args.env)
+    bootstrap_env(args.env)
 
     cfg = get_current_settings()
     channel = resolve_channel(args.channel)  # 미지정=활성 프로파일(018)

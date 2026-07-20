@@ -29,6 +29,7 @@ from unittest import mock
 from src.app import run_ingest as ri
 from src.classify.types import ClassificationResult
 from src.dispatch.types import AssetRecord
+from src.ingest import pipeline_steps as ps  # 069 FR-E3: 수집·처리 스텝 정본(내부 seam patch 대상)
 from src.ingest.router import RouteResult
 
 _EXISTING = uuid.UUID("018f0000-0000-7000-8000-000000000018")
@@ -54,16 +55,17 @@ class TestCollectFile(unittest.TestCase):
         self.conn = mock.MagicMock()
 
     def _patch(self, stack, *, route, dup=None):
+        # FR-E3: collect_file 는 pipeline_steps(ps) 내부 seam(route_file·create_asset 등)을 호출 → ps 에서 patch.
         return {
-            "route_file": stack.enter_context(mock.patch.object(ri, "route_file", return_value=route)),
+            "route_file": stack.enter_context(mock.patch.object(ps, "route_file", return_value=route)),
             "file_hash_and_size": stack.enter_context(
-                mock.patch.object(ri, "file_hash_and_size", return_value=("h0", 10))
+                mock.patch.object(ps, "file_hash_and_size", return_value=("h0", 10))
             ),
             "find_registered_asset_by_hash": stack.enter_context(
-                mock.patch.object(ri, "find_registered_asset_by_hash", return_value=dup)
+                mock.patch.object(ps, "find_registered_asset_by_hash", return_value=dup)
             ),
-            "create_asset": stack.enter_context(mock.patch.object(ri, "create_asset", return_value=_AID)),
-            "record_lineage": stack.enter_context(mock.patch.object(ri, "record_lineage")),
+            "create_asset": stack.enter_context(mock.patch.object(ps, "create_asset", return_value=_AID)),
+            "record_lineage": stack.enter_context(mock.patch.object(ps, "record_lineage")),
         }
 
     def test_routable_file_creates_received_asset_with_lineage(self) -> None:
@@ -124,12 +126,13 @@ class TestProcessAsset(unittest.TestCase):
         self.db = mock.MagicMock()
 
     def _patch(self, stack):
+        # FR-E3: process_asset 는 pipeline_steps(ps) 내부 seam(set_status·finalize_asset 등)을 호출 → ps 에서 patch.
         return {
-            "set_status": stack.enter_context(mock.patch.object(ri, "set_status")),
-            "record_classification": stack.enter_context(mock.patch.object(ri, "record_classification")),
-            "validate_ext_meta": stack.enter_context(mock.patch.object(ri, "validate_ext_meta")),
-            "finalize_asset": stack.enter_context(mock.patch.object(ri, "finalize_asset")),
-            "record_lineage": stack.enter_context(mock.patch.object(ri, "record_lineage")),
+            "set_status": stack.enter_context(mock.patch.object(ps, "set_status")),
+            "record_classification": stack.enter_context(mock.patch.object(ps, "record_classification")),
+            "validate_ext_meta": stack.enter_context(mock.patch.object(ps, "validate_ext_meta")),
+            "finalize_asset": stack.enter_context(mock.patch.object(ps, "finalize_asset")),
+            "record_lineage": stack.enter_context(mock.patch.object(ps, "record_lineage")),
         }
 
     def test_registered_transition_with_inline_index(self) -> None:
@@ -198,36 +201,36 @@ class TestRunIngestSplitSeal(unittest.TestCase):
 
     def _record_seq(self, stack, seq, *, route, dup=None):
         """run_ingest 의존 seam 을 순서 기록 side_effect 로 patch."""
-        stack.enter_context(mock.patch.object(ri, "route_file", return_value=route))
-        stack.enter_context(mock.patch.object(ri, "file_hash_and_size", return_value=("h0", 10)))
+        stack.enter_context(mock.patch.object(ps, "route_file", return_value=route))
+        stack.enter_context(mock.patch.object(ps, "file_hash_and_size", return_value=("h0", 10)))
         stack.enter_context(
             mock.patch.object(
-                ri, "find_registered_asset_by_hash",
+                ps, "find_registered_asset_by_hash",
                 side_effect=lambda c, h: (seq.append("dedup"), dup)[1],
             )
         )
         stack.enter_context(
-            mock.patch.object(ri, "create_asset", side_effect=lambda c, **k: (seq.append("create_asset"), _AID)[1])
+            mock.patch.object(ps, "create_asset", side_effect=lambda c, **k: (seq.append("create_asset"), _AID)[1])
         )
         stack.enter_context(
             mock.patch.object(
-                ri, "set_status",
+                ps, "set_status",
                 side_effect=lambda c, aid, tgt, **k: seq.append(f"set_status:{getattr(tgt, 'value', tgt)}"),
             )
         )
         stack.enter_context(
             mock.patch.object(
-                ri, "record_lineage", side_effect=lambda c, aid, *, activity, **k: seq.append(f"lineage:{activity}")
+                ps, "record_lineage", side_effect=lambda c, aid, *, activity, **k: seq.append(f"lineage:{activity}")
             )
         )
         stack.enter_context(
-            mock.patch.object(ri, "record_classification", side_effect=lambda c, aid, cls: seq.append("record_classification"))
+            mock.patch.object(ps, "record_classification", side_effect=lambda c, aid, cls: seq.append("record_classification"))
         )
         stack.enter_context(
-            mock.patch.object(ri, "validate_ext_meta", side_effect=lambda c, d, ext: seq.append("validate_ext_meta"))
+            mock.patch.object(ps, "validate_ext_meta", side_effect=lambda c, d, ext: seq.append("validate_ext_meta"))
         )
         stack.enter_context(
-            mock.patch.object(ri, "finalize_asset", side_effect=lambda c, aid, rec: seq.append("finalize_asset"))
+            mock.patch.object(ps, "finalize_asset", side_effect=lambda c, aid, rec: seq.append("finalize_asset"))
         )
         stack.enter_context(mock.patch.object(ri, "mark_failed", side_effect=lambda c, aid, reason: seq.append("mark_failed")))
         spy_os = mock.MagicMock(side_effect=lambda aid: seq.append("os_index"))

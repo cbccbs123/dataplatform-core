@@ -38,9 +38,6 @@ from typing import Any
 
 _LOG = logging.getLogger("meta_extract.run_topic_backfill")
 
-# src/app/run_topic_backfill.py → repo 루트(.env.{env} 로드용).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
 # 재실행 멱등 스킵 센티넬 — 트랜잭션 콜백이 "이미 부여됨(재분류 안 함)"을 카운터에 전달하는 표식.
 # None(미부여)·dict(부여)와 구분해야 하므로 별도 객체를 쓴다.
 _SKIP = object()
@@ -272,15 +269,9 @@ def format_status_lines(report: dict[str, Any]) -> list[str]:
 # ────────────────────────────────────────────────────────────────────────────
 def _bootstrap(env: str) -> Any:
     """.env.{env} 로드 → init_settings(운영 진입점 순서). frozen settings 반환."""
-    from dotenv import load_dotenv
+    from src.config.bootstrap import bootstrap_env
 
-    from src.config.settings import get_current_settings, init_settings
-
-    dotenv_path = _REPO_ROOT / f".env.{env}"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
-    init_settings(env)
-    return get_current_settings()
+    return bootstrap_env(env)
 
 
 def _make_os_syncer(db, settings) -> Callable[[Any], bool] | None:

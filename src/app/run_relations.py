@@ -297,11 +297,8 @@ def main() -> int:
     """CLI: registered 자산에 대해 관계 제안 배치."""
     import argparse
     import json
-    from pathlib import Path
 
-    from dotenv import load_dotenv
-
-    from src.config.settings import init_settings
+    from src.config.bootstrap import bootstrap_env
 
     parser = argparse.ArgumentParser(description="관계 제안 배치 (graph_edge 적재)")
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
@@ -319,11 +316,7 @@ def main() -> int:
     parser.add_argument("asset_ids", nargs="*", metavar="ASSET_ID")
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parents[2]
-    dotenv_path = project_root / f".env.{args.env}"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
-    init_settings(args.env)
+    bootstrap_env(args.env)
 
     db = PostgresUtil()
     with db:

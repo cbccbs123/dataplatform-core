@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from src.config.search_modalities import VALID_SEARCH_MODALITIES, parse_modalities_csv
@@ -70,9 +69,8 @@ def _build_parser() -> argparse.ArgumentParser:
 # 런타임 순서(run_ingest 와 동일): 1) load_dotenv(.env.{env}, override=False) →
 # 2) init_settings(env)(필수 환경변수 검증) → 3) 검색 실행. LLM/임베딩 클라이언트는 첫 사용 시 지연 초기화.
 def main() -> int:
-    from dotenv import load_dotenv
 
-    from src.config.settings import init_settings
+    from src.config.bootstrap import bootstrap_env
 
     parser = _build_parser()
     args = parser.parse_args()
@@ -85,11 +83,7 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    project_root = Path(__file__).resolve().parents[2]
-    dotenv_path = project_root / f".env.{args.env}"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
-    init_settings(args.env)
+    bootstrap_env(args.env)
 
     result = _run(args)
     print(json.dumps(result, ensure_ascii=False, default=str))

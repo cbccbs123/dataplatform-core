@@ -15,6 +15,7 @@ from src.app import run_ingest as ri
 from src.classify.types import ClassificationResult
 from src.dispatch.dispatcher import UnsupportedModalityError
 from src.dispatch.types import AssetRecord
+from src.ingest import pipeline_steps as ps  # 069 FR-E3: 수집·처리 스텝 정본(patch 대상)
 from src.ingest.router import RouteResult
 
 _EXISTING = uuid.UUID("018f0000-0000-7000-8000-000000000018")
@@ -29,20 +30,34 @@ def _cls(label="general", stage=2, conf=0.7):
 
 
 def _patch_all(stack: contextlib.ExitStack, route_result, *, dup=None) -> dict:
-    """run_ingest 의존 함수 전부 patch 후 mock dict 반환."""
-    specs = {
-        "route_file": mock.patch.object(ri, "route_file", return_value=route_result),
-        "file_hash_and_size": mock.patch.object(ri, "file_hash_and_size", return_value=("h0", 10)),
-        "find_registered_asset_by_hash": mock.patch.object(ri, "find_registered_asset_by_hash", return_value=dup),
-        "create_asset": mock.patch.object(ri, "create_asset", return_value=1),
-        "record_classification": mock.patch.object(ri, "record_classification"),
-        "set_status": mock.patch.object(ri, "set_status"),
-        "finalize_asset": mock.patch.object(ri, "finalize_asset"),
-        "mark_failed": mock.patch.object(ri, "mark_failed"),
-        "record_lineage": mock.patch.object(ri, "record_lineage"),
-        "validate_ext_meta": mock.patch.object(ri, "validate_ext_meta"),
+    """수집·처리 스텝 의존 함수 전부 patch 후 mock dict 반환.
+
+    069 FR-E3: collect_file/process_asset 가 pipeline_steps(ps) 로 이관돼 내부 seam(route_file·set_status
+    ·finalize_asset 등)을 ps 이름공간에서 호출한다 → **ps 에서 patch**. run_ingest CLI 가 직접 쓰는
+    ``mark_failed`` 는 ri 에서, ``record_lineage`` 는 스텝(ps)·실패핸들러(ri) 양쪽에서 호출되므로 **같은
+    mock 으로 둘 다** patch 해 호출을 한 곳에 집계한다(assert 호환).
+    """
+    m: dict = {}
+    step_specs = {
+        "route_file": mock.patch.object(ps, "route_file", return_value=route_result),
+        "file_hash_and_size": mock.patch.object(ps, "file_hash_and_size", return_value=("h0", 10)),
+        "find_registered_asset_by_hash":
+            mock.patch.object(ps, "find_registered_asset_by_hash", return_value=dup),
+        "create_asset": mock.patch.object(ps, "create_asset", return_value=1),
+        "record_classification": mock.patch.object(ps, "record_classification"),
+        "set_status": mock.patch.object(ps, "set_status"),
+        "finalize_asset": mock.patch.object(ps, "finalize_asset"),
+        "validate_ext_meta": mock.patch.object(ps, "validate_ext_meta"),
     }
-    return {k: stack.enter_context(p) for k, p in specs.items()}
+    for k, p in step_specs.items():
+        m[k] = stack.enter_context(p)
+    m["mark_failed"] = stack.enter_context(mock.patch.object(ri, "mark_failed"))
+    # record_lineage 는 ps(process_asset·collect_file)·ri(run_ingest 실패핸들러) 양쪽 호출 → 같은 mock.
+    rl = mock.MagicMock()
+    stack.enter_context(mock.patch.object(ps, "record_lineage", rl))
+    stack.enter_context(mock.patch.object(ri, "record_lineage", rl))
+    m["record_lineage"] = rl
+    return m
 
 
 class TestRunIngest(unittest.TestCase):
@@ -211,9 +226,10 @@ class TestRunIngestSelfTopicWiring(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             m = _patch_all(stack, _route())
             stack.enter_context(
-                mock.patch.object(ri, "classify_asset_topic", side_effect=classify_topic)
+                mock.patch.object(ps, "classify_asset_topic", side_effect=classify_topic)
             )
             # os_index 배치기를 레코더로 대체 — 분류/색인 호출 순서를 관측한다.
+            # _make_opensearch_indexer 는 run_ingest() CLI 가 호출하므로 ri 에서 patch(재export).
             stack.enter_context(
                 mock.patch.object(ri, "_make_opensearch_indexer", return_value=os_recorder)
             )

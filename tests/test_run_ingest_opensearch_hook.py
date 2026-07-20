@@ -22,6 +22,7 @@ import uuid
 from unittest import mock
 
 from src.app import run_ingest as ri
+from src.ingest import pipeline_steps as ps  # FR-E3: 스텝 정본(seam patch)
 
 _ASSET = uuid.UUID("018f0000-0000-7000-8000-000000000019")
 
@@ -155,18 +156,18 @@ def _patch_ingest(stack: contextlib.ExitStack) -> dict:
     from src.dispatch.types import AssetRecord
 
     specs = {
-        "route_file": mock.patch.object(ri, "route_file", return_value=_route()),
-        "file_hash_and_size": mock.patch.object(ri, "file_hash_and_size", return_value=("h0", 10)),
+        "route_file": mock.patch.object(ps, "route_file", return_value=_route()),
+        "file_hash_and_size": mock.patch.object(ps, "file_hash_and_size", return_value=("h0", 10)),
         "find_registered_asset_by_hash": mock.patch.object(
-            ri, "find_registered_asset_by_hash", return_value=None
+            ps, "find_registered_asset_by_hash", return_value=None
         ),
-        "create_asset": mock.patch.object(ri, "create_asset", return_value=1),
-        "record_classification": mock.patch.object(ri, "record_classification"),
-        "set_status": mock.patch.object(ri, "set_status"),
-        "finalize_asset": mock.patch.object(ri, "finalize_asset"),
+        "create_asset": mock.patch.object(ps, "create_asset", return_value=1),
+        "record_classification": mock.patch.object(ps, "record_classification"),
+        "set_status": mock.patch.object(ps, "set_status"),
+        "finalize_asset": mock.patch.object(ps, "finalize_asset"),
         "mark_failed": mock.patch.object(ri, "mark_failed"),
-        "record_lineage": mock.patch.object(ri, "record_lineage"),
-        "validate_ext_meta": mock.patch.object(ri, "validate_ext_meta"),
+        "record_lineage": mock.patch.object(ps, "record_lineage"),
+        "validate_ext_meta": mock.patch.object(ps, "validate_ext_meta"),
     }
     m = {k: stack.enter_context(p) for k, p in specs.items()}
     m["_AssetRecord"] = AssetRecord

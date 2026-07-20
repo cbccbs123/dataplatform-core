@@ -219,7 +219,7 @@ class TestThinWrappers(unittest.TestCase):
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files",
                            return_value=["/inbox/a.txt", "/inbox/b.txt"]) as m_files, \
-                mock.patch("src.app.run_ingest.collect_file") as m_collect:
+                mock.patch("src.ingest.pipeline_steps.collect_file") as m_collect:
             cb()
         m_init.assert_called_once()
         m_files.assert_called_once()
@@ -236,7 +236,7 @@ class TestThinWrappers(unittest.TestCase):
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files",
                            return_value=["/inbox/a.txt"]), \
-                mock.patch("src.app.run_ingest.collect_file") as m_collect:
+                mock.patch("src.ingest.pipeline_steps.collect_file") as m_collect:
             cb()
         m_collect.assert_not_called()
 
@@ -249,7 +249,7 @@ class TestThinWrappers(unittest.TestCase):
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files",
                            return_value=["/inbox/a.txt", "/inbox/b.txt"]), \
-                mock.patch("src.app.run_ingest.collect_file",
+                mock.patch("src.ingest.pipeline_steps.collect_file",
                            return_value=mock.Mock(asset_id=None, skip_reason=None)) as m_collect:
             collected = cb()
         self.assertEqual(m_collect.call_count, 2)   # 두 파일 다 시도는 함
@@ -263,7 +263,7 @@ class TestThinWrappers(unittest.TestCase):
                 mock.patch("src.config.settings.init_settings"), \
                 mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
                 mock.patch("src.ingest.collector.collect_files", return_value=["/inbox/dup.txt"]), \
-                mock.patch("src.app.run_ingest.collect_file",
+                mock.patch("src.ingest.pipeline_steps.collect_file",
                            return_value=mock.Mock(asset_id=None, skip_reason="duplicate:abc")), \
                 mock.patch("src.ingest.archiver.execute_move") as m_move:
             cb()

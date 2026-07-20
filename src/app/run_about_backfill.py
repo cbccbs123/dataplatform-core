@@ -29,11 +29,9 @@ import argparse
 import logging
 import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 _LOG = logging.getLogger("meta_extract.run_about_backfill")
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # 대상 스캔 — registered + 메타 보유 + 비의료. only_missing 이면 about 키 부재만(멱등 재실행).
 _TARGET_SQL = """
@@ -92,15 +90,9 @@ def backfill_about(
 
 def _bootstrap(env: str) -> Any:
     """.env.{env} 로드 → init_settings(운영 진입점 순서·run_topic_backfill 동형)."""
-    from dotenv import load_dotenv
+    from src.config.bootstrap import bootstrap_env
 
-    from src.config.settings import get_current_settings, init_settings
-
-    dotenv_path = _REPO_ROOT / f".env.{env}"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
-    init_settings(env)
-    return get_current_settings()
+    return bootstrap_env(env)
 
 
 def run(env: str, *, only_missing: bool, limit: int | None, os_sync: bool, report: bool) -> dict[str, int]:

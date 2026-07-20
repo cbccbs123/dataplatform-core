@@ -18,9 +18,7 @@ import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -187,13 +185,9 @@ async def access_log_middleware(request: Request, call_next: Callable) -> object
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # 부트스트랩(run_search 진입점과 동일): .env.{env} 로드 → init_settings(필수 env 검증). 1회만.
-    from src.config.settings import init_settings
+    from src.config.bootstrap import bootstrap_env
 
-    project_root = Path(__file__).resolve().parents[3]
-    dotenv_path = project_root / f".env.{_ENV}"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
-    init_settings(_ENV)
+    bootstrap_env(_ENV)
     yield
     # graceful shutdown: 남은 fire-and-forget 감사 기록 태스크를 드레인한다(best-effort·013 FR-012).
     if _PENDING_TASKS:
