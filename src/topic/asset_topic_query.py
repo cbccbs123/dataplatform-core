@@ -1,6 +1,6 @@
 """자산 자기주제 정본 **조회(read)** — 주제 패싯·같은주제 그룹·미분류 목록 (spec 065 · 077 코어 분리).
 
-분류(``classify_asset_topic``·write·LLM)는 파이프라인 ``src.classify.asset_topic`` 에 두고, 여기는
+분류(``classify_asset_topic``·write·LLM)는 파이프라인 레포(``processing.classify.asset_topic``)에 두고, 여기는
 백엔드·검색이 공유하는 **read seam** 만 담는다 — 077 레포 분리에서 "파이프라인=분류 / 백엔드=read" 런타임
 소유가 갈리므로 read 를 코어(config·database·file 만 의존)로 승격했다. ``asset_topic`` 테이블(v299) 조인으로
 주제 트리·같은주제·미분류를 파생한다(관계 파이프라인 불변). ``find_same_topic_groups`` 의 already_linked

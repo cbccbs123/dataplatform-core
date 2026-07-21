@@ -50,6 +50,39 @@ _EXTRACTED_TO_BACKEND = frozenset({
     "tests/test_search_modalities.py", "tests/test_thumbnail.py",
 })
 
+# 레포 분리(078·G4)로 **파이프라인 레포(dataplatform-pipeline)로 이관/제거**된 테스트 파일들.
+# 코어 물리 분리로 파이프라인 코드가 이 레포를 떠나 그 테스트도 함께 빠진 것 — 약화 위조 아님.
+# base(main)·현재 양쪽에서 함께 제외해 거짓 감소 오탐 방지(그 외 삭제는 계속 차단).
+_EXTRACTED_TO_PIPELINE = frozenset({
+    "tests/test_aboutness.py", "tests/test_archiver.py", "tests/test_archiver_e2e.py",
+    "tests/test_asset_persist.py", "tests/test_asset_relations.py", "tests/test_asset_topic_classify.py",
+    "tests/test_asset_topic_e2e.py", "tests/test_asset_topic_query_e2e.py", "tests/test_audio_meta_extractor.py",
+    "tests/test_backfill_aboutness.py", "tests/test_backfill_asset_topic.py", "tests/test_backfill_topic_canonical.py",
+    "tests/test_batch_runner.py", "tests/test_builtins.py", "tests/test_classification_persist.py",
+    "tests/test_classify.py", "tests/test_classify_profiles.py", "tests/test_collector.py",
+    "tests/test_content_guard.py", "tests/test_count_tokens_tokenizer.py", "tests/test_cross_runner.py",
+    "tests/test_dag_load.py", "tests/test_dedup_deferred.py", "tests/test_dispatcher.py",
+    "tests/test_domain_medical.py", "tests/test_evidence_rescue_harness.py", "tests/test_graph_persist.py",
+    "tests/test_ingest_split.py", "tests/test_keyframe_dedup.py", "tests/test_keyframe_dedup_defaults.py",
+    "tests/test_opensearch_search_e2e.py", "tests/test_packs.py", "tests/test_packs_cross_asset.py",
+    "tests/test_pipeline_contracts.py", "tests/test_policy.py", "tests/test_reextract_stage2.py",
+    "tests/test_registry.py", "tests/test_router.py", "tests/test_run_ingest.py",
+    "tests/test_run_ingest_e2e.py", "tests/test_run_ingest_opensearch_hook.py", "tests/test_run_ingest_packs.py",
+    "tests/test_run_opensearch_resync.py", "tests/test_run_relations_retry.py", "tests/test_run_relations_sample_e2e.py",
+    "tests/test_run_search.py", "tests/test_sample_pack_slot.py", "tests/test_search_parity_live.py",
+    "tests/test_skill_split.py", "tests/test_skills_active_channel.py", "tests/test_status.py",
+    "tests/test_status_transition_atomic.py", "tests/test_status_vocab.py", "tests/test_stt.py",
+    "tests/test_text_probe.py", "tests/test_topic_canonicalize_e2e.py", "tests/test_topic_grounding_report.py",
+    "tests/test_usf_cleanup_dead_files.py", "tests/test_video_keyframes_dedup.py", "tests/test_video_keyframes_fallback.py",
+    "tests/test_video_skill_dedup.py", "tests/test_video_skill_keyframe_zero.py",
+    "tests/test_backfill_bge.py", "tests/test_backfill_topic_canonical_e2e.py",
+    "tests/test_reextract_summaries.py",
+    # 077서 scripts 로 개명 이동된 백필 테스트의 **main(개명 전) 이름** — 개명(077 test_backfill_*)→제거(G4)
+    # 연쇄로 base(main)에만 존재. 개명 후 이름은 위에 있으나 개명 전 이름도 제외해야 base 과대계상 방지.
+    "tests/test_run_about_backfill.py", "tests/test_topic_backfill.py",
+})
+
+
 TESTDEF_RX = re.compile(r"^\s*def\s+test_\w+", re.M)
 ASSERT_RX = re.compile(r"\bself\.assert\w+\(|^\s*assert\s", re.M)
 # skipUnless 는 조건부 실행 게이트(e2e/선택 의존성)라 약화 아님 → 제외.
@@ -91,7 +124,7 @@ def _list_test_files(ref: str | None) -> list[str]:
 def _aggregate(ref: str | None) -> tuple[int, int, int]:
     td = ta = ts = 0
     files = set(_list_test_files(ref)) | set(_list_test_files(None) if ref else [])
-    files -= _EXTRACTED_TO_BACKEND  # 백엔드로 이관된 파일은 base·현재 모두에서 제외(거짓 감소 방지)
+    files -= _EXTRACTED_TO_BACKEND | _EXTRACTED_TO_PIPELINE  # 이관 파일은 base·현재 모두에서 제외(거짓 감소 방지)
     for f in files:
         text = (ROOT / f).read_text(encoding="utf-8") if ref is None and (ROOT / f).exists() \
             else _git_show(ref, f) if ref else ""
