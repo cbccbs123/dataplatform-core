@@ -7,6 +7,33 @@ name = "meta-extract"
 version = "0.1.0"
 requires-python = ">=3.10"
 description = "Media metadata extraction, embeddings, and pgvector search"
+# 런타임 의존성 = pyproject 단일 정본(requirements.txt 폐지·078 dep 일원화).
+# 코어(src.*)가 실제 import 하는 서드파티만 나열(AST 스캔 근거) — 파이프라인 전용(opencv·faster-whisper·
+# scenedetect·soundfile·pytesseract·apache-airflow)은 여기 없다(파이프라인 레포 pyproject 소유).
+# 이 목록 덕에 `pip install "meta-extract @ git+…@tag"` 한 번으로 코어 런타임 스택이 **전이 설치**되어,
+# 파이프라인·백엔드는 코어를 설치하면 psycopg·opensearch-py·torch 등을 자동으로 얻는다.
+dependencies = [
+    # 코어 런타임(설정·DB·LLM·검증·임베딩)
+    "openai>=1.40.0",              # src/llm/client.py (온프레미스 ollama · OpenAI 호환 API)
+    "psycopg[binary]>=3.1.0",      # src/database/* (PG17 클라이언트)
+    "psycopg-pool>=3.2.0",         # src/database/postgres_util.py (커넥션 풀)
+    "python-dotenv>=1.0.1",        # src/config/bootstrap.py (.env 로드)
+    "jsonschema>=4.26.0",          # src/registry/ext_meta_field_registry.py (039 ext_meta 값 검증)
+    "numpy>=1.26.0",               # src/embedders/* (벡터 연산)
+    "requests>=2.32.0",            # src/embedders/text_embedder_api.py (원격 임베딩 API)
+    "opensearch-py>=3.0.0",        # src/search/opensearch_sync.py (BM25+kNN 색인/검색)
+    # 파일 타입·문서 로딩(src/file/*)
+    "python-magic>=0.4.27",        # file_type_detector.py (MIME 탐지)
+    "python-docx>=1.1.0",          # data_loader.py (.docx)
+    "openpyxl>=3.1.0",             # data_loader.py (.xlsx)
+    "python-pptx>=0.6.23",         # data_loader.py (.pptx)
+    "pypdf>=4.0.0",                # data_loader.py (.pdf)
+    # 임베딩(텍스트·이미지)
+    "sentence-transformers>=3.0.0",  # src/embedders/text_embedder.py
+    "pillow>=10.0.0",              # image 계열(추출·임베딩)
+    "transformers>=4.40.0",        # src/embedders/image_embedder.py (CLIP 등)
+    "torch>=2.2.0",                # 임베딩 백엔드
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
