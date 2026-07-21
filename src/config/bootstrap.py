@@ -1,9 +1,10 @@
 """진입점 공통 부트스트랩 (069 US-E FR-E2) — ``.env.{env}`` 로드 + ``init_settings`` 1회 호출.
 
-종전 6개 CLI 진입점(run_ingest·run_relations·run_search·run_topic_backfill·run_about_backfill·
-run_opensearch_resync)과 포탈 lifespan 이 각자 ``Path(__file__).resolve().parents[N]`` 로 레포 루트를
-구해 ``.env.{env}`` 를 로드하고 ``init_settings`` 를 부르는 **동일한 5줄 블록을 복제**했다. 파일 위치마다
-``parents[N]`` 의 N 이 달라 오프바이원 footgun 이 됐다(FR-E6 에서 포탈 이동 시 parents[2]→[3] 보정 필요).
+종전 여러 진입점(run_ingest·run_relations·run_search·run_opensearch_resync·백필 배치·포탈 lifespan)이
+각자 ``Path(__file__).resolve().parents[N]`` 로 레포 루트를 구해 ``.env.{env}`` 를 로드하고
+``init_settings`` 를 부르는 **동일한 5줄 블록을 복제**했다. 파일 위치마다 ``parents[N]`` 의 N 이 달라
+오프바이원 footgun 이 됐다(FR-E6 에서 포탈 이동 시 parents[2]→[3] 보정 필요). ※ 077 레포 분리로 포탈은
+백엔드 레포로, 백필은 ``scripts/backfill_*`` 로 이동했으나, 남은/옮긴 진입점 모두 이 seam 을 그대로 공유한다.
 
 여기로 모아 **레포 루트 계산을 한 곳(이 파일 기준)에** 고정한다 — 진입점은 ``bootstrap_env(env)`` 한 줄만
 호출하면 된다. 동작은 종전과 동일: ``.env.{env}`` 가 있으면 ``override=False``(OS 기존 환경변수 우선)로

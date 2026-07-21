@@ -17,7 +17,7 @@ import unittest
 import uuid
 from unittest.mock import MagicMock
 
-from src.app.run_topic_backfill import (
+from scripts.backfill_asset_topic import (
     _asset_has_topic,
     _fetch_target_asset_ids,
     backfill_assets,

@@ -14,12 +14,12 @@
 
 실행 (FR-503 — 백필 실행은 사람 게이트: 재수집 완료·데이터 확정 후 사용자가 지시)
     conda activate AuroraFS
-    python -m src.app.run_topic_backfill --env dev --report            # 현황만(분류 0·쓰기 0)
-    python -m src.app.run_topic_backfill --env dev --all               # 미부여 자산 전체 백필
-    python -m src.app.run_topic_backfill --env dev --all --limit 100   # 앞 100건만(배치·재개)
-    python -m src.app.run_topic_backfill --env dev <asset_uuid> ...    # 지정 자산만
-    python -m src.app.run_topic_backfill --env dev --all --no-os-sync  # OS 재색인 생략
-    python -m src.app.run_topic_backfill --env dev --all --reclassify  # 품질 재백필(기존 행도 재분류·T604)
+    python scripts/backfill_asset_topic.py --env dev --report            # 현황만(분류 0·쓰기 0)
+    python scripts/backfill_asset_topic.py --env dev --all               # 미부여 자산 전체 백필
+    python scripts/backfill_asset_topic.py --env dev --all --limit 100   # 앞 100건만(배치·재개)
+    python scripts/backfill_asset_topic.py --env dev <asset_uuid> ...    # 지정 자산만
+    python scripts/backfill_asset_topic.py --env dev --all --no-os-sync  # OS 재색인 생략
+    python scripts/backfill_asset_topic.py --env dev --all --reclassify  # 품질 재백필(기존 행도 재분류·T604)
 
 설계 주의
     분류·OS 재색인·존재확인은 seam(``classify_fn``/``os_sync_fn``/``has_topic_fn``)으로 주입 가능해
@@ -36,7 +36,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-_LOG = logging.getLogger("meta_extract.run_topic_backfill")
+_LOG = logging.getLogger("meta_extract.backfill_asset_topic")
 
 # 재실행 멱등 스킵 센티넬 — 트랜잭션 콜백이 "이미 부여됨(재분류 안 함)"을 카운터에 전달하는 표식.
 # None(미부여)·dict(부여)와 구분해야 하므로 별도 객체를 쓴다.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.app.run_about_backfill import backfill_about
+from scripts.backfill_aboutness import backfill_about
 
 
 def _targets(*pairs: tuple[str, str | None]) -> list[dict]:

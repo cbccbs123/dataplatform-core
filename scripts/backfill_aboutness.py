@@ -11,16 +11,16 @@
     - **자산별 짧은 트랜잭션 + 격리**: 한 자산의 예외는 삼켜(failed 카운트) 배치를 멈추지 않는다.
     - **결정적 순서**(헌법 3조): ``asset_id`` 오름차순.
 
-실행 (backfill 실행은 사람 게이트 — 065 run_topic_backfill 과 동일 관례)
+실행 (backfill 실행은 사람 게이트 — 065 backfill_asset_topic 과 동일 관례)
     conda activate AuroraFS
-    python -m src.app.run_about_backfill --env dev --report          # 현황만(쓰기 0)
-    python -m src.app.run_about_backfill --env dev --all             # about 미확정 자산 전체
-    python -m src.app.run_about_backfill --env dev --all --limit 100 # 앞 100건(배치·재개)
-    python -m src.app.run_about_backfill --env dev --all --no-only-missing  # 재추출(--refresh 동의어)
+    python scripts/backfill_aboutness.py --env dev --report          # 현황만(쓰기 0)
+    python scripts/backfill_aboutness.py --env dev --all             # about 미확정 자산 전체
+    python scripts/backfill_aboutness.py --env dev --all --limit 100 # 앞 100건(배치·재개)
+    python scripts/backfill_aboutness.py --env dev --all --no-only-missing  # 재추출(--refresh 동의어)
 
 설계 주의
     코어(``backfill_about``)는 추출·OS 갱신을 seam(``extract_persist_fn``/``os_update_fn``)으로
-    주입받아 실 DB/LLM 없이 순수 단위 검증한다. IO 부트스트랩은 얇게(run_topic_backfill 동형).
+    주입받아 실 DB/LLM 없이 순수 단위 검증한다. IO 부트스트랩은 얇게(backfill_asset_topic 동형).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-_LOG = logging.getLogger("meta_extract.run_about_backfill")
+_LOG = logging.getLogger("meta_extract.backfill_aboutness")
 
 # 대상 스캔 — registered + 메타 보유 + 비의료. only_missing 이면 about 키 부재만(멱등 재실행).
 _TARGET_SQL = """
