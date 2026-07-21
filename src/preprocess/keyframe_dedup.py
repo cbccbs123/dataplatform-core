@@ -33,7 +33,7 @@ from src.config.keyframe_dedup_defaults import (
 )
 
 if TYPE_CHECKING:
-    from src.preprocess.video_keyframes import KeyframeBytesResult
+    from src.embedders.frame_types import KeyframeBytesResult
 
 # dHash: (HASH_SIZE+1) × HASH_SIZE grayscale 의 인접 열 비교 → HASH_SIZE² = 64 bit.
 HASH_SIZE = 8

@@ -24,8 +24,8 @@ import uuid
 from typing import Any
 
 from src.config.settings import get_current_settings
+from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
-from src.ingest.lineage_persist import record_lineage
 
 # FR-E3: 파이프라인 스텝은 pipeline_steps(ingest 계층)로 이관됨 — 여기서 재import 해 CLI 오케스트레이션에
 # 쓰고, 하위호환으로 재export 한다(run_ingest.<name> import·patch 경로 보존·정본은 pipeline_steps).

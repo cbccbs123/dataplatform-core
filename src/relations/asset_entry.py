@@ -22,8 +22,8 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from src.config.settings import get_current_settings
+from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
-from src.ingest.lineage_persist import record_lineage
 from src.relations.asset_candidates import (
     EmbeddingCandidate,
     EmbeddingKindFilter,
@@ -179,8 +179,9 @@ def propose_relations_for_asset(
             auto_approve_emb_min=cfg.relations.auto_approve_emb_min,
             collect=upserted_pairs)
         # 계보 기록: 이 자산에 대해 관계 제안이 실행되었음을 asset_lineage에 남긴다.
-        # run_relations.py 가 재실행될 때 이중 기록이 생길 수 있으나, idempotent=False로
-        # 트랜잭션 실패 시 롤백되어 반쪽 기록은 남지 않는다.
+        # 078: lineage_persist 를 코어(src.database)로 이동 — 코어 relations 가 ingest(파이프라인)를
+        # 역참조하던 것을 해소한다(record_lineage 는 코어 표 asset_lineage 쓰기·ingest/relations 공용이라 코어 소속).
+        # 호출·원자성은 불변(idempotent=False로 트랜잭션 실패 시 롤백되어 반쪽 기록 없음).
         # generated.edges: 생성된 관계 쌍을 target_asset_id ASC(동점 kind_code ASC)로 결정적 정렬(헌법 3조).
         record_lineage(
             conn,

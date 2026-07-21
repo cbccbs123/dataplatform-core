@@ -14,6 +14,7 @@ from typing import TypedDict
 from PIL import Image
 
 from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
+from src.embedders.frame_types import KeyframeBytesResult
 from src.embedders.image_embedder import (
     clip_image_embedding_normalized,
     clip_image_row_to_embedding_1536,
@@ -22,7 +23,6 @@ from src.embedders.image_embedder import (
     get_clip,
     normalize_korean_label_candidates,
 )
-from src.preprocess.video_keyframes import KeyframeBytesResult
 
 
 class KeyframeClipEmbedding(TypedDict):

@@ -13,26 +13,19 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import cv2
 from scenedetect import ContentDetector, detect
+
+# 078: KeyframeBytesResult(공유 계약)를 코어(embedders.frame_types)로 승격 — 이 모듈(파이프라인)은
+# 그 계약을 생산하고 embedders(코어)가 소비한다. 코어→파이프라인 역참조를 없애려 계약을 코어에 둔다.
+from src.embedders.frame_types import KeyframeBytesResult
 
 if TYPE_CHECKING:
     from src.preprocess.keyframe_dedup import KeyframeDedupConfig
 
 logger = logging.getLogger(__name__)
-
-
-class KeyframeBytesResult(TypedDict):
-    """장면별 대표 프레임(메모리 JPEG) 결과."""
-
-    scene_index: int
-    start_sec: float
-    end_sec: float
-    frame_sec: float
-    jpeg_bytes: bytes
-    summary: NotRequired[dict[str, str | list[str]]]
 
 
 class VideoBasicMeta(TypedDict):
