@@ -30,6 +30,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = "tests/"
 
+# 레포 분리(077)로 **백엔드 레포(dataplatform-service)로 이관**된 테스트 파일들.
+# 이건 "약화 위조"(몰래 삭제)가 아니라 정당한 이관(다른 레포에 그대로 존재)이므로,
+# base(main)·현재 양쪽 집계에서 함께 제외한다 → 이관분으로 인한 거짓 "감소" 오탐 방지.
+# ※ 여기 없는 파일의 삭제·assert 감소는 계속 차단된다(감시원 본래 기능 보존).
+_EXTRACTED_TO_BACKEND = frozenset({
+    "tests/test_basename_single_source.py", "tests/test_dashboard_summary.py",
+    "tests/test_display_file_name.py", "tests/test_ext_expr_single_source.py",
+    "tests/test_modality_migration_e2e.py", "tests/test_portal_access_log.py",
+    "tests/test_portal_api_dashboard.py", "tests/test_portal_api_history.py",
+    "tests/test_portal_api_relations.py", "tests/test_portal_api.py",
+    "tests/test_portal_asset_detail.py", "tests/test_portal_asset_stats.py",
+    "tests/test_portal_auth_config.py", "tests/test_portal_auth.py",
+    "tests/test_portal_db_singleton.py", "tests/test_portal_download.py",
+    "tests/test_portal_e2e.py", "tests/test_portal_history_e2e.py",
+    "tests/test_portal_lineage_query.py", "tests/test_portal_range.py",
+    "tests/test_portal_search_group.py", "tests/test_portal_snapshot_e2e.py",
+    "tests/test_portal_topics.py", "tests/test_relations_review_api_e2e.py",
+    "tests/test_search_modalities.py", "tests/test_thumbnail.py",
+})
+
 TESTDEF_RX = re.compile(r"^\s*def\s+test_\w+", re.M)
 ASSERT_RX = re.compile(r"\bself\.assert\w+\(|^\s*assert\s", re.M)
 # skipUnless 는 조건부 실행 게이트(e2e/선택 의존성)라 약화 아님 → 제외.
@@ -71,6 +91,7 @@ def _list_test_files(ref: str | None) -> list[str]:
 def _aggregate(ref: str | None) -> tuple[int, int, int]:
     td = ta = ts = 0
     files = set(_list_test_files(ref)) | set(_list_test_files(None) if ref else [])
+    files -= _EXTRACTED_TO_BACKEND  # 백엔드로 이관된 파일은 base·현재 모두에서 제외(거짓 감소 방지)
     for f in files:
         text = (ROOT / f).read_text(encoding="utf-8") if ref is None and (ROOT / f).exists() \
             else _git_show(ref, f) if ref else ""
