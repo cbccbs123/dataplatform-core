@@ -14,38 +14,13 @@ from __future__ import annotations
 
 import errno
 import os
-import re
 import shutil
 from collections.abc import Callable, Iterable
 from datetime import date
 from typing import Any
 
-# registered_dest 가 붙이는 ``{asset_id}__{원본명}`` 프리픽스(UUIDv7 + '__')의 역패턴.
-# 표시용 파일명 산출 시 이 프리픽스만 벗겨 원본 파일명을 복원한다(아카이브 이동으로 fs_path 가
-# asset_id 프리픽스를 갖게 돼도 프론트·다운로드엔 원본명만 보이게 — 065 T605).
-_ASSET_ID_PREFIX = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}__"
-)
-
-
-def strip_asset_id_prefix(name: str) -> str:
-    """basename 앞의 ``{asset_id}__`` 프리픽스 제거(순수·결정적). ``registered_dest`` 역함수.
-
-    프리픽스가 없으면(인입 원본 등) 원본 그대로 반환한다. UUID 프리픽스만 정확 매칭하므로
-    원본명에 ``__`` 가 있어도(맨 앞이 UUID 형태가 아니면) 건드리지 않는다.
-    """
-    return _ASSET_ID_PREFIX.sub("", name or "")
-
-
-def display_file_name(fs_path: str | None) -> str:
-    """fs_path → 표시용 파일명 = basename 에서 archiver 프리픽스(``{asset_id}__``) 제거(순수).
-
-    아카이브 이동 후 fs_path 가 ``.../{asset_id}__{원본명}`` 이어도 원본 파일명만 돌려준다.
-    프론트 트리·자산 목록·다운로드 파일명이 asset_id 를 노출하지 않게 하는 단일 출처(065 T605).
-    """
-    if not fs_path:
-        return ""
-    return strip_asset_id_prefix(os.path.basename(fs_path))
+# 표시용 파일명 유틸(``strip_asset_id_prefix``·``display_file_name``)은 077 레포 분리에서 코어
+# ``src/config/filename_util.py`` 로 승격됐다(백엔드가 참조·아카이브 이동로직과 분리).
 
 
 def assert_archive_separate(inbox_root: str, archive_root: str) -> None:

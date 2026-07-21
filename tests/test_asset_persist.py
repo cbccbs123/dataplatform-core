@@ -12,8 +12,8 @@ import uuid
 from unittest import mock
 
 from src.dispatch.types import AssetRecord, EmbeddingItem
-from src.registry import asset_persist
-from src.registry.asset_persist import create_asset, finalize_asset
+from src.ingest import asset_persist
+from src.ingest.asset_persist import create_asset, finalize_asset
 
 _FIXED = uuid.UUID("018f0000-0000-7000-8000-000000000001")
 

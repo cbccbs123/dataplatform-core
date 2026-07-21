@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.ingest.archiver import display_file_name  # 표시 파일명 asset_id 프리픽스 제거(065 T605)
+from src.config.filename_util import (
+    display_file_name,  # 표시 파일명 asset_id 프리픽스 제거(065 T605)
+)
 from src.portal._ext_expr import ext_expr  # 확장자 SQL 정규식 단일 출처(069 D4·057 FR-104)
 from src.portal._timeline_util import TIMELINE_INTERVALS, pivot_series
 

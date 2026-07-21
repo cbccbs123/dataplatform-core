@@ -68,7 +68,7 @@ class _AssetTopicE2EBase(unittest.TestCase):
 
     def _make_asset(self, *, ext_meta: dict | None = None) -> str:
         """테스트 자산 1건(+선택 메타) 생성. ext_meta=None 이면 asset_metadata 행 자체를 안 만든다."""
-        from src.registry.asset_persist import create_asset
+        from src.ingest.asset_persist import create_asset
         with self.db.transaction() as conn:
             aid = create_asset(
                 conn, fs_path=f"/t/{uuid.uuid4().hex}.txt", modality="txt",
@@ -139,7 +139,8 @@ class TestAssetTopicClassifyDB(_AssetTopicE2EBase):
 
     def test_classify_creates_row_and_fetch_roundtrip(self):
         """분류 1회 → 행 생성(policy_version 기록) → fetch 왕복 형상(T501 본문)."""
-        from src.classify.asset_topic import POLICY_VERSION, fetch_asset_topic
+        from src.classify.asset_topic import POLICY_VERSION
+        from src.topic.asset_topic_query import fetch_asset_topic
         aid = self._make_asset(ext_meta=self._meta)
         client = _client_returning(self._llm_content)
 
@@ -199,7 +200,7 @@ class TestAssetTopicClassifyDB(_AssetTopicE2EBase):
 
     def test_no_meta_skips_llm_and_creates_no_row(self):
         """메타 없는 자산 → 자기 텍스트 '' → LLM 미호출·행 없음·fetch [](FR-201 미부여 격리)."""
-        from src.classify.asset_topic import fetch_asset_topic
+        from src.topic.asset_topic_query import fetch_asset_topic
         aid = self._make_asset(ext_meta=None)
         client = _client_returning(self._llm_content)
 
@@ -284,7 +285,8 @@ class TestAssetTopicClassifyRealLLM(_AssetTopicE2EBase):
             self._pre_alias = {tuple(r) for r in cur.fetchall()}
 
     def test_real_classify_creates_row_and_rerun_identical(self):
-        from src.classify.asset_topic import classify_asset_topic, fetch_asset_topic
+        from src.classify.asset_topic import classify_asset_topic
+        from src.topic.asset_topic_query import fetch_asset_topic
         aid = self._make_asset(ext_meta={
             "summary": "김치찌개를 맛있게 끓이는 법을 단계별로 설명하는 요리 레시피. "
                        "돼지고기와 신김치를 볶아 육수를 붓고 끓여 완성한다.",

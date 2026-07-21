@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from src.config.settings import backend_for_channel, get_current_settings
 from src.embedders.text_embedder import embed_texts, embed_texts_for, pad_embedding_to_storage_dim
-from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
+from src.embedders.text_embedding_normalize import normalize_text_for_embedding
 
 
 def embed_query_for_media_search(

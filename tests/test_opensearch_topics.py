@@ -322,7 +322,7 @@ class _FakeClient:
         return (len(acts), [])
 
 
-_FETCH = "src.classify.asset_topic.fetch_asset_topic"
+_FETCH = "src.topic.asset_topic_query.fetch_asset_topic"
 
 
 class TestIndexAssetTopicWiring(unittest.TestCase):

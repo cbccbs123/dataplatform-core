@@ -29,7 +29,7 @@ class TestListTopics(unittest.TestCase):
     """``list_topics`` — (topic_ko, subtopic_ko) 별 distinct 자산 수 + 주제 전체 수(정본 조인)."""
 
     def test_groups_by_pair_with_asset_and_topic_counts(self) -> None:
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
 
         rows = [
             {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_id": "a1"},
@@ -53,7 +53,7 @@ class TestListTopics(unittest.TestCase):
         )
 
     def test_empty_topic_ko_skipped_and_subtopic_normalized(self) -> None:
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
 
         rows = [
             {"topic_ko": "", "subtopic_ko": "무시", "asset_id": "x"},   # 빈 topic → 제외
@@ -66,7 +66,7 @@ class TestListTopics(unittest.TestCase):
         self.assertIsNone(out[0]["subtopic_ko"])
 
     def test_sql_excludes_medical(self) -> None:
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
 
         conn, cur = _mock_conn([])
         list_topics(conn)
@@ -75,13 +75,13 @@ class TestListTopics(unittest.TestCase):
         self.assertIn("domain_label is distinct from 'medical'", sql)
 
     def test_empty_rows_returns_empty(self) -> None:
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
 
         conn, _ = _mock_conn([])
         self.assertEqual(list_topics(conn), [])
 
     def test_multiple_topics_deterministic_order(self) -> None:
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
 
         rows = [
             {"topic_ko": "여행", "subtopic_ko": "국내", "asset_id": "t1"},
@@ -100,7 +100,7 @@ class TestListTopics(unittest.TestCase):
         self.assertEqual(list_topics(conn2), out)
 
     def test_topic_asset_count_uniform_across_subtopics(self) -> None:
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
 
         rows = [
             {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_id": "a1"},
@@ -127,7 +127,7 @@ class TestAssetsInTopic(unittest.TestCase):
         ]
 
     def test_shape_sorted_and_basename(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn(self._rows())
         out = assets_in_topic(conn, topic_ko="요리")
@@ -145,7 +145,7 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertEqual(out["modality_counts"], {"text": 1, "image": 1, "video": 1})
 
     def test_modality_filter_counts_stay_full(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn(self._rows())
         out = assets_in_topic(conn, topic_ko="요리", modality="image")
@@ -155,7 +155,7 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertEqual(out["modality_counts"], {"text": 1, "image": 1, "video": 1})
 
     def test_paging(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn(self._rows())
         page = assets_in_topic(conn, topic_ko="요리", limit=2, offset=1)
@@ -163,7 +163,7 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertEqual([r["asset_id"] for r in page["rows"]], ["a2", "a3"])
 
     def test_subtopic_filter_appended(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, cur = _mock_conn([])
         assets_in_topic(conn, topic_ko="요리", subtopic_ko="제빵")
@@ -172,7 +172,7 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertIn("제빵", cur.execute.call_args[0][1])
 
     def test_no_subtopic_no_filter(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, cur = _mock_conn([])
         assets_in_topic(conn, topic_ko="스포츠")
@@ -181,7 +181,7 @@ class TestAssetsInTopic(unittest.TestCase):
 
     def test_unassigned_only_filters_null(self) -> None:
         """unassigned_only=True 면 '기타'(subtopic 미부여)만 — subtopic_ko IS NULL(값 매칭 아님)."""
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, cur = _mock_conn([])
         assets_in_topic(conn, topic_ko="요리", unassigned_only=True)
@@ -192,7 +192,7 @@ class TestAssetsInTopic(unittest.TestCase):
 
     def test_unassigned_only_overrides_subtopic(self) -> None:
         """unassigned_only=True 는 subtopic_ko 지정보다 우선(둘 다 오면 IS NULL)."""
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, cur = _mock_conn([])
         assets_in_topic(conn, topic_ko="요리", subtopic_ko="제빵", unassigned_only=True)
@@ -201,7 +201,7 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertNotIn("at.subtopic_ko = %s", sql)
 
     def test_sql_excludes_medical(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, cur = _mock_conn([])
         assets_in_topic(conn, topic_ko="요리")
@@ -210,14 +210,14 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertIn("domain_label is distinct from 'medical'", sql)
 
     def test_empty_result(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn([])
         self.assertEqual(assets_in_topic(conn, topic_ko="없음"),
                          {"rows": [], "total": 0, "modality_counts": {}})
 
     def test_offset_beyond_total(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn(self._rows())
         out = assets_in_topic(conn, topic_ko="요리", offset=10)
@@ -225,7 +225,7 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertEqual(out["rows"], [])   # offset 이 total 초과 → 빈 페이지
 
     def test_fs_uri_preserved(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn(self._rows())
         out = assets_in_topic(conn, topic_ko="요리")
@@ -236,7 +236,7 @@ class TestAssetsInTopic(unittest.TestCase):
         )
 
     def test_null_fs_path_safe_basename(self) -> None:
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
 
         conn, _ = _mock_conn([{"asset_id": "z1", "fs_uri": None, "fs_path": None, "modality": "text"}])
         out = assets_in_topic(conn, topic_ko="요리")
@@ -249,7 +249,7 @@ class TestAssetsUnclassified(unittest.TestCase):
     """assets_unclassified — 주제 미부여 자산(파일탐색기 '미분류' 폴더·전수 포함)."""
 
     def test_sql_left_join_null_registered_nonmedical(self) -> None:
-        from src.classify.asset_topic import assets_unclassified
+        from src.topic.asset_topic_query import assets_unclassified
 
         conn, cur = _mock_conn([])
         assets_unclassified(conn, limit=50, offset=0)
@@ -260,7 +260,7 @@ class TestAssetsUnclassified(unittest.TestCase):
         self.assertIn("domain_label is distinct from 'medical'", sql)  # PHI 제외 상속
 
     def test_shape_sorted_with_modality(self) -> None:
-        from src.classify.asset_topic import assets_unclassified
+        from src.topic.asset_topic_query import assets_unclassified
 
         conn, _ = _mock_conn([
             {"asset_id": "a2", "fs_uri": "/x/a2", "fs_path": "/d/a2__x.mp3", "modality": "audio"},

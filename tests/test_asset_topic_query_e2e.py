@@ -56,7 +56,7 @@ class TestAssetTopicQueryDB(unittest.TestCase):
                 cur.execute("DELETE FROM asset WHERE asset_id = ANY(%s)", (self._ids,))
 
     def _make_asset(self, *, domain: str = "general") -> str:
-        from src.registry.asset_persist import create_asset
+        from src.ingest.asset_persist import create_asset
         with self.db.transaction() as conn:
             aid = create_asset(
                 conn, fs_path=f"/t/{uuid.uuid4().hex}.txt", modality="txt",
@@ -106,7 +106,7 @@ class TestAssetTopicQueryDB(unittest.TestCase):
         return a, b, c, m
 
     def test_fetch_asset_topic_roundtrip(self):
-        from src.classify.asset_topic import fetch_asset_topic
+        from src.topic.asset_topic_query import fetch_asset_topic
         a, _b, _c, _m = self._seed()
 
         out = self.db.execute_in_transaction(
@@ -129,7 +129,7 @@ class TestAssetTopicQueryDB(unittest.TestCase):
         self.assertEqual(empty, [])
 
     def test_find_same_topic_groups_pairs_and_medical_excluded(self):
-        from src.classify.asset_topic import find_same_topic_groups
+        from src.topic.asset_topic_query import find_same_topic_groups
         a, b, c, m = self._seed()
 
         out = self.db.execute_in_transaction(
@@ -153,7 +153,7 @@ class TestAssetTopicQueryDB(unittest.TestCase):
         self.assertNotIn(a, all_ids)
 
     def test_assets_in_topic_paging_and_medical_excluded(self):
-        from src.classify.asset_topic import assets_in_topic
+        from src.topic.asset_topic_query import assets_in_topic
         a, b, c, m = self._seed()
 
         full = self.db.execute_in_transaction(
@@ -185,7 +185,7 @@ class TestAssetTopicQueryDB(unittest.TestCase):
         self.assertEqual(miss["total"], 0)
 
     def test_list_topics_asset_count_and_medical_excluded(self):
-        from src.classify.asset_topic import list_topics
+        from src.topic.asset_topic_query import list_topics
         a, b, c, m = self._seed()
 
         out = self.db.execute_in_transaction(

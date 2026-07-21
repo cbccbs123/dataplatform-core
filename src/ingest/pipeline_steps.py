@@ -29,16 +29,16 @@ from src.database.postgres_util import PostgresUtil
 from src.dispatch.types import AssetRecord, ExtractContext
 from src.file.file_type_defs import modality_of  # 저장·감사 canonical 매핑(053)
 from src.file.hashing import file_hash_and_size
+from src.ingest.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
+from src.ingest.classification_persist import record_classification
+from src.ingest.lineage_persist import record_lineage
 from src.ingest.router import REASON_MISSING, RouteResult, route_file
 from src.ingest.status import AssetStatus, set_status
 from src.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
 from src.pipeline.packs import for_domain
 from src.pipeline.policy import validate as policy_validate
 from src.pipeline.registry import DEFAULT_REGISTRY
-from src.registry.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
-from src.registry.classification_persist import record_classification
 from src.registry.ext_meta_field_registry import validate_ext_meta
-from src.registry.lineage_persist import record_lineage
 
 REASON_DUPLICATE = "duplicate"
 

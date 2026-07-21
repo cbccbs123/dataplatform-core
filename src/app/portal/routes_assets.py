@@ -19,14 +19,7 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 from src.app.portal import _infra
-from src.classify.asset_topic import (
-    assets_in_topic,
-    assets_unclassified,
-    fetch_asset_topic,
-    find_same_topic_groups,
-    list_topics,
-)
-from src.ingest.archiver import display_file_name
+from src.config.filename_util import display_file_name
 from src.portal.asset_detail import fetch_asset_detail
 from src.portal.auth import Principal, require_principal
 from src.portal.download import (
@@ -36,6 +29,13 @@ from src.portal.download import (
     resolve_download_target,
 )
 from src.portal.thumbnail import THUMBNAILABLE_MODALITIES, cached_thumbnail
+from src.topic.asset_topic_query import (
+    assets_in_topic,
+    assets_unclassified,
+    fetch_asset_topic,
+    find_same_topic_groups,
+    list_topics,
+)
 
 router = APIRouter()
 

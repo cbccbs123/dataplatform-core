@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -113,7 +114,10 @@ class TestRunIngestE2E(unittest.TestCase):
     def _run(self, files, *, extract_fn, classify_fn=_general):
         from src.app.run_ingest import run_ingest
 
-        res = run_ingest(files, db=self.db, extract_fn=extract_fn, classify_fn=classify_fn, settings=object())
+        # PR4b 중첩 settings: _make_opensearch_indexer 가 settings.opensearch.sync_enabled 를 직접 읽는다.
+        # e2e 는 PG 영속화만 검증(OS 색인 off) → sync_enabled=False no-op settings 주입.
+        settings = types.SimpleNamespace(opensearch=types.SimpleNamespace(sync_enabled=False))
+        res = run_ingest(files, db=self.db, extract_fn=extract_fn, classify_fn=classify_fn, settings=settings)
         # 정리 대상 id 수집(registered/deferred + 실패 중 asset 생성된 것)
         self._ids += list(res["registered"]) + list(res["deferred"])
         self._ids += [i for (i, _) in res["failed"] if i is not None]

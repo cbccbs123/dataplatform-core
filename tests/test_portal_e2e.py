@@ -96,8 +96,8 @@ class TestPortalE2E(unittest.TestCase):
         (Range 무결성·묶음 zip 엔트리 검증용). 생성 id 를 self._ids 에 누적해 tearDown 이 정리한다.
         """
         from src.dispatch.types import AssetRecord, EmbeddingItem
+        from src.ingest.asset_persist import create_asset, finalize_asset
         from src.ingest.status import AssetStatus, set_status
-        from src.registry.asset_persist import create_asset, finalize_asset
 
         fs_path = os.path.join(self._marker_dir, f"{uuid.uuid4().hex}.txt")
         with open(fs_path, "wb") as fh:

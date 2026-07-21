@@ -43,8 +43,8 @@ def _onehot(idx: int = 1500) -> list[float]:
 def _make_sample_asset(db, ids: list, vec: list[float]) -> str:
     """``/sample_pack/`` 마커 경로 + st 임베딩 보유 registered 자산(FR-004 픽스처). id 를 ids 에 누적."""
     from src.dispatch.types import AssetRecord, EmbeddingItem
+    from src.ingest.asset_persist import create_asset, finalize_asset
     from src.ingest.status import AssetStatus, set_status
-    from src.registry.asset_persist import create_asset, finalize_asset
 
     with db.transaction() as conn:
         aid = create_asset(

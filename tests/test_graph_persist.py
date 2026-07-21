@@ -316,8 +316,8 @@ def _vec():
 def _make_registered_asset(db, ids: list) -> str:
     """registered + st 임베딩 보유 자산 1건 생성(테스트 헬퍼). 생성 id 를 ids 에 누적."""
     from src.dispatch.types import AssetRecord, EmbeddingItem
+    from src.ingest.asset_persist import create_asset, finalize_asset
     from src.ingest.status import AssetStatus, set_status
-    from src.registry.asset_persist import create_asset, finalize_asset
 
     with db.transaction() as conn:
         aid = create_asset(conn, fs_path=f"/t/{uuid.uuid4().hex}.txt", modality="txt", file_hash=uuid.uuid4().hex)

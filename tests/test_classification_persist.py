@@ -7,7 +7,7 @@ import uuid
 from unittest import mock
 
 from src.classify.types import ClassificationResult
-from src.registry.classification_persist import record_classification
+from src.ingest.classification_persist import record_classification
 
 _AID = uuid.UUID("018f0000-0000-7000-8000-000000000001")
 

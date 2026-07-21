@@ -18,7 +18,7 @@ import unittest
 import uuid
 from unittest import mock
 
-from src.registry.asset_persist import find_registered_asset_by_hash
+from src.ingest.asset_persist import find_registered_asset_by_hash
 
 _EXISTING = uuid.UUID("018f0000-0000-7000-8000-000000000018")
 

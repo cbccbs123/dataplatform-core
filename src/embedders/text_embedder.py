@@ -22,13 +22,13 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+from src.embedders.text_embedding_normalize import normalize_text_for_embedding
 from src.file.data_loader import (
     MAX_INPUT_CHARS,
     iter_document_chunks,
     iter_plain_text_chunks,
     normalize_file_kind,
 )
-from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
 
 _LOG = logging.getLogger(__name__)
 

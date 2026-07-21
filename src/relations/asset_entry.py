@@ -21,10 +21,9 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from src.classify.asset_topic import fetch_asset_topic
 from src.config.settings import get_current_settings
 from src.database.postgres_util import PostgresUtil
-from src.registry.lineage_persist import record_lineage
+from src.ingest.lineage_persist import record_lineage
 from src.relations.asset_candidates import (
     EmbeddingCandidate,
     EmbeddingKindFilter,
@@ -36,6 +35,7 @@ from src.relations.path_signal import find_path_signal_candidates
 from src.relations.persist import register_new_relation_kinds
 from src.relations.prompt import build_relation_proposal_prompt
 from src.relations.relation_type_catalog import fetch_active_relation_kinds
+from src.topic.asset_topic_query import fetch_asset_topic
 
 _LOG = logging.getLogger(__name__)
 

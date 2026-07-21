@@ -55,8 +55,8 @@ class TestArchiverE2E(unittest.TestCase):
     def _registered(self, fs_path: str, ids: list[str]) -> str:
         from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
         from src.dispatch.types import AssetRecord, EmbeddingItem
+        from src.ingest.asset_persist import create_asset, finalize_asset
         from src.ingest.status import AssetStatus, set_status
-        from src.registry.asset_persist import create_asset, finalize_asset
 
         v = [0.0] * FIX_EMBEDDING_DIMENSION
         v[0] = 0.5
@@ -73,7 +73,7 @@ class TestArchiverE2E(unittest.TestCase):
         return str(aid)
 
     def _received(self, fs_path: str, ids: list[str]) -> str:
-        from src.registry.asset_persist import create_asset
+        from src.ingest.asset_persist import create_asset
 
         with self.db.transaction() as conn:
             aid = create_asset(conn, fs_path=fs_path, modality="txt", file_hash=uuid.uuid4().hex)

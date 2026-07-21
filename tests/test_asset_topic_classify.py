@@ -513,7 +513,7 @@ class TestFetchAssetTopic(unittest.TestCase):
         return set(fx["project_asset_topics_shape"][0].keys())
 
     def test_row_present_returns_weight_one_shape(self) -> None:
-        from src.classify.asset_topic import fetch_asset_topic
+        from src.topic.asset_topic_query import fetch_asset_topic
 
         row = {
             "topic_ko": "스포츠·레저",
@@ -530,7 +530,7 @@ class TestFetchAssetTopic(unittest.TestCase):
         self.assertEqual(out[0]["topic_ko"], "스포츠·레저")
 
     def test_absent_returns_empty(self) -> None:
-        from src.classify.asset_topic import fetch_asset_topic
+        from src.topic.asset_topic_query import fetch_asset_topic
 
         conn, _ = _mock_conn_seq(fetchone_val=None)
         self.assertEqual(fetch_asset_topic(conn, "missing"), [])
@@ -548,13 +548,13 @@ class TestFindSameTopicGroups(unittest.TestCase):
         return set(g.keys()), set(sub.keys()), set(asset.keys())
 
     def test_no_target_topic_returns_empty(self) -> None:
-        from src.classify.asset_topic import find_same_topic_groups
+        from src.topic.asset_topic_query import find_same_topic_groups
 
         conn, _ = _mock_conn_seq(fetchone_val=None)  # 대상 자산 asset_topic 행 없음
         self.assertEqual(find_same_topic_groups(conn, "A"), [])
 
     def test_pair_match_shape_equals_contract(self) -> None:
-        from src.classify.asset_topic import find_same_topic_groups
+        from src.topic.asset_topic_query import find_same_topic_groups
 
         target = {"topic_ko": "스포츠·레저", "subtopic_ko": "농구"}
         cand_rows = [
@@ -587,7 +587,7 @@ class TestFindSameTopicGroups(unittest.TestCase):
         self.assertIn("subtopic_ko", cand_sql)
 
     def test_topic_only_match_when_target_subtopic_none(self) -> None:
-        from src.classify.asset_topic import find_same_topic_groups
+        from src.topic.asset_topic_query import find_same_topic_groups
 
         target = {"topic_ko": "음식·요리", "subtopic_ko": None}
         cand_rows = [

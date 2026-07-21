@@ -25,7 +25,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 # 묶음 이웃은 반드시 graph_query seam 경유(대칭 엣지 양방향·status 필터). 직접 graph_edge 쿼리 금지.
-from src.ingest.archiver import (
+from src.config.filename_util import (
     display_file_name,  # 표시/다운로드 파일명 asset_id 프리픽스 제거(065 T605)
 )
 from src.relations.graph_query import fetch_active_relations_for_asset

@@ -275,7 +275,7 @@ class TestTopicCanonicalizeWiringE2E(unittest.TestCase):
             yield
 
     def _make_asset(self) -> str:
-        from src.registry.asset_persist import create_asset
+        from src.ingest.asset_persist import create_asset
         with self.db.transaction() as conn:
             aid = create_asset(
                 conn, fs_path=f"/t/{uuid.uuid4().hex}.txt", modality="txt",

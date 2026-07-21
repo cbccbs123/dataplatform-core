@@ -184,7 +184,7 @@ class TestStatusTransitionAtomicE2E(unittest.TestCase):
         create_asset(received)→routing→classifying→extracting 까지 단일 워커 정상 경로로
         진행한다. 각 set_status 가 예외 없이 진행되면 단일 워커 회귀 0(정상 전이 불변).
         """
-        from src.registry.asset_persist import create_asset
+        from src.ingest.asset_persist import create_asset
 
         with self.db.transaction() as conn:
             aid = create_asset(

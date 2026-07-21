@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.preprocess.text_embedding_normalize import normalize_text_for_embedding
+from src.embedders.text_embedding_normalize import normalize_text_for_embedding
 
 
 def build_image_vlm_text_for_embedding(meta: dict[str, Any]) -> str:

@@ -475,7 +475,7 @@ def _default_topics_fn(conn: Any, asset_id: Any) -> list[dict[str, Any]]:
     당기므로 **호출 시 지연 import** 한다 — 플래그 off(미도입) 환경의 순수 함수 게이트가 이 무거운
     의존 없이 opensearch_sync 를 import 할 수 있게 하기 위함이다. 반환 [] 면 자산에 주제 미부여.
     """
-    from src.classify.asset_topic import fetch_asset_topic
+    from src.topic.asset_topic_query import fetch_asset_topic
 
     return fetch_asset_topic(conn, asset_id=str(asset_id))
 
