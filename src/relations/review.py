@@ -146,7 +146,7 @@ def list_edges_for_review(
     각 행에 양끝 자산(asset_id·file_name·modality)·kind_code·confidence·reason·topic·
     status·reviewed_by·reviewed_at·created_at 를 담아 UI 가 "무엇을 승인하는지" 알 수 있게
     한다(CR-11/CR-18 최소 해소). ``file_name`` 은 asset 에 컬럼이 없어 ``fs_path`` basename
-    으로 파생한다(``src/portal/download.py`` 관례 일치).
+    으로 파생한다(파일명 파생 관례 — 구 ``src/portal/download.py``, 077로 백엔드 레포 이관).
 
     선택 인자(``q``·``asset_id``·``kind_code``·``modality``·``min/max_confidence``·
     ``reviewed_by``·``since``/``until``+``date_col``)는 주어진 것만 WHERE 에 AND 조합한다.
