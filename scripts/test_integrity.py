@@ -53,11 +53,14 @@ _EXTRACTED_TO_BACKEND = frozenset({
 # 레포 분리(078·G4)로 **파이프라인 레포(dataplatform-pipeline)로 이관/제거**된 테스트 파일들.
 # 코어 물리 분리로 파이프라인 코드가 이 레포를 떠나 그 테스트도 함께 빠진 것 — 약화 위조 아님.
 # base(main)·현재 양쪽에서 함께 제외해 거짓 감소 오탐 방지(그 외 삭제는 계속 차단).
+# ※ test_asset_topic_classify.py 는 파이프라인(classify write)행이나, 그 안의 코어 read 함수 테스트
+#   (fetch_asset_topic·find_same_topic_groups)는 코어 tests/test_asset_topic_query.py 로 **재편입**했다
+#   (코어 커버리지 유지·유실 방지). 즉 파일은 이관되되 코어 소속 검증은 코어에 남는다.
 _EXTRACTED_TO_PIPELINE = frozenset({
     "tests/test_aboutness.py", "tests/test_archiver.py", "tests/test_archiver_e2e.py",
     "tests/test_asset_persist.py", "tests/test_asset_relations.py", "tests/test_asset_topic_classify.py",
     "tests/test_asset_topic_e2e.py", "tests/test_asset_topic_query_e2e.py", "tests/test_audio_meta_extractor.py",
-    "tests/test_backfill_aboutness.py", "tests/test_backfill_asset_topic.py", "tests/test_backfill_topic_canonical.py",
+    "tests/test_backfill_topic_canonical.py",
     "tests/test_batch_runner.py", "tests/test_builtins.py", "tests/test_classification_persist.py",
     "tests/test_classify.py", "tests/test_classify_profiles.py", "tests/test_collector.py",
     "tests/test_content_guard.py", "tests/test_count_tokens_tokenizer.py", "tests/test_cross_runner.py",
