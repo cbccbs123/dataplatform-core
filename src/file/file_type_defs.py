@@ -7,10 +7,10 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class MediaKind(str, Enum):
+class MediaKind(StrEnum):
     IMAGE = "image"
     TEXT = "txt"
     VIDEO = "video"
@@ -20,7 +20,7 @@ class MediaKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class OfficeKind(str, Enum):
+class OfficeKind(StrEnum):
     WORD = "word"
     EXCEL = "excel"
     POWERPOINT = "powerpoint"

@@ -1,0 +1,33 @@
+# 코어(meta-extract) 의존성 잠금(lock) — CI 재현성용.
+#
+# pyproject.toml [project].dependencies 는 **추상 선언**(라이브러리 호환 범위·`>=`)이고,
+# 이 파일은 그로부터 **해소된 정확 버전**을 고정한다(둘은 상호보완 — 정본 충돌 아님).
+# CI 는 `pip install -e ".[migrate]" -c constraints.txt` 로 이 버전을 강제해, `>=` 로 인한
+# 버전 드리프트(무관한 상류 릴리스가 조용히 깔려 나는 flaky 실패)를 없애고 unit-tests 를 차단 게이트로 쓴다.
+#
+# 범위: pyproject 의 **직접 의존**(17) + [migrate] extra(alembic). 핵심 드리프트원(torch·transformers 등)을 고정한다.
+#   전이(transitive) 의존은 pip 가 해소(직접 의존 고정으로 주요 변동은 차단 — Option A).
+# **버전만 pin**(로컬 식별자 `+cpu` 등 제거) — Mac dev·ubuntu CI 양쪽에서 각 플랫폼 휠이 해소되도록.
+#
+# 재생성(의존 갱신·버전 상향 시): `conda activate AuroraFS` 에서 각 패키지의 현재 설치버전을
+#   재수집(`pip show <pkg>` 또는 importlib.metadata.version)해 **버전만**(+로컬식별자 제거) 갱신한다.
+#   목록 = pyproject `[project].dependencies` + `[migrate]` 의 alembic.
+
+openai==2.32.0
+psycopg==3.3.3
+psycopg-pool==3.3.0
+python-dotenv==1.2.2
+jsonschema==4.26.0
+numpy==2.4.4
+requests==2.33.1
+opensearch-py==3.2.0
+python-magic==0.4.27
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+pypdf==6.10.2
+sentence-transformers==5.4.1
+pillow==12.2.0
+transformers==5.6.0
+torch==2.11.0
+alembic==1.18.4

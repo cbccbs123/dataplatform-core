@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "meta-extract"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 description = "Media metadata extraction, embeddings, and pgvector search"
 # 런타임 의존성 = pyproject 단일 정본(requirements.txt 폐지·078 dep 일원화).
 # 코어(src.*)가 실제 import 하는 서드파티만 나열(AST 스캔 근거) — 파이프라인 전용(opencv·faster-whisper·
@@ -35,13 +35,19 @@ dependencies = [
     "torch>=2.2.0",                # 임베딩 백엔드
 ]
 
+[project.optional-dependencies]
+# 마이그레이션 실행 전용(코어가 스키마·alembic 소유). src 런타임 import 아님 → 별도 extra 로 분리.
+# 코어 셋업: `pip install -e ".[migrate]"` 후 `alembic -c alembic.ini upgrade head`.
+# 파이프라인/백엔드는 마이그레이션을 돌리지 않으므로(코어 소유) 이 extra 없이 코어를 설치한다.
+migrate = ["alembic>=1.13.0"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py313"
 src = ["src", "tests"]
 extend-exclude = ["migrations/alembic/versions", ".specify", "docs", "scripts"]
 
@@ -61,7 +67,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 files = ["src"]
 warn_unused_ignores = true
 warn_redundant_casts = true
