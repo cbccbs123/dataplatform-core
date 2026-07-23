@@ -189,14 +189,15 @@ class ExtMetaFieldRegistryDbE2eTest(unittest.TestCase):
         if cls.db is not None:
             cls.db.__exit__(None, None, None)
 
-    def test_labels_schema_has_string_items(self):
+    def test_labels_schema_has_object_items(self):
+        # 298: labels 는 [{label, score}] **객체 배열**이 실제 형식(039 시드버그 string→object 교정).
         with self.db.transaction() as conn:
             row = conn.execute(
                 "SELECT json_schema FROM ext_meta_field_registry "
                 "WHERE domain='general' AND meta_key='labels'"
             ).fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0]["items"]["type"], "string")
+        self.assertEqual(row[0]["items"]["type"], "object")
 
     def test_validate_ext_meta_blocks_bad_keywords(self):
         with self.db.transaction() as conn:

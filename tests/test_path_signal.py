@@ -373,6 +373,12 @@ class TestPathSignalDB(unittest.TestCase):
                     "VALUES (%s, '{}'::jsonb, %s::jsonb, '{}')",
                     (aid, json.dumps({"summary": path}, ensure_ascii=False)),
                 )
+                # 066: path_signal 후보는 asset_topic EXISTS(무내용 배제)를 요구 — 픽스처에 자기주제 부여.
+                cur.execute(
+                    "INSERT INTO asset_topic (asset_id, topic_ko, decided_by, policy_version) "
+                    "VALUES (%s, '음식·요리', 'test', 'test')",
+                    (aid,),
+                )
 
     @classmethod
     def _clear(cls) -> None:
