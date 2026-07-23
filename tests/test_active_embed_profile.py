@@ -109,11 +109,11 @@ class TestActiveEmbedModelHelper(unittest.TestCase):
         self.assertEqual(active_embed_model(settings), _BGE)
 
     def test_unsupported_active_raises_value_error(self) -> None:
-        # 미지원 채널은 model_for_channel 이 즉시 ValueError(잘못된 모델 사용 차단).
-        with _env(active="zzz"):
-            settings = _build_settings("dev")
-        with self.assertRaises(ValueError):
-            active_embed_model(settings)
+        # E6: 미지원 채널은 기동(_build_settings) 시점에 즉시 ValueError 로 차단한다(fail-fast).
+        #   과거엔 active_embed_model 호출 시점(파이프라인 한복판)에 터졌으나, 오설정을 빌드에서 앞당겨 막는다.
+        #   (model_for_channel 자체의 미지원-채널 가드는 tests/test_settings.py 화이트리스트 테스트가 검증.)
+        with _env(active="zzz"), self.assertRaises(ValueError):
+            _build_settings("dev")
 
 
 class TestFallsBackToCurrentSettings(unittest.TestCase):
