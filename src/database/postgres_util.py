@@ -31,6 +31,7 @@ from typing import Any, cast
 
 import psycopg
 from psycopg import Connection, errors
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
 PG17_NUMERIC_VERSION = 170000
@@ -174,19 +175,22 @@ class PostgresUtil:
         if self.dsn:
             return self.dsn
         assert self.config is not None
-        conninfo = (
-            f"host={self.config.host} "
-            f"port={self.config.port} "
-            f"dbname={self.config.dbname} "
-            f"user={self.config.user} "
-            f"password={self.config.password} "
-            f"connect_timeout={self.config.connect_timeout} "
-            f"sslmode={self.config.sslmode} "
-            f"application_name={self.config.application_name}"
-        )
+        # libpq conninfo 는 값에 공백·작은따옴표·백슬래시가 있으면 quoting/escaping 이 필요하다.
+        # f-string 손조립은 특수문자 비밀번호 등에서 문자열이 깨지므로(값이 다음 키로 새어들어감),
+        # psycopg 표준 make_conninfo 에 위임해 값별 이스케이프를 맡긴다(port·timeout 은 str 로 정규화).
+        params: dict[str, Any] = {
+            "host": self.config.host,
+            "port": str(self.config.port),
+            "dbname": self.config.dbname,
+            "user": self.config.user,
+            "password": self.config.password,
+            "connect_timeout": str(self.config.connect_timeout),
+            "sslmode": self.config.sslmode,
+            "application_name": self.config.application_name,
+        }
         if self.config.statement_timeout_ms is not None:
-            conninfo += f" options='-c statement_timeout={self.config.statement_timeout_ms}'"
-        return conninfo
+            params["options"] = f"-c statement_timeout={self.config.statement_timeout_ms}"
+        return make_conninfo(**params)
 
     @staticmethod
     def _extract_sqlstate(exc: BaseException) -> str | None:
