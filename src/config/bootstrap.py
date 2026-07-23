@@ -1,14 +1,18 @@
-"""진입점 공통 부트스트랩 (069 US-E FR-E2) — ``.env.{env}`` 로드 + ``init_settings`` 1회 호출.
+"""코어 진입점 공통 부트스트랩 (069 US-E FR-E2) — ``.env.{env}`` 로드 + ``init_settings`` 1회 호출.
 
-종전 여러 진입점(run_ingest·run_relations·run_search·run_opensearch_resync·백필 배치·포탈 lifespan)이
-각자 ``Path(__file__).resolve().parents[N]`` 로 레포 루트를 구해 ``.env.{env}`` 를 로드하고
-``init_settings`` 를 부르는 **동일한 5줄 블록을 복제**했다. 파일 위치마다 ``parents[N]`` 의 N 이 달라
-오프바이원 footgun 이 됐다(FR-E6 에서 포탈 이동 시 parents[2]→[3] 보정 필요). ※ 077 레포 분리로 포탈은
-백엔드 레포로, 백필은 ``scripts/backfill_*`` 로 이동했으나, 남은/옮긴 진입점 모두 이 seam 을 그대로 공유한다.
+원래 여러 진입점(run_ingest·run_relations·run_search·백필·포탈 lifespan)이 각자
+``Path(__file__).resolve().parents[N]`` 로 레포 루트를 구해 ``.env.{env}`` 로드 + ``init_settings`` 를
+부르는 **동일한 5줄 블록을 복제**했다(파일 위치마다 N 이 달라 오프바이원 footgun). 그래서 루트 계산을
+이 한 파일에 모아 고정했다 — 호출자는 ``bootstrap_env(env)`` 한 줄만 부르면 된다.
 
-여기로 모아 **레포 루트 계산을 한 곳(이 파일 기준)에** 고정한다 — 진입점은 ``bootstrap_env(env)`` 한 줄만
-호출하면 된다. 동작은 종전과 동일: ``.env.{env}`` 가 있으면 ``override=False``(OS 기존 환경변수 우선)로
-로드한 뒤 ``init_settings`` 로 필수 env 검증 + frozen 설정 생성(이후 ``get_current_settings`` 활성).
+**077/078 레포 분리 반영**: 위 실행 진입점(run_ingest·run_relations·run_search·백필)은 파이프라인 레포
+(``processing.*``)로, 포탈은 백엔드 레포(``service.*``)로 이관됐고 **각 소비 레포는 자체 부트스트랩을 소유**한다
+(자기 레포 루트에서 자기 ``.env`` 로드). 이 파일의 ``bootstrap_env`` 는 이제 **코어 레포 자체 진입점·테스트용**
+seam 이며, 루트(``_REPO_ROOT``)는 **코어 레포 루트**로 고정된다 — 소비 레포가 설치된 코어의 이 함수를 그대로
+재사용하면 자기 ``.env`` 가 아니라 **코어의 ``.env`` 를 읽게 되므로**(cross-repo footgun) 재사용하지 않는다.
+
+동작은 종전과 동일: ``.env.{env}`` 가 있으면 ``override=False``(OS 기존 환경변수 우선)로 로드한 뒤
+``init_settings`` 로 필수 env 검증 + frozen 설정 생성(이후 ``get_current_settings`` 활성).
 """
 
 from __future__ import annotations
@@ -20,8 +24,9 @@ from dotenv import load_dotenv
 
 from src.config.settings import PipelineSettings, init_settings
 
-# src/config/bootstrap.py → parents[2] = 레포 루트. **루트 계산은 이 한 줄이 유일 출처**(진입점별
-# parents[N] 분산 제거) — 이 파일이 옮겨지지 않는 한 호출자 위치와 무관하게 항상 올바르다.
+# src/config/bootstrap.py → parents[2] = **코어 레포 루트**. 코어 내부 호출자에겐 이 한 줄이 유일 출처
+# (진입점별 parents[N] 분산 제거)다. ※ 소비 레포(파이프/백엔드)는 이 값을 재사용하지 말 것 — 설치된 코어
+# 위치를 가리켜 코어의 .env 를 읽게 된다(자체 부트스트랩에서 자기 루트를 계산).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
