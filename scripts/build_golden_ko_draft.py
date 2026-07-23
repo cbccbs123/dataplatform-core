@@ -24,8 +24,8 @@
     ``wikipedia_등산`` 이 모두 키 ``등산`` 으로 병합돼 한 질의의 정답이 출처·모달리티를 가로지른다
     (질의 "등산" 의 진짜 정답 = 출처 불문 모든 등산 자산). 신규 주제는 밑줄이 없어 키=주제.
   - **질의**: 그룹 내 가장 서술적인(긴) 원문 주제를 자연어로(밑줄→공백, ``무선_충전기`` → "무선 충전기").
-  - **정답**: 그 주제의 ``channel='st_bge'`` 백필된 자산 전부(평가 풀과 정합 — st_bge 없는 자산
-    제외). 두 채널 공존 자산만 하니스가 평가하므로 st_bge 보유를 그룹 모집단으로 삼는다.
+  - **정답**: 그 주제의 registered 자산 전부(2026-07-23: 구 st_bge 채널 요건 제거·현행 단일 채널
+    st_api. 도메인 제외 전면 제거로 medical 포함).
   - **오라벨 제외**(``_EXCLUDE_FILES``): 수기 검증된 도메인-무관 위키 파일(파일명 토픽 ≠ 본문 내용,
     예: ``영어 회화`` 파일이 오르세 미술관 기사)은 정답군에서 뺀다. 정답이 1건만 남아 ``min-group``
     미만이 되면 그 주제 질의 자체가 빠진다(오염된 소그룹 질의 제거).
@@ -62,6 +62,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from psycopg.rows import dict_row  # noqa: E402 — sys.path 부트스트랩 뒤에 와야 함
 
+from src.config.filename_util import display_file_name  # noqa: E402 — {asset_id}__ 프리픽스 제거(065)
+
 _LOG = logging.getLogger("meta_extract.build_golden_ko_draft")
 
 # 초안 출력 경로(사람이 검수해 golden_ko.json 으로 확정). 초안 파일 자체는 커밋 대상 아님.
@@ -74,6 +76,9 @@ _SRC_PREFIXES = ("youtube", "wikipedia")
 # YouTube ID = [A-Za-z0-9_-] 11자(밑줄/하이픈 포함 가능). 주제는 비탐욕(.+?)으로 ID 직전까지.
 # 한국어 주제 토큰은 ASCII 가 아니므로, ID 직전 11자 ASCII 토큰이 유일하게 매칭된다.
 _TOPIC_ID_RE = re.compile(r"^(?P<topic>.+?)_(?P<id>[A-Za-z0-9_-]{11})_")
+# 명시 주제 접미(2026-07-23 추가): ``<원본명>_(<주제>).<ext>``(수집 시 부여·미디어/레거시 다수).
+# 예: ``골프_(골프).txt``·``…응급처치법_(응급처치).mp3``. youtube_/wikipedia_ 프리픽스보다 신뢰도 높아 1순위.
+_TOPIC_SUFFIX_RE = re.compile(r"_\(([^)]+)\)\.[^.]+$")
 
 # 수기 검증된 **도메인-무관 오라벨** 파일(파일명 토픽 ≠ 본문 내용) — 골든 정답에서 제외(2026-06-17).
 # 위키 본문 표제어가 토픽과 무관한 사례(예: `영어 회화` 파일이 오르세 미술관 기사). 이런 자산이
@@ -122,6 +127,11 @@ def _extract_topic(name: str) -> tuple[str, str] | None:
     그룹키 = 표시주제의 첫 밑줄 토큰 → 구형 ``등산_입문`` 과 신규 ``등산`` 이 키 ``등산`` 으로 병합
     (출처 교차). 신규 주제(밑줄 없음)는 키 = 주제.
     """
+    # 1순위: 명시 주제 접미 ``_(<주제>).<ext>``(수집 시 부여). 프리픽스/구형보다 신뢰도 높음.
+    ms = _TOPIC_SUFFIX_RE.search(name)
+    if ms and ms.group(1).strip():
+        topic = ms.group(1).strip()
+        return (topic, topic)
     parts = name.split("_")
     if len(parts) >= 3 and parts[0] in _SRC_PREFIXES:
         topic = parts[1].strip()
@@ -141,15 +151,15 @@ def _query_from_topic(topic: str) -> str:
 
 
 def _fetch_assets(conn: Any) -> list[dict[str, Any]]:
-    """``channel='st_bge'`` 백필된 registered 자산의 asset_id·fs_path 를 결정적 순서로 조회.
+    """registered 자산의 asset_id·fs_path 를 결정적 순서로 조회(도메인 무관·medical 포함).
 
-    골든셋 정답은 st_bge 보유 자산으로 한정한다(하니스 평가 풀 = 두 채널 공존). ``ORDER BY
-    a.asset_id`` 로 고정 순서(2회 실행 동일). 백필을 먼저 돌린 뒤 이 스크립트를 실행한다.
+    2026-07-23: 구 A/B 하니스의 ``channel='st_bge'`` 요건 제거 — 현행 코퍼스는 단일 활성 채널
+    (st_api)만 백필돼 st_bge 조인이 0행이었다. 검색 대상 전체(registered)를 정답 모집단으로 삼는다
+    (도메인 제외 전면 제거로 medical 포함). ``ORDER BY a.asset_id`` 로 고정 순서(2회 실행 동일).
     """
     sql = (
-        "SELECT DISTINCT a.asset_id, a.fs_path "
+        "SELECT a.asset_id, a.fs_path "
         "FROM asset a "
-        "JOIN asset_embedding e ON e.asset_id = a.asset_id AND e.channel = 'st_bge' "
         "WHERE a.status = 'registered' "
         "ORDER BY a.asset_id"
     )
@@ -170,7 +180,9 @@ def build_drafts(conn: Any, *, min_group: int = 2) -> list[dict[str, Any]]:
     labels: dict[str, set[str]] = {}  # 그룹키 → 본 표시주제들(질의 문구 선정용)
     excluded = 0
     for row in rows:
-        name = Path(row["fs_path"]).name
+        # 2026-07-23: registered_dest 가 붙인 ``{asset_id}__`` 프리픽스를 벗겨 원본 파일명으로 추출
+        # (프리픽스가 붙으면 split('_')[0] 이 UUID 라 _extract_topic 이 전부 실패했다).
+        name = display_file_name(row["fs_path"])
         if name in _EXCLUDE_FILES:  # 수기 검증 오라벨 — 정답군에서 제외
             excluded += 1
             continue
