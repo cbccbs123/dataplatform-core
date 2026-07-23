@@ -62,7 +62,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from psycopg.rows import dict_row  # noqa: E402 — sys.path 부트스트랩 뒤에 와야 함
 
-from src.config.filename_util import display_file_name  # noqa: E402 — 065 {asset_id}__ 프리픽스 제거
+from src.config.filename_util import display_file_name  # noqa: E402
 
 _LOG = logging.getLogger("meta_extract.build_golden_ko_draft")
 
