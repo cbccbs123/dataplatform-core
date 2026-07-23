@@ -863,5 +863,40 @@ class TestFieldSpecsSSOT(unittest.TestCase):
             )
 
 
+class TestEmbedActiveChannelWhitelist(unittest.TestCase):
+    """E6 — EMBED_ACTIVE_CHANNEL 은 지원 채널(st/st_bge/st_api) 화이트리스트로 기동 시점 검증.
+
+    미검증이면 오타 채널이 빌드를 통과하고, model_for_channel 이 실제 호출되는 파이프라인 한복판
+    (적재·검색)에서야 ValueError 로 터진다(fail-late). 038/062 관례대로 기동 차단(fail-fast)한다.
+    """
+
+    def test_default_channel_builds(self) -> None:
+        with _env():
+            settings = _build_settings("dev")
+        self.assertEqual(settings.embed.active_channel, "st")
+
+    def test_valid_local_channels_build(self) -> None:
+        for ch in ("st", "st_bge"):
+            with _env(EMBED_ACTIVE_CHANNEL=ch):
+                settings = _build_settings("dev")
+            self.assertEqual(settings.embed.active_channel, ch)
+
+    def test_unknown_channel_raises_fail_fast(self) -> None:
+        with _env(EMBED_ACTIVE_CHANNEL="foo"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_whitelist_matches_model_for_channel_keys(self) -> None:
+        # 화이트리스트가 model_for_channel 이 실제 수용하는 채널과 일치해야 한다(드리프트 방지).
+        from src.config.settings import _TEXT_EMBED_CHANNELS, model_for_channel
+
+        with _env():
+            settings = _build_settings("dev")
+        for ch in _TEXT_EMBED_CHANNELS:
+            self.assertIsInstance(model_for_channel(ch, settings), str)  # 예외 없이 매핑
+        with self.assertRaises(ValueError):
+            model_for_channel("nope", settings)
+
+
 if __name__ == "__main__":
     unittest.main()

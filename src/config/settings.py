@@ -270,6 +270,14 @@ def _validate_settings_consistency(settings: PipelineSettings) -> None:
             "OS 검색은 적재 시 OS 증분 색인이 필수입니다(037 이후 PG 폴백 없음 — 끄면 신규 자산이 "
             "검색에서 누락). OPENSEARCH_SYNC_ENABLED=true 로 설정하세요."
         )
+    # E6: 활성 임베딩 채널은 지원 목록(_TEXT_EMBED_CHANNELS = model_for_channel 매핑 키) 안이어야 한다.
+    #   미검증이면 오타 채널이 빌드를 통과하고, model_for_channel 이 실제 호출되는 파이프라인 한복판
+    #   (적재·검색)에서야 ValueError 로 터진다(fail-late). 038/062 관례대로 기동 시점에 즉시 차단한다.
+    if settings.embed.active_channel not in _TEXT_EMBED_CHANNELS:
+        raise ValueError(
+            f"설정 불일치: EMBED_ACTIVE_CHANNEL={settings.embed.active_channel!r} 은(는) 지원하지 않는 "
+            f"임베딩 채널입니다 (지원: {sorted(_TEXT_EMBED_CHANNELS)})."
+        )
     # 062: API 임베딩 채널(st_api) 활성인데 base_url 미설정이면 파이프라인 한복판(/embeddings 호출)이
     #   아니라 기동 시점에 즉시 차단한다(038 fail-fast 관례와 통일 — 채널만 켜는 사람 실수 방지).
     if backend_for_channel(settings.embed.active_channel, settings) == "api" and not settings.embed.api_base_url:
@@ -628,6 +636,11 @@ def get_current_settings() -> PipelineSettings:
     if _SETTINGS is None:
         raise RuntimeError("settings가 초기화되지 않았습니다. 먼저 init_settings(profile)를 호출하세요.")
     return _SETTINGS
+
+
+# E6: 지원 텍스트 임베딩 채널 화이트리스트 — 아래 model_for_channel 매핑 키의 단일 출처.
+#   _validate_settings_consistency 가 기동 시점 검증에 쓰고, model_for_channel 매핑이 이 집합과 일치해야 한다.
+_TEXT_EMBED_CHANNELS = frozenset({"st", "st_bge", "st_api"})
 
 
 def model_for_channel(channel: str, settings: PipelineSettings | None = None) -> str:
