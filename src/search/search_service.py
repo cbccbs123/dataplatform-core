@@ -196,7 +196,7 @@ def _grouped_via_opensearch(
         k=limit_per_bucket,
         channel=text_channel,
         index=os_index_name,
-        exclude_medical=True,
+        exclude_medical=False,  # 2026-07-23 도메인 제외 전면 제거(의료 이연). 복귀 시 True.
         # 069 US-E(FR-E5②): 융합·게이트·컷·rerank·evidence·about 튜닝 12종을 SearchTuning 한 묶음으로
         # 전달한다(위에서 from_settings 로 1회 해소·disable_os_cutoff 시 cutoff_enabled=False 덮음).
         # 종전 getattr 릴레이 12줄이 이 한 줄로 대체됐다(인자 축소·오타는 정적 검사로).

@@ -159,7 +159,7 @@ def search_assets_os(
     k: int = 20,
     channel: str = "st",
     index: str,
-    exclude_medical: bool = True,
+    exclude_medical: bool = False,  # 2026-07-23 도메인 제외 전면 제거·기본 OFF(의료 이연). 복귀 시 True.
     embed_fn: Callable[..., list[float]] = embed_query,
     tuning: SearchTuning = SearchTuning(),
     rerank_fn: Callable[..., list[float]] | None = None,

@@ -64,9 +64,9 @@ def _build_review_where(
 ) -> tuple[str, list[Any]]:
     """동적 WHERE 절(문자열) + params 리스트를 만든다(FR-701~753).
 
-    의료(PHI) 제외 2개 + ``e.status = %s`` 는 항상 붙는다(헌법 10조·NULL 도메인 노출 위해
-    ``IS DISTINCT FROM`` 사용 — ``= 'medical'`` 은 NULL 을 놓친다). 그 밖의 검색·필터·기간
+    ``e.status = %s`` 는 항상 붙는다. 그 밖의 검색·필터·기간
     조건은 인자가 주어졌을 때만 append 한다 → 미지정 시 현행과 완전 동일(하위 호환·SC-011).
+    (2026-07-23: 도메인 제외 전면 제거 — 의료 특수 트랙 미운용. 의료 복귀 시 재도입.)
     모든 값은 %s 바인딩(인젝션 0). ``date_col`` 만 f-string 조립이라 화이트리스트로 검증한다.
     """
     if date_col not in _REVIEW_DATE_COLS:
@@ -74,8 +74,6 @@ def _build_review_where(
 
     conditions: list[str] = [
         "e.status = %s",
-        "sa.domain_label IS DISTINCT FROM 'medical'",
-        "da.domain_label IS DISTINCT FROM 'medical'",
     ]
     params: list[Any] = [status]
 

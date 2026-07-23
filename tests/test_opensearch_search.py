@@ -228,19 +228,18 @@ class ImageVideoSubqueryBodyTest(unittest.TestCase):
     def _check_modality(self, modality_value: str) -> None:
         bm25 = build_bm25_body(self.query, modality_values=[modality_value], k=30)
         knn = build_knn_body(self.vector, modality_values=[modality_value], k=30)
-        # (1) BM25 서브검색: named query should + terms 필터 + 의료 must_not + size.
+        # (1) BM25 서브검색: named query should + terms 필터 + size. (2026-07-23: 도메인 제외 기본 OFF —
+        # 의료 must_not 은 기본 body 에 없다. 토글 검증은 BuildBm25BodyTest 참조.)
         self.assertEqual(_bm25_first_match_query(bm25), self.query)
         self.assertEqual(_bm25_named_names(bm25), set(BM25_NAMED_QUERY_NAMES))
         self.assertIn({"terms": {"modality": [modality_value]}}, bm25["query"]["bool"]["filter"])
-        self.assertIn(
-            {"term": {"domain_label": "medical"}}, bm25["query"]["bool"]["must_not"]
-        )
+        self.assertNotIn("must_not", bm25["query"]["bool"])
         self.assertEqual(bm25["size"], 30)
-        # (2) kNN 서브검색: 캡션 임베딩 벡터 + native pre-filter terms + 의료 must_not + size.
+        # (2) kNN 서브검색: 캡션 임베딩 벡터 + native pre-filter terms + size. (도메인 제외 기본 OFF·2026-07-23.)
         self.assertEqual(knn["query"]["knn"]["embedding"]["vector"], self.vector)
         knn_bool = knn["query"]["knn"]["embedding"]["filter"]["bool"]
         self.assertIn({"terms": {"modality": [modality_value]}}, knn_bool["filter"])
-        self.assertIn({"term": {"domain_label": "medical"}}, knn_bool["must_not"])
+        self.assertNotIn("must_not", knn_bool)
         self.assertEqual(knn["size"], 30)
 
     def test_image_subquery_bodies(self) -> None:
@@ -488,10 +487,11 @@ class BuildBm25BodyTest(unittest.TestCase):
         expected = {"terms": {"modality": sorted(ALLOWED_TEXT_META_FILE_KINDS)}}
         self.assertIn(expected, body["query"]["bool"]["filter"])
 
-    def test_exclude_medical_must_not_default(self) -> None:
-        # FR-011(헌법 10조): 의료 자산 배제 must_not(bool 래핑).
+    def test_exclude_medical_opt_in(self) -> None:
+        # 2026-07-23: 도메인 제외 기본 OFF. exclude_medical=True 명시 시에만 의료 배제 must_not(dormant 토글).
+        body = build_bm25_body(self.query, modality_values=["txt"], k=10, exclude_medical=True)
         self.assertIn(
-            {"term": {"domain_label": "medical"}}, self.body["query"]["bool"]["must_not"]
+            {"term": {"domain_label": "medical"}}, body["query"]["bool"]["must_not"]
         )
 
     def test_include_medical_when_disabled(self) -> None:
@@ -572,10 +572,10 @@ class Bm25MustIncludeExcludeTest(unittest.TestCase):
         self.assertIn(self._cross_and_clause("충전"), must)
         self.assertIn(self._cross_and_clause("배터리"), must)
 
-    def test_must_exclude_adds_clause_to_must_not_beside_medical(self) -> None:
-        # 의료 must_not 은 유지되고(헌법 10조), 제외 텀 절이 함께 must_not 에 추가된다.
+    def test_must_exclude_beside_medical_when_opted_in(self) -> None:
+        # exclude_medical=True(opt-in) 시 의료 must_not 과 제외 텀 절이 함께 must_not 에 들어간다(2026-07-23).
         body = build_bm25_body(
-            self.query, modality_values=["txt"], k=10, must_exclude=["광고"]
+            self.query, modality_values=["txt"], k=10, exclude_medical=True, must_exclude=["광고"]
         )
         must_not = body["query"]["bool"]["must_not"]
         self.assertIn({"term": {"domain_label": "medical"}}, must_not)
@@ -604,12 +604,9 @@ class Bm25MustIncludeExcludeTest(unittest.TestCase):
             json.dumps(default_body, ensure_ascii=False, sort_keys=False),
             json.dumps(empty_body, ensure_ascii=False, sort_keys=False),
         )
-        # 빈 필터면 must 키 자체가 없고 must_not 은 의료 절만(기존 형상 봉인).
+        # 빈 필터 + 도메인 제외 기본 OFF(2026-07-23) → must·must_not 키 둘 다 없다(형상 봉인).
         self.assertNotIn("must", empty_body["query"]["bool"])
-        self.assertEqual(
-            empty_body["query"]["bool"]["must_not"],
-            [{"term": {"domain_label": "medical"}}],
-        )
+        self.assertNotIn("must_not", empty_body["query"]["bool"])
 
     def test_blank_terms_ignored_byte_identical(self) -> None:
         # 공백·빈 문자열 텀은 무시(빈 절 생성 금지) → 미지정과 바이트 동일(방어적 정규화).
@@ -668,8 +665,9 @@ class BuildKnnBodyTest(unittest.TestCase):
         flt = body["query"]["knn"]["embedding"]["filter"]["bool"]["filter"]
         self.assertIn({"terms": {"modality": ["image", "video"]}}, flt)
 
-    def test_exclude_medical_must_not_default(self) -> None:
-        body = build_knn_body(self.vector, modality_values=["text"], k=10)
+    def test_exclude_medical_opt_in(self) -> None:
+        # 2026-07-23: 도메인 제외 기본 OFF. exclude_medical=True 명시 시에만 의료 배제 must_not(dormant 토글).
+        body = build_knn_body(self.vector, modality_values=["text"], k=10, exclude_medical=True)
         self.assertIn(
             {"term": {"domain_label": "medical"}},
             body["query"]["knn"]["embedding"]["filter"]["bool"]["must_not"],

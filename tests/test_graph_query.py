@@ -73,16 +73,14 @@ class TestGraphQuerySQL(unittest.TestCase):
         # ④ confidence 동점 시 순서 불안정 방지를 위한 edge_id 2차 정렬(헌법 3조, plan R-3)
         self.assertIn("ORDER BY ge.confidence DESC NULLS LAST, ge.edge_id", compact)
 
-    def test_medical_excluded_both_endpoints(self) -> None:
-        # 057: file_name·modality 하향(JOIN asset sa/da) 시 양끝 의료 배제(헌법 10조·PHI) — 비의료
-        # 자산의 의료 이웃 파일명이 relations[] 로 새는 경로 SQL 차단. topic_query/review 패턴 동일.
+    def test_no_domain_exclusion(self) -> None:
+        # 2026-07-23: 도메인 제외 전면 제거 — 관계 조회 SQL 이 medical 을 배제하지 않는다(의료 복귀 시 재도입).
         from src.relations.graph_query import fetch_active_relations_for_asset
 
         conn, cur = _conn_returning([])
         fetch_active_relations_for_asset(conn, asset_id="A")
         compact = " ".join(cur.execute.call_args[0][0].split())
-        self.assertIn("sa.domain_label IS DISTINCT FROM 'medical'", compact)
-        self.assertIn("da.domain_label IS DISTINCT FROM 'medical'", compact)
+        self.assertNotIn("medical", compact)
 
 
 class TestGraphQueryNormalize(unittest.TestCase):

@@ -42,14 +42,10 @@ JOIN asset sa ON sa.asset_id = sn.asset_id
 JOIN asset da ON da.asset_id = dn.asset_id
 WHERE (sn.asset_id = %s OR dn.asset_id = %s)
   AND ge.status = %s
-  AND sa.domain_label IS DISTINCT FROM 'medical'
-  AND da.domain_label IS DISTINCT FROM 'medical'
 ORDER BY ge.confidence DESC NULLS LAST, ge.edge_id
 """
-# 057: file_name·modality 하향(JOIN asset sa/da) 시 양끝 의료 배제를 함께 건다(헌법 10조·PHI).
-# review._build_review_where 와 동일 리터럴 — 관계 이웃(비의료 자산의
-# 의료 이웃)의 실제 파일명이 relations[] 로 새는 경로를 SQL 단에서 차단(FR-603·C5). 이웃이 의료면
-# 엣지 자체를 제외한다. 010부터 잠재했던 seam 갭을 057 파일명 하향과 함께 봉인.
+# 도메인 제외 없음(2026-07-23 전면 제거) — 의료 특수 트랙 미운용이라 도메인 무관 균일 취급.
+# 이전엔 양끝 domain_label='medical' 배제(PHI·FR-603)를 SQL 단에 걸었으나 삭제. 의료 복귀(3년차) 시 재도입.
 
 
 def fetch_active_relations_for_asset(

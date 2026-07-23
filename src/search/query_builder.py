@@ -89,7 +89,7 @@ def build_bm25_body(
     modality_values: Collection[str],
     k: int,
     operator: str = "or",
-    exclude_medical: bool = True,
+    exclude_medical: bool = False,  # 2026-07-23 도메인 제외 전면 제거·기본 OFF(의료 이연). 복귀 시 True.
     search_filters: SearchFilters | None = None,
     must_include: Collection[str] | None = None,
     must_exclude: Collection[str] | None = None,
@@ -142,8 +142,8 @@ def build_bm25_body(
     include_terms = _lexical_terms(must_include)
     exclude_terms = _lexical_terms(must_exclude)
 
-    # must_not = 의료 배제(exclude_medical) + 057 must_exclude 텀 절. 둘 다 없으면 키 자체를 두지
-    # 않아 기존 body 와 동일(미지정 시 바이트 동일). 의료 절을 먼저 넣어 기존 순서를 보존한다.
+    # must_not = 의료 배제(exclude_medical·2026-07-23부터 기본 OFF) + 057 must_exclude 텀 절. 둘 다
+    # 없으면 키 자체를 두지 않는다. 의료 절이 활성일 때만 먼저 넣어 순서를 보존한다.
     must_not: list[dict[str, Any]] = []
     if exclude_medical:
         must_not.append({"term": {"domain_label": _MEDICAL_LABEL}})
@@ -168,7 +168,7 @@ def build_knn_body(
     *,
     modality_values: Collection[str],
     k: int,
-    exclude_medical: bool = True,
+    exclude_medical: bool = False,  # 2026-07-23 도메인 제외 전면 제거·기본 OFF(의료 이연). 복귀 시 True.
     search_filters: SearchFilters | None = None,
     must_include: Collection[str] | None = None,
     must_exclude: Collection[str] | None = None,

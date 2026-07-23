@@ -51,7 +51,7 @@ def fetch_asset_topic(conn, asset_id) -> list[dict]:
 # already_linked = 대상 자산과 후보 자산 사이 active 엣지 존재 여부. graph_query 대칭 엣지 규칙을 따라
 #   양방향(EXISTS: src=대상∧dst=후보 OR src=후보∧dst=대상)으로 판정한다 — 대칭 엣지는 캐논 순서
 #   단일 행으로 저장되므로 순진한 단방향 WHERE 는 접힌 엣지를 누락한다(CLAUDE.md 규칙).
-# 의료(PHI) 제외(헌법 10조): 후보 자산 domain_label IS DISTINCT FROM 'medical'(NULL 도 노출 방지).
+# 도메인 제외 없음(2026-07-23 전면 제거) — 의료 특수 트랙 미운용. 후보 자산은 도메인 무관 균일 취급.
 _ALREADY_LINKED_EXISTS = """
        EXISTS (
            SELECT 1 FROM graph_edge ge
@@ -113,7 +113,6 @@ def find_same_topic_groups(
         JOIN asset a ON a.asset_id = at.asset_id
         WHERE at.asset_id <> %s
           AND at.topic_ko = %s
-          AND a.domain_label IS DISTINCT FROM 'medical'
     """
     params: list[Any] = [asset_id, asset_id, asset_id, topic_ko]
     if target_sub is not None:
@@ -181,7 +180,7 @@ def find_same_topic_groups(
 # 구 ``topic_query.list_topics``/``assets_in_topic`` 를 정본(``asset_topic``) 기준으로 이식한다.
 # 응답 계약(필드명·정렬)은 구 함수와 동일 → 포탈 /topics·/topics/{topic} 무변경 스왑(FR-402).
 # 정본은 자산당 1행(asset_id PK)이라 구 이웃-엣지 투영의 "양끝 자산 중복카운트" 문제가 원천 소거된다.
-# 의료(PHI) 제외(헌법 10조): 후보 자산 domain_label IS DISTINCT FROM 'medical'(NULL 도 노출 방지).
+# 도메인 제외 없음(2026-07-23 전면 제거) — 의료 특수 트랙 미운용. 후보 자산은 도메인 무관 균일 취급.
 
 # (topic_ko, subtopic_ko) 별 자산 집계용 — 빈 topic_ko 는 조회 단계에서 배제.
 _LIST_TOPICS_SQL = """
@@ -189,7 +188,6 @@ SELECT at.topic_ko, at.subtopic_ko, at.asset_id
 FROM asset_topic at
 JOIN asset a ON a.asset_id = at.asset_id
 WHERE COALESCE(at.topic_ko, '') <> ''
-  AND a.domain_label IS DISTINCT FROM 'medical'
 """
 
 # 주제별 자산 페이징용 — subtopic 필터는 호출 시 append.
@@ -199,8 +197,7 @@ SELECT at.asset_id, a.fs_uri, a.fs_path, a.modality,
 FROM asset_topic at
 JOIN asset a ON a.asset_id = at.asset_id
 LEFT JOIN asset_metadata m ON m.asset_id = at.asset_id
-WHERE a.domain_label IS DISTINCT FROM 'medical'
-  AND at.topic_ko = %s
+WHERE at.topic_ko = %s
 """
 
 
@@ -319,7 +316,7 @@ def assets_in_topic(
 # ── 미분류(주제 미부여) 조회 — 파일탐색기 '미분류' 폴더(전수 포함) ──────────────────────
 # list_topics/assets_in_topic 은 asset_topic 조인이라 **주제 정본이 없는** 자산(분류 실패·무내용 등)을
 # 누락한다. 자산목록을 파일시스템처럼 '빠짐없이' 보이려면 이들을 별도 회수해야 한다(주제 트리의 최상위
-# '미분류' 폴더). 의료(PHI) 제외 상속·registered 만(수집 중/실패 제외).
+# '미분류' 폴더). registered 만(수집 중/실패 제외). 도메인 제외 없음(2026-07-23 전면 제거).
 _ASSETS_UNCLASSIFIED_SQL = """
 SELECT a.asset_id, a.fs_uri, a.fs_path, a.modality,
        m.ext_meta->'keywords' AS keywords, m.ext_meta->'labels' AS labels
@@ -327,7 +324,6 @@ FROM asset a
 LEFT JOIN asset_topic at ON at.asset_id = a.asset_id
 LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
 WHERE a.status = 'registered'
-  AND a.domain_label IS DISTINCT FROM 'medical'
   AND at.asset_id IS NULL
 """
 

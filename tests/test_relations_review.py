@@ -78,7 +78,7 @@ class TestListEdgesForReview(unittest.TestCase):
         from src.relations.review import _REVIEW_STATUSES
         self.assertEqual(_REVIEW_STATUSES, ("proposed", "active", "rejected"))
 
-    def test_sql_binds_status_join_order_medical(self):
+    def test_sql_binds_status_join_order(self):
         from src.relations.review import list_edges_for_review
         conn, cur = self._conn(total=7, rows=[self._sample_row()])
         list_edges_for_review(conn, status="proposed", limit=50, offset=10)
@@ -86,7 +86,8 @@ class TestListEdgesForReview(unittest.TestCase):
         sqls = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
         self.assertIn("JOIN node", sqls)
         self.assertIn("JOIN asset", sqls)
-        self.assertIn("IS DISTINCT FROM 'medical'", sqls)  # 양끝 의료 제외
+        # 2026-07-23: 도메인 제외 전면 제거 — medical 배제 없음.
+        self.assertNotIn("medical", sqls)
         # tiebreaker 포함 결정적 정렬
         rows_sql = str(cur.execute.call_args_list[-1].args[0])
         self.assertIn("ORDER BY", rows_sql)
@@ -160,7 +161,7 @@ class TestListEdgesForReview(unittest.TestCase):
         count_sql = str(cur.execute.call_args_list[0].args[0])
         self.assertIn("COUNT", count_sql.upper())
         self.assertIn("status = %s", count_sql)
-        self.assertIn("IS DISTINCT FROM 'medical'", count_sql)
+        self.assertNotIn("medical", count_sql)  # 2026-07-23: 도메인 제외 전면 제거
         self.assertEqual(cur.execute.call_args_list[0].args[1][0], "active")
 
 
@@ -190,14 +191,14 @@ class TestListEdgesForReviewFilters(unittest.TestCase):
         )
 
     def test_no_filter_args_backward_compatible(self):
-        # SC-011 — 확장 인자 전부 생략 시 WHERE 는 status + 의료 제외 2개만(현행).
+        # SC-011 — 확장 인자 전부 생략 시 WHERE 는 status 만(2026-07-23 도메인 제외 전면 제거).
         from src.relations.review import list_edges_for_review
         conn, cur = self._conn(total=1, rows=[])
         list_edges_for_review(conn, status="proposed", limit=50, offset=0)
         count_sql, count_params, rows_sql, rows_params = self._both_sql(cur)
         for sql in (count_sql, rows_sql):
             self.assertIn("e.status = %s", sql)
-            self.assertIn("IS DISTINCT FROM 'medical'", sql)
+            self.assertNotIn("medical", sql)  # 도메인 제외 전면 제거
             # 확장 필터 조건은 없어야 한다
             self.assertNotIn("ILIKE", sql)
             self.assertNotIn("rk.kind_code = %s", sql)

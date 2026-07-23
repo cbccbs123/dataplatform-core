@@ -65,14 +65,15 @@ class TestListTopics(unittest.TestCase):
         self.assertEqual(out[0]["topic_ko"], "음악")
         self.assertIsNone(out[0]["subtopic_ko"])
 
-    def test_sql_excludes_medical(self) -> None:
+    def test_sql_no_domain_exclusion(self) -> None:
+        # 2026-07-23: 도메인 제외 전면 제거 — 주제 조회 SQL 이 medical 을 배제하지 않는다.
         from src.topic.asset_topic_query import list_topics
 
         conn, cur = _mock_conn([])
         list_topics(conn)
         sql = " ".join(cur.execute.call_args[0][0].split()).lower()
         self.assertIn("from asset_topic", sql)
-        self.assertIn("domain_label is distinct from 'medical'", sql)
+        self.assertNotIn("medical", sql)
 
     def test_empty_rows_returns_empty(self) -> None:
         from src.topic.asset_topic_query import list_topics
@@ -200,14 +201,15 @@ class TestAssetsInTopic(unittest.TestCase):
         self.assertIn("at.subtopic_ko IS NULL", sql)
         self.assertNotIn("at.subtopic_ko = %s", sql)
 
-    def test_sql_excludes_medical(self) -> None:
+    def test_sql_no_domain_exclusion(self) -> None:
+        # 2026-07-23: 도메인 제외 전면 제거 — 주제별 자산 SQL 이 medical 을 배제하지 않는다.
         from src.topic.asset_topic_query import assets_in_topic
 
         conn, cur = _mock_conn([])
         assets_in_topic(conn, topic_ko="요리")
         sql = " ".join(cur.execute.call_args[0][0].split()).lower()
         self.assertIn("from asset_topic", sql)
-        self.assertIn("domain_label is distinct from 'medical'", sql)
+        self.assertNotIn("medical", sql)
 
     def test_empty_result(self) -> None:
         from src.topic.asset_topic_query import assets_in_topic
@@ -248,7 +250,7 @@ class TestAssetsInTopic(unittest.TestCase):
 class TestAssetsUnclassified(unittest.TestCase):
     """assets_unclassified — 주제 미부여 자산(파일탐색기 '미분류' 폴더·전수 포함)."""
 
-    def test_sql_left_join_null_registered_nonmedical(self) -> None:
+    def test_sql_left_join_null_registered(self) -> None:
         from src.topic.asset_topic_query import assets_unclassified
 
         conn, cur = _mock_conn([])
@@ -257,7 +259,7 @@ class TestAssetsUnclassified(unittest.TestCase):
         self.assertIn("left join asset_topic", sql)          # 미부여 회수(부여된 것 제외)
         self.assertIn("at.asset_id is null", sql)            # 주제 정본 없음만
         self.assertIn("a.status = 'registered'", sql)        # 수집 중/실패 제외
-        self.assertIn("domain_label is distinct from 'medical'", sql)  # PHI 제외 상속
+        self.assertNotIn("medical", sql)                     # 2026-07-23: 도메인 제외 전면 제거
 
     def test_shape_sorted_with_modality(self) -> None:
         from src.topic.asset_topic_query import assets_unclassified
