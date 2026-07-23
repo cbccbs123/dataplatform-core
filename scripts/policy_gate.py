@@ -6,9 +6,11 @@ CI(`.github/workflows/ci.yml`)와 로컬(`python scripts/policy_gate.py`)이 공
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import sys
+import tokenize
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
@@ -22,6 +24,41 @@ CHECKS = [
     ("LLM 직접 import(2조)", re.compile(r"^\s*(?:from|import)\s+openai\b"), "warn"),
     ("직접 HTTP 호출(2조)", re.compile(r"\b(?:requests|httpx|aiohttp)\.(?:post|get|request)\("), "warn"),
 ]
+
+
+# A2: 문자열/주석/f-string 리터럴 토큰 — 학습·정책 정규식의 오탐 원천이라 검사에서 제외한다.
+_MASK_TOKEN_TYPES = {tokenize.STRING, tokenize.COMMENT}
+for _n in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+    _t = getattr(tokenize, _n, None)
+    if _t is not None:
+        _MASK_TOKEN_TYPES.add(_t)
+
+
+def _code_only_lines(source: str) -> list[str]:
+    """소스에서 문자열/주석/f-string 리터럴 토큰을 공백으로 가린 라인 목록(1-based: ``[0]=''``).
+
+    학습 배제·결정성 정규식이 **코드 토큰만** 보도록 마스킹한다 — 독스트링의 'fine-tuning 배제' 서술이나
+    문자열 속 ``ImageOps.fit(`` 언급 같은 오탐을 없애되, 실제 코드(``loss.backward``·실제 ``.fit(`` 호출·
+    f-string 내 표현식)는 그대로 남겨 검출된다. 토크나이즈 실패(부분·비정형 파일) 시엔 보수적으로 원본을
+    쓴다(미검출보다 오탐을 감수 — 게이트는 놓치지 않는 편이 안전)."""
+    lines = source.splitlines()
+    grid = [list(ln) for ln in lines]
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type not in _MASK_TOKEN_TYPES:
+                continue
+            (sr, sc), (er, ec) = tok.start, tok.end
+            for r in range(sr, er + 1):
+                if r - 1 >= len(grid):
+                    break
+                row = grid[r - 1]
+                c0 = sc if r == sr else 0
+                c1 = ec if r == er else len(row)
+                for c in range(c0, min(c1, len(row))):
+                    row[c] = " "
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return ["", *lines]  # 토크나이즈 실패 시 원본(보수적)
+    return ["", *("".join(r) for r in grid)]
 
 
 def iter_py(base: str):
@@ -40,20 +77,23 @@ def main() -> int:
     for path in iter_py(SRC):
         rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
         with open(path, encoding="utf-8") as f:
-            for i, raw in enumerate(f, 1):
-                code = raw.split("#", 1)[0]  # 주석 제외(휴리스틱)
-                if not code.strip():
-                    continue
-                # 결정성: temperature 비-0
-                m = TEMP_RX.search(code)
-                if m and float(m.group(1)) != 0:
-                    found["block"].append(f"  {rel}:{i}: [결정성(3조) temperature={m.group(1)}] {raw.strip()[:90]}")
-                for label, rx, sev in CHECKS:
-                    if label.startswith("LLM 직접") or label.startswith("직접 HTTP"):
-                        if rel == SEAM:
-                            continue
-                    if rx.search(code):
-                        found[sev].append(f"  {rel}:{i}: [{label}] {raw.strip()[:90]}")
+            source = f.read()
+        raw_lines = source.splitlines()
+        code_lines = _code_only_lines(source)  # 1-based; 문자열/주석/f-string 리터럴을 가린 코드만 스캔
+        for i, raw in enumerate(raw_lines, 1):
+            code = code_lines[i] if i < len(code_lines) else ""
+            if not code.strip():
+                continue
+            # 결정성: temperature 비-0
+            m = TEMP_RX.search(code)
+            if m and float(m.group(1)) != 0:
+                found["block"].append(f"  {rel}:{i}: [결정성(3조) temperature={m.group(1)}] {raw.strip()[:90]}")
+            for label, rx, sev in CHECKS:
+                if label.startswith("LLM 직접") or label.startswith("직접 HTTP"):
+                    if rel == SEAM:
+                        continue
+                if rx.search(code):
+                    found[sev].append(f"  {rel}:{i}: [{label}] {raw.strip()[:90]}")
 
     for sev, title in [("block", "🔴 차단"), ("warn", "🟡 경고(검토 권장)")]:
         items = found[sev]
