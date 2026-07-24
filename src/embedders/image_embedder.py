@@ -162,6 +162,8 @@ def clip_zero_shot_logits(
     text_emb: torch.Tensor,
     model: CLIPModel,
 ) -> torch.Tensor:
+    # CLIP 학습 온도(logit_scale=log(1/T), 로그로 저장)를 exp 로 복원해 코사인 유사도(-1~1)에 곱한다(≈100배).
+    # 이 스케일이 있어야 뒤이은 softmax 가 라벨 간 확률을 분리한다 — 없으면 [-1,1] 코사인의 softmax 가 거의 균일해짐.
     logits = (image_emb @ text_emb.T) * model.logit_scale.exp()
     return logits[0]
 

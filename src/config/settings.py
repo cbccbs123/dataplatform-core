@@ -65,7 +65,7 @@ class SearchConfig:
     llm_verify_enabled: bool
     # 025: OS BM25 operator(기본 'or'·현행). 'and'=전 토큰 매칭(복합어 가짜매칭 F2 차단). 화이트리스트 fail-fast.
     os_bm25_operator: str
-    # 044: 필드 evidence 기반 lexical rescue 게이트(런타임 on/off·관측). 임계·가중·seed 는 search_constants.
+    # 044: 필드 evidence 기반 lexical rescue 게이트(런타임 on/off·관측). 임계·가중은 search_constants.
     evidence_rescue_enabled: bool
     evidence_debug: bool            # 044: per-hit debug meta opt-in(keep_reason·matched_queries)
 

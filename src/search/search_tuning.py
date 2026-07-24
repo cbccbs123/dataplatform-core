@@ -6,7 +6,7 @@ dataclass 로 묶어 ``SearchTuning.from_settings(cfg)`` 1회 해소로 대체�
 릴레이가 함께 줄고, 오타는 정적 검사(직접 속성 접근)로 잡힌다.
 
 per-request·주입 인자(client·query·modalities·k·channel·index·embed_fn·rerank_fn·query_norm_fn·
-search_filters·must_include/exclude·search_policy·search_mode·exclude_medical)는 **튜닝이 아니라**
+search_filters·search_policy·search_mode·exclude_medical)는 **튜닝이 아니라**
 호출마다 달라지므로 이 묶음에 넣지 않는다. 기본값은 ``search_constants`` 단일 출처(F1)와 일치한다 —
 ``SearchTuning()`` 무인자 생성 = 현행 기본 동작(회귀 0).
 """

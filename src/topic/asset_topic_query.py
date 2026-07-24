@@ -331,7 +331,8 @@ WHERE a.status = 'registered'
 def assets_unclassified(conn, *, modality: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     """주제 미부여(자기주제 정본 없음) 자산을 페이징 조회 — 파일탐색기의 '미분류' 폴더용.
 
-    ``asset_topic`` 행이 없는 registered 비의료 자산. 주제 트리(``list_topics``)는 asset_topic 조인이라
+    ``asset_topic`` 행이 없는 registered 자산(도메인 무관 — 2026-07-23 도메인 제외 전면 제거·의료 포함 균일).
+    주제 트리(``list_topics``)는 asset_topic 조인이라
     이들을 누락하므로, 전수 조회(빠짐없이)를 위해 별도로 회수한다.
 
     Args:

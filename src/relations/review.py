@@ -32,7 +32,8 @@ _REVIEW_STATUSES = ("proposed", "active", "rejected")
 # C6: 검토 화면은 "원본 엣지 행" 단위라 graph_query seam 의 대칭 정규화(dst 접힘 복원)를
 #     쓰지 않는다. 노출용 대칭 정규화는 그 seam 의 책임이고 검토(원본 행)와 무관하다.
 # G7 확장: 고정 WHERE(_REVIEW_FROM_WHERE) 를 조인 상수(_REVIEW_FROM) + 동적 WHERE 빌더로
-#   분리했다. 의료 제외 2개 + status 는 항상 붙고, 검색·필터·기간은 주어진 것만 append 한다.
+#   분리했다. status 만 항상 붙고(2026-07-23 도메인 제외 전면 제거 — 의료 특수 트랙 미운용·복귀 시 재도입),
+#   검색·필터·기간은 주어진 것만 append 한다.
 #   COUNT 와 rows 가 동일 WHERE·params 를 공유하도록 빌더가 (conditions, params) 를 함께 만든다.
 _REVIEW_FROM = """
 FROM graph_edge e

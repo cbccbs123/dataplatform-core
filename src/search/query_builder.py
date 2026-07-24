@@ -36,7 +36,8 @@ BM25_NAMED_QUERY_NAMES: tuple[str, ...] = (
     "hit_cross_meta",
 )
 
-# FR-011(헌법 10조 · 010 FR-014): 의료 자산은 검색 결과에서 제외(domain_label keyword 필터).
+# FR-011(헌법 10조 · 010 FR-014): 의료 자산 검색 제외용 라벨(domain_label keyword 필터) — exclude_medical=True 일 때만.
+# 2026-07-23 도메인 제외 전면 제거로 기본 OFF(의료 복귀 시 재도입).
 _MEDICAL_LABEL = "medical"
 
 # OS 검색 버킷 라벨 → 저장된 modality 값 집합. 요청 라벨('text')을 저장 modality 값으로 매핑한다.

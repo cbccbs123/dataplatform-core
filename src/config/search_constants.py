@@ -8,7 +8,7 @@
 순수 상수만 둔다(import 0·IO 0) — settings 미초기화 환경(순수 단위)에서도 안전하게 참조된다.
 임계는 **코사인 스케일**(클라이언트 융합 전환으로 정규화 스케일 임계 4종이 폐기됨, 027). 실측
 확정치(EPS·FLOOR·RESULT_FLOOR)는 G4 실OS 재보정 후 **여기 1곳만** 갱신한다.
-044 evidence 가중·rescue 임계·generic seed·``SEARCH_EVIDENCE_*`` 토글 기본값도 동일 원칙.
+044 evidence 가중·rescue 임계·``SEARCH_EVIDENCE_*`` 토글 기본값도 동일 원칙.
 """
 
 from __future__ import annotations
@@ -156,7 +156,7 @@ SEARCH_EVIDENCE_DEBUG_DEFAULT: bool = False
 # 포탈·run_search JSON 관측용. 프로덕션 기본 off(응답 부풀림·내부 _name 노출 최소화).
 SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT: bool = True
 # lexical rescue **정책 집행** 스위치. False=027 호환(어휘 BM25 hit 이면 게이트 실패 후에도 전부 keep,
-# ``keep_reason=legacy_lexical``). True=``lexical_rescue_keep`` live(weak-only drop·restricted 등).
+# ``keep_reason=legacy_lexical``). True=``lexical_rescue_keep`` live(weak-only drop·keyword 관대/그 외 일반 임계).
 # 044 G2 merge 시점엔 회귀 방지로 default=0(shadow)였고, 045 G2b 골든(RESCUE 0/1 동등·SC-A2)·
 # ``q=테스트`` 스모크로 검증한 뒤 045 stabilization 에서 default=True(live)로 채택했다(044 spec D8 갱신).
 # ``.env`` 로 0 강제 가능. flip 전후 025 골든(recall@20·p@3): gate-on 시 weak-only precision ↑·recall 소폭 ↓.
