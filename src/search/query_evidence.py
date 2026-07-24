@@ -85,16 +85,11 @@ def lexical_rescue_keep(
         return False, "dropped_no_evidence"
 
     ev = evidence_score(mq, weights=weights)
-    strong = strong_evidence_score(mq, weights=weights)
 
+    # 2026-07-24 mode 슬림: restricted(generic+auto) 분기 제거 — keyword=관대 임계 / 그 외=일반 임계.
     if policy.mode == "keyword":
         if ev >= sc.EVIDENCE_KEYWORD_THRESHOLD:
             return True, "evidence_keyword"
-        return False, "dropped_weak"
-
-    if policy.lexical_rescue == "restricted":
-        if strong >= sc.EVIDENCE_RESTRICTED_STRONG_THRESHOLD:
-            return True, "evidence_restricted"
         return False, "dropped_weak"
 
     if ev >= sc.EVIDENCE_NORMAL_THRESHOLD:

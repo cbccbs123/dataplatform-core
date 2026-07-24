@@ -44,48 +44,34 @@ class EvidenceScoreTest(unittest.TestCase):
 
 
 class LexicalRescueKeepTest(unittest.TestCase):
+    """2026-07-24 mode 슬림: restricted 분기 제거 — auto=NORMAL(1.5) / keyword=KEYWORD(0.7) 임계만."""
+
     def setUp(self) -> None:
-        self.restricted = build_search_policy("테스트")
-        self.normal = build_search_policy("무선충전기")
+        self.auto = build_search_policy("무선충전기")
 
     def test_legacy_when_rescue_off(self) -> None:
-        keep, reason = lexical_rescue_keep(["hit_summary"], policy=self.restricted, rescue_enabled=False)
+        keep, reason = lexical_rescue_keep(["hit_summary"], policy=self.auto, rescue_enabled=False)
         self.assertTrue(keep)
         self.assertEqual(reason, "legacy_lexical")
 
-    def test_weak_only_restricted_drop(self) -> None:
+    def test_weak_auto_drop(self) -> None:
+        # summary+cross_meta = 1.0 < NORMAL 1.5 → drop.
         keep, reason = lexical_rescue_keep(
-            ["hit_summary", "hit_cross_meta"],
-            policy=self.restricted,
-            rescue_enabled=True,
-        )
+            ["hit_summary", "hit_cross_meta"], policy=self.auto, rescue_enabled=True)
         self.assertFalse(keep)
         self.assertEqual(reason, "dropped_weak")
 
-    def test_strong_restricted_keep(self) -> None:
-        keep, reason = lexical_rescue_keep(
-            ["hit_keywords"],
-            policy=self.restricted,
-            rescue_enabled=True,
-        )
+    def test_normal_keywords_keep(self) -> None:
+        # keywords 3.0 ≥ NORMAL 1.5 → keep.
+        keep, reason = lexical_rescue_keep(["hit_keywords"], policy=self.auto, rescue_enabled=True)
         self.assertTrue(keep)
-        self.assertEqual(reason, "evidence_restricted")
-
-    def test_normal_policy_keywords_keep(self) -> None:
-        keep, _ = lexical_rescue_keep(
-            ["hit_keywords"],
-            policy=self.normal,
-            rescue_enabled=True,
-        )
-        self.assertTrue(keep)
+        self.assertEqual(reason, "evidence_normal")
 
     def test_keyword_mode_weak_keep(self) -> None:
+        # keyword 모드는 관대한 하한(0.7) — weak(1.0)도 keep.
         policy = build_search_policy("테스트", mode="keyword")
         keep, reason = lexical_rescue_keep(
-            ["hit_summary", "hit_cross_meta"],
-            policy=policy,
-            rescue_enabled=True,
-        )
+            ["hit_summary", "hit_cross_meta"], policy=policy, rescue_enabled=True)
         self.assertTrue(keep)
         self.assertEqual(reason, "evidence_keyword")
 

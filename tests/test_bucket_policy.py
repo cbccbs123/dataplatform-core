@@ -37,13 +37,8 @@ def _row(
     return r
 
 
-def _policy(*, rescue: str = "restricted") -> SearchPolicy:
-    return SearchPolicy(
-        content_query="테스트",
-        lexical_rescue=rescue,  # type: ignore[arg-type]
-        generic_single_term=True,
-        mode="auto",
-    )
+def _policy(*, mode: str = "auto") -> SearchPolicy:
+    return SearchPolicy(content_query="테스트", mode=mode)  # type: ignore[arg-type]
 
 
 class ApplyBucketPolicyTest(unittest.TestCase):
@@ -132,7 +127,7 @@ class ApplyBucketPolicyTest(unittest.TestCase):
         self.assertIsNotNone(out.rerank)
         self.assertEqual(out.rerank["kept"], 2)
 
-    def test_gate_fail_lexical_rescue_legacy_and_restricted(self) -> None:
+    def test_gate_fail_lexical_rescue_legacy_and_normal(self) -> None:
         weak = _row(
             "w1",
             bm25=True,
@@ -150,7 +145,7 @@ class ApplyBucketPolicyTest(unittest.TestCase):
         self.assertFalse(out_off.gate_passed)
         self.assertEqual([r["id"] for r in out_off.rows], ["w1"])
 
-        # RESCUE on + restricted → weak drop
+        # RESCUE on + auto/normal → weak drop(summary+cross_meta 1.0 < NORMAL 1.5)
         out_on = self._call(
             [weak],
             top=0.40,

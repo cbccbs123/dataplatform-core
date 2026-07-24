@@ -13,7 +13,6 @@ class SearchFilters:
     """portal/CLI 명시 필터 — 자동 질의 승격 없음(044)."""
 
     file_exts: tuple[str, ...] = ()
-    source_datasets: tuple[str, ...] = ()
     created_from: date | datetime | None = None
     created_to: date | datetime | None = None
     # 056 FR-503 — 주제/하위주제 keyword terms 필터. 색인된 ``topics``/``subtopics`` (keyword)
@@ -37,7 +36,6 @@ def _parse_date_param(raw: str) -> date | datetime:
 def parse_search_filters(
     *,
     file_ext: list[str] | None = None,
-    source_dataset: list[str] | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
     topic: str | None = None,
@@ -47,19 +45,15 @@ def parse_search_filters(
     exts = tuple(
         sorted({_norm_ext(x) for x in (file_ext or []) if x and x.strip()})
     )
-    datasets = tuple(
-        sorted({x.strip().casefold() for x in (source_dataset or []) if x and x.strip()})
-    )
     cf = _parse_date_param(created_from) if created_from and created_from.strip() else None
     ct = _parse_date_param(created_to) if created_to and created_to.strip() else None
     # 056: 주제/하위주제는 색인 keyword 원문과 정확 일치용이라 strip 만(casefold·소문자화 금지).
     topic_v = topic.strip() if topic and topic.strip() else None
     subtopic_v = subtopic.strip() if subtopic and subtopic.strip() else None
-    if not exts and not datasets and cf is None and ct is None and topic_v is None and subtopic_v is None:
+    if not exts and cf is None and ct is None and topic_v is None and subtopic_v is None:
         return None
     return SearchFilters(
         file_exts=exts,
-        source_datasets=datasets,
         created_from=cf,
         created_to=ct,
         topic=topic_v,
@@ -81,10 +75,6 @@ def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, 
     clauses: list[dict[str, Any]] = []
     if filters.file_exts:
         clauses.append({"terms": {"filter_kw.file_ext": sorted(filters.file_exts)}})
-    if filters.source_datasets:
-        clauses.append({
-            "terms": {"filter_kw.source_dataset": sorted(filters.source_datasets)},
-        })
     if filters.created_from is not None:
         gte = _to_utc_date(filters.created_from)
         clauses.append({"range": {"filter_date.created_at": {"gte": gte}}})

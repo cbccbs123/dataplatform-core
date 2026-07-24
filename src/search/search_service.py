@@ -72,8 +72,6 @@ def _grouped_via_opensearch(
     llm_verify_judge_fn: Callable[[str, str, str], bool] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
-    must_include: list[str] | None = None,
-    must_exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
 
@@ -204,10 +202,6 @@ def _grouped_via_opensearch(
         search_mode=search_mode,
         search_policy=plan.policy,
         search_filters=search_filters,
-        # 057 FR-202: 서버 lexical 필터(must_include/exclude)를 OS seam 에 그대로 전달한다. None 은
-        # 빈 리스트로 정규화해 넘겨 미지정과 동일한 하위호환 body(바이트 동일)를 보장한다.
-        must_include=list(must_include or []),
-        must_exclude=list(must_exclude or []),
     )  # client.msearch 미도달 예외도 전파(FR-007)
 
     # 074: 검색시점 top-3 개별 LLM 검증(L2) — 토글 on AND 자연어(어절≥3·072 판별과 동일 기준)일 때만.
@@ -262,8 +256,6 @@ def search_hybrid(
     _llm_verify_judge_fn: Callable[[str, str, str], bool] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
-    must_include: list[str] | None = None,
-    must_exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
@@ -291,11 +283,6 @@ def search_hybrid(
     ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/
     ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 072 ``morph_noun_phrase_query``
     형태소 클로저를 client·index 로 배선).
-
-    **057 FR-202 서버 lexical 필터**: ``must_include``/``must_exclude`` 를 OS seam 에 그대로 넘겨 BM25
-    본문의 must(전토큰 AND)/must_not 로 **전체 코퍼스**에 적용한다(프론트 페이지-only 필터의 서버 진실
-    불일치 해소). 필터 절만 추가하고 융합·게이트·컷 로직은 무변경 → 랭킹 산식·정렬 불변. 미지정(None)이면
-    빈 리스트로 넘어가 body 바이트 동일(하위호환·회귀 0).
 
     069 US-C(037 잔재 철거): 037 로 죽어 있던 PG 전용 no-op 인자(``structured``·``fusion``·
     ``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·``min_scores``·``text_query_model``)와
@@ -354,9 +341,6 @@ def search_hybrid(
         llm_verify_judge_fn=_llm_verify_judge_fn,
         search_mode=search_mode,
         search_filters=search_filters,
-        # 057 FR-202: 서버 lexical 필터를 OS 경로로 배선(랭킹 융합·컷오프 불변 — 필터 절만 추가).
-        must_include=must_include,
-        must_exclude=must_exclude,
     )
     # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 끝나므로
     # 호출부에는 별도 하한 필터가 없다(069 US-C: 037 로 no-op 였던 _filter_by_min_score 철거). 요청 라벨

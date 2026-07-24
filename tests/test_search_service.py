@@ -49,7 +49,6 @@ def _cfg(**flat):
         os_bm25_operator=search_constants.OS_BM25_OPERATOR_DEFAULT,
         evidence_rescue_enabled=search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
         evidence_debug=search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT,
-        generic_term_seed=(),
     )
     index = "assets"
     over: dict = {}
@@ -658,30 +657,6 @@ class TestBackendOsBm25OperatorWiring(unittest.TestCase):
         )
         # 폴백 = search_constants 단일 출처(027 리뷰 후속: 기본 'and' — 운영 검증값).
         self.assertEqual(os_cap["tuning"].bm25_operator, "and")
-
-
-class TestBackendOsLexicalFilterWiring(unittest.TestCase):
-    """057 FR-202: search_hybrid 가 must_include/must_exclude 를 os_search_fn(OS seam)에 배선한다."""
-
-    def test_must_include_exclude_forwarded_to_os(self) -> None:
-        fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
-        search_hybrid(
-            "질의", modalities=["text"],
-            must_include=["충전"], must_exclude=["광고"],
-            _os_search_fn=fake_os, _os_client_fn=lambda: "C",
-        )
-        self.assertEqual(os_cap["must_include"], ["충전"])
-        self.assertEqual(os_cap["must_exclude"], ["광고"])
-
-    def test_default_lexical_filters_forwarded_empty(self) -> None:
-        # 미지정(기본)이면 빈 리스트로 전달 → OS seam 에서 body 무변경(하위호환).
-        fake_os, os_cap = _recording_os({"text": [{"id": "os_t", "similarity": 0.9}]})
-        search_hybrid(
-            "질의", modalities=["text"],
-            _os_search_fn=fake_os, _os_client_fn=lambda: "C",
-        )
-        self.assertEqual(os_cap["must_include"], [])
-        self.assertEqual(os_cap["must_exclude"], [])
 
 
 class TestBackendOpenSearchUnreachable(unittest.TestCase):

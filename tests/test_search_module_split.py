@@ -52,7 +52,7 @@ class TestReexportIdentity(unittest.TestCase):
     def test_query_builder_symbols_are_reexported_identically(self) -> None:
         for name in (
             "build_bm25_body", "build_knn_body", "BM25_NAMED_QUERY_NAMES",
-            "_MODALITY_VALUES", "_lexical_clause",
+            "_MODALITY_VALUES",
         ):
             self.assertIs(
                 getattr(opensearch_search, name), getattr(query_builder, name),

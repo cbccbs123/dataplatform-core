@@ -21,13 +21,6 @@ class FiltersToOpensearchBoolTest(unittest.TestCase):
         clauses = filters_to_opensearch_bool(SearchFilters(file_exts=("pdf", "txt")))
         self.assertEqual(clauses, [{"terms": {"filter_kw.file_ext": ["pdf", "txt"]}}])
 
-    def test_source_dataset_clause(self) -> None:
-        clauses = filters_to_opensearch_bool(SearchFilters(source_datasets=("wikipedia", "data1")))
-        self.assertEqual(
-            clauses,
-            [{"terms": {"filter_kw.source_dataset": ["data1", "wikipedia"]}}],
-        )
-
     def test_created_at_range(self) -> None:
         clauses = filters_to_opensearch_bool(
             SearchFilters(
@@ -45,7 +38,7 @@ class FiltersToOpensearchBoolTest(unittest.TestCase):
 
     def test_combined_clauses(self) -> None:
         clauses = filters_to_opensearch_bool(
-            SearchFilters(file_exts=("mp3",), source_datasets=("youtube",))
+            SearchFilters(file_exts=("mp3",), created_from=date(2026, 1, 1))
         )
         self.assertEqual(len(clauses), 2)
 
@@ -54,11 +47,10 @@ class ParseSearchFiltersTest(unittest.TestCase):
     def test_none_when_empty(self) -> None:
         self.assertIsNone(parse_search_filters())
 
-    def test_normalizes_ext_and_dataset(self) -> None:
-        sf = parse_search_filters(file_ext=[".PDF", "txt"], source_dataset=["Wikipedia"])
+    def test_normalizes_ext(self) -> None:
+        sf = parse_search_filters(file_ext=[".PDF", "txt"])
         assert sf is not None
         self.assertEqual(sf.file_exts, ("pdf", "txt"))
-        self.assertEqual(sf.source_datasets, ("wikipedia",))
 
 
 if __name__ == "__main__":

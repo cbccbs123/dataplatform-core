@@ -48,7 +48,6 @@ from src.search.fusion import (
 from src.search.query_builder import (
     _MODALITY_VALUES,
     BM25_NAMED_QUERY_NAMES,
-    _lexical_clause,
     build_bm25_body,
     build_knn_body,
 )
@@ -60,7 +59,6 @@ from src.search.search_tuning import SearchTuning
 __all__ = [
     "BM25_NAMED_QUERY_NAMES",
     "_MODALITY_VALUES",
-    "_lexical_clause",
     "build_bm25_body",
     "build_knn_body",
     "cut_rows",
@@ -168,8 +166,6 @@ def search_assets_os(
     search_mode: str = "auto",
     search_policy: SearchPolicy | None = None,
     search_filters: SearchFilters | None = None,
-    must_include: list[str] | None = None,
-    must_exclude: list[str] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
 
@@ -193,13 +189,6 @@ def search_assets_os(
 
     **디버그 우회**(``cutoff_enabled=False``): 게이트·per-result 컷을 **모두 끈다** — 융합 전체를 그대로
     노출한다(약한 후보까지 관측). 호출부(search_service)의 ``disable_os_cutoff`` 가 이 스위치로 배선된다.
-
-    **057 FR-202 서버 lexical 필터**: ``must_include``/``must_exclude`` 를 **BM25 서브검색과 kNN 표본
-    본문 양쪽**에 넘겨 전체 코퍼스에서 must(전토큰 AND)/must_not 로 적용한다 — 프론트의 페이지-only
-    필터(서버 진실 불일치) 해소. **kNN 에도 반드시 적용**한다: 클라이언트 융합이 BM25∪kNN 이라 BM25 만
-    필터하면 kNN 회수분이 필터를 우회한다(T213 골든에서 실효 없음 발견 → build_knn_body 에도 배선).
-    필터 절만 추가하고 융합·게이트·컷 로직은 무변경이라 랭킹 산식은 불변이며, 미지정(None)이면
-    build_bm25_body/build_knn_body 가 절을 만들지 않아 body 바이트 동일(하위호환·회귀 0).
 
     OS 미도달(``client.msearch`` 예외)이면 **그대로 전파**한다(FR-007 — silent pg 폴백 금지: 결과가
     백엔드 가용성에 따라 달라지면 결정성·관측성 훼손). 검색은 OS 를 **읽기 전용**으로만 만진다(헌법 6조).
@@ -235,18 +224,11 @@ def search_assets_os(
         knn_body = build_knn_body(
             query_vector, modality_values=values, k=sample_k, exclude_medical=exclude_medical,
             search_filters=search_filters,
-            must_include=must_include, must_exclude=must_exclude,
         )
         bm25_body = build_bm25_body(
             query, modality_values=values, k=int(k),
             operator=tuning.bm25_operator, exclude_medical=exclude_medical,
             search_filters=search_filters,
-            # 057 FR-202 + T213: 서버 lexical 필터(must_include→must·must_exclude→must_not)는 BM25·kNN
-            # 양쪽 서브검색 본문에 적용한다(위 build_knn_body 에도 동일 전달) — 융합이 BM25∪kNN 이라
-            # BM25 만 필터하면 kNN 회수분이 우회한다(T213 골든서 발견). 미지정(None)이면 절 미생성·body
-            # 바이트 동일(하위호환·회귀 0).
-            must_include=must_include,
-            must_exclude=must_exclude,
         )
         msearch_body.extend(({"index": index}, knn_body, {"index": index}, bm25_body))
 

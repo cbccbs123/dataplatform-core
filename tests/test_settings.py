@@ -606,46 +606,6 @@ class TestOpenSearchSyncGuard(unittest.TestCase):
         self.assertEqual(settings.search.backend, "opensearch")
 
 
-class TestGenericTermSeedExtra(unittest.TestCase):
-    """045 v2a — ``SEARCH_GENERIC_TERM_SEED_EXTRA`` env merge."""
-
-    def test_default_is_core_seed_only(self) -> None:
-        with _env():
-            settings = _build_settings("dev")
-        self.assertEqual(
-            settings.search.generic_term_seed,
-            search_constants.GENERIC_SINGLE_TERM_SEED,
-        )
-
-    def test_extra_env_merges_and_dedups(self) -> None:
-        with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,bar,TEST"):
-            settings = _build_settings("dev")
-        seed = settings.search.generic_term_seed
-        self.assertIn("foo", seed)
-        self.assertIn("bar", seed)
-        self.assertEqual(len(seed), len(search_constants.GENERIC_SINGLE_TERM_SEED) + 2)
-
-    def test_extra_seed_restricted_policy(self) -> None:
-        from src.search import query_plan
-        from src.search.query_plan import build_search_policy
-
-        with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,bar"):
-            settings = _build_settings("dev")
-        with mock.patch.object(
-            query_plan,
-            "resolve_generic_term_seed",
-            return_value=settings.search.generic_term_seed,
-        ):
-            p = build_search_policy("foo")
-        self.assertTrue(p.generic_single_term)
-        self.assertEqual(p.lexical_rescue, "restricted")
-
-    def test_blank_extra_entry_raises(self) -> None:
-        with _env(SEARCH_GENERIC_TERM_SEED_EXTRA="foo,,bar"):
-            with self.assertRaises(ValueError):
-                _build_settings("dev")
-
-
 class TestVideoKeyframeDedupSettings(unittest.TestCase):
     """048 G0(FR-501): 영상 키프레임 near-dup 제거 7필드 단일 출처.
 

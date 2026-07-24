@@ -144,31 +144,10 @@ EVIDENCE_HIT_CROSS_META_WEIGHT: float = 0.3  # weak — cross_fields summary+key
 # 적용 경로: 게이트 실패 ∧ BM25 행(`_bm25=True`) ∧ ``bm25_operator=and`` 일 때만(027 lexical rescue 잎).
 # ``SEARCH_EVIDENCE_RESCUE_ENABLED=0`` 이면 임계 **미사용** — legacy `has_lexical` 전부 keep.
 EVIDENCE_NORMAL_THRESHOLD: float = 1.5
-# ``lexical_rescue=normal``(일반 질의·또는 generic+keyword) — **전체** evidence_score 하한.
-# 예: keywords만 hit(3.0) → keep; summary+cross_meta 만(1.0) → drop.
-EVIDENCE_RESTRICTED_STRONG_THRESHOLD: float = 2.5
-# ``lexical_rescue=restricted``(generic single term + auto) — **strong tier 합** 만 본다(weak 무시).
-# 예: q=테스트 → 낚시(summary weak만) drop; 반도체(keywords strong≥2.5) keep.
+# ``mode=auto``(기본) — **전체** evidence_score 하한. 예: keywords만 hit(3.0) → keep; summary+cross_meta(1.0) → drop.
 EVIDENCE_KEYWORD_THRESHOLD: float = 0.7
-# ``mode=keyword``(사용자 명시) — weak evidence 도 rescue 허용. 전체 evidence_score 하한(낮게 설정).
-# 포탈 ``GET /search?mode=keyword`` · suggestion "단어 포함 문서…" 와 쌍.
-#
-# ── generic single term seed (v1 · brainstorming YAGNI 6개) ─────────────────
-# ``query_plan.is_generic_single_term``: (1) 공백 없는 단일 토큰·len≤12 이고 (2) NFKC+casefold 가
-# seed 와 일치 → ``generic_single_term=True``. auto 모드에서 ``lexical_rescue=restricted`` 승격.
-# **자동 필터 승격 금지**(FR-302): `테스트`→`tags=test` 변환 없음 — policy 플래그·suggestion 만.
-# 추가 seed(`샘플`·`예시` 등)는 코퍼스 DF 측정 후 v2 — 무분별 확대 시 정상 단어까지 restricted.
-GENERIC_SINGLE_TERM_SEED: tuple[str, ...] = (
-    "테스트",
-    "검증",
-    "가이드",
-    "test",
-    "sample",
-    "demo",
-)
-# 045 v2a: 운영 추가 seed — ``SEARCH_GENERIC_TERM_SEED_EXTRA`` env(콤마 구분). 미설정 시 빈.
-# merge·dedup은 ``query_plan.merge_generic_term_seed`` · settings ``search_generic_term_seed``.
-SEARCH_GENERIC_TERM_SEED_EXTRA_ENV = "SEARCH_GENERIC_TERM_SEED_EXTRA"
+# ``mode=keyword``(사용자 명시) — weak evidence 도 rescue 허용(낮은 하한). 포탈 ``GET /search?mode=keyword`` 와 쌍.
+# (2026-07-24 mode 슬림: generic seed·restricted 임계·keyword 안내 suggestion 제거.)
 #
 # ── env 토글 기본값 (settings ``SEARCH_EVIDENCE_*`` 로 덮어씀) ───────────────
 SEARCH_EVIDENCE_DEBUG_DEFAULT: bool = False
@@ -196,10 +175,7 @@ __all__ = [
     "EVIDENCE_HIT_SUMMARY_WEIGHT",
     "EVIDENCE_KEYWORD_THRESHOLD",
     "EVIDENCE_NORMAL_THRESHOLD",
-    "EVIDENCE_RESTRICTED_STRONG_THRESHOLD",
-    "GENERIC_SINGLE_TERM_SEED",
     "NORI_USER_WORDS_DEFAULT",
-    "SEARCH_GENERIC_TERM_SEED_EXTRA_ENV",
     "OS_BM25_OPERATOR_DEFAULT",
     "OS_CUTOFF_ENABLED_DEFAULT",
     "OS_CUTOFF_EPS_DEFAULT",
