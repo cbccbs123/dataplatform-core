@@ -15,19 +15,34 @@
 
 from __future__ import annotations
 
+import re
+
 # 신규 출처-prefix(주제 아님 — 벗겨야 2번째 토큰이 진짜 주제). build_golden_ko_draft 와 동일 규약.
 _SOURCE_PREFIXES = ("youtube", "wikipedia")
+# 재수집 명명 `<uuid>__<제목>_(주제).ext` 의 **끝 괄호**가 주제 표식(정본). 제목에 밑줄·공백·특수문자가
+# 많아 토큰 위치가 불안정하므로 이 괄호 표식을 토큰 분해보다 우선 신뢰한다.
+_TRAILING_PAREN = re.compile(r"\(([^()]+)\)\s*$")
 
 
 def topic_of_filename(file_name: str) -> str:
-    """파일명에서 토픽 키를 뽑는다(순수·결정적, 명명 규약 3종 대응).
+    """파일명에서 토픽 키를 뽑는다(순수·결정적, 명명 규약 4종 대응).
 
-    `youtube_사막_<id>.jpg`·`wikipedia_고려청자_<id>.txt` → 2번째 토큰(`사막`·`고려청자`).
-    `등산_입문_<id>_<제목>.mp4` → `등산`(구형: 첫 토큰). 언더스코어가 없으면 확장자 뗀 stem 전체가
-    토픽(예: `manifest.json` → `manifest` — 위생 대상이 가드에 노출되도록 그대로 둔다)."""
-    stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+    - **신규(재수집)** `<uuid>__<제목>_(주제).ext` → **끝의 괄호 안**이 주제(`…_(전통주).svg` → `전통주`).
+      제목에 밑줄·공백·특수문자가 많아 토큰 위치가 불안정하므로 괄호 표식을 우선 신뢰한다.
+    - `youtube_사막_<id>.jpg`·`wikipedia_고려청자_<id>.txt` → 2번째 토큰(`사막`·`고려청자`).
+    - `등산_입문_<id>_<제목>.mp4` → `등산`(구형: 첫 토큰). `<uuid>__` 접두가 있으면 벗기고 적용한다.
+    - 언더스코어가 없으면 확장자 뗀 stem 전체가 토픽(예: `manifest.json` → `manifest` — 위생
+      대상이 가드에 노출되도록 그대로 둔다)."""
+    stem = (file_name.rsplit(".", 1)[0] if "." in file_name else file_name).strip()
     if not stem:
         return ""
+    # 신규 명명: 끝의 (주제) 괄호가 정본(UUID 접두·자유 제목 뒤).
+    m = _TRAILING_PAREN.search(stem)
+    if m:
+        return m.group(1).strip()
+    # UUID 접두(`<uuid>__`) 제거 후 구형/출처-prefix 규약 적용.
+    if "__" in stem:
+        stem = stem.split("__", 1)[1]
     parts = stem.split("_")
     if len(parts) >= 2 and parts[0] in _SOURCE_PREFIXES:
         return parts[1]

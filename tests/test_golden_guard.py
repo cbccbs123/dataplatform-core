@@ -24,6 +24,22 @@ class TopicOfFilenameTest(unittest.TestCase):
         # 주제에 공백이 있어도 한 필드(밑줄로만 분리).
         self.assertEqual(topic_of_filename("youtube_기후 변화_3CHPt7zk5fE.mp4"), "기후 변화")
 
+    def test_trailing_paren_topic(self) -> None:
+        # 재수집 명명 <uuid>__<제목>_(주제).ext → 끝 괄호가 주제(토큰 위치 불안정 → 표식 우선).
+        self.assertEqual(
+            topic_of_filename("018f0000-0000-7000-8000-000000000273__Yoke_and_Arrows_(전통주).svg"),
+            "전통주",
+        )
+        self.assertEqual(
+            topic_of_filename("018f0000-0000-7000-8000-000000000276__서귀포 열대우림 🌴_(열대우림).mp4"),
+            "열대우림",
+        )
+        # 괄호 없는 신규 youtube(+uuid 접두)는 접두 제거 후 2번째 토큰.
+        self.assertEqual(
+            topic_of_filename("018f0000-0000-7000-8000-000000000274__youtube_빙하_6uWBi3GrRYM.mp3"),
+            "빙하",
+        )
+
     def test_no_underscore_returns_stem(self) -> None:
         self.assertEqual(topic_of_filename("manifest.json"), "manifest")
 
