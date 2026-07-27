@@ -21,13 +21,11 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-# 양 끝점 asset 역조인(node_kind='asset')으로 src/dst asset_id 를 함께 끌어온 뒤,
-# 파이썬에서 질의 자산 관점으로 방향·이웃을 정규화한다.
-# 057 FR-102: 이웃 표시필드(file_name·modality) 하향을 위해 양끝 node→asset 조인을 하나 더 건다
-#   (review._build_review_where 와 동일 패턴). modality·fs_path 는 asset 에만 있고
-#   기존 소비자를 깨지 않도록 WHERE·정렬·기존 컬럼은 불변 — 필드/조인 추가만.
-# ORDER BY: confidence DESC NULLS LAST 동점 시 순서가 불안정하므로 edge_id 2차 키로
-# 결정성(헌법 3조)을 보장한다(ADR 원안 대비 강화 — plan R-3).
+# 엣지 양 끝을 node → asset 으로 두 번 조인한다. 앞의 조인은 asset_id 를 얻기 위한 것이고,
+# 뒤의 조인은 화면에 보일 파일명·모달리티를 함께 가져오기 위한 것이다 — 이게 없으면 소비자가
+# 이웃마다 자산을 다시 조회해야 한다.
+# 정렬에 edge_id 를 2차 키로 둔 이유: 신뢰도가 같은 엣지들의 순서가 실행 계획에 따라 흔들리면
+# 같은 질의가 매번 다른 순서를 낸다.
 _FETCH_RELATIONS_SQL = """
 SELECT ge.edge_id, rk.kind_code, rk.is_symmetric,
        ge.confidence, ge.reason, ge.topic, ge.status,

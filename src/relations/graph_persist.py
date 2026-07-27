@@ -190,8 +190,8 @@ def sync_graph_edges(
     allowed = frozenset(str(t) for t in allowed_target_ids)
     upserted = 0
     skipped = 0
-    # 058 FR-401: topic 정본화 배선 여부를 루프 밖에서 1회 조회(엣지마다 동일·설정 불변).
-    # 기본 False → 아래 배선 블록을 통째로 건너뛰어 canonicalize·registry 쓰기·LLM 0(동작 불변).
+    # 토글은 **루프 밖에서 한 번만** 읽는다 — 엣지마다 읽으면 같은 배치 안에서 설정이 바뀔 경우
+    # 앞뒤 엣지가 다른 규칙으로 저장된다.
     canonicalize_on = _topic_canonicalize_enabled()
     src_node = ensure_asset_node(conn, source_asset_id)
     for edge in edges:
@@ -216,24 +216,15 @@ def sync_graph_edges(
         kind_id = str(kind["relation_kind_id"])
         symmetric = bool(kind["is_symmetric"])
 
-        # topic은 C+ 슬림화 설계에 따라 graph_edge.topic jsonb에 비정규화 저장.
-        # relation_type / relation_subtopic / relation_topic_parent 3테이블은 v230에서 드랍됨.
-        # 065 FR-405: graph_edge.topic 은 **관계 맥락 라벨(자산 주제 아님)** — 이 쌍(pairwise) 관계를
-        #   설명하는 메타일 뿐, 자산의 주제는 asset_topic 정본이 결정한다. 기록은 존치(관계 검토 UI용)·
-        #   소비만 끊음(065). 컬럼 제거는 후속.
-        # 5번째 반환 mvp_topic_auto(자동 보정 마커)는 **의도적으로 폐기(_)** — 현재 prod 는 이 마커로
-        # 어떤 동작도 하지 않는다. "나중에 재검토 필요" 표식일 뿐이라 향후 재정제 도구가 소비할 예비값이며
-        # 테스트(test_relations_schema)가 산출을 봉인한다(P3-1: prod 미소비는 死가 아니라 의도).
+        # 여기서 다루는 topic 은 **이 쌍(관계)의 맥락 라벨**이지 자산의 주제가 아니다 —
+        # 자산 주제는 asset_topic 이 따로 정한다. 검토 화면 표시용으로만 남긴다.
+        # 5번째 반환값(자동 보정 여부)을 버리는 것은 의도적이다 — 지금은 아무 동작도 걸려 있지
+        # 않은 예비 표식이라 여기서 쓰지 않는다(산출 자체는 테스트가 봉인한다).
         topic_ko, subtopic_ko, topic_en, subtopic_en, _ = coerce_topic_fields_mvp(edge)
-        # 058 FR-401: persist 직전 정본화(플래그 게이트). off(기본)면 이 블록 통째로 skip →
-        # coerce 결과를 그대로 저장(canonicalize·registry·LLM 0·바이트 동일·동작 불변·T403).
-        # on 이면 topic 은 canonicalize_topic(정본 ko/en), subtopic 은 canonicalize_subtopic 통과.
-        # ⚠ LLM-in-transaction 한계: sync_graph_edges 는 execute_in_transaction 안에서 돌고,
-        #   flag-on 경로의 canonicalize_topic 은 캐시 미스 시 judge_topic(LLM)을 부를 수 있다.
-        #   그러나 (1) 이 트랜잭션에는 관계-제안 LLM(propose_edges_json)이 이미 동거하는 선례가 있고
-        #   (asset_entry._run), (2) 시드(G5)된 레지스트리에선 alias 정확일치가 대부분이라 LLM 은
-        #   희소하다(캐시 히트). 트랜잭션 밖 사전 정본화는 다중 호출부(asset_entry·sample) 배선 확장이
-        #   필요해 1차 배제하고, 여기 배선 + 본 주석으로 한계를 명시한다(ADR 2026-07-06·헌법 ⑤).
+        # ⚠️ 이 블록은 **트랜잭션 안에서 LLM 을 부를 수 있다**(캐시가 비어 있을 때).
+        #   같은 트랜잭션에 관계 제안 LLM 이 이미 들어 있어 새로운 위험은 아니고, 레지스트리가
+        #   시드된 상태에서는 대부분 캐시로 끝난다. 트랜잭션 밖으로 빼려면 호출부 여럿을 함께
+        #   고쳐야 해서 미뤄 둔 한계다 — 배치가 길어지면 여기를 먼저 의심할 것.
         if canonicalize_on:
             res = canonicalize_topic(conn, topic_ko, topic_en)
             topic_ko = res["canonical_ko"]
@@ -283,20 +274,21 @@ def sync_graph_edges(
                     updated_at = now()
                 RETURNING status
                 """,
-                # ON CONFLICT(032·#5): confidence 더 큰 재제안의 topic·reason 만 갱신(작거나 같으면 기존 유지)
-                # — 첫 제안 stale topic 고정을 해소한다. confidence 는 GREATEST 화해.
-                # ★ status 는 **미갱신** — 사람이 한 번 내린 검토 결정(특히 rejected)을 LLM 재제안이 덮어쓰면 안 된다.
-                # 069 B4(P2-4): RETURNING status 로 DB 확정 status(신규=status_val, 충돌=기존 보존값)를 회수한다.
+                # 재제안 시 갱신 규칙(위 SQL):
+                #   신뢰도 — 더 큰 값으로 화해한다.
+                #   topic·reason — **더 높은 신뢰도일 때만** 덮는다(첫 제안의 낡은 값이 굳지 않게).
+                #   status — **절대 덮지 않는다**. 사람이 내린 검토 결정, 특히 반려를 LLM 재제안이
+                #            되돌리면 안 되기 때문이다.
+                # RETURNING 으로 DB 가 확정한 status 를 받아 온다(신규면 계산값, 충돌이면 기존 값).
                 (uuid7_str(), a_node, b_node, kind_id, conf_f, reason, topic_json, status_val),
             )
             # ON CONFLICT DO UPDATE 는 신규·충돌 모두 행을 돌려주므로 RETURNING 은 항상 1행이다.
             returned = cur.fetchone()
-        # 계보에는 계산 status_val 이 아니라 DB 실제 status 를 기록한다 — 반려 재제안이 계보에
-        # active 로 남는 오염을 차단(B4). RETURNING 이 None 이면 위 INSERT 가 DO UPDATE 에서
-        # DO NOTHING 으로 바뀌었다는 뜻이며, 그 순간 status_val 로 조용히 폴백하면 B4 가 고친
-        # 버그(계보에 계산값 오염)가 소리 없이 되살아난다. 조용한 폴백 대신 즉시 예외로 못박아
-        # SQL 변경이 이 불변식을 깨면 배치에서 바로 드러나게 한다(재발 차단).
-        if returned is None:  # 현재 SQL(DO UPDATE)로는 도달 불가 — 방어적 불변식 가드
+        # 계보에는 **DB 가 확정한 status** 를 남긴다(방금 계산한 값이 아니라).
+        # 사람이 반려한 엣지를 LLM 이 다시 제안하면 계산값은 active 지만 DB 는 rejected 를 유지하는데,
+        # 계산값을 기록하면 계보에 "승인됨"으로 남아 사실과 어긋난다.
+        # 아래 가드를 예외로 둔 이유: 조용히 계산값으로 폴백하면 그 오염이 소리 없이 되살아난다.
+        if returned is None:  # 현재 SQL 로는 도달 불가 — SQL 이 바뀌면 여기서 즉시 드러나게 한다
             raise RuntimeError(
                 "graph_edge upsert RETURNING 이 행을 돌려주지 않음 — ON CONFLICT 가 "
                 "DO NOTHING 으로 바뀌었는지 확인(B4: 계보 status 는 DB 확정값이어야 함)."

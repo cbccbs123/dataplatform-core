@@ -152,11 +152,10 @@ def propose_relations_for_asset(
         if src is None:
             # asset 테이블에 없는 ID — 조용히 (0,0,0,0) 반환(호출자 로그에서 확인).
             return 0, 0, 0, 0
-        # 066 FR-102/103: 소스가 미부여(asset_topic 행 없음·무내용)면 관계 생성을 스킵한다.
-        #   후보검색·LLM 을 아예 호출하지 않고 (0,0,0,0) 을 반환 → 상위 run_relations 의
-        #   _record_resolution 이 기존 decide_resolution_status(0엣지·무예외→isolated)로 종결한다.
-        #   (스캔·상태기계는 불변 — 여기선 0엣지 반환만 보장해 재시도·LLM 낭비를 없앤다.)
-        #   FR-201 재사용: 부여됐으면 이 조회 결과에서 소스 주제(topic_ko/subtopic_ko)를 얻어 프롬프트에 싣는다.
+        # 주제가 없는 자산은 내용이 없다는 뜻이다 — 그 임베딩은 아무 의미가 없어서 남의 후보만
+        # 오염시킨다. 그래서 후보 검색도 LLM 도 부르지 않고 0엣지로 끝낸다(재시도 대상도 아니다:
+        # 상위 배치가 "평가했으나 관계 없음"으로 종결한다).
+        # 주제가 있으면 그 값을 그대로 프롬프트에 실어 관계 판단의 참고 신호로 쓴다.
         source_topics = fetch_asset_topic(conn, source_asset_id)
         if not source_topics:
             _LOG.info("미부여 소스 관계 스킵: %s", source_asset_id)
@@ -170,13 +169,14 @@ def propose_relations_for_asset(
             conn, source_asset_id=source_asset_id, top_k=k,
             embedding_kind=embedding_kind, min_sim=cfg.relations.min_sim,
         )
-        # 레버 B(FR-004·005): 동일 폴더·파일명 stem 신호로 결정적 후보를 보강한다.
-        # 임베딩 유사도가 min_sim 미만이라 emb_candidates 에 없던 same_series/derived_from/
-        # references 후보가 여기서 합류한다. path_top_k 는 임베딩 top_k 와 별도 한도(C-2).
+        # 임베딩만으로는 못 찾는 관계를 파일명·폴더로 보완한다 — 연작(1부/2부)·원문과 요약처럼
+        # 내용이 겹치지 않아 유사도 하한을 못 넘는 쌍이 여기서 합류한다.
+        # 한도가 임베딩 후보와 **별개**라, 두 경로가 서로의 자리를 뺏지 않는다.
         path_candidates = find_path_signal_candidates(
             conn, source_asset_id=source_asset_id, limit=cfg.relations.path_top_k,
         )
-        # C-3: 겹치면 임베딩 후보(실측 emb_score) 유지. 프롬프트·환각 화이트리스트 모두 이 union 을 쓴다.
+        # 두 경로에 같은 자산이 있으면 임베딩 쪽을 남긴다 — 경로 후보의 점수는 실측값이 아니라
+        # 자리표시(0.0)라, 덮어쓰면 자동 승인 판정이 잘못된다.
         candidates = union_candidates(emb_candidates, path_candidates)
         # 활성 relation_kind 목록을 프롬프트에 포함시켜 LLM이 통제 어휘 안에서 코드를 선택하게 한다.
         # 동시에 active_codes 집합을 만들어 신규 kind 등록 여부 판단에 재사용한다.
@@ -192,18 +192,17 @@ def propose_relations_for_asset(
         edges = parse_and_normalize_edges(raw)
         # active_codes: LLM이 반환한 kind 중 이미 카탈로그에 있는 것을 구분하는 기준.
         active_codes = frozenset(str(r["type_code"]) for r in kinds)
-        # candidate_ids: 후보 집합 밖 target을 LLM 환각으로 간주해 sync_graph_edges에서 차단(FR-012).
-        # candidates 는 임베딩 ∪ 경로 신호 union 이므로 allowed_target_ids 가 경로 신호 후보까지
-        # **자동 확장**된다(FR-006) — 경로 신호로 추가된 target 에 LLM 이 단 엣지가 환각으로
-        # 부당 차단되지 않는다. union 밖 target 거부 불변식은 그대로 유지된다.
+        # LLM 이 지어낸 자산 id 를 막는 화이트리스트. **합친 후보 전체**를 넘겨야 한다 —
+        # 임베딩 후보만 넘기면 경로로 찾은 자산에 LLM 이 단 엣지가 환각으로 잘못 차단된다.
         candidate_ids = frozenset(str(c["id"]) for c in candidates)
 
         # 신규 kind는 inactive로 먼저 등록 — 검토자가 active로 승인하기 전까지 그래프에 반영 안 됨.
         kinds_registered, kinds_skipped = register_new_relation_kinds(
             conn, edges=edges, active_kind_codes=active_codes)
-        # 033 FR-003: 후보 emb_score 맵 + emb 하한을 persist 로 전달 → 자동승인 AND 게이트.
-        # 기본 auto_approve_emb_min=0.0 이면 emb 변이 무력 → 현행과 동일(SC-001).
-        # collect: upsert 된 관계 쌍(상대자산·관계유형·신뢰도·status)을 계보에 남기기 위해 모은다(013).
+        # 자동 승인은 LLM 신뢰도와 임베딩 유사도를 **함께** 본다. 그래서 후보별 유사도 맵을
+        # 넘긴다 — 이 맵이 없으면 모든 타깃이 0으로 취급돼 승인이 막힌다.
+        # collect 리스트는 저장된 관계 쌍을 모아 계보에 남기려는 것이다(반환값만으론 무엇과
+        # 무엇이 이어졌는지 알 수 없다).
         upserted_pairs: list[dict[str, Any]] = []
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
@@ -211,11 +210,9 @@ def propose_relations_for_asset(
             target_emb_scores=target_emb_score_map(candidates),
             auto_approve_emb_min=cfg.relations.auto_approve_emb_min,
             collect=upserted_pairs)
-        # 계보 기록: 이 자산에 대해 관계 제안이 실행되었음을 asset_lineage에 남긴다.
-        # 078: lineage_persist 를 코어(src.database)로 이동 — 코어 relations 가 ingest(파이프라인)를
-        # 역참조하던 것을 해소한다(record_lineage 는 코어 표 asset_lineage 쓰기·ingest/relations 공용이라 코어 소속).
-        # 호출·원자성은 불변(idempotent=False로 트랜잭션 실패 시 롤백되어 반쪽 기록 없음).
-        # generated.edges: 생성된 관계 쌍을 target_asset_id ASC(동점 kind_code ASC)로 결정적 정렬(헌법 3조).
+        # 계보 기록도 **같은 트랜잭션 안**이다 — 엣지는 저장됐는데 기록이 없거나 그 반대인
+        # 반쪽 상태를 만들지 않기 위해서다(실패하면 둘 다 롤백된다).
+        # 저장한 쌍을 정렬해 남기는 이유: 같은 입력이면 계보 내용도 같아야 비교·재현이 된다.
         record_lineage(
             conn,
             uuid.UUID(source_asset_id),

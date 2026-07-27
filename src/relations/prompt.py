@@ -28,13 +28,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-# ── topic 닫힌 분류체계(spec 058 v2·FR-401v2) ────────────────────────────────
-# topic_ko 는 자유 기입이 아니라 **닫힌 27+미분류 목록에서 하나 선택**이다(ADR 2026-07-07).
-# 목록의 **단일 출처는 taxonomy_seed.json**(seed_topic_registry·canonicalize 와 동일 파일) —
-# 프롬프트가 목록을 통째로 주입하므로(27개라 topic 층 kNN 불필요) 생성시부터 정본에 수렴시킨다.
-# subtopic 은 열린 층이라 여전히 자유 기입(구체 주제어)한다.
-# 경로는 **src/relations 패키지 내부**다(PR #81 이관). src-only 패키징(pyproject include=["src*"])
-# 시에도 run_relations 가 런타임에 접근할 수 있도록 specs/ 가 아닌 src/ 에 정본을 둔다.
+# ── 대주제 닫힌 목록 ─────────────────────────────────────────────────────────
+# 대주제는 자유 기입이 아니라 **목록에서 고르는 것**이다. 목록이 작아서 프롬프트에 통째로 넣을 수
+# 있고, 그래서 생성 시점부터 정본 어휘로 수렴한다(세부주제는 열린 층이라 자유 기입).
+# 이 파일이 시드·정본화 로직과 **같은 목록 파일**을 본다 — 셋이 어긋나면 분류가 깨진다.
+# 위치가 ``src/`` 안인 이유: 패키징이 ``src`` 만 담으므로 여기 없으면 런타임에 파일을 못 찾는다.
 _TAXONOMY_SEED_PATH = Path(__file__).resolve().parent / "taxonomy_seed.json"
 
 
@@ -75,10 +73,9 @@ def _build_topic_taxonomy_block() -> str:
     """
     return "\n".join(f"- ``{ko}`` ({en})" for ko, en in _load_taxonomy_topics())
 
-# 경로 패턴 가이드(레버 A, FR-009): 파일명·폴더 신호가 same_series/derived_from/references
-# 후보를 보강하지만(US2 path_signal), 그건 **보조 신호**일 뿐이다. 내용이 실제로 합치할 때만
-# 그 종류를 고르도록 LLM 을 유도한다(오탐 방지). emb_score=0.0 인 경로 신호 후보를
-# "비유사"로 오해하지 않게 "경로 신호" 표식을 함께 둔다(C-3).
+# 파일명·폴더 신호는 **보조**라는 것을 LLM 에 명시하는 블록. 이름만 비슷하고 내용이 무관한 쌍을
+# 연작·파생으로 단정하지 않게 한다. 경로로 들어온 후보는 유사도가 0.0 인데, 그것을 "안 닮았다"로
+# 오해하지 않도록 "경로 신호"라는 표식을 함께 보여준다.
 _PATH_SIGNAL_GUIDE_KO = """### 파일명·폴더 경로 신호 가이드 (보조)
 후보에는 **임베딩 유사도(embedding_similarity)** 외에 **파일명·폴더 신호**가 함께 올 수 있다.
 ``signal`` 이 ``경로 신호`` 인 후보는 동일 폴더이거나 파일명 stem 이 일치/근접해서 추가된 것으로,
@@ -164,8 +161,8 @@ def _fmt_topic(topic: Mapping[str, Any] | None) -> str:
     return topic_ko or subtopic_ko or "(주제 없음)"
 
 
-# 066 FR-202: 자기주제를 관계 LLM 에 넣되 **soft 신호**로만 쓰게 하는 지시.
-# 하드 배제(주제 다르면 무조건 컷)를 금지한다 — 정상 크로스-주제 관계(레시피↔주방도구)를 죽이지 않도록.
+# 주제를 **참고 신호로만** 쓰게 하는 지시. "주제가 다르면 무조건 무관"으로 굳으면
+# 레시피↔주방도구처럼 정상적인 교차 주제 관계가 전부 죽는다.
 # 판단 우선순위는 항상 **내용**이며, 주제는 same_domain 오매칭을 줄이는 참고 신호일 뿐이다.
 _TOPIC_SOFT_GUIDE_KO = """### 자기주제(topic) 참고 가이드 (soft·보조)
 소스와 각 후보에는 **자기주제(topic_ko / subtopic_ko)** 가 함께 제공된다(자산이 자기 내용에서 확정한 주제).

@@ -1,14 +1,11 @@
 """하이브리드 검색 서비스 진입점 — 호출부(CLI/HTTP)에 독립적인 함수 계층.
 
-요청(query·modalities·limit)을 받아 OpenSearch 하이브리드 검색으로 모달리티별 버킷 결과를 만든 뒤,
-요청한 모달리티만 골라 일정한 모양으로 반환한다. 실제 검색·임베딩은 ``opensearch_search`` 가
-담당하고, 본 모듈은 요청 정규화·채널 해소·응답 형태만 책임진다(F-4.3).
+**흐름에서의 위치**: CLI·HTTP 가 이 모듈의 ``search_hybrid`` 를 부르면, 여기서 요청을 정리하고
+(모달리티 검증·임베딩 채널 해소) ``opensearch_search`` 에 넘긴 뒤, 돌아온 버킷을 응답 모양으로 담는다.
+검색·임베딩 자체는 하지 않는다 — **요청 정규화 · 채널 해소 · 응답 조립**이 이 층의 책임이다.
 
-037 OpenSearch 전용 정리: 021 의 PG(``media_search`` FTS/벡터) 백엔드 분기를 걷어내고 OS 단일
-경로만 남겼다. 내부에서는 ``_grouped_via_opensearch`` 만 호출한다. 069 US-C: 037 로 죽어 있던 PG 전용
-no-op 인자(``structured``·``fusion``·``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·
-``min_scores``·``text_query_model``)와 하한 필터 잔재(``_filter_by_min_score``)를 시그니처·본문에서
-철거했다 — ``backend`` 인자만 fail-fast(미지원 백엔드 ValueError) 가치로 남긴다.
+검색 백엔드는 OpenSearch 하나뿐이다. ``backend`` 인자가 남아 있는 것은 다른 값이 들어왔을 때
+조용히 무시하지 않고 즉시 실패시키기 위해서다.
 """
 
 from __future__ import annotations
@@ -25,9 +22,8 @@ from src.config.settings import (
     get_current_settings,
 )
 
-# 037: 검색 read path 단일 백엔드 = OpenSearch. opensearch_search 모듈 상단은 순수(opensearch-py·임베더는
-# 함수 내부 지연 import)라 OS 미연결 환경(순수 단위 등)에서도 import 안전 — 실제 OS IO 는 search_hybrid
-# 호출 시에만 발생한다.
+# 이 import 는 OS 연결이 없는 환경에서도 안전하다 — opensearch_search 모듈 상단은 순수하고,
+# opensearch-py·임베더는 함수 안에서 지연 import 하기 때문이다(실제 통신은 검색 호출 때 처음 일어난다).
 from src.search.opensearch_search import get_client as os_get_client
 from src.search.opensearch_search import normalize_query as os_normalize_query
 from src.search.opensearch_search import search_assets_os as os_search_assets
@@ -37,9 +33,9 @@ from src.search.search_tuning import SearchTuning
 
 _LOG = logging.getLogger(__name__)
 
-# 요청 모달리티 라벨 → OS 버킷 결과 키.
-# 결정성(헌법 3조): 결과 버킷 조립이 ``list(.items())`` 순회 순서에 의존하므로 삽입 순서를
-# 보존한다(dict 는 3.7+ 삽입 순서 보장). set 등 순서 비보장 타입으로 대체 금지.
+# 요청 모달리티 라벨 → 응답 버킷 키.
+# ⚠️ **순서가 계약이다** — 응답 버킷 조립이 이 dict 의 순회 순서를 그대로 따르므로, set 처럼 순서를
+# 보장하지 않는 타입으로 바꾸면 같은 질의가 매번 다른 순서를 내놓는다.
 _MODALITY_BUCKETS: dict[str, str] = {
     "text": "text_documents",
     "audio": "audio",
@@ -47,15 +43,12 @@ _MODALITY_BUCKETS: dict[str, str] = {
     "video": "video",
 }
 
-# 022/037 백엔드 단일화: text·audio·**image·video 모두** 020 OS 인덱스(하이브리드)에서 검색한다(021 의
-# image/video→PG CLIP 경로를 OS 로 전환·037 PG 경로 제거). image/video 는 020 assets 인덱스에 한국어 VLM
-# 캡션(nori) + 활성 텍스트 채널 임베딩(embedding·현행 st_api·bge-m3)으로 이미 색인돼 있어 text/audio 와 동일 하이브리드로
-# 회수된다(CLIP 아님 — 시각-내용 매칭은 후속 spec). 따라서 OS 경로는 요청 모달리티 전체를 한 번의
-# search_assets_os 호출로 처리한다.
+# 이미지·영상도 텍스트와 **같은 인덱스·같은 방식**으로 찾는다 — 한국어 캡션과 텍스트 임베딩으로
+# 색인돼 있기 때문이다(이미지 벡터로 직접 매칭하는 경로가 아니다). 그래서 모달리티가 몇 개든
+# 검색 호출은 한 번이다.
 
-# 027: OS 융합·게이트·컷 기본값은 모듈 중복 상수(_DEFAULT_OS_*)를 두지 않고 src.config.search_constants
-# 단일 출처(F1)를 직접 참조한다 — settings 미초기화(순수 단위 등) getattr 폴백도 같은 공개 상수를 쓴다
-# (cross-module private import 없음·하드코딩 0). 미초기화 시 게이트 기본은 운영 기본과 동일(enabled True)이다.
+# 게이트·컷 기본값은 이 모듈에 복사해 두지 않고 search_constants 를 직접 본다 — 값이 두 곳에 있으면
+# 설정이 초기화된 경로와 안 된 경로가 서로 다르게 동작한다.
 
 
 def _grouped_via_opensearch(
@@ -118,24 +111,19 @@ def _grouped_via_opensearch(
 
     plan = build_query_plan(query, mode=search_mode)
 
-    # 069 US-E(FR-E5②): OS 검색 튜닝 12종(융합·게이트·컷·rerank·evidence·about)을 cfg 에서 **1회**
-    # 해소해 SearchTuning 한 묶음으로 만든다(종전 getattr 릴레이 12줄 제거·인자 축소). disable_os_cutoff
-    # (디버그 우회)면 cutoff_enabled 만 False 로 덮는다(replace) — 게이트·per-result 컷 모두 off.
-    # PR4b: settings 미초기화(순수 단위 등)로 cfg=None 이면 SearchTuning() 기본(search_constants·F1)으로
-    # 폴백한다 — from_settings 는 완전한 cfg.search 를 요구하므로 None 가드를 호출부에 명시(방어 getattr 폐지).
+    # 튜닝값 12종을 여기서 **한 번에** 해소해 묶음으로 넘긴다 — 아래 호출부들이 설정을 각자 읽으면
+    # 같은 요청 안에서 서로 다른 값을 볼 수 있다. cfg 가 없으면(설정 미초기화 테스트) 상수 기본값.
     tuning = SearchTuning.from_settings(cfg) if cfg is not None else SearchTuning()
     if disable_os_cutoff:
+        # 디버그 우회는 게이트 스위치 하나만 덮는다 — 나머지 튜닝값은 운영과 동일하게 두어야
+        # "컷만 없는 상태"를 관측할 수 있다.
         tuning = replace(tuning, cutoff_enabled=False)
 
-    # 072 query-norm(029 seam 재사용): cfg 토글(getattr 폴백=search_constants 단일 출처)을 읽어, on 이면
-    # 검색 직전 질의를 **service 레벨에서 1회** 형태소 정규화한다. 정규화를 여기 한 곳에서 끝내는 이유:
-    # ① 정규화 1회(중복 0), ② 관측성(FR-007)을 top-level meta["query_norm"] 로 노출해 모달리티 키 dict 인
-    # os_gate(gate_meta)를 오염시키지 않음(골든 하니스 등 gate_meta 순회 소비자 보호 — search_assets_os 는
-    # 별도 반환·gate_meta 오염 없이 정규화된 질의만 받음). off(기본)면 normalize_query 가 원문 그대로
-    # 돌려줘 정규화 미호출·바이트 동일(SC-002). 정규화된 질의가 OS seam 안에서 임베딩·BM25·rerank 채점에
-    # 동일 적용된다(query_norm_fn 미주입+enabled 면 아래 morph_noun_phrase_query 클로저를 배선).
-    # PR4b: cfg-파생 검색 설정을 여기서 한 번에 해소한다(방어 getattr 폐지·직접 중첩 접근). cfg=None
-    # (settings 미초기화·순수 단위)이면 search_constants 단일 출처 기본으로 폴백(운영은 항상 init_settings).
+    # 질의 정규화를 **검색층이 아니라 여기서** 하는 이유가 둘 있다.
+    #   ① 한 번만 하면 되는 일이다 — 정규화된 질의를 아래로 넘기면 임베딩·BM25·리랭크가 모두
+    #      같은 문자열을 쓴다(각 층이 따로 정규화하면 서로 다른 질의로 검색하게 된다).
+    #   ② 관측치를 meta["query_norm"] 최상위에 실을 수 있다 — 검색층 반환값(모달리티별 dict)에
+    #      끼워 넣으면 그 dict 를 순회하는 소비자들이 깨진다.
     if cfg is not None:
         qn_enabled = cfg.search.os_query_norm_enabled
         qn_method = cfg.search.os_query_norm_method
@@ -146,25 +134,23 @@ def _grouped_via_opensearch(
         qn_method = search_constants.OS_QUERY_NORM_METHOD_DEFAULT
         lv_enabled = search_constants.SEARCH_LLM_VERIFY_ENABLED_DEFAULT
         os_index_name = "assets"
-    # 072: 형태소 정규화가 nori _analyze(client)를 쓰므로 client 를 정규화 앞에서 획득한다(아래
-    # os_search_fn 도 이 동일 client 를 재사용 — 생성 1회). OS 생성 실패 예외는 그대로 전파(FR-007).
+    # 클라이언트를 **정규화보다 먼저** 만든다 — 형태소 정규화가 OpenSearch 분석기를 호출하므로
+    # 같은 클라이언트가 필요하고, 아래 검색도 이것을 재사용한다(연결 생성 1회).
     client = os_client_fn()
-    # 075: 정규화 방식 선택(morph 기본·072 / llm·029 gemma). enabled on + query_norm_fn 미주입일 때만
-    # 배선한다(주입 seam 우선). off 는 방식 무관 원문 passthrough(불변).
+    # 정규화 방식은 설정이 고르지만, 콜백이 주입돼 있으면 그쪽이 우선이다(테스트·실험용 대체).
     norm_fn = query_norm_fn
     if qn_enabled and norm_fn is None:
         if qn_method == "llm":
-            # 075: gemma(LLM) 정규화 경로(029 noun_phrase_query 재활성). 검색시점 LLM·단일 seam·temp=0·
-            # fail-safe 원문 폴백. client=None → complete_json 이 현 설정 온프레미스 LLM 사용.
+            # LLM 방식은 검색 시점에 모델을 부른다 — 그래서 이 분기에서만 import 한다
+            # (형태소 방식만 쓰는 환경에 LLM 의존을 끌어오지 않기 위해).
             from src.search.query_preprocess import noun_phrase_query
 
             def norm_fn(q: str) -> str:
                 """LLM(gemma) 정규화 경로 — 실패 시 원문 폴백은 noun_phrase_query 가 보장한다."""
                 return noun_phrase_query(q)
         else:
-            # 072(기본): 검색시점 질의 정규화를 **nori 형태소 명사추출+스톱워드**로(측정 2026-07-13: 자연어
-            # nDCG 0.490→0.591 로 LLM 정규화 0.575 상회·검색시점 LLM 0·결정적). client·index 를 클로저로
-            # 바인딩해 morph_noun_phrase_query 의 analyze_fn(nori _analyze IO)을 배선한다.
+            # 기본 경로. 형태소 분석기로 명사만 뽑으므로 검색 시점에 LLM 을 부르지 않고,
+            # 사전 기반이라 같은 질의는 언제나 같은 결과가 된다.
             from src.search.opensearch_search import nori_analyze_tokens
             from src.search.query_preprocess import morph_noun_phrase_query
 
@@ -188,24 +174,21 @@ def _grouped_via_opensearch(
 
     os_buckets, gate_meta = os_search_fn(
         client,
-        os_query,  # 029: 정규화된 질의(off 면 원문 그대로) — 임베딩·BM25·rerank 채점에 동일 적용
-        modalities=requested,  # 요청 전 모달리티(image/video 포함)를 한 번에 OS 검색
+        os_query,  # 정규화된 질의(꺼져 있으면 원문) — 임베딩·BM25·리랭크가 이 값을 함께 쓴다
+        modalities=requested,  # 요청 모달리티를 한 번에 넘긴다(버킷마다 따로 호출하지 않는다)
         k=limit_per_bucket,
         channel=text_channel,
         index=os_index_name,
-        exclude_medical=False,  # 2026-07-23 도메인 제외 전면 제거(의료 이연). 복귀 시 True.
-        # 069 US-E(FR-E5②): 융합·게이트·컷·rerank·evidence·about 튜닝 12종을 SearchTuning 한 묶음으로
-        # 전달한다(위에서 from_settings 로 1회 해소·disable_os_cutoff 시 cutoff_enabled=False 덮음).
-        # 종전 getattr 릴레이 12줄이 이 한 줄로 대체됐다(인자 축소·오타는 정적 검사로).
+        exclude_medical=False,  # 도메인 균일 노출 — 의료 트랙을 다시 열 때 켤 자리
         tuning=tuning,
         search_mode=search_mode,
         search_policy=plan.policy,
         search_filters=search_filters,
-    )  # client.msearch 미도달 예외도 전파(FR-007)
+    )  # OpenSearch 미도달 예외는 여기서 잡지 않고 호출자에게 그대로 올라간다
 
-    # 074: 검색시점 top-3 개별 LLM 검증(L2) — 토글 on AND 자연어(어절≥3·072 판별과 동일 기준)일 때만.
-    # 판정 질의=**사용자 원문**(의도 정보 보존·측정과 동일), 캐시 키=정규화 질의(표현 변형 흡수).
-    # 단어 질의·off 는 검증 경로 무접촉(호출 0·응답 바이트 동일 — FR-001·005). 폴백은 모듈 내부(FR-003).
+    # LLM 검증은 **자연어 질의에만** 건다 — 한두 단어 질의는 판정할 문맥이 없어 이득이 없고,
+    # 검색 시점 모델 호출은 비싸기 때문이다(꺼져 있거나 짧은 질의면 이 경로 자체를 타지 않는다).
+    # 판정에는 사용자 원문을, 캐시 키에는 정규화 질의를 쓴다(표현이 달라도 같은 판정을 재사용).
     llm_verify_meta: dict[str, Any] | None = None
     if lv_enabled and len((query or "").split()) >= search_constants.OS_QUERY_NORM_MIN_WORD_TOKENS:
         from src.search.llm_verify import verify_top_assets
@@ -214,7 +197,7 @@ def _grouped_via_opensearch(
             os_buckets, query, norm_query=os_query, judge_fn=llm_verify_judge_fn
         )
 
-    # meta 에 게이트 관측성(os_gate) + search_plan(044 FR-303) 합류.
+    # meta 에 게이트 관측치와 질의 계획을 싣는다 — 빈 버킷의 원인을 응답만 보고 알 수 있게.
     grouped: dict[str, Any] = {
         "meta": {
             "backend": "opensearch",
@@ -222,17 +205,17 @@ def _grouped_via_opensearch(
             "search_plan": search_plan_to_meta(plan),
         },
     }
-    # 074 관측성(FR-006): 검증 실행 시에만 meta["llm_verify"] 노출(query_norm 관례 동형 — off 면 키 부재).
+    # 검증이 실제로 돈 경우에만 키를 넣는다 — 키의 유무 자체가 "돌았는가"를 알려준다.
     if llm_verify_meta is not None:
         grouped["meta"]["llm_verify"] = llm_verify_meta
-    # 029 query-norm 관측성(FR-007): on 일 때만 top-level meta["query_norm"] 로 원문→정규화 매핑을 노출
-    # 한다(os_gate 는 모달리티 키 dict 이라 오염 금지). off(기본)면 키 자체를 두지 않아 027 meta 와 바이트
-    # 동일(SC-001 — 기존 meta 형태 봉인 테스트 무영향).
+    # 정규화가 켜졌을 때만 원문→정규화 매핑을 노출한다 — 검색 결과가 이상할 때 "질의가 어떻게
+    # 바뀌어 들어갔는지"를 응답만 보고 확인할 수 있어야 한다. 꺼져 있으면 키를 두지 않는다.
     if qn_enabled:
         grouped["meta"]["query_norm"] = {
             "enabled": True, "method": qn_method, "original": query, "normalized": os_query,
         }
-    # 모달리티명('text'/'image') → grouped 버킷 키('text_documents'/'image') 매핑.
+    # 검색층은 모달리티 이름('text')으로 버킷을 주고, 응답 계약은 다른 키('text_documents')를 쓴다.
+    # 그 이름 차이를 여기서 흡수한다.
     for m in requested:
         grouped[_MODALITY_BUCKETS[m]] = os_buckets.get(m, [])
 

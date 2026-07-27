@@ -1,14 +1,13 @@
-"""OpenSearch 서브검색 **본문 빌더** (BM25·kNN) + 모달리티/필드 상수 (검색 read path, spec 021·027·044·057).
+"""OpenSearch 검색 **본문(body) 빌더** — BM25·kNN 요청 dict 를 만드는 순수 함수들.
 
-069 US-E(FR-E5): 종전 ``opensearch_search`` 한 파일(융합 수학 + 본문 빌더 + IO)에서 **본문 빌더**만
-분리했다. 여기의 함수는 OS·opensearch-py 없이 **순수·결정적**으로 body dict 를 만든다(단위 검증 가능·
-헌법 3조). IO(실행)는 ``opensearch_search``, 융합·게이트 수학은 ``fusion`` 이 담당한다.
+**흐름에서의 위치**: 여기서 만든 body 를 ``opensearch_search`` 가 실제로 보내고, 돌아온 결과는
+``fusion`` 이 합쳐 거른다. 이 모듈은 OpenSearch 도 임베더도 건드리지 않아 단위 테스트로 전부 검증된다.
 
-필드명 정본 = 020 인덱스 매핑(``opensearch_sync.build_index_body``): nori 텍스트(summary·keywords·
-labels·file_name) + 벡터(embedding·1536D) + keyword 필터(modality·domain_label).
+필드 이름의 정본은 색인 매핑(``opensearch_sync.build_index_body``)이다 — 텍스트(summary·keywords·
+labels·file_name) · 벡터(embedding) · 필터용 keyword(modality·domain_label).
 
-하위호환: 기존 ``opensearch_search.<name>`` import·patch 경로는 그 모듈이 이 심볼들을 **재export**해
-그대로 유지된다(US-E patch seam 보존).
+``opensearch_search`` 는 이 모듈의 함수들을 **재export** 한다 — 그래서 호출부·테스트가
+``opensearch_search.build_bm25_body`` 로 참조하거나 patch 하는 코드가 있다(같은 함수다).
 """
 
 from __future__ import annotations
@@ -19,15 +18,14 @@ from typing import Any
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from src.search.search_filters import SearchFilters, filters_to_opensearch_bool
 
-# 020 인덱스의 nori 텍스트 필드(BM25 multi_match 대상). 필드명 정본 = opensearch_sync.build_index_body.
-# 주의: labels 는 매핑상 keyword 지만 plan §1 이 multi_match 대상에 포함한다 — multi_match 는 keyword
-# 필드를 정확매칭 절로 안전 수용한다(텍스트 필드와 혼합 무해). text/audio 버킷 한국어 BM25 재현율용.
-# 026 T008(FR-003①): boost 차등 표기('field^N') — 토픽 신호(summary^3·keywords^2·labels^1)를
-# 파일명(file_name^0.5)보다 강하게 둬서 파일명 노이즈가 랭킹을 압도하지 못하게 한다(F8 구조 방어).
-# 047: 교차 필드 AND(recall) — ``multi_match`` ``cross_fields`` on summary+keywords(색인 search_text 제거).
+# summary 와 keywords 를 **한 필드처럼** 묶어 보는 대상. 질의 토큰이 두 필드에 나뉘어 있어도
+# 맞도록(예: "무선" 은 요약에, "충전기" 는 키워드에) 회수율을 올린다.
+# ``^N`` 은 가중치다 — 요약·키워드를 파일명보다 크게 둬서 파일명 노이즈가 랭킹을 뒤집지 못하게 한다.
+# 필드 이름의 정본은 색인 매핑(``opensearch_sync.build_index_body``)이다.
 _CROSS_META_FIELDS: tuple[str, ...] = ("summary^3", "keywords^2")
 
-# 044 FR-101 · 047: named query _name 고정 집합(build_bm25_body bool.should).
+# 각 BM25 절에 붙이는 이름. 응답의 matched_queries 로 **어느 필드에서 맞았는지** 관측해
+# 증거 판정(query_evidence)에 쓰므로, 이 목록과 절 생성 코드는 1:1로 유지해야 한다.
 BM25_NAMED_QUERY_NAMES: tuple[str, ...] = (
     "hit_keywords",
     "hit_labels",
@@ -36,18 +34,13 @@ BM25_NAMED_QUERY_NAMES: tuple[str, ...] = (
     "hit_cross_meta",
 )
 
-# FR-011(헌법 10조 · 010 FR-014): 의료 자산 검색 제외용 라벨(domain_label keyword 필터) — exclude_medical=True 일 때만.
-# 2026-07-23 도메인 제외 전면 제거로 기본 OFF(의료 복귀 시 재도입).
+# 의료 자산을 걸러낼 때 쓰는 라벨. 현재 운영에서는 도메인을 균일하게 노출하므로 쓰이지 않는다.
 _MEDICAL_LABEL = "medical"
 
-# OS 검색 버킷 라벨 → 저장된 modality 값 집합. 요청 라벨('text')을 저장 modality 값으로 매핑한다.
-# 053 canonical 전환: 저장 modality 는 이제 canonical('text'). 다만 재색인 완료 전까지 구 OS 문서엔
-# file_kind 값(txt·json·pdf·office)이 남아 있을 수 있어, text 버킷을 **합집합**
-# ({text} ∪ ALLOWED_TEXT_META_FILE_KINDS)으로 두어 구·신 문서를 동시 매칭한다(무중단·C5).
-# 재색인 안정 후 frozenset({"text"})로 정리(FR-403). 단일 term 이 아니라 terms(집합) 필터를 써야 회수된다.
-# 022 G1: image·video 는 020 assets 인덱스에 한국어 VLM 캡션(nori) + 활성 텍스트 채널 임베딩(현행
-# st_api·bge-m3)으로 이미 색인돼 text/audio 와 동일 OS 하이브리드로 검색한다(CLIP 아님). 저장값=
-# 라벨이라 단일값·문서화용 명시.
+# 요청 버킷 라벨 → 색인에 저장된 modality 값들.
+# text 만 **집합**인 이유: 예전 문서에는 확장자 계열 값(txt·pdf 등)이 남아 있을 수 있어, 새 값과
+# 옛 값을 함께 매칭해야 재색인 도중에도 결과가 비지 않는다. 그래서 term 이 아니라 terms 필터를 쓴다.
+# 이미지·영상은 별도 벡터 공간이 아니라 텍스트와 같은 방식으로 찾으므로 값이 하나뿐이다.
 _MODALITY_VALUES: dict[str, frozenset[str]] = {
     "text": frozenset({"text", *ALLOWED_TEXT_META_FILE_KINDS}),
     "audio": frozenset({MediaKind.AUDIO.value}),
@@ -117,7 +110,8 @@ def build_bm25_body(
         _match("summary", 3.0, "hit_summary"),
         _cross_meta(boost=1.0, _name="hit_cross_meta"),
     ]
-    # must_not = 의료 배제(exclude_medical·2026-07-23부터 기본 OFF). 활성일 때만 추가.
+    # 배제 절은 필요할 때만 넣는다 — 빈 must_not 을 항상 붙이면 요청 본문이 커지고,
+    # 봉인 테스트가 보는 body 모양도 달라진다.
     must_not: list[dict[str, Any]] = []
     if exclude_medical:
         must_not.append({"term": {"domain_label": _MEDICAL_LABEL}})

@@ -28,9 +28,10 @@ from src.config.filename_util import basename_of
 from src.config.search_constants import NORI_USER_WORDS_DEFAULT
 from src.search.filter_index_fields import build_filter_index_fields
 
-# ── 읽기전용 SELECT (FR-004, 헌법 6조) — 원본 PG 무수정 ──
-# registered 자산 + 메타(LEFT JOIN) + 활성 채널 청크 **평균 임베딩**(avg, 자산당 1행)을 한 행으로 모은다.
-# avg(embedding) 은 pgvector 집계(>=0.5.0). 임베딩 없는 자산은 INNER JOIN 으로 자연 제외(→ 색인 대상 아님).
+# ── 색인 대상 조회 SQL (읽기 전용 — PG 는 건드리지 않는다) ──
+# 자산 하나를 한 행으로 만든다: 메타 + **청크 임베딩의 평균**(자산당 1벡터).
+# 평균 집계는 pgvector 0.5 이상에서만 되므로 복구 도구가 시작 전에 버전을 확인한다.
+# 임베딩이 없는 자산은 INNER JOIN 에서 자연히 빠진다 — 색인해도 벡터 검색이 안 되기 때문이다.
 _ASSET_SELECT = """
 SELECT a.asset_id, a.modality, a.domain_label, a.fs_path, a.created_at,
        am.ext_meta, e.emb AS emb
@@ -45,10 +46,9 @@ JOIN (
 """
 # 전체 재동기화(복구 도구) — registered 자산 전부, asset_id 정렬로 결정적 순서(FR-005).
 _SYNC_SQL = _ASSET_SELECT + "WHERE a.status = 'registered'\nORDER BY a.asset_id\n"
-# 단건 색인(증분 훅) — 그 자산 1건만. 전체 재동기화(_SYNC_SQL)와 **대칭**으로 status='registered' 만
-# 색인한다(비-registered → 행 없음 → index_asset no-op). 두 경로의 게이트를 맞춰, deferred/failed/medical
-# 이 증분 경로로만 새던 비대칭(번들 게이트 우회와 같은 결의 누출)을 SQL 단에서 차단한다.
-# 파라미터 순서 (channel, asset_id): 서브쿼리 channel 이 먼저.
+# 단건 색인용. 전체 재동기화와 **같은 조건**(registered 만)을 쓰는 것이 중요하다 — 두 경로의
+# 기준이 어긋나면 아직 준비되지 않은 자산이 증분 경로로만 색인돼 검색에 새어 나온다.
+# 파라미터 순서는 (channel, asset_id) — 서브쿼리의 channel 이 먼저 바인딩된다.
 _ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s AND a.status = 'registered'\n"
 
 
@@ -73,8 +73,9 @@ def parse_vector(value: Any) -> list[float]:
     return [float(x) for x in inner.split(",") if x.strip()]
 
 
-# 파일명 정제(spec 026 FR-003②) — ID스러움 판정 상수.
-# 순수 영숫자(하이픈 포함) 토큰만 ID 후보로 본다. 한글·기타 비-ASCII 가 섞이면 자연어로 간주해 보존.
+# 파일명에서 잡음(유튜브 ID 같은 것)을 걸러내기 위한 판정 상수.
+# 영숫자 토큰만 의심하고, 한글 등 비-ASCII 가 섞이면 자연어로 보고 **항상 보존**한다 —
+# 외래어 명사는 잡음이 아니라 검색 신호이기 때문이다.
 _ALNUM_TOKEN_RE = re.compile(r"^[A-Za-z0-9-]+$")
 _VOWELS = frozenset("aeiouAEIOU")
 _ID_MIN_LEN = 8          # 길이≥8 (짧은 영숫자 'Qi2'·'xyz' 는 보수적으로 보존)
