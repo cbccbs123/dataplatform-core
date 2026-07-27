@@ -24,6 +24,7 @@ def list_file_paths_under_directory(
         raise NotADirectoryError(f"디렉터리가 아니거나 없습니다: {root}")
 
     def _skip(path: Path) -> bool:
+        """수집에서 제외할 경로인지 판단한다(루트 밖 경로는 제외하지 않는다)."""
         try:
             rel = path.relative_to(root)
         except ValueError:

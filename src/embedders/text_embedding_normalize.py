@@ -48,11 +48,16 @@ def _symbol_replacements() -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def _replacement_pairs() -> tuple[tuple[str, str], ...]:
+    """치환 규칙을 (찾을 문자, 바꿀 문자) 쌍으로 펼친다(한 번 만들어 재사용)."""
     d = _symbol_replacements()
     return tuple(sorted(d.items(), key=lambda kv: len(kv[0]), reverse=True))
 
 
 def _strip_control_and_noise(s: str) -> str:
+    """눈에 보이지 않는 제어문자를 걷어낸다.
+
+    화면에는 안 보이지만 토큰화 결과를 바꿔 놓아, 같은 내용의 문서가 다르게 임베딩된다.
+    """
     out: list[str] = []
     for ch in s:
         if ch in _NOISE_CHARS:
@@ -65,6 +70,7 @@ def _strip_control_and_noise(s: str) -> str:
 
 
 def _collapse_whitespace(s: str) -> str:
+    """연속 공백을 하나로 합치고 앞뒤를 자른다(줄바꿈·탭 포함)."""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     lines = []
     for line in s.split("\n"):

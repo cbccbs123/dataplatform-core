@@ -41,6 +41,14 @@ class ZeroShotKoTagResult(TypedDict):
 
 @lru_cache(maxsize=2)
 def get_clip(model_name: str) -> tuple[CLIPProcessor, CLIPModel]:
+    """CLIP 전처리기·모델을 한 번만 로드해 재사용한다(추론 모드 고정).
+
+    Args:
+        model_name: 모델 이름. **캐시 키이기도 하다** — 이름이 다르면 별도 인스턴스가 뜬다.
+
+    Returns:
+        ``(processor, model)``. 모델은 평가 모드라 학습 관련 동작(드롭아웃 등)이 꺼져 있다.
+    """
     processor = CLIPProcessor.from_pretrained(model_name)
     model = CLIPModel.from_pretrained(model_name)
     model.eval()
@@ -48,11 +56,31 @@ def get_clip(model_name: str) -> tuple[CLIPProcessor, CLIPModel]:
 
 
 def l2_normalize_rows(x: torch.Tensor) -> torch.Tensor:
+    """행마다 길이를 1로 맞춘다 — 그래야 내적이 곧 코사인 유사도가 된다.
+
+    Args:
+        x: (행, 차원) 텐서.
+
+    Returns:
+        정규화된 텐서. 길이가 0인 행은 **아주 작은 값으로 나눠** 0으로 나누는 것을 피한다
+        (그 행은 결과적으로 0 벡터에 가깝게 남는다).
+    """
     n = x.norm(dim=-1, keepdim=True).clamp(min=1e-12)
     return x / n
 
 
 def pad_or_truncate_1d(vec: np.ndarray, target_dim: int) -> np.ndarray:
+    """벡터 길이를 저장 차원에 맞춘다 — 길면 자르고, 짧으면 0으로 채운다.
+
+    모델마다 출력 차원이 달라도 **한 컬럼에 저장**하려면 길이를 통일해야 한다.
+
+    Args:
+        vec: 1차원 벡터.
+        target_dim: 맞출 길이.
+
+    Returns:
+        길이가 ``target_dim`` 인 벡터(이미 맞으면 원본 그대로).
+    """
     if vec.shape[0] == target_dim:
         return vec
     if vec.shape[0] > target_dim:
@@ -87,6 +115,21 @@ def apply_clip_projection_or_pass(linear: nn.Linear, x: torch.Tensor) -> torch.T
 
 
 def coerce_clip_image_feature_tensor(model: CLIPModel, feat: object) -> torch.Tensor:
+    """CLIP 이미지 출력이 무엇으로 오든 **비교 가능한 텐서**로 맞춘다.
+
+    라이브러리 버전에 따라 텐서가 그대로 오기도 하고, 풀링 결과나 은닉 상태 객체로 오기도
+    한다. 후자는 투영을 거쳐야 텍스트 임베딩과 같은 공간이 된다.
+
+    Args:
+        model: 투영 계층을 꺼낼 모델.
+        feat: 모델 출력(텐서 또는 출력 객체).
+
+    Returns:
+        이미지 임베딩 텐서.
+
+    Raises:
+        TypeError: 알아볼 수 없는 형태일 때 — 조용히 넘기면 엉뚱한 벡터가 저장된다.
+    """
     if isinstance(feat, torch.Tensor):
         return feat
     proj = model.visual_projection
@@ -105,6 +148,20 @@ def coerce_clip_text_feature_tensor(
     *,
     attention_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """CLIP 텍스트 출력을 비교 가능한 텐서로 맞춘다(이미지판과 같은 취지).
+
+    Args:
+        model: 투영 계층을 꺼낼 모델.
+        feat: 모델 출력(텐서 또는 출력 객체).
+        attention_mask: 있으면 **패딩 토큰을 빼고** 평균 낸다. 없으면 전체를 평균 내므로
+            길이가 다른 문장이 섞였을 때 값이 흐려진다.
+
+    Returns:
+        텍스트 임베딩 텐서.
+
+    Raises:
+        TypeError: 알아볼 수 없는 형태일 때.
+    """
     if isinstance(feat, torch.Tensor):
         return feat
     proj = model.text_projection
@@ -131,6 +188,17 @@ def clip_image_embedding_normalized(
     model: CLIPModel,
     rgb_img: Image.Image,
 ) -> torch.Tensor:
+    """이미지 하나를 길이 1로 정규화된 임베딩으로 만든다(추론만·기울기 계산 없음).
+
+    Args:
+        processor: 이미지 전처리기.
+        model: CLIP 모델.
+        rgb_img: RGB 이미지. **모드 변환은 호출자 책임**이다(회색조·투명 이미지를 그대로
+            넣으면 채널 수가 맞지 않는다).
+
+    Returns:
+        (1, 차원) 정규화 텐서 — 내적이 곧 코사인 유사도다.
+    """
     inputs = processor(images=rgb_img, return_tensors="pt")
     with torch.no_grad():
         raw = model.get_image_features(pixel_values=inputs["pixel_values"])
@@ -143,6 +211,19 @@ def clip_text_embeddings_normalized(
     model: CLIPModel,
     texts: list[str],
 ) -> torch.Tensor:
+    """여러 문장을 한 번에 정규화된 임베딩으로 만든다(추론만).
+
+    길이가 다른 문장을 함께 넣으므로 패딩이 붙는데, 그 패딩이 평균에 섞이지 않도록
+    마스크를 함께 넘긴다.
+
+    Args:
+        processor: 텍스트 전처리기.
+        model: CLIP 모델.
+        texts: 문장 목록.
+
+    Returns:
+        (문장 수, 차원) 정규화 텐서.
+    """
     inputs = processor(text=texts, return_tensors="pt", padding=True)
     with torch.no_grad():
         raw = model.get_text_features(
@@ -162,8 +243,18 @@ def clip_zero_shot_logits(
     text_emb: torch.Tensor,
     model: CLIPModel,
 ) -> torch.Tensor:
-    # CLIP 학습 온도(logit_scale=log(1/T), 로그로 저장)를 exp 로 복원해 코사인 유사도(-1~1)에 곱한다(≈100배).
-    # 이 스케일이 있어야 뒤이은 softmax 가 라벨 간 확률을 분리한다 — 없으면 [-1,1] 코사인의 softmax 가 거의 균일해짐.
+    """이미지 하나와 여러 라벨 사이의 점수를 낸다(제로샷 분류용).
+
+    Args:
+        image_emb: 정규화된 이미지 임베딩(1행).
+        text_emb: 정규화된 라벨 임베딩(라벨 수만큼).
+        model: 학습된 온도 계수를 꺼낼 모델.
+
+    Returns:
+        라벨 수만큼의 점수 벡터. 이후 softmax 를 씌워 확률로 쓴다.
+    """
+    # 코사인 유사도(-1~1)에 학습된 온도 계수를 곱한다(로그로 저장돼 있어 exp 로 복원·약 100배).
+    # 이 스케일이 없으면 softmax 결과가 라벨 간에 거의 평평해져 분류가 되지 않는다.
     logits = (image_emb @ text_emb.T) * model.logit_scale.exp()
     return logits[0]
 

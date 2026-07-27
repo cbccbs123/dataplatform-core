@@ -62,8 +62,17 @@ def pad_embedding_to_storage_dim(raw: list[float]) -> list[float]:
 
 @lru_cache(maxsize=4)
 def get_embedding_model(model_name: str) -> SentenceTransformer:
-    # 프로세스 내 최대 4개 체크포인트까지 캐싱 — 대부분 단일 모델 사용이므로 메모리 부담 없음.
-    # 인덱싱/검색 시 동일 체크포인트를 써야 벡터 공간이 일치한다(embedding_constants.py 참조).
+    """임베딩 모델을 한 번만 로드해 재사용한다.
+
+    Args:
+        model_name: 모델 이름. **캐시 키이기도 하다** — 최대 4개까지 프로세스에 남는다.
+
+    Returns:
+        로드된 모델.
+
+    ⚠️ 적재와 검색이 **같은 모델**을 써야 벡터 공간이 일치한다. 다른 모델로 만든 벡터끼리
+    비교하면 값은 나오지만 의미가 없다.
+    """
     return SentenceTransformer(model_name)
 
 
@@ -163,9 +172,20 @@ def _iter_nonempty_chunks(
     chunk_size: int,
     overlap_size: int = 0,
 ) -> Iterator[tuple[int, str]]:
-    # idx 는 빈 청크를 건너뛴 뒤의 연속 번호(0,1,2,…) — 원본 문서상의 청크 위치가 아니다.
-    # DB persist 가 chunk_index 로 청크를 식별하므로 빈틈 없는 0-based 순번을 보장한다.
-    # 069 D8: overlap_size 기본 0 = 하드코딩과 동일(동작 불변). 호출자가 설정으로 조정 가능.
+    """파일을 청크로 잘라 **비어 있지 않은 것만** 번호와 함께 흘려보낸다.
+
+    Args:
+        path: 대상 파일.
+        file_kind: 파일 종류(어떤 방식으로 읽을지 정한다).
+        encoding: 텍스트 인코딩.
+        chunk_size: 청크 하나의 최대 길이.
+        overlap_size: 앞 청크 끝을 다음 청크 앞에 겹쳐 넣는 길이. 문장이 청크 경계에서
+            잘려 의미가 끊기는 것을 줄인다. 0이면 겹치지 않는다.
+
+    Yields:
+        ``(번호, 청크 텍스트)``. **번호는 빈 청크를 건너뛴 뒤의 연속 순번**이라 원본 문서의
+        위치가 아니다 — DB 가 이 번호로 청크를 식별하므로 빈틈이 없어야 한다.
+    """
     kind = normalize_file_kind(file_kind)
     if kind is None:
         raise ValueError("file_kind는 필수입니다.")

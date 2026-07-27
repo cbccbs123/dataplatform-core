@@ -43,6 +43,11 @@ _ALLOWED_FILE_KINDS = ALLOWED_TEXT_META_FILE_KINDS
 
 
 def _normalize_file_kind(value: str | None) -> str | None:
+    """파일 종류 문자열을 비교 가능한 형태로 통일한다(공백 제거·소문자).
+
+    Returns:
+        정규화된 값. 비었으면 ``None``.
+    """
     if value is None:
         return None
     s = str(value).strip().lower()
@@ -52,9 +57,20 @@ def _normalize_file_kind(value: str | None) -> str | None:
 
 
 def _choose_encoding(path: Path, preferred_encoding: str) -> str:
-    # 파일 스트리밍 읽기를 위해 샘플 바이트로 인코딩을 추정한다.
-    # 069 P1-8: read_bytes()[:65536](파일 **전체**를 메모리에 올린 뒤 슬라이스 — 대용량 문서에서
-    # 낭비·파일당 extract/chunk 2회 호출)를 앞 64KiB 만 읽는 부분 읽기로 교체(판정 결과 동일).
+    """앞부분 샘플을 읽어 **실제로 디코딩되는** 인코딩을 고른다.
+
+    인코딩을 잘못 고르면 글자가 깨진 채로 임베딩까지 흘러가 검색이 조용히 나빠진다. 그래서
+    선호 인코딩부터 한국어권에서 흔한 것들까지 차례로 시도해 본다.
+
+    Args:
+        path: 대상 파일.
+        preferred_encoding: 가장 먼저 시도할 인코딩.
+
+    Returns:
+        디코딩에 성공한 인코딩 이름. 전부 실패하면 마지막 후보를 그대로 돌려준다
+        (읽기 단계에서 대체 문자로 처리된다).
+    """
+    # 판정에는 앞 64KiB 면 충분하다 — 파일 전체를 메모리에 올리면 큰 문서에서 낭비가 크다.
     with path.open("rb") as f:
         sample = f.read(65536)
     for enc in (preferred_encoding, "utf-8-sig", "cp949", "euc-kr"):
@@ -183,6 +199,11 @@ def _iter_document_chunks(
             wb = load_workbook(filename=str(path), read_only=True, data_only=True)
             try:
                 def _rows() -> Iterator[str]:
+                    """시트를 순서대로 훑어 한 줄씩 흘려보낸다(시트 제목 → 행들).
+
+                    전부 메모리에 올리지 않으려고 제너레이터로 둔다 — 큰 표도 상한까지만
+                    읽고 멈출 수 있다.
+                    """
                     for sheet in wb.worksheets:
                         yield f"[시트] {sheet.title}"
                         for row in sheet.iter_rows(values_only=True):
@@ -201,6 +222,7 @@ def _iter_document_chunks(
             prs = Presentation(str(path))
 
             def _slides() -> Iterator[str]:
+                """슬라이드를 순서대로 훑어 텍스트를 흘려보낸다(번호 → 도형 텍스트)."""
                 for i, slide in enumerate(prs.slides, start=1):
                     yield f"[슬라이드] {i}"
                     for shape in slide.shapes:
@@ -220,6 +242,7 @@ def _iter_document_chunks(
         enc = _choose_encoding(path, encoding)
         with path.open("r", encoding=enc, errors="replace") as f:
             def _parts() -> Iterator[str]:
+                """파일을 조각내어 읽는다 — 큰 파일을 통째로 메모리에 올리지 않기 위해서다."""
                 while True:
                     part = f.read(4096)
                     if not part:

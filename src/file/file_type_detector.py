@@ -50,6 +50,14 @@ _PPT_MIMES = frozenset(
 
 
 def _magic_mime(path: Path) -> str:
+    """파일 **내용**을 보고 MIME 을 판별한다(확장자를 믿지 않는다).
+
+    Args:
+        path: 검사할 파일.
+
+    Returns:
+        소문자 MIME 문자열.
+    """
     mime = magic.from_file(str(path), mime=True)
     if isinstance(mime, bytes):
         mime = mime.decode("utf-8", errors="replace")
@@ -57,6 +65,14 @@ def _magic_mime(path: Path) -> str:
 
 
 def _kind_from_mime(mime: str) -> MediaKind | None:
+    """MIME 문자열을 미디어 종류로 옮긴다.
+
+    Args:
+        mime: ``image/jpeg`` 같은 문자열.
+
+    Returns:
+        해당하는 종류. 매핑에 없으면 ``None``(호출자가 다른 단서로 판단한다).
+    """
     if not mime or mime == "application/octet-stream":
         return None
     if mime == "application/pdf":
