@@ -19,7 +19,7 @@ from src.relations.topic_canonicalize import canonicalize_subtopic, canonicalize
 
 
 def _topic_canonicalize_enabled() -> bool:
-    """``TOPIC_CANONICALIZE_ENABLED`` 설정 조회(058 FR-401). 미초기화 시 보수적 **False** 폴백.
+    """주제 정본화 토글을 읽는다. 설정 미초기화 환경에서는 보수적으로 **False**.
 
     settings 미초기화(순수 단위 테스트 등)에서는 ``get_current_settings()`` 가 ``RuntimeError`` 이므로
     False 로 폴백해 현행 경로(canonicalize 미배선·coerce 결과 그대로)를 보존한다 — 다른 선택 설정
@@ -80,7 +80,7 @@ def _decide_status(
     auto_approve_min: float,
     auto_approve_emb_min: float,
 ) -> str:
-    """신규 엣지의 status 를 정한다 — LLM 신뢰도 **AND** 임베딩 유사도 두 게이트(033 FR-001).
+    """신규 엣지의 status 를 정한다 — LLM 신뢰도 **와** 임베딩 유사도 두 관문.
 
     둘 다 통과해야 ``active``(자동 승인), 하나라도 못 넘으면 ``proposed``(사람 검토 대기)다.
 
@@ -232,7 +232,7 @@ def sync_graph_edges(
             topic_en = res["canonical_en"] or topic_en
             sub = canonicalize_subtopic(conn, topic_ko, subtopic_ko)
             if sub is None:
-                # 모달리티어/계층 규칙으로 비운 경우 en 도 함께 비운다(계층 일관·FR-301/302).
+                # 한글 라벨을 비웠으면 영문도 함께 비운다(둘이 어긋나면 표시가 깨진다).
                 subtopic_ko, subtopic_en = "", ""
             else:
                 subtopic_ko = sub  # subtopic_en 정본화(영문)는 후속 여지(1차는 ko 라벨만)
@@ -249,7 +249,7 @@ def sync_graph_edges(
         reason = str(edge.get("reason") or "").strip() or None
         # auto_approve_min 기본값 1.01 = 신뢰도가 1.0을 초과할 수 없으므로 사실상 자동승인 없음.
         # 운영에서 임계를 낮추면(예: 0.85) 해당 구간 이상 엣지는 HITL 없이 바로 'active'.
-        # 033 FR-001: emb_min>0 이면 타깃 emb_score 도 통과해야 active(AND 게이트). 맵 미전달·emb_min=0 이면 무력.
+        # 유사도 하한이 켜져 있으면 신뢰도와 유사도를 **둘 다** 넘어야 자동 승인된다.
         emb_s = (target_emb_scores or {}).get(tid, 0.0)
         status_val = _decide_status(conf_f, emb_s, auto_approve_min, auto_approve_emb_min)
 
@@ -295,7 +295,7 @@ def sync_graph_edges(
             )
         db_status = returned[0]
         upserted += 1
-        if collect is not None:  # 계보 관계쌍 기록용(013) — upsert 된 것만, skip 제외
+        if collect is not None:  # 계보에 남길 관계 쌍 — 실제로 저장된 것만 모은다(건너뛴 것은 제외)
             collect.append({"target_asset_id": tid, "kind_code": kind_code,
                             "confidence": conf_f, "status": db_status})
     return upserted, skipped

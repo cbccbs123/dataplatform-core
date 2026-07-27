@@ -1,20 +1,21 @@
-"""PostgreSQL(`asset_*`) → OpenSearch 데이터 동기화 (검색 엔진 도입 — spec 020).
+"""PostgreSQL 자산 데이터를 OpenSearch 색인 문서로 옮긴다.
 
-PG 는 **읽기 전용**(SELECT 만), OpenSearch 에만 색인을 쓴다(CQRS — 원본 DB 무수정, 헌법 6조).
+**흐름에서의 위치**: 적재가 끝난 자산을 검색 가능하게 만드는 마지막 단계다. PG 는 읽기만 하고
+(원본은 건드리지 않는다) OpenSearch 에만 쓴다.
 
 설계
     - **자산 1건 = OpenSearch 문서 1개**. 임베딩은 활성 채널 청크들의 **평균 풀링**(`avg(embedding)`)
-      한 벡터를 `knn_vector` 로 색인한다 — 019 측정에서 평균 집계가 MAX 보다 검색 품질이 좋았고,
-      자산당 단일 벡터라 색인·질의가 단순하다(청크별 색인은 후속 선택지).
+      한 벡터를 `knn_vector` 로 색인한다 — 평균이 최댓값보다 검색 품질이 좋았고,
+      자산당 단일 벡터라 색인·질의가 단순하다.
     - **하이브리드 한 인덱스**: 텍스트(summary·keywords·file_name)는 한국어 형태소 분석기 `nori` 로
       BM25(``labels`` 는 keyword 정확매칭 필드), 임베딩은 `knn_vector`(코사인). 메타(modality·
       domain_label·filter_kw 등)는 keyword/date 필터. ``status``·``channel``·``chunk_count`` 는 색인하지
-      않는다(047 — 동기화 SQL·단일 active channel 전제).
+      않는다(인덱스가 활성 채널 하나만 담는 전제).
 
-이 모듈의 **순수 함수**(`build_index_body`·`asset_to_doc`·`parse_vector`)는 DB·OS·opensearch-py
-없이 결정적으로 동작하며 단위 게이트에서 항상 검증된다. **IO 함수**(get_client·ensure_index·
-색인 실행)는 후속 그룹(G2)에서 추가하며, opensearch-py·psycopg 의존은 모듈 상단이 아니라
-**해당 함수 내부에서 지연 import** 한다 — 플래그 off(미도입) 환경의 순수성을 보존하기 위함이다.
+**순수 함수**(`build_index_body`·`asset_to_doc`·`parse_vector`)는 DB·OpenSearch 없이 돌아가
+단위 테스트로 전부 검증된다. **IO 함수**는 opensearch-py·psycopg 를 모듈 상단이 아니라 **함수
+안에서 지연 import** 한다 — 그 라이브러리가 없는 환경에서도 순수 함수만 쓰는 코드가 이 모듈을
+import 할 수 있어야 하기 때문이다.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ JOIN (
     GROUP BY asset_id
 ) e ON e.asset_id = a.asset_id
 """
-# 전체 재동기화(복구 도구) — registered 자산 전부, asset_id 정렬로 결정적 순서(FR-005).
+# 전체 재동기화용. asset_id 로 정렬해 순서를 고정한다(같은 데이터면 같은 순서로 색인).
 _SYNC_SQL = _ASSET_SELECT + "WHERE a.status = 'registered'\nORDER BY a.asset_id\n"
 # 단건 색인용. 전체 재동기화와 **같은 조건**(registered 만)을 쓰는 것이 중요하다 — 두 경로의
 # 기준이 어긋나면 아직 준비되지 않은 자산이 증분 경로로만 색인돼 검색에 새어 나온다.
@@ -103,7 +104,7 @@ def _looks_like_natural_word(token: str) -> bool:
 
 
 def _is_id_like_token(token: str) -> bool:
-    """토큰이 유튜브 ID 같은 '식별자성' 잡음인지 판정한다(보수적·결정적, FR-003②).
+    """토큰이 유튜브 ID 같은 '식별자성' 잡음인지 판정한다(보수적·결정적).
 
     제거 조건(AND): 순수 영숫자([A-Za-z0-9-]) · 길이≥8 · (모음 비율<25% **또는**
     (대문자·소문자·숫자 중 2종 이상 혼합 and 사전식 단어 아님)). 한글 등 비-ASCII 토큰은
@@ -136,15 +137,15 @@ def _is_id_like_token(token: str) -> bool:
 
 
 def clean_file_name(name: str, *, noise_patterns: Iterable[str] = ()) -> str:
-    """파일명에서 ID스러운(유튜브 ID 등) 잡음 토큰을 보수적으로 제거한다(순수·결정적, FR-003②).
+    """파일명에서 ID스러운(유튜브 ID 등) 잡음 토큰을 보수적으로 제거한다(순수·결정적).
 
     절차: 확장자 분리(stem 만 — 확장자는 검색 신호가 아님) → ``_``/공백으로 토큰화 →
     ① 설정 잡음 패턴(``noise_patterns`` regex)에 매칭되는 토큰 제거(수집원별 규약 — 코드 수정 없이
     새 명명 규약 대응) ② ``_is_id_like_token`` 잡음 토큰 제거 → 남은 토큰을 공백으로 결합.
     한글 토큰은 항상 보존되고, 모든 토큰이 잡음이면 빈 문자열을 돌려준다(파일명 신호 0·안전).
 
-    ``vlm_text_for_embedding`` 의 파일명 처리와 결을 맞춰, 파일명 노이즈가
-    BM25·임베딩을 오염시키지 않게 한다(F8 — 어떤 명명 규약의 파일이 와도 피해 반경을 제한).
+    임베딩 입력을 만들 때의 파일명 처리와 규칙을 맞춰, 어떤 명명 규약의 파일이 들어와도
+    파일명 노이즈가 BM25·임베딩을 오염시키지 않게 한다.
 
     Args:
         name: 원본 파일명(경로 아님). 빈 값이면 빈 문자열을 돌려준다.
@@ -180,9 +181,8 @@ def build_index_body(
     ``index.knn=true`` 로 kNN 검색을 켜고, 텍스트 필드는 ``analyzer='nori_user'`` 를 쓴다 — 이는
     ``nori_tokenizer`` + ``user_dictionary_rules``(외래어 고유명사 목록)로 만든 **커스텀** analyzer 다.
     내장 'nori' analyzer 는 user_dictionary 를 받지 못해(설정 불가) 외래어가 분해되므로, 사전을 받는
-    커스텀 토크나이저를 반드시 정의한다(FR-004). ``nori_user_words`` 미지정 시 단일 출처 기본
-    (``search_constants.NORI_USER_WORDS_DEFAULT`` — settings resolver 와 공유·069 T302)을 쓴다.
-    임베딩은 lucene HNSW + cosinesimil. 차원은 단일 출처 ``FIX_EMBEDDING_DIMENSION``(1536D, 헌법 6조).
+    커스텀 토크나이저를 반드시 정의한다. ``nori_user_words`` 미지정 시 설정과 공유하는 기본 목록을 쓴다.
+    임베딩은 HNSW + 코사인. 차원은 단일 출처 상수를 따른다.
 
     Args:
         dim: 벡터 차원. 기본값이 정본이며 **바꾸면 기존 색인과 호환되지 않는다**(재색인 필요).
@@ -269,7 +269,7 @@ def build_index_body(
 
 
 def _flatten_labels(raw: Any) -> list[str]:
-    """labels 항목을 색인용 문자열 리스트로 평탄화한다(순수, spec 026 FR-002 — P0 교정).
+    """labels 항목을 색인용 문자열 리스트로 평탄화한다(순수).
 
     과거엔 ``str(label)`` 직렬화라 ``{'label':'텍스트','score':0.51}`` dict 가 통째로
     ``"{'label': '텍스트', 'score': 0.519}"`` 로 색인돼 'label'·'score'·숫자가 BM25 를 오염시키고
@@ -323,12 +323,12 @@ def _dedup_in_order(values: Iterable[Any]) -> list[str]:
 
 
 def _topic_pair(topic_ko: Any, subtopic_ko: Any) -> str:
-    """(topic_ko, subtopic_ko) → ``"topic>subtopic"`` 짝 문자열(순수·결정적, 059 FR-101).
+    """(topic_ko, subtopic_ko) → ``"topic>subtopic"`` 짝 문자열(순수·결정적).
 
     subtopic 이 None/"" 이면 ``topic_ko`` 단독으로 돌려준다(짝 없는 주제도 트리 루트로 표시).
     구분자 ``>`` 는 정규화 라벨에 나타나지 않는 문자다(라벨은 한 어절·``·`` 만 허용) → 충돌 0·프론트
     파싱 계약(C2). **프론트 파싱 계약: 첫 ``>`` 로만 분할한다**(``split('>', 1)``) — topic 층은
-    닫힌 통제어휘(058·``>`` 불포함)라 항상 첫 토큰으로 정확히 복원되고, 만에 하나 열린 subtopic
+    대주제는 닫힌 어휘라(``>`` 를 포함하지 않는다) 항상 첫 토큰으로 정확히 복원되고, 만에 하나 세부주제
     라벨에 ``>`` 가 섞여도 부모 오배치(교차곱)는 나지 않는다(subtopic 표기만 그대로 보존).
     Args:
         topic_ko: 대주제 라벨.
@@ -352,9 +352,9 @@ def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
     - ``subtopics``   = dedup 된 ``subtopic_ko``(None/"" 스킵·keyword)
     - ``topic_pairs`` = dedup 된 ``"topic_ko>subtopic_ko"`` 짝(subtopic 없으면 topic 단독·keyword)
 
-    ``topic_pairs``(059 FR-101)는 평면 ``topics``/``subtopics`` 가 잃어버리는 **부모-자식 짝**을
+    ``topic_pairs`` 는 평면 ``topics``/``subtopics`` 가 잃어버리는 **부모-자식 짝**을
     한 문자열로 보존해, 프론트가 topic→subtopic 트리를 교차곱 오배치 없이 그리게 한다. 짝은 입력
-    (``fetch_asset_topic`` 자기주제 정본·065)에 이미 있으므로 그대로 나르며(생성 아님),
+    (자기주제 정본 조회 결과)에 이미 있으므로 그대로 나르며(생성 아님),
     ``_dedup_in_order`` 로 순서 보존·중복 제거만 한다. **평면 ``topics``/``subtopics`` 반환값·로직은 불변**(짝 필드는
     표시·패싯 전용·랭킹 미반영 — 검색 무회귀, C5).
 
@@ -385,18 +385,18 @@ def asset_to_doc(
 ) -> dict[str, Any]:
     """PG 행(asset+metadata+평균임베딩) → OpenSearch 문서(순수·결정적).
 
-    BM25 교차 필드 AND(047)는 ``summary``·``keywords`` 필드로 쿼리 시 ``cross_fields`` 처리 —
-    합본 ``search_text`` 색인은 제거했다. ``file_name`` 은 별도 필드 + 낮은 boost(026 FR-003①).
+    요약·키워드는 검색 시점에 한 필드처럼 함께 조회되므로 합본 필드를 따로 색인하지 않는다.
+    ``file_name`` 은 별도 필드로 두고 가중치를 낮게 준다(파일명 노이즈가 랭킹을 뒤집지 않게).
     ``channel`` 인자는 resync SQL 파라미터와 call-site 호환용 — **문서 필드로는 저장하지 않는다**
     (단일 active channel 인덱스 전제). ``status``·``chunk_count`` 도 색인 제외(registered 만 sync).
     ``file_name`` 필드 자체는 ``clean_file_name`` 으로 ID스러운 잡음 토큰을 정제한 값이다.
-    ``labels`` 는 ``_flatten_labels`` 로 dict→label 문자열만 추출한다(P0·FR-002). ext_meta 가 None/
+    ``labels`` 는 ``_flatten_labels`` 로 dict→label 문자열만 추출한다. ext_meta 가 None/
     비-리스트(스키마 위반)여도 빈 값으로 안전 처리한다. ``noise_patterns`` 는 settings 정제 패턴(IO 층 주입).
 
-    ``topics``(065) 는 자기주제 정본(``fetch_asset_topic``) 결과 리스트다. **주어지고 비어있지
-    않으면** ``topics``/``subtopics``/``topic_pairs``(059) 3필드(keyword)를 수록하고, ``None``/빈
+    ``topics`` 는 자기주제 정본 조회 결과다. **주어지고 비어있지
+    않으면** ``topics``/``subtopics``/``topic_pairs`` 3필드를 수록하고, ``None``/빈
     리스트면 이 필드들을 **넣지 않는다**(주제 미부여 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다
-    자산 자기주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
+    자산 자기주제를 함께 실어, 재수집·재색인이 색인된 주제를 지우지 않게 한다.
 
     Args:
         row: PG 조회 행(asset + metadata + 평균 임베딩).
@@ -535,7 +535,7 @@ def _fetch_one(conn: Any, sql: str, params: tuple) -> dict[str, Any] | None:
 
 
 def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> str:
-    """pgvector 확장 버전이 최소 요구(기본 0.5)를 만족하는지 선검사한다(읽기전용 1쿼리, FR-004).
+    """pgvector 확장 버전이 최소 요구(기본 0.5)를 만족하는지 선검사한다(읽기 전용 1쿼리).
 
     동기화 SELECT 가 자산당 청크 임베딩을 ``avg(embedding)`` 으로 평균 풀링하는데, vector 타입
     집계(avg/sum)는 pgvector **0.5.0** 에서 추가됐다(그 이전엔 집계 함수 자체가 없다). 미설치/구버전
@@ -578,12 +578,10 @@ def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> s
 
 
 def _default_topics_fn(conn: Any, asset_id: Any) -> list[dict[str, Any]]:
-    """자산의 자기주제 정본 읽기(065 배선 seam 기본값 — 색인 경로 공용).
+    """자산의 자기주제 정본을 읽는다(색인 경로가 공유하는 기본 seam).
 
-    065 전에는 이웃 엣지 topic 을 투영(``project_asset_topics``)했으나, 065 는 주제를 자산 자기
-    내용에서 확정한 정본(``asset_topic`` 테이블)에서 읽는다 — ``fetch_asset_topic`` 로 소스만 교체하고
-    출력 형상(``[{topic_ko, subtopic_ko, topic_en, subtopic_en, weight}]``)은 유지해 topics/subtopics/
-    topic_pairs 필드 계약(059)이 불변이다(FR-401). ``fetch_asset_topic`` 은 ``psycopg`` 를 모듈 상단에서
+    주제는 관계 이웃에서 빌려오는 게 아니라 **자산이 자기 내용에서 확정한 정본**을 읽는다.
+    ``fetch_asset_topic`` 은 ``psycopg`` 를 모듈 상단에서
     당기므로 **호출 시 지연 import** 한다 — 플래그 off(미도입) 환경의 순수 함수 게이트가 이 무거운
     의존 없이 opensearch_sync 를 import 할 수 있게 하기 위함이다.
 
@@ -614,8 +612,8 @@ def iter_asset_docs(
     """PG 에서 registered 자산을 읽어 OpenSearch 문서를 yield(읽기 전용).
 
     ``noise_patterns`` 는 파일명 정제용 settings 패턴(IO 층이 주입 — 순수 ``asset_to_doc`` 으로 전달).
-    ``topics_fn``(065·기본 ``fetch_asset_topic``)은 자산별 자기주제 정본을 읽어 문서에 함께 싣는다 —
-    전체 재색인(백필·복구) 문서가 topics 를 포함해 재색인이 색인된 주제를 지우지 않게 한다(C5·SC-03, R3 self-heal).
+    ``topics_fn`` 은 자산별 자기주제를 읽어 문서에 함께 싣는다 — 전체 재색인이 색인된 주제를
+    지우지 않게 하는 장치다.
 
     구현 주의(실 DB): 바깥 커서를 순회하며 자산마다 ``topics_fn`` 이 conn 에 **중첩 커서**로 topic 을
     조회한다. psycopg3 기본(client-side) 커서는 ``execute`` 시 결과를 클라이언트로 내려받아 버퍼링하므로,

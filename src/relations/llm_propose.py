@@ -24,11 +24,11 @@ _LLM_LOG = logging.getLogger("meta_extract.relations.llm")
 
 
 class RelationProposalParseError(RuntimeError):
-    """LLM 관계 제안 응답이 스키마 불능(파싱 실패·빈 응답·엣지 구조 부재)일 때(069 P1-3).
+    """LLM 관계 제안 응답을 알아볼 수 없을 때(파싱 실패·빈 응답·엣지 구조 부재).
 
     ``{}``(client 의 파싱실패 폴백)나 인식 키가 전혀 없는 응답을 정상 빈 제안(``{"edges": []}``)과
     구분해 예외로 승격한다 — ``run_relations`` 자산 단위 except 가 이를 받아 ``pending`` 재시도로
-    보낸다(기존엔 edges=0·error=None 으로 흘러 **isolated 영구 오확정**되던 조용한 실패).
+    보낸다 — 예외로 올리지 않으면 "관계 없음"으로 영구 확정돼 재시도 기회를 잃는다.
     """
 
 
@@ -38,7 +38,7 @@ def _configure_llm_logging() -> None:
     이미 핸들러가 있으면 아무 것도 하지 않는다 — 호출마다 붙이면 같은 줄이 중복 출력된다.
 
     ⚠️ 이 로거는 **LLM 응답 전문을 평문으로 남긴다**. 의료 도메인(단계 D) 운용 시에는 PHI 가
-    로그로 새지 않도록 마스킹·레벨 조정이 선행되어야 한다(2026-07-24 리뷰 지적·미착수).
+    로그로 새지 않도록 마스킹·레벨 조정이 선행되어야 한다(미착수).
     """
     if _LLM_LOG.handlers:
         return
@@ -83,7 +83,7 @@ def propose_edges_json(prompt: str) -> dict[str, Any]:
 
 
 def _clamp_confidence(raw: Any) -> float:
-    """LLM confidence 를 결정적으로 [0,1] 범위에 가둔다(#2, FR-010, 헌법 3조).
+    """LLM 신뢰도를 [0, 1] 범위 안으로 가둔다(결정적).
 
     - 1.5 → 1.0, -0.3 → 0.0 처럼 범위를 벗어난 값은 양 끝으로 클램프.
     - NaN·무한대·파싱 불가 문자열·누락(None)은 비교가 무의미하므로 결정적 기본값 0.0.
@@ -133,8 +133,8 @@ def parse_and_normalize_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
         tid = edge.get("target_media_item_id")
         if tid is None or str(tid).strip() == "":
             continue
-        # 065 FR-405: 아래 topic/subtopic 은 **관계 맥락 라벨(자산 주제 아님)** — 관계 LLM 이 이 쌍을
-        #   설명하려 붙이는 메타이며, 자산 주제는 asset_topic 정본이 결정한다(엣지 topic 소비 중단·065).
+        # 여기의 topic/subtopic 은 **이 쌍(관계)의 맥락 라벨**이지 자산의 주제가 아니다 —
+        # 자산 주제는 별도 정본이 정한다.
         tk, sk, ten, sen = extract_topic_fields_from_edge(edge)
         row = {
             "target_media_item_id": str(tid).strip(),

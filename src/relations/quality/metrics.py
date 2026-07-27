@@ -1,9 +1,10 @@
-"""관계 품질 순수 메트릭 (spec 031 T003·T004·T005).
+"""관계 품질 지표 — 전부 순수 함수(LLM·DB 없이 결정적).
 
-LLM/DB 0·결정적. 단계 분리 측정으로 "후보 단계 문제 vs LLM 판단 문제"를 진단한다.
-- `candidate_recall`(T003): 후보 단계가 정답 파트너를 회수하는지(대칭 인정).
-- `relation_metrics`(T004): 제안 엣지의 precision/recall·kind/고립 정확도.
-- `threshold_sweep`(T005): 임계를 쓸어 P/R 곡선(스냅샷 위 결정적 재측정).
+단계를 나눠 재는 이유: 품질이 나쁠 때 **후보 검색이 못 찾은 것**과 **LLM 이 잘못 판단한 것**을
+구분해야 고칠 곳을 안다.
+- `candidate_recall`: 후보 단계가 정답 상대를 회수했는가.
+- `relation_metrics`: 제안된 엣지의 정확도·회수율·종류 일치·고립 판정.
+- `threshold_sweep`: 임계를 훑어 그린 곡선(동결 스냅샷 위에서 재측정 — LLM 재호출 0).
 """
 from __future__ import annotations
 
@@ -14,11 +15,10 @@ def isolated_candidates(
     registered_ids: set[str],
     candidate_ids: set[str],
 ) -> list[str]:
-    """후보(`candidate_ids`)에 한 번도 등장하지 않은 registered 자산 = 고립 후보(051 FR-101).
+    """후보로 한 번도 등장하지 않은 자산 = 고립 후보.
 
-    순수 집합 차 — `candidate_ids` 의 **의미는 호출자가 정한다**. 051 curate 는 부트스트랩 쌍
-    (고conf graph_edge + path_signal)에 등장한 자산을 candidate 로 보아 "관계 0 ∧ path 0" 을
-    고립으로 정의(035 isolation 의미·관계 단계). 학습 0.
+    단순 집합 차이다 — **무엇을 후보로 볼지는 호출자가 정한다**(신뢰도 높은 기존 엣지에 등장한
+    자산으로 볼 수도, 경로 신호까지 포함할 수도 있다).
 
     Args:
         registered_ids: 측정 모집단(등록된 전체 자산 id).
@@ -34,7 +34,7 @@ def candidate_recall(
     pairs: list[tuple[str, str]],
     source_candidates: dict[str, set[str]],
 ) -> float:
-    """골든 쌍 중 후보 단계가 파트너를 회수한 비율(FR-003).
+    """정답 쌍 중 후보 단계가 상대를 회수한 비율.
 
     쌍 (a,b)는 `b∈cand[a]` 또는 `a∈cand[b]`면 회수(대칭 kind 양방향 인정).
 
@@ -77,7 +77,7 @@ def relation_metrics(
     proposed: dict[str, list[ProposedEdge]],
     confidence_min: float,
 ) -> dict:
-    """제안 엣지 대비 골든으로 P/R·kind·고립 정확도를 계산한다(FR-004).
+    """제안된 엣지를 정답과 대조해 정확도·회수율·종류 일치·고립 정확도를 낸다.
 
     - precision: accepted 엣지 중 골든 쌍과 일치하는 비율(무순 쌍).
     - recall: 골든 쌍 중 accepted 엣지가 덮은 비율(대칭 양방향 인정).
@@ -125,7 +125,7 @@ def min_sim_sweep(
     *,
     thresholds: list[float],
 ) -> list[dict]:
-    """min_sim(후보 코사인 유사도) 하한 스윕 — 각 하한에서 recall·통과 후보 수(033 FR-004·N1).
+    """유사도 하한을 훑으며 각 값에서의 회수율과 통과 후보 수를 잰다.
 
     각 하한 t 에서 `emb_score >= t` 후보만 남기고(소스별 (id, emb_score) 리스트), 남은 후보를
     `dict[str, set[str]]` 로 접어 `candidate_recall`(대칭 인정·DRY) 로 recall 을 잰다.
@@ -162,7 +162,7 @@ def auto_approve_sweep(
     conf_thresholds: list[float],
     emb_thresholds: list[float],
 ) -> list[dict]:
-    """2D(conf×emb) 자동승인 스윕 — 각 격자점의 precision·승인 수(033 FR-005·#3).
+    """신뢰도 × 유사도 격자를 훑으며 각 조합의 자동 승인 정확도와 승인 수를 잰다.
 
     자동승인 집합 = `confidence >= conf_min AND emb_score >= emb_min` 인 제안 엣지.
     precision = 골든 무순 쌍과 일치한 승인 수 / 전체 승인 수(승인 0 이면 0.0).
@@ -203,7 +203,7 @@ def threshold_sweep(
     proposed: dict[str, list[ProposedEdge]],
     thresholds: list[float],
 ) -> list[dict]:
-    """각 임계에서 `relation_metrics`를 재사용해 P/R 곡선을 반환한다(FR-006·DRY).
+    """각 임계에서 `relation_metrics` 를 다시 돌려 곡선을 만든다.
 
     동결 스냅샷을 입력하면 LLM 을 다시 부르지 않고도 임계만 바꿔 재측정할 수 있다.
 

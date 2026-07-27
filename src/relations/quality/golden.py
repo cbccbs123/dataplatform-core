@@ -1,12 +1,10 @@
-"""골든 관계셋 데이터 모델 + 순수 파싱·검증 (spec 031 T001).
+"""정답 관계셋(골든)의 데이터 모델과 순수 파싱·검증.
 
-골든 픽스처는 사람이 검증한 정답 관계셋이다.
-- `pairs`: 관계가 있어야 하는 자산 쌍(a,b)과 정답 `kind`.
-- `isolated`: 어떤 관계도 없어야 하는 자산(고립 처리 정확도 측정용).
+골든은 **사람이 확인한 정답**이다 — `pairs` 는 관계가 있어야 하는 쌍, `isolated` 는 어떤 관계도
+없어야 하는 자산이다.
 
-자산은 **fs_path 또는 content_hash 키**로 지정한다(재적재에도 안정 — FR-001).
-실제 `asset_id`로의 해소(`resolve_asset_keys`)는 DB가 필요하므로 러너/사람 몫(T006).
-이 모듈의 `parse_golden`은 LLM/DB 불요 순수 함수다.
+자산을 asset_id 가 아니라 **파일 경로나 해시로** 지정하는 이유: 재적재하면 id 가 바뀌지만 파일은
+그대로라, id 로 적으면 골든이 통째로 무효가 된다. 실제 id 로의 변환은 DB 가 필요해 별도 함수다.
 """
 from __future__ import annotations
 
@@ -71,7 +69,7 @@ def parse_golden(data: dict) -> Golden:
 def resolve_asset_keys(
     conn: Connection[Any], golden: Golden
 ) -> tuple[dict[str, str], list[str]]:
-    """골든 키(fs_path|content_hash)를 현재 ``asset_id``로 해소한다 (T006·DB·읽기 전용).
+    """골든 키(파일 경로 또는 해시)를 현재 ``asset_id`` 로 바꾼다(DB 조회·읽기 전용).
 
     ``key_type=fs_path`` → ``asset.fs_path``, ``content_hash`` → ``asset.file_hash`` 와 매칭한다.
     **조회 전용**(그래프에 아무것도 쓰지 않는다 — 측정 전용). 트랜잭션 경계는 호출자가 제어한다.

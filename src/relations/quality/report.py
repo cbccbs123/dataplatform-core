@@ -1,11 +1,9 @@
-"""리포트 조립 — 골든+스냅샷+키매핑 → 메트릭 리포트 (spec 031 T008 순수부).
+"""골든 + 동결 스냅샷 + 키 매핑을 합쳐 품질 리포트를 만든다(순수 함수).
 
-골든은 fs_path/content_hash **키 공간**, 스냅샷은 **asset_id 공간**이다.
-`build_report`는 `key_to_id`(키→asset_id, DB 해소는 러너/사람 몫 T006)로 골든을
-asset_id 공간으로 정합한 뒤 후보 recall·관계 P/R·임계 스윕을 한 번에 조립한다(SC-001).
+골든은 **파일 키**로, 스냅샷은 **asset_id** 로 자산을 가리킨다 — 그 둘을 맞추는 매핑을 받아
+같은 공간으로 정렬한 뒤 후보 회수율·관계 정확도·임계 곡선을 한 번에 계산한다.
 
-이 함수는 **순수**(입력=Golden+Snapshot+resolved map) — LLM/DB 0·결정적이라
-단위테스트로 검증한다. CLI 러너(scripts/)는 이 함수를 호출만 한다(DB/LLM 글루는 별도·사람 몫).
+DB·LLM 을 건드리지 않으므로 단위 테스트로 검증된다(실행 스크립트가 이 함수를 부르기만 한다).
 """
 from __future__ import annotations
 
@@ -17,7 +15,7 @@ from src.relations.quality.metrics import (
 )
 from src.relations.quality.snapshot import Snapshot
 
-# 임계 스윕 기본 격자 — auto_approve 후보 범위를 균등히 훑는다(FR-006).
+# 임계 곡선을 그릴 기본 격자 — 자동 승인 후보 구간을 고르게 훑는다.
 _DEFAULT_THRESHOLDS = [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
 
 
@@ -31,10 +29,8 @@ def build_report(
 ) -> dict:
     """골든+스냅샷+키매핑을 조립해 관계 품질 리포트(dict)를 반환한다.
 
-    - 골든 키를 `key_to_id`로 asset_id 공간으로 정합. 한쪽이라도 미해소인 쌍·
-      미해소 고립 키는 제외하고 `unresolved_keys`로 보고(결정적·정렬).
-    - `candidate_recall`(스냅샷 candidates)·`relation_metrics`(confidence_min)·
-      `threshold_sweep`(thresholds)를 호출해 결과를 한 리포트에 담는다(SC-001).
+    한쪽이라도 id 로 바꾸지 못한 쌍은 측정에서 빼고 `unresolved_keys` 로 보고한다 — 조용히
+    0점 처리하면 골든이 낡은 것인지 검색이 나쁜 것인지 구분할 수 없다.
 
     Args:
         golden: 정답 관계셋(키 공간).
@@ -78,8 +74,8 @@ def build_report(
 
     # 스냅샷(asset_id 공간)에서 메트릭 입력 추출.
     # ss.candidates 는 (target_id, emb_score) 튜플들 — candidate_recall 은 id 집합을 기대하므로
-    # id 만 추출한다(033 이 candidates 를 (id,score)로 바꾼 뒤 set(candidates)가 튜플 집합이 돼
-    # candidate_recall 이 항상 0 이던 잠복 버그 수정 — 051).
+    # ⚠️ **id 만 뽑아야 한다** — 후보가 (id, 점수) 쌍이라 그대로 집합으로 만들면 튜플 집합이
+    #    되어 id 비교가 전부 실패한다(회수율이 늘 0으로 나오던 원인).
     source_candidates = {
         sid: {tid for tid, _ in ss.candidates} for sid, ss in snapshot.sources.items()}
     proposed = {sid: list(ss.proposed) for sid, ss in snapshot.sources.items()}

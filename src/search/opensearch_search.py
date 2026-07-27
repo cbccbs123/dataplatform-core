@@ -1,19 +1,17 @@
-"""OpenSearch 검색 **IO 실행**(질의 임베딩·msearch 융합 검색·nori 분석) (검색 read path, spec 021·027).
+"""OpenSearch 검색을 **실제로 실행**하는 계층 — 질의 임베딩 · 묶음 검색 · 형태소 분석.
 
-069 US-E(FR-E5): 종전 이 한 파일이 [본문 빌더 + 융합 수학 + IO]를 모두 담았다. 이를 3분할했다 —
-**본문 빌더** → ``query_builder``, **순수 융합·게이트·컷 수학** → ``fusion``, **IO 실행**(여기) 로 나눴다.
-하위호환을 위해 이 모듈은 두 파일의 심볼을 **재export**한다(``opensearch_search.<name>`` import·patch
-경로 보존 — US-E patch seam). ``search_assets_os`` 는 재export 된 모듈 전역(``fuse_hybrid`` 등)을
-호출하므로 기존 테스트의 ``opensearch_search.<name>`` monkeypatch 가 그대로 유효하다.
+**흐름에서의 위치**: 검색 본문은 ``query_builder`` 가 만들고, 여기서 보낸다. 돌아온 결과를
+``fusion`` 이 합쳐 거르면 이 모듈이 버킷으로 담아 돌려준다. 인덱스는 **읽기만** 한다.
 
-020 이 깐 단일 인덱스(nori 한국어 BM25 + ``knn_vector``)를 **읽기만** 한다(쓰기 0, 헌법 6조).
-실제 검색 실행(IO: 질의 임베딩·``search_assets_os`` msearch)의 opensearch-py 의존은 모듈 상단이 아니라
-함수 내부에서 지연 import 한다(플래그 off 환경의 순수성 보존 — 020 동형). 순수 함수(빌더·융합)는
-``query_builder``·``fusion`` 에서 OS·opensearch-py 없이 단위 검증된다(헌법 3조).
+세 파일로 나뉘어 있지만 이 모듈이 나머지 둘의 함수를 **재export** 한다 — 그래서 호출부·테스트가
+``opensearch_search.<이름>`` 으로 참조하거나 patch 하는 코드가 있고, 그게 그대로 동작한다.
 
-**027 클라이언트 융합** — 모달리티당 [plain kNN + BM25] 서브검색을 전 모달리티 **_msearch 1회**로 받아
-``fuse_hybrid`` 가 min-max+가중평균(서버와 동일 수식)으로 융합한다. kNN 응답에 원시 코사인이 보존돼
-게이트(``gate_signal``)·per-result 컷(``cut_rows``)이 코사인 단일 스케일의 두 규칙으로 통합된다.
+핵심 동작: 모달리티마다 [벡터 kNN + BM25] 두 검색을 만들어 **한 번의 묶음 요청**으로 보낸다.
+kNN 응답에 원시 코사인이 남아 있어, 추가 검색 없이 같은 표본으로 버킷 게이트와 결과 컷을 함께
+판정할 수 있다.
+
+opensearch-py 는 모듈 상단이 아니라 함수 안에서 import 한다 — 그 라이브러리가 없는 환경에서도
+순수 함수만 쓰는 코드가 이 모듈을 import 할 수 있어야 하기 때문이다.
 
 필드명 정본 = 020 인덱스 매핑(``opensearch_sync.build_index_body``).
 """
@@ -88,13 +86,10 @@ _LOG = logging.getLogger(__name__)
 
 
 def embed_query(query: str, *, channel: str) -> list[float]:
-    """질의를 인덱스와 **동일 채널·모델**로 임베딩한다(FR-004 질의-문서 일치, 018 단일 출처).
+    """질의를 문서와 **같은 채널·모델**로 임베딩한다.
 
-    적재·검색이 공유하는 텍스트 임베더(`query_embed.embed_query_for_media_search`)를 **재사용**한다
-    — 임베딩 로직을 복제하지 않는다. 채널→모델 해소는 단일 출처 ``settings.model_for_channel``
-    (017 A/B)로 한다(``'st'`` → KoSimCSE·``'st_bge'`` → 로컬 BGE-M3·``'st_api'`` → 원격 API bge-m3·062).
-    020 인덱스가 활성 채널 임베딩을 색인하므로, 질의도 같은 채널 모델로 임베딩해야 같은 벡터 공간에서
-    비교된다.
+    적재·검색이 공유하는 임베더를 그대로 쓴다 — 임베딩 로직을 복제하지 않는다. 채널에서 모델을
+    찾는 규칙도 설정 한 곳에 있다. **인덱스에 든 벡터와 같은 모델로 만들어야** 비교가 성립한다.
 
     Args:
         query: 임베딩할 질의 텍스트.
@@ -115,12 +110,10 @@ def embed_query(query: str, *, channel: str) -> list[float]:
 def nori_analyze_tokens(
     client: Any, text: str, *, index: str, decompound: str = OS_QUERY_NORM_DECOMPOUND
 ) -> list[tuple[str, str]]:
-    """OS nori ``_analyze`` 로 텍스트를 ``(token, pos)`` 리스트로 분석한다(072 IO seam — 형태소 정규화 잎).
+    """OpenSearch 분석기로 텍스트를 ``(토큰, 품사)`` 목록으로 쪼갠다.
 
-    ``morph_noun_phrase_query`` 의 ``analyze_fn`` 실체다. ``decompound_mode`` 를 즉석 지정한 nori_tokenizer
-    + ``explain=True`` 로 각 토큰의 품사(``leftPOS`` 앞 코드, 예 'NNG(General Noun)'→'NNG')를 얻는다.
-    **색인 재색인 없이 질의 분석만** 모드를 정할 수 있고, 인덱스는 **읽기 전용**으로만 만진다(헌법 6조·
-    운영 인덱스 무접촉).
+    질의 정규화가 쓰는 분석 함수의 실체다. 분해 모드를 요청마다 지정하므로 **재색인 없이 질의
+    분석만** 바꿀 수 있고, 인덱스는 읽기만 한다.
 
     Args:
         client: OpenSearch 클라이언트.
@@ -154,11 +147,10 @@ def nori_analyze_tokens(
 
 
 def _resp_hits(resp: dict[str, Any] | None) -> tuple[list[dict[str, Any]], bool]:
-    """msearch 한 서브검색 응답에서 (hits, 오류여부)를 안전 추출한다(None·누락 방어).
+    """묶음 검색 응답 하나에서 (hits, 오류 여부)를 안전하게 꺼낸다.
 
-    msearch 는 HTTP 200 이어도 서브검색별로 ``{"error": …}`` 를 돌려줄 수 있다 — 이를 조용히
-    빈 결과로 격하하면 **부분 실패가 no-match 와 구분 불가**해진다(FR-007 관측성·silent 폴백
-    금지 취지). 오류 여부를 함께 돌려 호출부가 gate_meta 에 표식·로그를 남긴다.
+    묶음 검색은 전체가 성공(HTTP 200)이어도 **개별 검색만 실패**할 수 있다. 그것을 빈 결과로
+    넘기면 "검색 결과 없음"과 구분되지 않으므로, 오류 여부를 함께 돌려 호출부가 표시하게 한다.
 
     Args:
         resp: 서브검색 응답 하나. ``None``(배열이 짧아 자리가 빈 경우)도 받는다.

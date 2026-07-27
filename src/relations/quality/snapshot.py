@@ -1,8 +1,7 @@
-"""LLM 동결 스냅샷 모델 + 순수 JSON I/O (spec 031 T002).
+"""LLM 제안을 파일로 **동결**해 두는 스냅샷 모델과 순수 JSON 변환.
 
-골든 소스마다 LLM 1회 제안(target·kind·confidence·topic)을 스냅샷으로 동결한다(FR-005).
-이후 측정·임계 스윕은 스냅샷 위에서 결정적으로 돌아 **재측정 LLM 호출 0**(SC-002, 헌법 3조).
-`dump_snapshot`/`load_snapshot`은 LLM/DB 불요 순수 함수다.
+측정할 때마다 LLM 을 다시 부르면 결과가 흔들리고 비용도 든다. 그래서 한 번 받은 제안을 그대로
+얼려 두고, 임계를 바꿔 가며 재측정할 때는 이 스냅샷만 읽는다(LLM 호출 0).
 """
 from __future__ import annotations
 
@@ -16,8 +15,8 @@ class ProposedEdge:
     kind: str
     confidence: float
     topic_ko: str = ""
-    # 033 FR-006: 후보 단계의 코사인 유사도(emb_score) 동결값. 기본 0.0 =
-    # path-only 후보(임베딩 신호 없음)·구 스냅샷 호환. 2D 자동승인 스윕/AND 게이트가 참조한다.
+    # 후보 단계의 유사도를 함께 얼려 둔다. 0.0 은 경로로만 찾은 후보(임베딩 신호 없음)이거나
+    # 이 값을 저장하지 않던 옛 스냅샷이라는 뜻이다.
     emb_score: float = 0.0
 
 
@@ -25,9 +24,8 @@ class ProposedEdge:
 class SourceSnapshot:
     """한 소스 자산의 동결 결과 — union 후보 집합 + LLM 제안 엣지.
 
-    033 FR-004: candidates 는 ``(target_id, emb_score)`` 쌍으로 동결한다 — N1 min_sim 스윕이
-    후보 단계 recall(=골든 양성이 후보로 회수되는지)을 점수 임계로 재측정하려면 후보 코사인
-    유사도가 필요하기 때문(proposed 엣지는 LLM 이 고른 부분집합이라 후보 recall 을 과소측정).
+    후보를 ``(자산 id, 유사도)`` 쌍으로 얼리는 이유: 유사도 하한을 바꿔 가며 후보 단계 회수율을
+    다시 재려면 점수가 필요하다. 제안된 엣지만으로는 LLM 이 고른 부분집합이라 과소측정된다.
     """
     candidates: tuple[tuple[str, float], ...]
     proposed: tuple[ProposedEdge, ...]

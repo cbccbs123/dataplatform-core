@@ -32,9 +32,9 @@ EmbeddingKindFilter = Literal["st", "clip", "both"]
 class EmbeddingCandidate(TypedDict):
     """LLM 프롬프트에 실릴 후보 한 건(자산 메타 + 임베딩 유사도). id 는 asset_id(UUID str).
 
-    066 FR-201: 후보의 자기주제(``asset_topic``)를 동반한다 — ``topic_ko``/``subtopic_ko``.
-    FR-101 의 EXISTS 배제로 미부여 후보는 이미 빠지므로 ``topic_ko`` 는 사실상 항상 존재하나,
-    LEFT JOIN 특성상 방어적으로 ``None`` 을 허용한다(호출부가 None 을 견딜 것).
+    후보의 자기주제(``topic_ko``/``subtopic_ko``)를 함께 싣는다 — 관계 LLM 이 주제 정합을
+    참고 신호로 볼 수 있게 하기 위해서다. 미부여 자산은 조회 단계에서 빠지지만 형식상
+    ``None`` 이 올 수 있으므로 호출부는 그것을 견뎌야 한다.
     """
 
     id: str
@@ -172,7 +172,8 @@ def find_embedding_candidates(
         rows = cur.fetchall()
     out: list[EmbeddingCandidate] = []
     for r in rows:
-        # 066 FR-201: 주제는 방어적으로 None 허용(LEFT JOIN — EXISTS 배제로 사실상 항상 존재).
+        # 주제는 방어적으로 None 을 허용한다 — 위 EXISTS 로 미부여 자산이 이미 빠지지만,
+        # LEFT JOIN 이라 형식상 NULL 이 올 수 있다.
         topic_ko = r.get("topic_ko")
         subtopic_ko = r.get("subtopic_ko")
         out.append(

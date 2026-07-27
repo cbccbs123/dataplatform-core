@@ -1,4 +1,4 @@
-"""DB 연결·LLM 호출이 필요한 **관계 파이프라인 진입점** — asset_* 재배선판.
+"""관계 생성의 **진입점** — DB 연결과 LLM 호출이 여기서 일어난다.
 
 한 사이클
     1. ``asset`` + ``asset_metadata`` 에서 소스 요약(ext_meta.summary)·modality 로드.
@@ -73,7 +73,7 @@ def union_candidates(
         - 경로 신호 후보 내부 중복 asset_id 도 첫 항목만 유지(결정적).
 
     이 순서·dedup 규칙은 헌법 3조(재현성)를 위해 입력 정렬을 보존하는 안정 결합이다.
-    union 총 후보 ≤ top_k + path_top_k(각 입력이 별도 LIMIT 됨, FR-013).
+    두 입력이 각각 상한을 갖고 있으므로 합친 후보 수도 그 합을 넘지 않는다.
 
     Args:
         embedding_candidates: ``find_embedding_candidates`` 결과(유사도 정렬됨). 그대로 앞에 온다.
@@ -95,7 +95,7 @@ def union_candidates(
 
 
 def target_emb_score_map(candidates: list[EmbeddingCandidate]) -> dict[str, float]:
-    """후보의 ``{asset_id: emb_score}`` 맵 — 자동승인 AND 게이트(033 FR-003)에 전달.
+    """후보의 ``{asset_id: 유사도}`` 맵 — 자동 승인 판정에 넘긴다.
 
     path-only 후보는 ``emb_score=0.0`` sentinel 을 그대로 유지(``emb_min>0`` 이면 자동승인 불가).
     union 에서 임베딩 후보가 우선이라 겹친 id 는 실측 emb_score 가 담긴다.
@@ -115,7 +115,7 @@ def propose_relations_for_asset(
     source_asset_id: str,
     *,
     top_k: int | None = None,
-    embedding_kind: EmbeddingKindFilter = "st",  # 036: bge-only 기본(단일 st_bge 공간·척도 일관)
+    embedding_kind: EmbeddingKindFilter = "st",  # 기본은 텍스트 단일 공간(척도가 섞이지 않게)
     llm_fn: Callable[[str], dict[str, Any]] | None = None,  # 테스트용 주입(미주입=실 LLM 호출)
 ) -> tuple[int, int, int, int]:
     """한 자산의 관계를 제안해 그래프에 반영한다 — 후보 검색 → LLM → kind 등록 → 엣지 upsert.
@@ -186,7 +186,7 @@ def propose_relations_for_asset(
             source_media_type=str(src.get("modality") or ""),
             candidates=candidates,
             relation_kinds_catalog=kinds,
-            source_topic=source_topic,  # 066 FR-202: 소스 자기주제를 soft 신호로 전달.
+            source_topic=source_topic,  # 소스 주제를 참고 신호로 전달(하드 배제 아님).
         )
         raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)

@@ -1,9 +1,8 @@
-"""관계 HITL 검토 — proposed 엣지 승인/반려 + relation_kind 승격(inactive→active).
+"""사람이 관계를 검토하는 계층 — 제안된 엣지의 승인·반려, 새 관계 종류의 승격.
 
 검토 큐 설계
-    별도 큐 테이블 없이 ``graph_edge.status = 'proposed'`` 자체가 검토 큐다.
-    ``list_edges_for_review`` 로 조회하고(052 API·식별보강·페이징·검색/필터),
-    ``approve_edge``/``reject_edge`` 로 상태를 전환한다(포탈 ``bulk_review`` 경유).
+    별도 큐 테이블이 없다 — ``status = 'proposed'`` 인 엣지 자체가 검토 대기 목록이다.
+    조회는 ``list_edges_for_review``, 결정은 ``approve_edge``/``reject_edge`` 가 맡는다.
 
 멱등·반려 부활 방지 계약
     ``_decide_edge`` 의 ``WHERE edge_id = %s AND status = 'proposed'`` 가드가 핵심이다.
@@ -11,8 +10,8 @@
     False 를 반환한다. 소비자는 이 반환값으로 "이미 결정된 엣지" 여부를 판단한다.
 
 관계 어휘 거버넌스
-    ``promote_relation_kind`` 는 LLM 이 제안해 inactive 로 쌓인 kind 를 active 로 올리는
-    HITL 경로다. 반대 방향(active→inactive 강등)은 현재 미구현 — 직접 SQL 로 처리한다.
+    ``promote_relation_kind`` 는 LLM 이 제안해 쌓인 관계 종류를 사람이 승인해 쓰이게 하는
+    유일한 경로다. 반대(승인 취소)는 아직 함수가 없어 직접 SQL 로 처리해야 한다.
 """
 from __future__ import annotations
 
@@ -24,17 +23,13 @@ from psycopg.rows import dict_row
 
 from src.relations.path_signal import like_escape  # LIKE 메타문자 이스케이프 공용(B9·SSOT)
 
-# 조회·정정 status 화이트리스트(포탈 API 검증과 공유). 검토 큐 = proposed,
-# 승인 내역 = active, 비승인 내역 = rejected 세 상태만 노출·전이 대상이다.
+# 노출·전이가 허용되는 상태 셋. 검토 대기(proposed) · 승인(active) · 반려(rejected).
 _REVIEW_STATUSES = ("proposed", "active", "rejected")
 
-# 검토 목록 조회 SQL(FR-102) — node→asset 양끝 조인으로 식별 보강.
-# C6: 검토 화면은 "원본 엣지 행" 단위라 graph_query seam 의 대칭 정규화(dst 접힘 복원)를
-#     쓰지 않는다. 노출용 대칭 정규화는 그 seam 의 책임이고 검토(원본 행)와 무관하다.
-# G7 확장: 고정 WHERE(_REVIEW_FROM_WHERE) 를 조인 상수(_REVIEW_FROM) + 동적 WHERE 빌더로
-#   분리했다. status 만 항상 붙고(2026-07-23 도메인 제외 전면 제거 — 의료 특수 트랙 미운용·복귀 시 재도입),
-#   검색·필터·기간은 주어진 것만 append 한다.
-#   COUNT 와 rows 가 동일 WHERE·params 를 공유하도록 빌더가 (conditions, params) 를 함께 만든다.
+# 검토 목록 조회의 고정 조인 부분. 양 끝 자산을 함께 끌어와 화면에 파일명·모달리티를 보여준다.
+# ⚠️ 검토 화면은 **저장된 원본 행**을 그대로 보여준다 — 대칭 엣지를 질의 자산 관점으로 뒤집는
+#    정규화는 조회 seam 의 몫이고, 여기서 하면 사람이 승인하려는 행과 화면이 어긋난다.
+# WHERE 는 빌더가 따로 만든다. 목록과 COUNT 가 **같은 조건·같은 파라미터**를 써야 총계가 맞는다.
 _REVIEW_FROM = """
 FROM graph_edge e
 JOIN relation_kind rk ON rk.relation_kind_id = e.relation_kind_id
@@ -44,8 +39,8 @@ JOIN asset sa ON sa.asset_id = sn.asset_id
 JOIN asset da ON da.asset_id = dn.asset_id
 """
 
-# 기간 필터 date_col 화이트리스트 — f-string 으로 컬럼명을 조립하되, 이 상수 집합에 없는
-# 값이면 진입 즉시 ValueError 로 거부해 인젝션을 원천 차단한다(013 _TIMELINE_INTERVALS 관례).
+# 기간 필터가 쓸 수 있는 컬럼. 컬럼명은 파라미터로 바인딩할 수 없어 문자열로 조립하므로,
+# 이 목록 밖 값이 들어오면 즉시 거부해야 한다(그러지 않으면 인젝션 통로가 된다).
 _REVIEW_DATE_COLS = ("created_at", "reviewed_at")
 
 
@@ -63,10 +58,9 @@ def _build_review_where(
     until: Any,
     date_col: str,
 ) -> tuple[str, list[Any]]:
-    """동적 WHERE 절(문자열) + params 리스트를 만든다(FR-701~753).
+    """주어진 필터만 골라 WHERE 절과 파라미터를 만든다.
 
-    ``e.status = %s`` 는 항상 붙는다. 그 밖의 검색·필터·기간
-    조건은 인자가 주어졌을 때만 append 한다 → 미지정 시 현행과 완전 동일(하위 호환·SC-011).
+    상태 조건만 항상 붙고, 나머지는 값이 주어졌을 때만 추가된다.
     모든 값은 %s 바인딩(인젝션 0). ``date_col`` 만 f-string 조립이라 화이트리스트로 검증한다.
 
     Args:
@@ -99,11 +93,10 @@ def _build_review_where(
     params: list[Any] = [status]
 
     if q:
-        # 통합 텍스트 검색(FR-702) — 대소문자 무시 부분 일치를 8개 필드에 OR 매칭한다.
-        # UUID 컬럼은 ::text 캐스팅 후 ILIKE. Postgres 에 basename() 이 없어 fs_path 전체를
-        # ILIKE 하는데, 파일명이 경로의 부분문자열이라 파일명 검색을 커버한다.
-        # 2026-07-15 B9(P3-2): 검색어의 %·_ 를 이스케이프해 리터럴 매칭한다 — 이전엔 "100%" 검색이
-        # "100"+임의 문자열로 와일드카드 동작(인젝션은 아님·의미 혼동만). path_signal 과 규칙 공유.
+        # 한 검색어로 8개 필드를 한꺼번에 훑는다(대소문자 무시 부분 일치).
+        # 경로 전체를 매칭하는 이유: DB 에 basename 함수가 없는데 파일명은 경로의 일부라,
+        # 경로를 훑으면 파일명 검색도 함께 커버된다.
+        # 검색어의 ``%``·``_`` 는 이스케이프한다 — 안 하면 "100%" 검색이 와일드카드로 동작한다.
         q_pat = f"%{like_escape(q)}%"
         conditions.append(
             "(e.edge_id::text ILIKE %s OR sn.asset_id::text ILIKE %s"
@@ -113,11 +106,11 @@ def _build_review_where(
         )
         params.extend([q_pat] * 8)
     if asset_id is not None:
-        # 양끝 중 하나 정확 일치. ::text = 로 비교해 비-UUID 입력에도 500 아닌 0건이 되게 한다.
+        # 양 끝 중 하나와 정확 일치. 문자열로 비교하므로 UUID 가 아닌 값이 와도 오류 대신 0건이다.
         conditions.append("(sn.asset_id::text = %s OR dn.asset_id::text = %s)")
         params.extend([asset_id, asset_id])
     if kind_code is not None:
-        # 미지 값도 검증 없이 그대로 바인딩 → 200 + total=0(FR-703).
+        # 없는 코드가 와도 검증하지 않는다 — 오류 대신 0건으로 응답한다.
         conditions.append("rk.kind_code = %s")
         params.append(kind_code)
     if modality is not None:
@@ -137,7 +130,7 @@ def _build_review_where(
         conditions.append(f"e.{date_col} >= %s")
         params.append(since)
     if until is not None:
-        conditions.append(f"e.{date_col} < %s")  # exclusive(FR-751)
+        conditions.append(f"e.{date_col} < %s")  # 끝 경계는 **미포함**(하루 단위 조회의 중복 방지)
         params.append(until)
 
     return "WHERE " + "\n  AND ".join(conditions), params
@@ -160,12 +153,10 @@ def list_edges_for_review(
     until: Any = None,
     date_col: str = "created_at",
 ) -> dict[str, Any]:
-    """status별 엣지를 식별 보강해 페이징 조회한다(FR-101/102/103 + G7 검색·필터·기간).
+    """상태별 엣지를 페이징 조회한다 — 양 끝 자산 정보까지 담아 화면이 바로 그릴 수 있게.
 
-    각 행에 양끝 자산(asset_id·file_name·modality)·kind_code·confidence·reason·topic·
-    status·reviewed_by·reviewed_at·created_at 를 담아 UI 가 "무엇을 승인하는지" 알 수 있게
-    한다(CR-11/CR-18 최소 해소). ``file_name`` 은 asset 에 컬럼이 없어 ``fs_path`` basename
-    으로 파생한다(파일명 파생 관례 — 구 ``src/portal/download.py``, 077로 백엔드 레포 이관).
+    검토자가 "무엇을 승인하는지" 알려면 엣지 정보만으로는 부족해 양 끝 자산의 파일명·모달리티까지
+    싣는다. 파일명 컬럼은 따로 없어 경로에서 파생한다.
 
     조회 전용(쓰기 없음). 선택 인자는 **주어진 것만** WHERE 에 AND 로 붙으므로, 전부 생략하면
     status 필터만 걸린 기본 목록이 된다. 필터 값 검증은 호출자(포탈 API) 책임이고, ``date_col``
@@ -263,13 +254,10 @@ def _review_row(r: dict[str, Any]) -> dict[str, Any]:
 def list_relation_kinds(
     conn: Connection[Any], *, status: str | None = None
 ) -> dict[str, Any]:
-    """relation_kind 목록을 조회한다(FR-801·필터 드롭다운용·조회 전용·LLM 0).
+    """관계 종류 목록을 조회한다(필터 드롭다운용·조회 전용).
 
-    ``{rows:[{kind_code, kind_name_ko, description, status}], total}`` 를 반환한다.
-    ``description`` 은 관계종류 설명(TEXT·nullable → None 가능)으로, UI 드롭다운/툴팁에서
-    "이 관계가 무슨 뜻인지" 보여주도록 DB 에서 함께 읽어 전달한다. ``ORDER BY kind_code`` 로
-    결정적 정렬(헌법 3조). ``status`` 지정 시 ``WHERE status = %s``(active|inactive 화이트
-    리스트 검증은 호출자 책임), 미지정이면 전체.
+    설명(``description``)까지 함께 읽는 이유: 드롭다운에서 "이 관계가 무슨 뜻인지" 보여주려면
+    코드만으로는 부족하다. 정렬을 고정해 목록 순서가 매번 같게 한다.
 
     Args:
         status: 상태 필터(``active``|``inactive``). ``None`` 이면 **전체**를 돌려준다.
@@ -368,16 +356,10 @@ def reject_edge(conn: Connection[Any], *, edge_id: str, reviewer: str) -> bool:
 def bulk_review(
     conn: Connection[Any], *, edge_ids: list[str], reviewer: str, action: str
 ) -> list[dict[str, Any]]:
-    """일괄 승인/반려 — 건별 기존 단건 함수를 호출하고 per-id 결과를 모은다(FR-201/202/203).
+    """여러 건을 한 번에 승인·반려한다 — 건별로 단건 함수를 부르고 결과를 모은다.
 
-    ``action`` 은 "approve"|"reject" — 각각 검증된 ``approve_edge``/``reject_edge`` 로
-    디스패치한다(재구현 0·proposed 가드·멱등은 단건 함수 계약 그대로). 반환은
-    ``[{"edge_id", "ok"}]`` per-id 배열이다.
-
-    한 트랜잭션 = 호출자(포탈 ``_run_in_db_write``)가 커밋한다 — 여기서는 커밋/롤백하지
-    않는다. ``ok=False``(엣지 없음 또는 이미 결정됨=proposed 아님)는 **예외가 아니라 결과값**
-    이므로 나머지 엣지 처리를 멈추지 않는다. 성공(ok=True) 건은 같은 트랜잭션에서 원자적으로
-    함께 커밋된다(FR-203).
+    로직을 다시 구현하지 않고 단건 함수에 위임하므로 가드·멱등성이 그대로 유지된다.
+    커밋은 호출자가 한다 — 성공한 건들은 **한 트랜잭션에서 함께** 반영된다.
 
     Args:
         edge_ids: 처리할 엣지 id 목록. 순서대로 처리하며 결과도 같은 순서로 돌려준다.
@@ -404,16 +386,12 @@ def bulk_review(
 def revise_edge(
     conn: Connection[Any], *, edge_id: str, reviewer: str, to_status: str
 ) -> bool:
-    """사람 전용 결정 정정 — proposed 가드 **없이** status 를 전이한다(FR-301·C4).
+    """이미 내린 결정을 사람이 **되돌리는** 유일한 경로 — proposed 가드를 우회한다.
 
-    ``_decide_edge`` 의 ``AND status = 'proposed'`` 가드를 **우회하는 유일 경로**다. 운영에서
-    오결정(잘못 approve/reject)을 되돌리려면 active↔rejected·→proposed 전 방향 전이가 필요한데,
-    proposed 가드가 있으면 이미 결정된 엣지를 되돌릴 수 없다. 그래서 이 함수만 가드 없이
-    ``WHERE edge_id = %s`` 로 갱신하고 ``reviewed_by``/``reviewed_at``/``updated_at`` 을 새로 찍는다.
+    다른 결정 함수들은 "아직 검토 전인 엣지"만 바꾸도록 막혀 있다. 그러면 잘못 승인·반려한 것을
+    되돌릴 수 없으므로, 이 함수만 그 조건 없이 상태를 전이한다.
 
-    LLM 경로(``sync_graph_edges``)와 분리(FR-302): revise 가 status 를 바꿔도, LLM 재제안의
-    ON CONFLICT ``DO UPDATE SET`` 는 여전히 ``status`` 를 **미갱신**한다(graph_persist.py). 즉
-    사람의 정정이 LLM 재제안에 덮이지 않는다 — 사람↔LLM 경계는 그대로 보존된다.
+    사람이 정정한 값은 LLM 재제안에 덮이지 않는다 — 저장 경로가 status 를 갱신하지 않기 때문이다.
 
     **DB에 쓴다**.
 

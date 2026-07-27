@@ -211,7 +211,7 @@ def find_path_signal_candidates(
 
     out: list[EmbeddingCandidate] = []
     for _rank, aid, r in matched[:limit]:
-        # 066 FR-201: 주제는 방어적으로 None 허용(LEFT JOIN — EXISTS 배제로 사실상 항상 존재).
+        # 주제는 방어적으로 None 을 허용한다(EXISTS 로 이미 걸렀지만 LEFT JOIN 이라 형식상 가능).
         topic_ko = r.get("topic_ko")
         subtopic_ko = r.get("subtopic_ko")
         out.append(

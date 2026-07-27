@@ -7,12 +7,12 @@
        ``type_code`` 는 ``relation_kind.kind_code``. **관계 종류**(왜 연결되는지)만 여기서 고른다.
     4. **선택 가이드** — ``RELATION_KIND_HINTS_KO`` + 카탈로그에 없는 코드는 DB ``description`` 일부 표시.
     5. **닫힌 topic 분류체계 목록** — ``topic_ko`` 는 ``taxonomy_seed.json`` 의 **27+미분류**에서 하나 선택
-       (spec 058 v2·FR-401v2). subtopic 은 열린 층이라 자유 기입(구체 주제어).
+       세부주제는 열린 층이라 자유 기입한다(구체 주제어).
 
 출력 규격
     LLM 은 **JSON 객체 하나**만 반환하도록 지시한다(코드 펜스 금지).
 
-topic 지시 변경(spec 058 v2·FR-401v2·2026-07-07 닫힌 분류체계 전환)
+대주제 지시 — 닫힌 목록에서 고르게 한다
     과거에는 ``topic_ko`` 를 한 단어 카테고리로 **자유 기입**시켰으나(동의어 난립),
     이제 ``taxonomy_seed.json`` 의 닫힌 27+미분류 목록을 프롬프트에 통째로 주입하고 **그 중 하나를
     선택**하게 한다(확신 없으면 ``미분류``). 관계종류(kind)·후보·경로신호·JSON 출력 지시는 불변.
@@ -188,7 +188,7 @@ def build_relation_proposal_prompt(
     Args:
         source_summary: 소스 자산 요약(길이 상한은 본문에서 잘라 씀).
         source_media_type: 매체 타입 구분용 문자열.
-        candidates: ``find_embedding_candidates`` 결과 행들(066: topic_ko/subtopic_ko 동반 가능).
+        candidates: 후보 행들. 각 후보의 주제(``topic_ko``/``subtopic_ko``)도 함께 실린다.
         relation_kinds_catalog: **active** ``relation_kind`` 목록(``type_code``/``type_name``/``description``/``is_symmetric``).
         source_topic: 소스 자산의 자기주제 ``{"topic_ko","subtopic_ko"}``. 주제가 달라도 내용이
             맞으면 연결하라는 **soft 신호**로만 쓰인다(하드 배제 금지). ``None`` 이면 주제 표기를
@@ -199,14 +199,14 @@ def build_relation_proposal_prompt(
     """
     cand_lines: list[str] = []
     for c in candidates:
-        # FR-008(SC-006): 디렉터리 풀경로를 LLM 입력으로 노출하지 않는다(결정성·PHI 누출 방지,
+        # 디렉터리 전체 경로를 LLM 입력에 넣지 않는다(개인정보 누출 방지·환경 의존 제거,
         # 헌법 3조·10조). 후보 식별엔 파일명만 충분하므로 basename 만 ``filename`` 으로 내보낸다.
         filename = posixpath.basename(str(c["file_uri"] or ""))
         emb_score = round(c["emb_score"], 6)
         # C-3: emb_score=0.0 인 후보는 경로 신호(파일명·폴더 매칭)로 추가된 것 — LLM 이 0.0 을
         # "비유사"로 오해하지 않게 ``signal`` 표식을 붙인다(가이드 문구와 호응).
         signal = "경로 신호" if emb_score == 0.0 else "임베딩"
-        # 066 FR-202: 후보의 자기주제(topic_ko/subtopic_ko)를 후보 표기에 실어 주제 정합을 보게 한다.
+        # 후보의 주제를 함께 보여줘 주제 정합을 참고하게 한다(하드 조건은 아니다).
         cand_topic_ko = c.get("topic_ko")
         cand_subtopic_ko = c.get("subtopic_ko")
         cand_lines.append(
@@ -265,7 +265,7 @@ def build_relation_proposal_prompt(
     # topic 지시부에 주입할 닫힌 27+미분류 목록(taxonomy_seed.json 단일 출처·결정적).
     topic_taxonomy_block = _build_topic_taxonomy_block()
 
-    # 066 FR-202: 소스 자기주제를 한 줄로 표기(soft 신호). None(미부여·구 호출부)이면 (주제 없음).
+    # 소스 주제를 한 줄로 표기한다. 미부여면 '(주제 없음)'.
     source_topic_line = _fmt_topic(source_topic)
 
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.

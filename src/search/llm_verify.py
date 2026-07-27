@@ -1,23 +1,16 @@
-"""검색시점 top-3 개별 LLM 검증 (spec 074 — 자연어 무관 L2·노출 직전 정밀 판정).
+"""검색 결과 **상위 몇 건만** LLM 이 다시 읽어 무관한 것을 노출 직전에 걸러낸다.
 
-운영 상태(2026-07-14): 독립지표 재평가로 운영에서 **off** 로 되돌렸다(코드·배선은 보존·L3 재접근
-예정 — ADR ``docs/decisions/2026-07-14-llm-verify-off-reeval.md``). 아래는 074 채택 근거 서사이며,
-현행 운영 기본값(``SEARCH_LLM_VERIFY_ENABLED_DEFAULT=False``)이 이 재평가를 반영한다.
+**흐름에서의 위치**: 검색·융합·컷이 모두 끝난 뒤 마지막에 붙는 선택적 층이다. 기본은 꺼져 있다.
 
-073(L1·적재시점 aboutness 필터) 후에도 남는 자연어 상위3 무관(실측 34~55%)을, **상위 3 자산만
-gemma 가 1건씩 개별 정독 판정**해 제거한다. 측정(2026-07-13)의 결정적 발견 두 가지가 설계를 정한다:
+설계를 정한 두 가지
+  ① **한 건씩 묻는다.** 여러 건을 한 프롬프트에 묶으면 판정이 흔들려 같은 자산이 실행마다 다르게
+     분류된다.
+  ② **상위 소수만 본다.** 전체를 검증하면 동시 검색 몇 건만으로 LLM 이 포화된다. 넓은 범위는
+     적재 시점 필터가 맡고, 여기는 맨 앞자리 정밀도만 담당한다.
 
-  ① **개별 판정만 작동한다** — 자산당 1건씩 물으면 무관 44.7→0%·연관유지 1.36→1.60(잡음 자리에
-     하위 관련이 승격). 10건을 한 프롬프트에 묶는 배치는 판정이 흔들려(개별과 일치율 66~77%) 기각.
-  ② **top-3 이 유일한 실용점** — top3×병렬은 동시 30검색 p95 1.06s(실측)로 감당되지만, 전수(20건)
-     검증은 동시 4~5검색에 gemma 포화. 전체 깊이는 L1(073) 몫·상위 정밀은 L2 몫(계층 분담).
-
-헌법 정합: 검색시점 LLM 은 021 FR-004 의 029 거버넌스 토글 개정 선례를 따른다(기본 off·opt-in·
-온프레미스 단일 seam·temp=0·프롬프트 env 입력 0). 라이브 읽기 경로의 near-tie 섭동은 판정 캐시
-(같은 (정규화질의, 자산) 쌍은 첫 판정으로 고정)로 완화한다 — spec §헌법 정합.
-
-폴백(FR-003): 데드라인 초과·judge 예외 시 **전량 폴백**(미검증 원 버킷 그대로·드롭 0·meta 표식).
-부분 적용(끝난 판정만 반영)은 타이밍 의존 비결정이라 금지한다(헌법 §3).
+같은 (정규화 질의, 자산) 쌍은 **첫 판정을 캐시에 고정**한다 — 그래야 같은 검색을 반복해도 순위가
+흔들리지 않는다. 마감을 넘기거나 판정이 실패하면 **전량 폴백**한다(끝난 것만 반영하면 타이밍에
+따라 결과가 달라진다).
 """
 
 from __future__ import annotations
@@ -34,22 +27,22 @@ from src.config.search_constants import (
     SEARCH_LLM_VERIFY_TOP_N,
 )
 
-# 074 판정 프롬프트 — 측정 하니스와 **동일 문면**(측정-구현 일치·"주제가 맞으면 관련" 기준).
-# env 의존 입력(날짜·경로·랜덤) 0 — 029 가 021 에서 제거한 비결정성을 재도입하지 않는다.
+# 판정 프롬프트. 날짜·경로·난수 같은 환경 의존 입력을 넣지 않는다 — 넣으면 같은 질의가
+# 실행할 때마다 다르게 판정된다.
 _JUDGE_PROMPT = """검색어 "{q}" 로 자산을 찾는 사용자에게 아래 자산이 관련 있나? 주제가 맞으면 관련.
 자산: {s}
 JSON 하나만: {{"related": true 또는 false}}"""
 
-# 프로세스 내 판정 캐시: (norm_query, asset_id) → bool. temp=0 결정적이라 TTL 불요·상한만 관리.
-# 반복·인기 질의는 LLM 0회로 수렴한다(FR-004). 테스트는 cache= 주입으로 격리.
+# 판정 캐시: (정규화 질의, 자산) → 관련 여부. temperature 0 이라 같은 쌍은 늘 같은 답이므로
+# 만료 시각 없이 개수 상한만 둔다. 반복되는 질의는 LLM 호출이 0으로 수렴한다.
 _VERDICT_CACHE: dict[tuple[str, str], bool] = {}
-# 캐시 동시성 락(리뷰 🔴 — 포탈 /search 는 스레드풀 병렬이라 무락 트리밍이 iter 중 dict 변형
-# RuntimeError 를 실제 유발·재현됨). 조회·쓰기·트리밍을 한 락으로 보호한다(임계구역 극소·µs 단위).
+# ⚠️ 캐시 락은 필수다 — 검색 요청이 스레드로 병렬 처리되는데, 락 없이 캐시를 정리하면
+# 순회 도중 dict 가 바뀌어 실제로 예외가 났다. 조회·쓰기·정리를 모두 이 락으로 감싼다.
 _CACHE_LOCK = threading.Lock()
 
 
 def default_judge(query: str, asset_id: str, summary: str, *, client: Any | None = None) -> bool:
-    """자산 1건 개별 판정(측정 프롬프트 그대로·단일 seam·temp=0).
+    """자산 1건이 질의와 관련 있는지 LLM 에 묻는다(단일 seam·temperature 0).
 
     **외부 호출**이 한 번 일어난다(단일 seam·temperature=0).
 
@@ -64,22 +57,21 @@ def default_judge(query: str, asset_id: str, summary: str, *, client: Any | None
         관련 있으면 True. **스키마 위반·빈 응답도 True** — 판정 실패가 자산을 지우는 쪽으로
         작동하면 안 되기 때문이다(드롭은 명시적 false 일 때만).
     """
-    _ = asset_id  # 시그니처 계약(judge_fn(query, asset_id, summary)) — 프롬프트엔 미사용.
+    _ = asset_id  # 주입 seam 시그니처를 맞추려는 자리 — 프롬프트에는 쓰지 않는다.
     from src.llm.client import complete_json
 
     out = complete_json(_JUDGE_PROMPT.format(q=query, s=(summary or "")[:120]), client=client)
     if isinstance(out, dict) and isinstance(out.get("related"), bool):
         return out["related"]
-    return True  # fail-safe: 불명이면 유지
+    return True  # 판정 불명이면 남긴다 — 검증 실패가 결과를 지우면 안 된다
 
 
 def _top_candidates(
     buckets: dict[str, list[dict[str, Any]]], top_n: int
 ) -> list[tuple[str, str]]:
-    """전 버킷 행을 (-similarity, id) 합산 정렬해 **중복 제거 상위 top_n** (asset_id, summary).
+    """모든 버킷의 행을 점수순으로 합쳐 상위 top_n 개를 뽑는다(중복 자산은 한 번만).
 
-    측정 하니스와 동일 형상(flat 합산 상위) — 모달리티 섹션 표시와 무관하게 "융합 점수 기준
-    가장 먼저 보일 자산"을 검증 대상으로 삼는다.
+    모달리티 구분과 무관하게 "점수 기준으로 가장 먼저 보일 자산"을 검증 대상으로 삼는다.
 
     Args:
         buckets: 모달리티별 행 목록.
@@ -116,10 +108,11 @@ def verify_top_assets(
     deadline_s: float = SEARCH_LLM_VERIFY_DEADLINE_S,
     cache_max: int = SEARCH_LLM_VERIFY_CACHE_MAX,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
-    """상위 top_n 자산을 개별 병렬 판정해 무관을 전 버킷에서 제거한다(FR-002·003·004·006).
+    """상위 top_n 자산을 병렬로 판정해 무관한 것을 모든 버킷에서 제거한다.
 
-    - ``query`` = 판정 프롬프트용 **사용자 원문**(의도 정보 보존 — 측정과 동일).
-      ``norm_query`` = 캐시 키(072 정규화 질의 — 표현 변형을 한 키로 흡수).
+    판정에는 **사용자 원문**을, 캐시 키에는 **정규화 질의**를 쓴다 — 판정은 의도가 담긴 원문이
+    정확하고, 캐시는 표현이 조금 달라도 같은 것으로 묶여야 적중률이 오른다.
+
     Args:
         buckets: 모달리티별 행 목록(이 함수는 **드롭만** 하고 순서·점수는 건드리지 않는다).
         query: 판정 프롬프트에 쓸 사용자 원문 질의.
@@ -146,7 +139,8 @@ def verify_top_assets(
         meta["latency_ms"] = int((time.perf_counter() - t0) * 1000)
         return buckets, meta
 
-    # 캐시 조회(락 보호) → 미스만 병렬 판정. 데드라인 내 전부 완료돼야 적용(부분 적용 금지 — 결정성).
+    # 캐시에 없는 것만 병렬로 묻는다. **전부 제때 끝나야** 결과를 반영한다 —
+    # 끝난 것만 적용하면 같은 검색이 실행할 때마다 다른 결과를 낸다.
     verdicts: dict[str, bool] = {}
     misses: list[tuple[str, str]] = []
     with _CACHE_LOCK:
@@ -160,17 +154,17 @@ def verify_top_assets(
             meta["cache_hits"] += 1
 
     if misses:
-        # ⚠️ with-블록 금지(리뷰 🔴 재현): ThreadPoolExecutor.__exit__ 는 shutdown(wait=True) 라
-        # 실행 중 judge 가 끝날 때까지 **폴백 반환 자체가 블록**돼 데드라인이 무력화된다(느린 judge
-        # 3s 주입 시 실반환 3s 실측). 비대기 종료로 즉시 반환한다 — 미완 judge 스레드는 백그라운드
-        # 에서 소진 후 종료(잔여 위험: gemma 무응답 시 SDK 기본 타임아웃까지 워커 점유 — ADR 후속:
-        # llm client 명시 timeout). 결과는 이미 폴백 확정이라 버려진다(부분 적용 없음·결정성 유지).
+        # ⚠️ **``with`` 블록으로 감싸면 안 된다.** ThreadPoolExecutor 의 종료가 실행 중인 작업을
+        # 기다리기 때문에, 마감을 넘겨 폴백하려는 순간에도 느린 판정이 끝날 때까지 반환이 막힌다
+        # (마감 1.5초인데 3초 걸리는 판정에서 실제로 3초가 걸렸다).
+        # 그래서 기다리지 않고 종료한다 — 남은 스레드는 백그라운드에서 끝나고 그 결과는 버려진다
+        # (이미 폴백이 확정됐으므로 부분 반영은 일어나지 않는다).
         ex = _futures.ThreadPoolExecutor(max_workers=len(misses))
         try:
             futs = {ex.submit(jf, query, aid, summ): aid for aid, summ in misses}
             done, not_done = _futures.wait(futs, timeout=deadline_s)
             if not_done or any(f.exception() is not None for f in done):
-                # 전량 폴백(FR-003): 미검증 원 버킷 그대로 — 서비스 무중단·드롭 0.
+                # 하나라도 못 끝냈거나 실패하면 검증 자체를 포기하고 원본을 그대로 돌려준다.
                 meta["fallback"] = True
                 meta["latency_ms"] = int((time.perf_counter() - t0) * 1000)
                 return buckets, meta
@@ -182,11 +176,12 @@ def verify_top_assets(
             return buckets, meta
         finally:
             ex.shutdown(wait=False, cancel_futures=True)
-        # 완주한 판정만 캐시에 동결(폴백 경로는 캐시 미기록 — 불완전 배치 저장 방지). 락 보호(리뷰 🔴).
+        # 끝까지 완주한 판정만 캐시에 남긴다(폴백 경로는 기록하지 않는다 — 불완전한 배치를
+        # 저장하면 다음 요청이 그 값을 재사용해 버린다).
         with _CACHE_LOCK:
             for aid, _summ in misses:
                 vc[(norm_query, aid)] = verdicts[aid]
-            while len(vc) > cache_max:  # FIFO 근사(삽입순 제거·리뷰 지적으로 명칭 정정 — LRU 아님)
+            while len(vc) > cache_max:  # 넣은 순서대로 제거한다(사용 빈도는 보지 않는다)
                 try:
                     vc.pop(next(iter(vc)))
                 except (KeyError, StopIteration, RuntimeError):  # 축출 경합 최후 방어(락 밖 주입 캐시 대비)

@@ -1,4 +1,4 @@
-"""009 US3 — 도메인-불가지 관계 재시도/미해소 큐 영속화 계층.
+"""관계 생성 재시도 큐 — 관계를 못 만든 자산을 추적한다.
 
 cross-asset 관계 생성(``run_relations``)이 자산별로 관계를 못 만든 경우를 추적하는 경량 큐
 ``relation_resolution`` 의 결정 로직(순수)과 upsert/조회(conn-우선)를 모은다.
@@ -21,11 +21,11 @@ from typing import Any
 from psycopg import Connection
 
 # ── 큐 상태 상수 ────────────────────────────────────────────────────────────
-# 닫힌 어휘 정본은 domain/status_vocab.RelationResolutionStatus(v250/v260 CHECK 대응) — 여기 상수는
-# 실사용 문자열이며 값이 정본과 동일해야 한다(테스트가 동기 검증). 신규 상태는 정본에 먼저 추가할 것.
+# 상태 문자열의 정본은 ``domain/status_vocab`` 이고 DB CHECK 도 그 값을 쓴다 — 여기 상수는
+# 실사용 값이라 정본과 **반드시 같아야** 한다(테스트가 동기화를 검증한다).
 STATUS_PENDING = "pending"
 STATUS_RESOLVED = "resolved"
-STATUS_ISOLATED = "isolated"  # 035 #2: 평가 완료·관계 0(고립). 실패 아님 — 재시도·DLQ 없음, #6 재평가 대상.
+STATUS_ISOLATED = "isolated"  # 평가는 끝났고 관계가 0건 — **실패가 아니라서** 재시도하지 않는다.
 STATUS_FAILED = "failed"
 
 
@@ -48,9 +48,9 @@ def decide_resolution_status(
     Returns:
         ``(status, attempts)``. status 는 ``resolved``/``isolated``/``pending``/``failed`` 중 하나.
 
-    규칙(FR-008 + 035 #2, 결정적):
+    규칙(결정적):
       * error None & 엣지≥1 → ('resolved', attempts)           # 관계 생성 성공, attempts 불변
-      * error None & 엣지==0 → ('isolated', attempts)           # 035 #2: 고립 = 평가 완료·관계 0
+      * error None & 엣지==0 → ('isolated', attempts)           # 고립 = 평가 완료·관계 0
       * 예외(error 있음)     → attempts+1, 재시도 대상:
           - attempts+1 < max_attempts → ('pending', attempts+1)   # 일시 실패 재시도
           - attempts+1 >= max_attempts → ('failed', attempts+1)   # 상한 도달 DLQ 승격
@@ -62,7 +62,7 @@ def decide_resolution_status(
     다음 주기에 인프라가 살아있으면 성공할 수 있어 의미가 있다.
     """
     if error is None:
-        # 035 #2(B): 엣지≥1=resolved(관계 있음) / 엣지0=isolated(관계 없음·평가 완료). 둘 다 재시도·DLQ 없음.
+        # 엣지가 있으면 해결, 없으면 고립 — 둘 다 정상 종료라 재시도하지 않는다.
         return (STATUS_RESOLVED if edges_upserted >= 1 else STATUS_ISOLATED), attempts
     # 예외(일시 실패)만 재시도 대상.
     next_attempts = attempts + 1
@@ -114,9 +114,8 @@ def upsert_resolution(
 # run_relations._fetch_registered_asset_ids 와 동일한 베이스(status='registered' + 임베딩 존재)에
 # relation_resolution 를 LEFT JOIN 하여 미해소(pending)와 미시도(큐 행 없음=asset_id IS NULL)만 고른다.
 #   * resolved/failed(DLQ) 자산은 (rr.status='pending' OR rr.asset_id IS NULL) 조건으로 자연 제외.
-#   * 정렬은 attempts ASC, created_at ASC, asset_id ASC — 결정적 tiebreaker(헌법 3조, SC-007).
-#     attempts 가 작은(덜 시도한) 자산 우선, 동률이면 생성순, created_at 동일 μs 까지 같으면
-#     asset_id 로 절대 결정성 보장(동일 타임스탬프 충돌 시 비결정 제거).
+#   * 정렬 기준: 시도 횟수 → 생성 시각 → id.
+#     덜 시도한 자산을 먼저, 동률이면 오래된 순, 시각까지 같으면 id 순 — 순서를 완전히 고정한다.
 _UNRESOLVED_SQL = """
     SELECT a.asset_id
     FROM asset a
