@@ -107,6 +107,7 @@ _EXCLUDE_FILES = frozenset({
 
 
 def _configure_logging() -> None:
+    """스크립트용 로깅을 설정한다(중복 핸들러 방지)."""
     if _LOG.handlers:
         return
     h = logging.StreamHandler()
@@ -215,6 +216,14 @@ def build_drafts(conn: Any, *, min_group: int = 2) -> list[dict[str, Any]]:
 # 1) load_dotenv(.env.{env}, override=False) → 2) init_settings(env) → 3) PostgresUtil() + `with` →
 # 4) build_drafts → 5) golden_ko.draft.json 기록. 읽기 전용(SELECT 만).
 def main() -> int:
+    """코퍼스에서 골든 질의 초안을 만든다(사람이 검수할 출발점).
+
+    파일명에서 주제를 뽑아 질의를 만들고 같은 주제 자산을 정답으로 묶는다 — 초안이므로
+    **그대로 쓰지 말고** 검수 후 확정한다.
+
+    Returns:
+        0=성공.
+    """
     from dotenv import load_dotenv
 
     from src.config.settings import init_settings

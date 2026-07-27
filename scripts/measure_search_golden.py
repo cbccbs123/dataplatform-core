@@ -31,6 +31,11 @@ _MODALITIES = ["text", "audio", "image", "video"]
 
 
 def main() -> int:
+    """골든 질의셋으로 검색 품질을 측정한다(회수율·정확도·지연).
+
+    Returns:
+        0=성공. 기준 스냅샷을 함께 주면 이전 대비 증감까지 보여준다.
+    """
     parser = argparse.ArgumentParser(description="골든 58질의 검색 KPI 하니스(025·029)")
     parser.add_argument("--skip-nomatch", action="store_true", help="production no-match 측정 생략")
     parser.add_argument(
@@ -136,6 +141,7 @@ def main() -> int:
         return {"label": label, "recall": r, "p3": p, "blocked": blocked, "total": len(absent), "leaks": leaks}
 
     def report(m: dict[str, Any], base: dict[str, Any] | None = None) -> None:
+        """측정 결과를 표로 출력한다(``base`` 를 주면 항목마다 증감을 함께 보여준다)."""
         d = ""
         if base is not None:
             d = f" (Δrecall={m['recall']-base['recall']:+.4f}·Δp@3={m['p3']-base['p3']:+.4f})"

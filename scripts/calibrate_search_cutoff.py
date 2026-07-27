@@ -36,6 +36,7 @@ from src.config.search_constants import OS_KNN_SAMPLE_K as _SIGNAL_K  # noqa: E4
 
 
 def _bootstrap() -> None:
+    """설정·로깅을 초기화한다(스크립트 진입 시 1회)."""
     from dotenv import load_dotenv
 
     load_dotenv(dotenv_path=_REPO_ROOT / ".env.dev", override=False)
@@ -45,6 +46,10 @@ def _bootstrap() -> None:
 
 
 def main() -> None:
+    """게이트 임계를 고르기 위한 신호를 뽑는다 — 질의별 최고·배경 유사도와 통과 여부.
+
+    임계는 추측이 아니라 이 표를 보고 정한다(어느 값에서 어떤 질의가 잘리는지).
+    """
     _bootstrap()
     from src.config.settings import get_current_settings
     from src.search.opensearch_search import (
@@ -82,6 +87,7 @@ def main() -> None:
         return [knn_score_to_cosine(h.get("_score")) for h in hits]
 
     def signal_row(query: str) -> dict[str, tuple[float, float, bool]]:
+        """질의 하나의 모달리티별 게이트 신호 — ``{모달리티: (최고, 배경, 통과 여부)}``."""
         vec = embed_query(query, channel=cfg.embed.active_channel)
         out: dict[str, tuple[float, float, bool]] = {}
         for label in MODALITIES:
@@ -126,6 +132,7 @@ def main() -> None:
 
     # ── 3) 비용(멀티모달 게이트 p50/max Δ, ms) ────────────────────────────────────
     def timed(enabled: bool, q: str) -> float:
+        """게이트를 켜고/끄고 같은 질의를 돌려 걸린 시간(초)을 잰다."""
         t0 = time.perf_counter()
         search_assets_os(
             client, q, modalities=MODALITIES, k=20, channel=cfg.embed.active_channel,

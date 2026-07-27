@@ -39,6 +39,8 @@ from psycopg import Connection
 # 부트스트랩: .env.{env} 로드 → init_settings (운영 진입점과 동일 순서)
 # ────────────────────────────────────────────────────────────────────────────
 def _bootstrap(env: str) -> Any:
+    """지정 환경으로 설정을 초기화해 돌려준다."""
+    """지정 환경으로 설정을 초기화해 돌려준다."""
     from dotenv import load_dotenv
 
     from src.config.settings import get_current_settings, init_settings
@@ -199,6 +201,7 @@ def run_sample(*, env: str, limit: int, spread: bool = True) -> dict[str, Any]:
 
 
 def _print_report(rep: dict[str, Any]) -> None:
+    """표본 결과를 사람이 읽을 형태로 출력한다(후보·주제·프롬프트 발췌)."""
     print("=" * 72)
     print(f"[058 T1102] 관계 제안 topic 품질 dry 샘플 (env={rep['env']}·비저장)")
     print("=" * 72)
@@ -224,6 +227,13 @@ def _print_report(rep: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    """실제 관계 후보·프롬프트를 표본으로 뽑아 눈으로 확인한다(진단용).
+
+    운영과 **같은 함수**로 후보를 만들므로, 여기서 이상하면 운영에서도 이상하다.
+
+    Returns:
+        0=성공.
+    """
     p = argparse.ArgumentParser(
         description="관계 제안 topic 품질 dry 샘플러(spec 058 T1102·비저장)"
     )

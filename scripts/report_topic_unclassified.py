@@ -195,6 +195,11 @@ def run_report(*, env: str, threshold: float = _DEFAULT_THRESHOLD) -> dict[str, 
 
 
 def main() -> int:
+    """주제가 미분류로 남은 자산을 집계해 보고한다 — 분류 어휘를 늘릴 근거가 된다.
+
+    Returns:
+        0=성공.
+    """
     p = argparse.ArgumentParser(
         description="미분류 감시 리포트 — 닫힌 분류체계 건강 지표(spec 058 v2 · G13 · 읽기전용)"
     )

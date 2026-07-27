@@ -122,6 +122,7 @@ def build_snapshot(
 
 
 def _settings() -> Any:
+    """설정을 초기화해 돌려준다(측정 스크립트는 운영과 같은 설정을 써야 한다)."""
     from src.config.settings import get_current_settings
     return get_current_settings()
 
@@ -165,6 +166,7 @@ def _bootstrap_candidate_pairs(conn: Connection[Any], *, edge_conf_min: float) -
 
 
 def _asset_fs_path(conn: Connection[Any], ids: set[str]) -> dict[str, str]:
+    """자산 id → 경로 매핑을 한 번에 조회한다(리포트에 사람이 읽을 이름을 붙이려고)."""
     if not ids:
         return {}
     with conn.cursor() as cur:
@@ -211,11 +213,19 @@ def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict
 
 # ── snapshot / measure ───────────────────────────────────────────────────────
 def _make_config(args: Any, cfg: Any) -> dict:
+    """측정 조건을 dict 로 굳힌다 — 스냅샷에 함께 저장돼 "어떤 조건의 수치인지" 남는다."""
     return {"top_k": args.top_k or cfg.relations.top_k, "min_sim": cfg.relations.min_sim,
             "embedding_kind": args.embedding_kind}
 
 
 def cmd_snapshot(db: PostgresUtil, golden: Golden, *, config: dict, out_path: str) -> dict:
+    """골든 소스마다 후보·LLM 제안을 받아 **파일로 동결**한다.
+
+    이후 임계를 바꿔 가며 재측정할 때 LLM 을 다시 부르지 않기 위한 단계다.
+
+    Returns:
+        동결 결과 요약 dict(파일 경로·소스 수·미해소 키 등).
+    """
     snap, mapping, missing = build_snapshot(db, golden, config=config)
     payload = {"snapshot": dump_snapshot(snap), "key_to_id": mapping, "missing_keys": missing}
     with open(out_path, "w", encoding="utf-8") as f:
@@ -281,11 +291,17 @@ def _dump_report(report: dict, path: str) -> None:
 
 
 def _load_golden(path: str) -> Golden:
+    """골든 파일을 읽어 검증까지 마친 객체로 돌려준다(형식 오류면 예외)."""
     with open(path, encoding="utf-8") as f:
         return parse_golden(json.load(f))
 
 
 def main() -> int:
+    """관계 품질 측정 CLI 진입점 — 하위 명령(스냅샷 동결·측정·큐레이션)을 분기한다.
+
+    Returns:
+        0=성공, 그 외=실패(셸 종료 코드).
+    """
     import argparse
     from pathlib import Path
 

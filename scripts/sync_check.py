@@ -31,6 +31,11 @@ REV_RX = re.compile(r"^(v\d{3})_.*\.py$")
 
 
 def _all_revisions() -> list[str]:
+    """마이그레이션 디렉터리에 실재하는 리비전 번호를 모은다.
+
+    Returns:
+        정렬된 리비전 목록(중복 제거). 디렉터리가 없으면 빈 목록.
+    """
     if not VERSIONS_DIR.exists():
         return []
     revs = [
@@ -42,13 +47,24 @@ def _all_revisions() -> list[str]:
 
 
 def _documented_revisions() -> set[str]:
+    """DB 변경이력 문서에 적힌 리비전 번호를 모은다.
+
+    Returns:
+        문서에서 발견한 리비전 집합. 문서가 없으면 빈 집합.
+    """
     if not DB_HISTORY.exists():
         return set()
     return set(re.findall(r"v\d{3}", DB_HISTORY.read_text(encoding="utf-8")))
 
 
 def check_all() -> int:
-    """모든 리비전이 DB이력에 기록됐는지(차단)."""
+    """실재하는 마이그레이션이 모두 문서에 기록됐는지 확인한다.
+
+    스키마를 바꿔 놓고 이력을 안 남기면, 나중에 왜 이 컬럼이 생겼는지 알 길이 없어진다.
+
+    Returns:
+        0=이상 없음, 0이 아니면 차단.
+    """
     revs = _all_revisions()
     if not revs:
         print("마이그레이션 리비전 없음 — 건너뜀")
@@ -69,6 +85,11 @@ def check_all() -> int:
 
 
 def _git_changed(base: str, head: str) -> list[str]:
+    """두 시점 사이에 바뀐 파일 목록을 얻는다.
+
+    Returns:
+        변경된 경로 목록. 비교에 실패하면 빈 목록(검사를 막지 않는다).
+    """
     try:
         out = subprocess.run(
             ["git", "diff", "--name-only", f"{base}...{head}"],
@@ -102,6 +123,11 @@ def check_changed(base: str, head: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """마이그레이션과 DB 변경이력이 어긋나지 않는지 확인한다(CI 게이트).
+
+    Returns:
+        0=이상 없음, 0이 아니면 차단.
+    """
     ap = argparse.ArgumentParser(description="문서 동기화 가드")
     ap.add_argument("--changed", nargs=2, metavar=("BASE", "HEAD"),
                     help="BASE..HEAD diff 기반 경고(비차단)")

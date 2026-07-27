@@ -94,6 +94,10 @@ SKIP_RX = re.compile(r"@(?:unittest\.)?(?:skip|skipIf|expectedFailure)\b")
 
 
 def _counts(text: str) -> tuple[int, int, int]:
+    """테스트 파일 한 개의 (테스트 수, assert 수, skip 데코 수)를 센다.
+
+    이 세 숫자가 줄어들면 테스트가 약해졌다는 신호다 — 그것이 이 게이트가 보는 전부다.
+    """
     return (
         len(TESTDEF_RX.findall(text)),
         len(ASSERT_RX.findall(text)),
@@ -102,6 +106,12 @@ def _counts(text: str) -> tuple[int, int, int]:
 
 
 def _git_show(ref: str, path: str) -> str:
+    """특정 시점의 파일 내용을 읽는다(비교 기준을 만들기 위해).
+
+    Returns:
+        파일 내용. **그 시점에 없던 파일이면 빈 문자열** — 새로 생긴 파일을
+        "0에서 늘어난 것"으로 세게 해서, 신규 추가가 감소로 오해되지 않게 한다.
+    """
     try:
         return subprocess.run(
             ["git", "show", f"{ref}:{path}"],
@@ -112,6 +122,14 @@ def _git_show(ref: str, path: str) -> str:
 
 
 def _list_test_files(ref: str | None) -> list[str]:
+    """테스트 파일 목록을 만든다.
+
+    Args:
+        ref: 비교 기준 시점. ``None`` 이면 **지금 작업 중인 파일들**을 본다.
+
+    Returns:
+        레포 기준 상대 경로 목록.
+    """
     if ref is None:  # 현재 작업트리
         return [
             str(p.relative_to(ROOT))
@@ -125,6 +143,18 @@ def _list_test_files(ref: str | None) -> list[str]:
 
 
 def _aggregate(ref: str | None) -> tuple[int, int, int]:
+    """한 시점의 테스트 총량을 집계한다.
+
+    ⚠️ 기준 시점과 현재의 **파일 목록을 합집합으로** 본다 — 한쪽에만 있는 파일을 빼면
+    삭제가 집계에서 사라져 버려 이 게이트가 잡으려는 것을 놓친다.
+    다른 레포로 이관된 파일은 양쪽에서 함께 제외한다(정당한 이동이라 감소가 아니다).
+
+    Args:
+        ref: 기준 시점. ``None`` 이면 현재.
+
+    Returns:
+        ``(테스트 수, assert 수, skip 수)`` 합계.
+    """
     td = ta = ts = 0
     files = set(_list_test_files(ref)) | set(_list_test_files(None) if ref else [])
     files -= _EXTRACTED_TO_BACKEND | _EXTRACTED_TO_PIPELINE  # 이관 파일은 base·현재 모두에서 제외(거짓 감소 방지)
@@ -139,6 +169,11 @@ def _aggregate(ref: str | None) -> tuple[int, int, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """기준 시점과 현재를 비교해 **테스트가 약해졌으면 실패**한다.
+
+    Returns:
+        0=이상 없음, 0이 아니면 차단(CI 가 이 값으로 판단한다).
+    """
     ap = argparse.ArgumentParser(description="테스트 무결성 가드")
     ap.add_argument("--base", default="main", help="기준 ref(기본 main)")
     args = ap.parse_args(argv)

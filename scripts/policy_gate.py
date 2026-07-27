@@ -62,6 +62,11 @@ def _code_only_lines(source: str) -> list[str]:
 
 
 def iter_py(base: str):
+    """검사 대상 파이썬 파일을 훑는다(테스트·캐시 등 제외).
+
+    Yields:
+        ``(경로, 내용)`` 쌍.
+    """
     for dp, dns, fns in os.walk(base):
         dns[:] = [d for d in dns if d != "__pycache__"]
         for fn in fns:
@@ -70,6 +75,12 @@ def iter_py(base: str):
 
 
 def main() -> int:
+    """프로젝트 하드 규칙 위반을 정적으로 훑는다(외부 LLM 호출·학습 코드·결정성 위반 등).
+
+    Returns:
+        0=차단 없음. 위반이 있으면 0이 아닌 값으로 CI 를 실패시킨다.
+        경고(🟡)는 종료 코드에 영향을 주지 않는다 — 판단이 필요한 항목이라 사람이 본다.
+    """
     if not os.path.isdir(SRC):
         print("src/ 없음 — 건너뜀")
         return 0

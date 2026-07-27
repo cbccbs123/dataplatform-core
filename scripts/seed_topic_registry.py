@@ -341,6 +341,14 @@ def run_subtopic_seed(
 
 
 def main() -> int:
+    """닫힌 주제 분류체계를 DB 에 시드한다.
+
+    **이 시드가 없으면 관계·주제 기능이 통째로 동작하지 않는다**(정본 목록이 비어 있으면
+    정본화가 원본을 그대로 통과시킨다).
+
+    Returns:
+        0=성공.
+    """
     from dotenv import load_dotenv
 
     from src.config.settings import init_settings

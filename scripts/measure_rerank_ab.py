@@ -25,6 +25,7 @@ _MODALITIES = ["text", "audio", "image", "video"]
 
 
 def _union_rank(buckets) -> list[str]:
+    """모달리티별 버킷을 하나의 순위 목록으로 합친다(점수 기준·중복 제거)."""
     rows = sorted(
         (r for b in buckets.values() for r in b),
         key=lambda r: (-float(r.get("similarity") or 0.0), str(r.get("id"))),
@@ -58,6 +59,11 @@ def _rrtext_map(client, index: str, ids: list[str]) -> dict[str, str]:
 
 
 def main() -> int:
+    """리랭커를 켠 경우와 끈 경우를 같은 질의로 비교한다(A/B).
+
+    Returns:
+        0=성공. 두 경우의 순위·지연을 표로 출력한다.
+    """
     parser = argparse.ArgumentParser(description="028/029 reranker A/B/C 측정")
     parser.add_argument("--sweep", action="store_true", help="τ 분포 스윕만(채점 분포 출력·_rrtext 동치)")
     parser.add_argument("--tau", type=float, default=None)
@@ -118,6 +124,7 @@ def main() -> int:
                         nonrel_scores.append(sc)
             print(f"[sweep] {q['id']} 완료", file=sys.stderr)
         def stats(xs):
+            """숫자 목록의 요약값(평균·중앙·p95 등) — 지연 비교용."""
             if not xs:
                 return "(없음)"
             xs = sorted(xs)

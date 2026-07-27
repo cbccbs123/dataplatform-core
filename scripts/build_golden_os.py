@@ -53,6 +53,7 @@ GROUP BY t.asset_id ORDER BY sim DESC LIMIT 8"""
 
 
 def main() -> None:
+    """검색 평가용 골든셋을 만들어 파일로 저장한다."""
     from dotenv import load_dotenv
 
     load_dotenv(_REPO_ROOT / ".env.dev", override=False)

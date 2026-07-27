@@ -44,11 +44,13 @@ def _next_version() -> int:
 
 
 def _slug(feature: str) -> str:
+    """기능 이름을 파일명에 쓸 수 있는 형태로 바꾼다(공백·특수문자 정리)."""
     s = SAFE_RX.sub("_", feature.strip()).strip("_")
     return s or "untitled"
 
 
 def _list_snapshots() -> list[Path]:
+    """이미 떠 둔 스냅샷 파일 목록을 최신순으로 돌려준다."""
     if not HIST_DIR.exists():
         return []
     return sorted(HIST_DIR.glob("v*_*.md"))
@@ -79,6 +81,11 @@ def _update_index(snapshot: Path, feature: str, note: str, source: Path) -> None
 
 
 def main(argv: list[str] | None = None) -> int:
+    """설계 문서의 현재 상태를 스냅샷으로 떠 이력 디렉터리에 남긴다.
+
+    Returns:
+        0=성공.
+    """
     ap = argparse.ArgumentParser(description="설계서 버전 스냅샷 생성")
     ap.add_argument("feature", nargs="?", help="이번 스냅샷의 기능명(파일명·인덱스에 사용)")
     ap.add_argument("--source", default=str(DEFAULT_SOURCE), help="스냅샷할 원본(기본: docs/설계서.md)")
