@@ -67,6 +67,13 @@ def _embed_label(raw_ko: str) -> list[float]:
     호출해 재사용한다 — 임베딩 로직을 복제하지 않는다(037 이후 적재·검색 공유부). ``channel`` 을 넘겨
     백엔드까지 활성 채널을 따른다(st_api면 API·그외 로컬·062). 무거운 임베더 의존은 함수 안에서 지연
     import 해 모듈 기동을 가볍게 유지하고, 단위 테스트가 이 함수를 patch 로 대체할 수 있게 한다.
+
+    Args:
+        raw_ko: 임베딩할 라벨 문자열.
+
+    Returns:
+        1536차원 실수 리스트. 빈 문자열이면 0-노름 벡터가 나올 수 있으므로 저장 전에
+        ``_l2_norm`` 으로 걸러야 한다(``register_topic`` 이 그 역할을 한다).
     """
     from src.config.settings import active_embed_channel, model_for_channel
     from src.search.query_embed import embed_query_for_media_search
@@ -78,7 +85,14 @@ def _embed_label(raw_ko: str) -> list[float]:
 
 
 def _l2_norm(vec: list[float]) -> float:
-    """벡터 L2 노름(0-노름 판정용). numpy 의존 없이 순수 계산."""
+    """벡터의 L2 노름(길이)을 구한다 — 0-노름 판정용. numpy 없이 순수 계산.
+
+    Args:
+        vec: 임베딩 벡터.
+
+    Returns:
+        노름 값. **0.0 이면 내용이 없는 벡터**라 코사인 유사도가 NaN 이 되어 kNN 에 쓸 수 없다.
+    """
     return sum(x * x for x in vec) ** 0.5
 
 
@@ -86,8 +100,17 @@ def lookup_alias(conn, raw_ko: str, *, parent_topic: str | None = None) -> str |
     """``topic_alias`` 정확일치 canonical_ko(캐시 룩업). 없으면 None.
 
     **부모 스코프(v297)**: ``parent_topic`` None=topic 층(parent NULL) / 값=subtopic 층(부모 스코프).
-    v297 이후 raw_ko 는 층별 부분 유니크라 스코프를 함께 조여야 subtopic 오히트를 막는다(동음이의 보존).
-    조회행 계약(graph_query 관례): canonical_ko 는 ``str()`` 로 강제.
+    raw_ko 는 층별로만 유일하므로 스코프를 함께 조여야 subtopic 오히트를 막는다(동음이의 보존 —
+    교통>사고와 사회>사고를 섞지 않는다).
+
+    Args:
+        conn: DB 커넥션.
+        raw_ko: 찾을 원본 라벨.
+        parent_topic: ``None`` 이면 **대주제 층**(부모 없음), 값이 있으면 **그 부모 아래 세부주제
+            층**만 본다. 같은 raw_ko 라도 층이 다르면 다른 행이다.
+
+    Returns:
+        동결된 정본 라벨. 캐시에 없으면 ``None``(호출자가 판정 경로로 넘어간다).
     """
     with conn.cursor(row_factory=dict_row) as cur:
         if parent_topic is None:
@@ -108,7 +131,19 @@ def lookup_alias(conn, raw_ko: str, *, parent_topic: str | None = None) -> str |
 
 
 def _lookup_topic_en(conn, topic_ko: str) -> str | None:
-    """정본 ``topic_ko`` 의 registry ``topic_en``(정본 영문·FR-204). 없으면 None."""
+    """정본 ``topic_ko`` 에 대응하는 registry ``topic_en``(정본 영문)을 조회한다.
+
+    ⚠️ **이름이 밑줄로 시작하지만 레포 밖 소비자가 있다** — 파이프 레포
+    ``processing/classify/asset_topic.py`` 가 이 함수를 import 해 자산 주제의 영문 정본을 채운다
+    (중복 구현을 막으려고 코어 정본을 공유하는 구조). 코어만 grep 하면 미사용으로 보이므로
+    **죽은 코드로 오인해 삭제하지 말 것**.
+
+    Args:
+        topic_ko: 정본 한글 주제.
+
+    Returns:
+        정본 영문. 행이 없거나 ``topic_en`` 이 NULL 이면 ``None``.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT topic_en FROM topic_registry WHERE topic_ko = %s",
@@ -129,6 +164,13 @@ def _fetch_canonical_topics(conn) -> dict[str, str | None]:
     - **결정적 정렬**: ``ORDER BY topic_ko`` — 분류 프롬프트에 넣는 후보 목록 순서를 재실행마다 고정
       (헌법 3조 재현성). dict 는 삽입 순서를 보존하므로 호출부가 그대로 후보 순서로 쓴다.
     - 레지스트리 미시드면 ``{}``(→ canonicalize_topic 은 분류하지 않고 원본 유지·동작 보존).
+
+    Args:
+        conn: DB 커넥션.
+
+    Returns:
+        ``{topic_ko: topic_en}``. ``topic_en`` 은 NULL 일 수 있어 값이 ``None`` 인 항목이 나온다.
+        시드가 안 됐으면 빈 dict.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -156,7 +198,15 @@ def knn_topic_candidates(
     - ``<=>`` 는 pgvector 코사인 거리(0=동일). 결정적 정렬 = **거리 asc → topic_ko asc**
       (동거리 타이브레이커가 없으면 PG 실행계획에 따라 순서가 흔들려 헌법 3조 재현성을 깬다).
     - 034 교훈: NULL/0-노름 registry 임베딩은 코사인이 NaN 이라 후보를 오염시키므로 제외.
-    - 후보가 비면 ``[]``(→ judge 는 LLM 없이 NEW). topic_ko 는 ``str()`` 로 강제.
+    Args:
+        conn: DB 커넥션.
+        raw_ko: 후보를 찾을 원본 라벨(이 함수가 임베딩한다).
+        k: 가져올 최대 후보 수. 프롬프트에 실릴 양이라 크게 잡으면 LLM 판정이 흔들린다.
+        parent_topic: ``None`` 이면 대주제 층, 값이 있으면 **그 부모 아래**에서만 찾는다.
+
+    Returns:
+        가까운 순서의 정본 라벨 목록. 후보가 없으면 ``[]`` — 이때 judge 는 LLM 을 부르지 않고
+        곧바로 NEW 로 처리한다.
     """
     vec = _embed_label(raw_ko)
     scope_sql = "parent_topic IS NULL" if parent_topic is None else "parent_topic = %s"
@@ -196,6 +246,19 @@ def register_topic(
       지정해 인퍼런스한다 — v297 이후 topic_ko 에 단일 유니크가 없으므로 술어가 필수다.
     - ``topic_en`` 은 None 허용(subtopic 층은 정본 en 을 추적하지 않음 → NULL 저장·후속 여지).
     - topic_id 는 앱 발급 UUIDv7(런타임 테이블 관례). 벡터는 ``::vector(1536)`` 캐스트.
+
+    **DB에 쓴다**(이미 있으면 아무 것도 하지 않는 멱등 INSERT). 라벨 임베딩을 위해 임베더를 호출한다.
+
+    Args:
+        conn: DB 커넥션.
+        topic_ko: 등록할 한글 라벨(임베딩 대상이기도 하다).
+        topic_en: 영문 라벨. ``None`` 허용 — 세부주제 층은 영문 정본을 추적하지 않아 NULL 로 둔다.
+        source: 출처 표기. ``taxonomy``(시드 정본) / ``auto``(실행 중 자동 등록) 구분에 쓴다.
+        parent_topic: ``None`` 이면 대주제 층, 값이 있으면 그 부모 아래 세부주제로 등록한다.
+
+    Raises:
+        ValueError: 라벨 임베딩이 0-노름일 때. 저장하면 그 행은 kNN 에서 영영 안 잡혀 같은 뜻의
+            라벨이 계속 새로 생긴다 — 그래서 조용히 넘기지 않고 즉시 막는다.
     """
     vec = _embed_label(topic_ko)
     if _l2_norm(vec) <= 0.0:
@@ -240,6 +303,16 @@ def _freeze_alias(
     **부모 스코프(v297)**: ``parent_topic`` None=topic 층 / 값=subtopic 층. ON CONFLICT 는 층별
     **부분 유니크 인덱스**를 인덱스 술어(WHERE)로 지정해 인퍼런스한다(raw_ko 단일 PK 는 v297 에서
     드롭됐으므로 술어 필수). 같은 스코프의 raw 재판정 없이 최초 결정을 유지(재실행 결정적).
+
+    **DB에 쓴다**(이미 있으면 무시). 이 동결이 있어야 같은 라벨을 다시 만나도 LLM 을 부르지 않는다.
+
+    Args:
+        conn: DB 커넥션.
+        raw_ko: 원본(자유 기입) 라벨.
+        canonical_ko: 이 라벨이 수렴한 정본.
+        decided_by: 누가 정했는지 — ``exact``(정확 일치)·``classify``(분류 LLM)·``llm``(동의어 판정).
+        parent_topic: ``None`` 이면 대주제 층, 값이 있으면 그 부모 스코프로 동결한다.
+            **``register_topic`` 과 같은 부모로** 불러야 한다(스코프 불변식).
     """
     with conn.cursor() as cur:
         if parent_topic is None:
@@ -300,6 +373,16 @@ def classify_topic(
     - ``src.llm.client.complete_json`` 단일 seam·temp=0·``client=`` 주입. 후보=닫힌 목록 전체를 주입.
     - LLM 이 목록 밖 라벨을 지어내거나 응답이 누락되면 안전하게 ``"미분류"``(강제·오배정 방지·결정성).
     - 후보가 비면(레지스트리 미시드) 호출부(``canonicalize_topic``)가 분류 자체를 건너뛴다.
+
+    Args:
+        raw_ko: 분류할 한글 라벨.
+        raw_en: 영문 라벨(보조 힌트). ``None`` 이면 빈 문자열로 프롬프트에 들어간다.
+        categories: 고를 수 있는 **닫힌 범주 목록**. 이 목록 밖 응답은 전부 버린다.
+        client: **테스트용 LLM 클라이언트 주입 seam** — 미주입이면 운영 온프레미스 LLM 을 쓴다.
+
+    Returns:
+        고른 범주 문자열. LLM 이 목록 밖 값을 지어내거나 응답이 비면 ``"미분류"``
+        (억지 배정 대신 파킹 — 나중에 범주를 늘릴 근거로 로그가 남는다).
     """
     from src.llm.client import complete_json
 
@@ -357,6 +440,14 @@ def judge_topic(raw_ko: str, candidates: list[str], *, client=None) -> str | Non
     - 후보가 비면 **LLM 호출 없이** None(NEW). 레지스트리 포화 전(초기)엔 호출 급감.
     - ``src.llm.client.complete_json`` 단일 seam·temp=0·``client=`` 주입. 후보 K개만 프롬프트에.
     - LLM 이 후보 밖 라벨을 지어내면 안전하게 None(오병합 방지·결정성).
+
+    Args:
+        raw_ko: 판정할 원본 라벨.
+        candidates: 같은 스코프의 정본 후보들. **비면 LLM 을 부르지 않는다**.
+        client: **테스트용 LLM 클라이언트 주입 seam** — 미주입이면 운영 LLM.
+
+    Returns:
+        동의어로 판정된 정본 라벨, 또는 ``None``(=NEW·새 라벨로 등록해야 함).
     """
     if not candidates:
         return None
@@ -381,6 +472,18 @@ def canonicalize_topic(
     4. alias 캐시(parent NULL) 히트 → 정본 + registry en(``decided_by="exact"``·LLM 0).
     5. 미스 → ``classify_topic`` LLM 분류(후보=닫힌 목록 전체·temp=0): 목록 중 하나로 분류, 애매하면
        ``미분류``(+제안 라벨 로그) → alias 동결(``decided_by="classify"``). **신규 topic 등록 없음**(고정 층).
+
+    **DB에 쓸 수 있다** — 5번 경로에서 판정 결과를 alias 로 동결한다(1~4번은 읽기만).
+
+    Args:
+        conn: DB 커넥션.
+        raw_ko: 정본화할 자유 기입 라벨.
+        raw_en: 영문 라벨(분류 힌트·폴백값). ``None`` 이면 ``general`` 로 채운다.
+        client: **테스트용 LLM 클라이언트 주입 seam** — 미주입이면 운영 LLM.
+
+    Returns:
+        ``{canonical_ko, canonical_en, decided_by}``. ``decided_by`` 는 ``passthrough``(빈 입력·
+        레지스트리 미시드) · ``exact``(정확 일치·캐시 히트·LLM 0) · ``classify``(LLM 분류) 중 하나다.
     """
     # 1) 빈/None → passthrough(정규화 안 함·하위호환)
     if not raw_ko or not str(raw_ko).strip():
@@ -435,9 +538,19 @@ def canonicalize_subtopic(
       4. NEW → ``register_topic``(부모 스코프·라벨 임베딩)·매칭=그 정본 → **동일 부모 스코프로 alias 동결**.
          (스코프 불변식·plan: v297 FK 완화를 앱 불변식으로 보증 — register→freeze 를 같은 parent 로.)
 
-    파라미터
-        ``topic_ko_canonical``: 이미 정본화된 상위 topic(부모 스코프 키·범주명 비움 기준).
-        ``client``: 동의어 judge 에 주입(캐시 미스에만 호출). 캐시 히트·조기 반환 경로는 LLM 0(결정성).
+    **DB에 쓸 수 있다** — 3·4번 경로에서 registry 등록·alias 동결이 일어난다(0~1번은 읽기만).
+
+    Args:
+        conn: DB 커넥션.
+        topic_ko_canonical: **이미 정본화된** 상위 주제. 부모 스코프 키이자, 세부주제가 부모 이름을
+            그대로 반복할 때 비우는 기준이 된다.
+        raw_sub: 자유 기입 세부주제. ``None``·빈 값·모달리티 단어(사진·영상 등)·부모와 동일하면
+            **registry 를 보기도 전에** ``None`` 을 돌려준다.
+        client: **테스트용 LLM 클라이언트 주입 seam** — 미주입이면 운영 LLM. 캐시 히트·조기 반환
+            경로에서는 애초에 호출되지 않는다.
+
+    Returns:
+        정본 세부주제 라벨, 또는 ``None``(세부주제 없음 — 화면에서는 '기타'로 표시된다).
     """
     # 0a) None/빈/공백만 → 하위주제 없음
     if raw_sub is None or not str(raw_sub).strip():
