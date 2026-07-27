@@ -18,7 +18,14 @@ def isolated_candidates(
 
     순수 집합 차 — `candidate_ids` 의 **의미는 호출자가 정한다**. 051 curate 는 부트스트랩 쌍
     (고conf graph_edge + path_signal)에 등장한 자산을 candidate 로 보아 "관계 0 ∧ path 0" 을
-    고립으로 정의(035 isolation 의미·관계 단계). 정렬 반환 — 결정적(헌법 3조). 학습 0.
+    고립으로 정의(035 isolation 의미·관계 단계). 학습 0.
+
+    Args:
+        registered_ids: 측정 모집단(등록된 전체 자산 id).
+        candidate_ids: 후보로 한 번이라도 등장한 자산 id. **무엇을 후보로 볼지는 호출자가 정한다.**
+
+    Returns:
+        고립 자산 id 리스트(정렬 — 결정적).
     """
     return sorted(registered_ids - candidate_ids)
 
@@ -30,7 +37,13 @@ def candidate_recall(
     """골든 쌍 중 후보 단계가 파트너를 회수한 비율(FR-003).
 
     쌍 (a,b)는 `b∈cand[a]` 또는 `a∈cand[b]`면 회수(대칭 kind 양방향 인정).
-    빈 골든은 0.0.
+
+    Args:
+        pairs: 정답 자산 쌍 목록.
+        source_candidates: ``{소스 자산: 후보 자산 집합}``. 키가 없으면 후보 없음으로 본다.
+
+    Returns:
+        회수 비율 0.0~1.0. **골든이 비면 0.0**(1.0 아님 — 측정 불가를 만점으로 오해하지 않도록).
     """
     if not pairs:
         return 0.0
@@ -42,7 +55,15 @@ def candidate_recall(
 
 
 def _accepted_edges(proposed: dict[str, list[ProposedEdge]], confidence_min: float):
-    """confidence_min 이상(accepted)인 (소스, 엣지) 쌍만 산출한다."""
+    """confidence_min 이상(accepted)인 ``(소스, 엣지)`` 쌍만 골라 흘려보낸다(제너레이터).
+
+    Args:
+        proposed: ``{소스 자산: 제안 엣지 목록}``.
+        confidence_min: 신뢰도 하한(**이상**이면 통과).
+
+    Yields:
+        ``(소스 자산 id, ProposedEdge)``.
+    """
     for src, edges in proposed.items():
         for e in edges:
             if e.confidence >= confidence_min:
@@ -62,6 +83,16 @@ def relation_metrics(
     - recall: 골든 쌍 중 accepted 엣지가 덮은 비율(대칭 양방향 인정).
     - kind_accuracy: 일치한 쌍 중 제안 kind가 정답과 같은 비율.
     - isolation_accuracy: 고립 자산 중 accepted 엣지 0인 비율(감사 #2 진단).
+
+    Args:
+        triples: 정답 ``(a, b, kind)`` 목록. 쌍은 **무순**으로 비교한다.
+        isolated: 관계가 없어야 하는 자산 집합.
+        proposed: ``{소스 자산: 제안 엣지 목록}``(측정 대상).
+        confidence_min: 이 값 **이상**인 제안만 채택(accepted)으로 본다.
+
+    Returns:
+        precision·recall·kind_accuracy·isolation_accuracy + 모수(``n_pairs``·``n_isolated``·
+        ``n_accepted``) dict. 분모가 0인 지표는 0.0 이다.
     """
     golden_pairs = {frozenset((a, b)): kind for a, b, kind in triples}
     accepted = list(_accepted_edges(proposed, confidence_min))
@@ -97,8 +128,16 @@ def min_sim_sweep(
     """min_sim(후보 코사인 유사도) 하한 스윕 — 각 하한에서 recall·통과 후보 수(033 FR-004·N1).
 
     각 하한 t 에서 `emb_score >= t` 후보만 남기고(소스별 (id, emb_score) 리스트), 남은 후보를
-    `dict[str, set[str]]` 로 접어 `candidate_recall`(대칭 인정·DRY) 로 recall 을 잰다. 통과 후보 수는
-    전 소스 합. 입력 결정적이면 LLM/DB 0·결정적(헌법 3조).
+    `dict[str, set[str]]` 로 접어 `candidate_recall`(대칭 인정·DRY) 로 recall 을 잰다.
+
+    Args:
+        golden_pairs: 정답 자산 쌍 목록.
+        candidates_by_source: ``{소스: [(후보 id, emb_score), ...]}``.
+        thresholds: 시험할 하한 값들(0~1). 순서대로 결과 행이 나온다.
+
+    Returns:
+        ``[{min_sim, recall, candidates}]`` — 하한을 올릴수록 recall 은 떨어지고 후보 수는 준다.
+        이 곡선에서 운영 하한을 고른다.
     """
     rows = []
     for t in thresholds:
@@ -127,7 +166,15 @@ def auto_approve_sweep(
 
     자동승인 집합 = `confidence >= conf_min AND emb_score >= emb_min` 인 제안 엣지.
     precision = 골든 무순 쌍과 일치한 승인 수 / 전체 승인 수(승인 0 이면 0.0).
-    approved = 승인 수. 입력 결정적이면 LLM/DB 0·결정적.
+
+    Args:
+        golden_pairs: 정답 자산 쌍 목록.
+        proposed: ``{소스: 제안 엣지 목록}``.
+        conf_thresholds: 시험할 LLM 신뢰도 하한 값들.
+        emb_thresholds: 시험할 임베딩 유사도 하한 값들.
+
+    Returns:
+        격자점마다 ``{conf_min, emb_min, precision, approved}`` 한 행. 행 수는 두 목록 길이의 곱.
     """
     golden_keys = {frozenset((a, b)) for a, b in golden_pairs}
     rows = []
@@ -158,7 +205,16 @@ def threshold_sweep(
 ) -> list[dict]:
     """각 임계에서 `relation_metrics`를 재사용해 P/R 곡선을 반환한다(FR-006·DRY).
 
-    동결 스냅샷 입력이면 LLM 재호출 0·결정적(SC-002).
+    동결 스냅샷을 입력하면 LLM 을 다시 부르지 않고도 임계만 바꿔 재측정할 수 있다.
+
+    Args:
+        triples: 정답 ``(a, b, kind)`` 목록.
+        isolated: 관계가 없어야 하는 자산 집합.
+        proposed: ``{소스: 제안 엣지 목록}``.
+        thresholds: 시험할 신뢰도 하한 값들.
+
+    Returns:
+        임계마다 ``{confidence_min, ...relation_metrics 결과}`` 한 행.
     """
     return [
         {"confidence_min": t,

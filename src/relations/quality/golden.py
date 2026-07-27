@@ -39,9 +39,17 @@ class Golden:
 
 
 def parse_golden(data: dict) -> Golden:
-    """골든 dict를 검증해 `Golden`으로 변환한다.
+    """골든 dict 를 검증해 ``Golden`` 으로 변환한다(순수 함수).
 
-    결함(버전 불일치·미지원 key_type·필드 누락·자기-쌍)은 `ValueError`.
+    Args:
+        data: 골든 픽스처 JSON 을 읽은 dict. ``version``·``key_type``·``pairs``·``isolated`` 를 본다.
+
+    Returns:
+        불변 ``Golden`` 객체.
+
+    Raises:
+        ValueError: 버전 불일치 · 미지원 ``key_type`` · 쌍의 필드 누락 · 자기 자신과의 쌍.
+            **관대하게 넘기지 않는다** — 잘못된 골든으로 잰 수치는 틀린 결론을 낳기 때문이다.
     """
     if data.get("version") != 1:
         raise ValueError(f"golden version must be 1: {data.get('version')!r}")
@@ -66,7 +74,10 @@ def resolve_asset_keys(
     """골든 키(fs_path|content_hash)를 현재 ``asset_id``로 해소한다 (T006·DB·읽기 전용).
 
     ``key_type=fs_path`` → ``asset.fs_path``, ``content_hash`` → ``asset.file_hash`` 와 매칭한다.
-    트랜잭션 경계는 호출자가 제어한다(conn-우선 관례). graph 무기록(측정 전용·SC-004).
+    **조회 전용**(그래프에 아무것도 쓰지 않는다 — 측정 전용). 트랜잭션 경계는 호출자가 제어한다.
+
+    Args:
+        golden: ``parse_golden`` 을 통과한 골든셋. ``key_type`` 이 어느 컬럼과 맞출지 결정한다.
 
     Returns:
         ``(mapping, missing)`` — ``mapping``=키→asset_id, ``missing``=해소 안 된 키(정렬·결정적).

@@ -41,7 +41,14 @@ class Snapshot:
 
 
 def dump_snapshot(s: Snapshot) -> dict:
-    """스냅샷을 JSON 직렬화 가능한 dict로 변환한다."""
+    """스냅샷을 JSON 직렬화 가능한 dict 로 변환한다(순수 함수).
+
+    Args:
+        s: 동결할 스냅샷.
+
+    Returns:
+        ``{version, config, sources}`` dict. ``candidates`` 는 ``[id, score]`` 2원소 배열로 쓴다.
+    """
     return {
         "version": 1,
         "config": s.config,
@@ -59,7 +66,20 @@ def dump_snapshot(s: Snapshot) -> dict:
 
 
 def load_snapshot(d: dict) -> Snapshot:
-    """dict를 검증해 `Snapshot`으로 복원한다. 버전 불일치는 `ValueError`."""
+    """dict 를 검증해 ``Snapshot`` 으로 복원한다(순수 함수).
+
+    구 형식 스냅샷도 읽는다 — ``candidates`` 가 문자열만 있으면 ``emb_score=0.0`` 으로,
+    ``emb_score`` 키가 없으면 0.0 으로 채운다(옛 스냅샷으로도 재측정이 가능하도록).
+
+    Args:
+        d: ``dump_snapshot`` 이 만든 dict(또는 그 구 버전).
+
+    Returns:
+        복원된 ``Snapshot``.
+
+    Raises:
+        ValueError: ``version`` 이 1이 아닐 때.
+    """
     if d.get("version") != 1:
         raise ValueError(f"snapshot version must be 1: {d.get('version')!r}")
     sources = {

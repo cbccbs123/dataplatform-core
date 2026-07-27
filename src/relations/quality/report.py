@@ -35,7 +35,18 @@ def build_report(
       미해소 고립 키는 제외하고 `unresolved_keys`로 보고(결정적·정렬).
     - `candidate_recall`(스냅샷 candidates)·`relation_metrics`(confidence_min)·
       `threshold_sweep`(thresholds)를 호출해 결과를 한 리포트에 담는다(SC-001).
-    반환 dict는 JSON 직렬화 가능(리포트 출력용).
+
+    Args:
+        golden: 정답 관계셋(키 공간).
+        snapshot: 동결된 후보·제안(asset_id 공간).
+        key_to_id: 골든 키 → ``asset_id`` 매핑. **여기 없는 키는 측정에서 빠지고**
+            ``unresolved_keys`` 로 보고된다(조용히 0점 처리하지 않는다).
+        confidence_min: 본 측정에 쓸 신뢰도 하한.
+        thresholds: 스윕할 임계 목록. ``None`` 이면 기본 격자(0.0~0.95)를 쓴다.
+
+    Returns:
+        JSON 직렬화 가능한 리포트 dict — ``config``·``n_golden_pairs``·``unresolved_keys``·
+        ``candidate_recall``·``relation_metrics``·``sweep``.
     """
     thresholds = list(_DEFAULT_THRESHOLDS if thresholds is None else thresholds)
 
@@ -43,6 +54,7 @@ def build_report(
     unresolved: set[str] = set()
 
     def _resolve(key: str) -> str | None:
+        """골든 키를 asset_id 로 바꾸고, 실패하면 ``unresolved`` 에 모아 둔다(부수효과 있음)."""
         aid = key_to_id.get(key)
         if aid is None:
             unresolved.add(key)

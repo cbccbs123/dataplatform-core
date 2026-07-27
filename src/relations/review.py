@@ -67,8 +67,28 @@ def _build_review_where(
 
     ``e.status = %s`` 는 항상 붙는다. 그 밖의 검색·필터·기간
     조건은 인자가 주어졌을 때만 append 한다 → 미지정 시 현행과 완전 동일(하위 호환·SC-011).
-    (2026-07-23: 도메인 제외 전면 제거 — 의료 특수 트랙 미운용. 의료 복귀 시 재도입.)
     모든 값은 %s 바인딩(인젝션 0). ``date_col`` 만 f-string 조립이라 화이트리스트로 검증한다.
+
+    Args:
+        status: 엣지 상태(항상 조건에 붙는 유일한 필수 값).
+        q: 통합 검색어. 주면 8개 필드에 대소문자 무시 부분 일치(OR)로 매칭한다.
+            ``%``·``_`` 는 리터럴로 이스케이프된다.
+        asset_id: 양끝 자산 중 하나와 정확 일치. 비-UUID 문자열이어도 오류 없이 0건이 된다.
+        kind_code: 관계 종류 코드 정확 일치. 존재하지 않는 값도 검증 없이 0건으로 흘린다.
+        modality: 양끝 자산 중 하나의 모달리티 일치.
+        min_confidence: 신뢰도 하한(이상). ``None`` 이면 하한 없음.
+        max_confidence: 신뢰도 상한(이하). ``None`` 이면 상한 없음.
+        reviewed_by: 검토자 정확 일치.
+        since: 기간 시작(**포함**). ``date_col`` 기준.
+        until: 기간 끝(**미포함** — 하루 단위 조회에서 경계 중복을 피하려는 의도).
+        date_col: 기간 필터가 볼 컬럼. ``created_at``(생성 시각) 또는 ``reviewed_at``(검토 시각).
+
+    Returns:
+        ``("WHERE ...", params)``. COUNT 와 목록 조회가 **같은 값을 공유**해야 total 이 맞는다.
+
+    Raises:
+        ValueError: ``date_col`` 이 화이트리스트 밖일 때(컬럼명은 바인딩할 수 없어 f-string 으로
+            조립하므로, 여기서 막지 않으면 인젝션 통로가 된다).
     """
     if date_col not in _REVIEW_DATE_COLS:
         raise ValueError(f"date_col 은 {_REVIEW_DATE_COLS} 만 허용: {date_col!r}")
@@ -147,12 +167,31 @@ def list_edges_for_review(
     한다(CR-11/CR-18 최소 해소). ``file_name`` 은 asset 에 컬럼이 없어 ``fs_path`` basename
     으로 파생한다(파일명 파생 관례 — 구 ``src/portal/download.py``, 077로 백엔드 레포 이관).
 
-    선택 인자(``q``·``asset_id``·``kind_code``·``modality``·``min/max_confidence``·
-    ``reviewed_by``·``since``/``until``+``date_col``)는 주어진 것만 WHERE 에 AND 조합한다.
-    **전부 생략하면 현행과 완전 동일**(하위 호환·SC-011). status/필터 값 검증은 호출자(포탈
-    API) 책임이고, ``date_col`` 만 함수가 화이트리스트 검증한다(f-string 조립·인젝션 방지).
-    total 은 같은 WHERE·params 로 COUNT 해 페이징 UI(proposed 4.7k 큐·필터 후 total 일치·
-    FR-705)를 받친다. 반환 ``{rows, total, status, limit, offset}``.
+    조회 전용(쓰기 없음). 선택 인자는 **주어진 것만** WHERE 에 AND 로 붙으므로, 전부 생략하면
+    status 필터만 걸린 기본 목록이 된다. 필터 값 검증은 호출자(포탈 API) 책임이고, ``date_col``
+    만 이 함수가 검증한다.
+
+    Args:
+        status: 조회할 엣지 상태. ``proposed``(검토 큐)·``active``(승인)·``rejected``(반려).
+        limit: 페이지 크기.
+        offset: 건너뛸 행 수.
+        q: 통합 검색어(엣지 id·양끝 자산 id·경로·사유·주제에 부분 일치).
+        asset_id: 이 자산이 양끝 중 하나인 엣지만.
+        kind_code: 관계 종류 필터.
+        modality: 양끝 중 하나의 모달리티 필터.
+        min_confidence: 신뢰도 하한(이상).
+        max_confidence: 신뢰도 상한(이하).
+        reviewed_by: 검토자 필터.
+        since: 기간 시작(포함).
+        until: 기간 끝(미포함).
+        date_col: 기간 기준 컬럼(``created_at``|``reviewed_at``).
+
+    Returns:
+        ``{rows, total, status, limit, offset}``. ``total`` 은 **같은 필터**로 센 전체 건수라
+        페이징 UI 의 쪽수와 목록이 어긋나지 않는다. ``rows`` 는 신뢰도 내림차순(동점은 edge_id).
+
+    Raises:
+        ValueError: ``date_col`` 이 허용 목록 밖일 때(``_build_review_where`` 가 던진다).
     """
     where, params = _build_review_where(
         status=status, q=q, asset_id=asset_id, kind_code=kind_code, modality=modality,
@@ -191,6 +230,12 @@ def _review_row(r: dict[str, Any]) -> dict[str, Any]:
     비교·JSON 직렬화 일관성을 보장한다(미변환 시 ``UUID(...) == "..."`` 가 False 가 되는 함정).
     ``reviewed_by`` 는 NULL(미결정 엣지) 가능이라 str화하지 않는다(None → 'None' 방지).
     ``created_at`` 은 datetime 그대로 둔다(NOT NULL·FastAPI 가 ISO 8601 로 직렬화·FR-761).
+
+    Args:
+        r: ``list_edges_for_review`` 의 조회 행(dict_row).
+
+    Returns:
+        UI 용 dict. ``src``/``dst`` 각각 ``{asset_id, file_name, modality}`` 를 갖는다.
     """
     return {
         "edge_id": str(r["edge_id"]),
@@ -224,7 +269,14 @@ def list_relation_kinds(
     ``description`` 은 관계종류 설명(TEXT·nullable → None 가능)으로, UI 드롭다운/툴팁에서
     "이 관계가 무슨 뜻인지" 보여주도록 DB 에서 함께 읽어 전달한다. ``ORDER BY kind_code`` 로
     결정적 정렬(헌법 3조). ``status`` 지정 시 ``WHERE status = %s``(active|inactive 화이트
-    리스트 검증은 호출자 책임), 미지정이면 전체. relation_kind 테이블 재사용(마이그레이션 0).
+    리스트 검증은 호출자 책임), 미지정이면 전체.
+
+    Args:
+        status: 상태 필터(``active``|``inactive``). ``None`` 이면 **전체**를 돌려준다.
+
+    Returns:
+        ``{rows, total}``. rows 는 ``kind_code`` 오름차순(결정적). ``description`` 은 nullable
+        이라 ``None`` 일 수 있다.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         if status is not None:
@@ -249,7 +301,18 @@ def list_relation_kinds(
 
 
 def _decide_edge(conn: Connection[Any], *, edge_id: str, reviewer: str, status: str) -> bool:
-    """proposed 엣지만 status 로 확정(이미 결정된 엣지는 변경 안 함). 1행 갱신 시 True.
+    """proposed 엣지만 status 로 확정한다 — 이미 결정된 엣지는 건드리지 않는다.
+
+    **DB에 쓴다**(UPDATE). 커밋은 호출자 몫이다.
+
+    Args:
+        edge_id: 대상 엣지.
+        reviewer: 결정을 내린 사람(``reviewed_by`` 에 기록).
+        status: 확정할 상태(``active`` 또는 ``rejected``).
+
+    Returns:
+        1행을 실제로 바꿨으면 True. **False 는 두 경우를 함께 뜻한다** — 엣지가 없거나, 이미
+        결정돼 proposed 가 아니거나. 호출자는 이 값으로 "내 결정이 반영됐는지"만 판단한다.
 
     ``AND status = 'proposed'`` 가드 목적
         - 이미 active 인 엣지를 실수로 재반려하는 사고를 차단한다.
@@ -272,7 +335,14 @@ def _decide_edge(conn: Connection[Any], *, edge_id: str, reviewer: str, status: 
 def approve_edge(conn: Connection[Any], *, edge_id: str, reviewer: str) -> bool:
     """proposed 엣지를 active 로 승인 — 이후 graph_query 의 status='active' 필터에 잡혀 그래프에 노출된다.
 
-    1행 갱신 시 True(계약·멱등·proposed 가드는 ``_decide_edge`` 참조).
+    **DB에 쓴다**.
+
+    Args:
+        edge_id: 승인할 엣지.
+        reviewer: 승인자.
+
+    Returns:
+        실제로 승인했으면 True. 이미 결정됐거나 없으면 False(``_decide_edge`` 계약과 동일).
     """
     return _decide_edge(conn, edge_id=edge_id, reviewer=reviewer, status="active")
 
@@ -282,7 +352,15 @@ def reject_edge(conn: Connection[Any], *, edge_id: str, reviewer: str) -> bool:
 
     이 rejected 결정은 사람의 판단이므로, 이후 LLM 이 같은 쌍을 재제안해도
     ``sync_graph_edges`` 의 ON CONFLICT 가 status 를 덮지 않아 rejected 가 보존된다(부활 방지).
-    1행 갱신 시 True(계약은 ``_decide_edge`` 참조).
+
+    **DB에 쓴다**.
+
+    Args:
+        edge_id: 반려할 엣지.
+        reviewer: 반려자.
+
+    Returns:
+        실제로 반려했으면 True. 이미 결정됐거나 없으면 False.
     """
     return _decide_edge(conn, edge_id=edge_id, reviewer=reviewer, status="rejected")
 
@@ -301,8 +379,18 @@ def bulk_review(
     이므로 나머지 엣지 처리를 멈추지 않는다. 성공(ok=True) 건은 같은 트랜잭션에서 원자적으로
     함께 커밋된다(FR-203).
 
-    ``action`` 화이트리스트 가드: 오타·미지 값이 조용히 reject 로 처리되는 사고를 막는다
-    (놀람 최소화 — approve/reject 외에는 즉시 ValueError).
+    Args:
+        edge_ids: 처리할 엣지 id 목록. 순서대로 처리하며 결과도 같은 순서로 돌려준다.
+        reviewer: 결정자(모든 건에 동일하게 기록).
+        action: ``"approve"`` 또는 ``"reject"``. **다른 값은 즉시 예외** — 오타가 조용히 반려로
+            처리되는 사고를 막는다.
+
+    Returns:
+        ``[{"edge_id", "ok"}]``. ``ok=False`` 는 그 건이 없거나 이미 결정됐다는 뜻이며, 예외가
+        아니라 결과값이므로 뒤 건들의 처리를 멈추지 않는다.
+
+    Raises:
+        ValueError: ``action`` 이 허용 값이 아닐 때.
     """
     if action not in ("approve", "reject"):
         raise ValueError(f"action 은 'approve'|'reject' 만 허용: {action!r}")
@@ -327,8 +415,16 @@ def revise_edge(
     ON CONFLICT ``DO UPDATE SET`` 는 여전히 ``status`` 를 **미갱신**한다(graph_persist.py). 즉
     사람의 정정이 LLM 재제안에 덮이지 않는다 — 사람↔LLM 경계는 그대로 보존된다.
 
-    to_status 화이트리스트 검증은 호출자(포탈 API·``_REVIEW_STATUSES``) 책임이다.
-    1행 갱신 시 True, 대상 엣지 없음(rowcount==0) 시 False.
+    **DB에 쓴다**.
+
+    Args:
+        edge_id: 정정할 엣지.
+        reviewer: 정정한 사람.
+        to_status: 바꿀 상태. **화이트리스트 검증은 호출자 책임**이다(포탈 API 가
+            ``_REVIEW_STATUSES`` 로 막는다) — 이 함수는 받은 값을 그대로 쓴다.
+
+    Returns:
+        1행을 바꿨으면 True, 대상 엣지가 없으면 False.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -343,7 +439,16 @@ def revise_edge(
 
 
 def promote_relation_kind(conn: Connection[Any], *, kind_code: str, reviewer: str) -> bool:
-    """LLM 제안으로 쌓인 inactive relation_kind 를 active 로 승격(어휘 거버넌스). reviewer 는 lineage 기록용.
+    """LLM 제안으로 쌓인 inactive 관계 종류를 active 로 승격한다(어휘 거버넌스).
+
+    **DB에 쓴다**. 승격된 뒤에야 그 종류가 실제 엣지로 저장될 수 있다.
+
+    Args:
+        kind_code: 승격할 관계 종류 코드.
+        reviewer: 승격한 사람. **현재는 저장되지 않는다**(아래 "reviewer 미저장 이유").
+
+    Returns:
+        실제로 승격했으면 True. 이미 active 이거나 없는 코드면 False(멱등).
 
     ``AND status = 'inactive'`` 가드
         이미 active 인 kind 를 중복 승격해도 rowcount == 0 이 되어 False 를 반환한다(멱등).
