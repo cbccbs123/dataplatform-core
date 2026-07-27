@@ -20,7 +20,17 @@ from typing import Any
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    """None·비수치·NaN·inf 를 안전한 유한 실수로 정규화(결정적·순수)."""
+    """어떤 값이든 **유한한 실수**로 바꾼다(결정적·순수).
+
+    NaN·무한대는 비교가 비결정적이라(정렬 순서가 흔들린다) 여기서 전부 걸러낸다.
+
+    Args:
+        value: 숫자·문자열·``None`` 무엇이든.
+        default: 변환 실패나 비유한 값일 때 쓸 대체값.
+
+    Returns:
+        유한 실수.
+    """
     try:
         x = float(value)
     except (TypeError, ValueError):
@@ -37,6 +47,12 @@ def knn_score_to_cosine(score: Any) -> float:
 
     비유한 _score 의 안전 기본값은 0.0(코사인 -1)이 아니라 **0.5(코사인 0, 중립)**다 — 환산식이
     ``score=0.5`` 에서 ``cos=0`` 이라, 무효 점수는 게이트를 끄는 쪽이 아니라 중립으로 떨어뜨려야 한다.
+
+    Args:
+        score: OpenSearch knn ``_score``. 숫자가 아니어도 받는다.
+
+    Returns:
+        [-1, 1] 로 clamp 된 코사인 유사도.
     """
     cos = 2.0 * _safe_float(score, 0.5) - 1.0
     return max(-1.0, min(1.0, cos))
@@ -55,8 +71,17 @@ def passes_cutoff(top: float, baseline: float, *, eps: float, floor: float) -> b
     실패면 빈 버킷(no-match → 무관 결과 표출 차단). 비교는 ``_CUTOFF_TOL`` 로 경계를 포용한다.
 
     027: ``baseline`` 은 ``gate_signal`` 이 주는 **하위 절반 평균**(robust)이다 — 023 의 전체 평균을
-    대체해 밀집 토픽('충전')에서 baseline 이 끌려 올라가는 오컷을 구조 해결한다. 입력 의미만 바뀌고
-    판정식·경계 처리는 동일(시그니처 (top, baseline, *, eps, floor) — 인자 위치·의미 보존).
+    대체해 밀집 토픽('충전')에서 baseline 이 끌려 올라가는 오컷을 구조 해결한다.
+
+    Args:
+        top: 그 버킷 kNN 표본의 최고 코사인.
+        baseline: 배경 수준(``gate_signal`` 이 주는 하위 절반 평균).
+        eps: ``top − baseline`` 이 이만큼은 벌어져야 한다는 **상대** 기준. 주판정이다.
+        floor: ``top`` 자체의 **절대** 하한. 코퍼스가 통째로 평평할 때를 위한 backstop.
+
+    Returns:
+        버킷을 유지하면 True. **둘 다 만족해야 한다**(AND) — 하나라도 못 넘으면 그 버킷은 빈
+        결과로 접혀 무관한 항목이 노출되지 않는다.
     """
     t = _safe_float(top)
     return (t - _safe_float(baseline)) >= eps - _CUTOFF_TOL and t >= floor - _CUTOFF_TOL
@@ -67,8 +92,12 @@ def minmax_normalize(scores: Iterable[float]) -> list[float]:
 
     클라이언트 융합의 1단계다 — OS 서버 normalization-processor 가 하던 min-max 를 **순수 함수로
     이관**(헌법 3조: 융합 수학을 서버 상태가 아닌 단위 검증 가능한 코드로). 빈 입력은 ``[]``,
-    퇴화(``max==min``, 단일 원소·전 동점)는 **전원 1.0** 으로 결정적 정의한다(0 나눗셈 회피·랭킹
-    보존). 입력 순서·길이를 보존해 호출부(fuse_hybrid)가 hit 리스트와 자리표시로 zip 할 수 있다.
+    Args:
+        scores: 정규화할 점수들. 숫자가 아닌 값도 안전하게 0.0 으로 흡수한다.
+
+    Returns:
+        같은 순서·같은 길이의 [0,1] 값 리스트(호출부가 hit 리스트와 zip 한다). 빈 입력은 ``[]``,
+        **전부 같은 값이면 전원 1.0** — 0 으로 나누지 않으면서 기존 순위를 그대로 둔다.
     """
     vals = [_safe_float(s) for s in scores]
     if not vals:
@@ -93,7 +122,12 @@ def gate_signal(cosines: Iterable[float]) -> tuple[float, float]:
       하위 절반(정렬 후 floor(n/2)개)만 평균내면 background(무관 꼬리) 해석이 유지돼 밀집 토픽에서도
       신호가 분리된다 — 신규 분기·상수 0 의 **구조 해결**(027 핵심).
 
-    표본이 2개 미만이면 하위 절반을 평균낼 수 없어 ``baseline=0.0``(빈 표본은 ``top`` 도 0.0).
+    Args:
+        cosines: 그 버킷 kNN 표본의 원시 코사인들(순서 무관).
+
+    Returns:
+        ``(top, baseline)``. 표본이 2개 미만이면 하위 절반을 만들 수 없어 ``baseline=0.0``,
+        빈 표본이면 ``(0.0, 0.0)``.
     """
     vals = [_safe_float(c) for c in cosines]
     if not vals:
@@ -115,7 +149,13 @@ def cut_rows(rows: Iterable[dict[str, Any]], *, result_floor: float) -> list[dic
     - ``_bm25 is True`` (전 토큰 어휘 증거)면 유지 — 코사인이 없어도(``_cos None``, BM25-only 행) 안전.
     - 아니면 원시 코사인 ``_cos`` 가 ``result_floor`` 이상일 때만 유지(의미 증거). ``_cos None`` 은
       비교 불가이므로 ``_bm25`` 가 유일 근거다(없으면 컷).
-    입력(이미 융합 정렬된) 순서를 보존한다 — 랭킹 불변, 노이즈 꼬리만 제거. 경계는 ``_CUTOFF_TOL`` 포용.
+
+    Args:
+        rows: 이미 융합·정렬된 행들. ``_bm25``(어휘 증거 여부)·``_cos``(원시 코사인) 내부 키를 본다.
+        result_floor: 코사인 하한. 이 값 미만이고 어휘 증거도 없으면 버린다.
+
+    Returns:
+        살아남은 행(입력 순서 보존 — **랭킹은 바꾸지 않고** 꼬리만 잘라낸다).
     """
     kept: list[dict[str, Any]] = []
     for r in rows:
@@ -160,7 +200,18 @@ def rerank_reorder(
     - 빈 head 는 ``(list(rows), [])``(rerank_fn 미호출). ``rerank_fn is None`` 이면 기본 seam
       ``src.search.reranker.score_pairs`` 를 지연 import(무거운 의존을 플래그 off 환경에 안 당김).
 
-    반환 ``(reordered_rows, scores)`` — ``scores`` 는 head 채점값(관측 ``rerank.top``·``scored`` 용).
+    Args:
+        rows: 게이트·컷을 통과한 행들(융합 순서).
+        query: 질의 문자열(리랭커 입력).
+        rerank_fn: 채점 함수 **주입 seam**. ``None`` 이면 기본 cross-encoder 를 지연 import 한다
+            — 리랭크가 꺼진 환경에 무거운 의존을 끌어오지 않기 위해서다.
+        top_r: 앞에서 몇 행만 채점할지(지연 통제). 나머지는 융합 순서 그대로 뒤에 붙는다.
+        tau: 이 점수 미만인 head 행을 **드롭**한다. **기본 0.0 = 드롭 없음**(순수 재정렬) —
+            실측에서 τ 드롭이 recall 을 깎았기 때문이다.
+        model_name: 리랭커 모델 이름.
+
+    Returns:
+        ``(재정렬된 행, head 채점값)``. head 가 비면 입력을 그대로 돌려주고 채점하지 않는다.
     """
     rows = list(rows)
     head = rows[: int(top_r)]
@@ -211,6 +262,15 @@ def normalize_query(
       env 입력 0)은 호출부(G2 ``query_norm`` seam)가 보장한다 — 본 함수는 같은 입력에 같은 출력.
       방어적으로 ``llm_fn`` 미주입(``None``)이면 정규화 수단이 없으므로 원문을 그대로 둔다(배선
       누락이 결정성을 깨지 않게 — fail-safe to 027).
+
+    Args:
+        query: 원본 질의.
+        enabled: 꺼져 있으면(기본) **원문을 바이트 그대로** 돌려준다.
+        llm_fn: 정규화 콜백 주입 seam. 이름은 LLM 이지만 **형태소 정규화 같은 비-LLM 콜백**도
+            받는다(파라미터명은 하위호환으로 유지). ``None`` 이면 정규화하지 않는다.
+
+    Returns:
+        정규화된 질의, 또는 원문(꺼짐·빈 질의·콜백 미주입).
     """
     if not enabled or not query or llm_fn is None:
         return query
@@ -230,6 +290,13 @@ def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
 
     ⚠️ media_search 버킷 행의 자산 식별 키는 ``asset_id`` 가 아니라 ``id`` 다(검색 SQL alias
     ``asset_id AS id``). 따라서 020 인덱스 ``_source.asset_id``(== ``_id``)를 이 ``id`` 로 옮긴다.
+
+    Args:
+        hit: OpenSearch 응답의 hit 하나. ``_source`` 가 없거나 필드가 비어도 안전하게 처리한다.
+
+    Returns:
+        버킷 행 dict. ``matched_queries`` 는 응답에 있을 때만 넣는다 — **키 자체의 유무**가
+        "관측했는가"를 뜻하기 때문에 빈 리스트로 채우면 안 된다(rescue 판정이 달라진다).
     """
     src = hit.get("_source") or {}
     asset_id = src.get("asset_id") or hit.get("_id")
@@ -274,7 +341,14 @@ def fuse_hybrid(
       (file_uri·modality·summary)는 먼저 본 측(BM25 우선) hit 으로 채운다 — 같은 asset_id 라 내용 동일.
     - 행은 ``os_hit_to_row`` 동형 + 내부키 ``_cos``(kNN 원시 코사인|없으면 None)·``_bm25``(BM25 매칭 여부).
       이 두 키가 게이트(gate_signal)·per-result 컷(cut_rows)의 **단일 코사인 스케일 신호**다(024 통일).
-    - 정렬은 ``(-similarity, id)`` — 점수 desc·동점 id asc 결정적(FR-002, 헌법 3조).
+    Args:
+        bm25_hits: BM25 서브검색 hit 들.
+        knn_hits: kNN 서브검색 hit 들.
+        weights: ``(w_bm25, w_knn)`` 가중치. 두 축의 정규화 점수를 이 비율로 섞는다.
+
+    Returns:
+        융합·정렬된 행 리스트(점수 내림차순, 동점은 id 오름차순으로 **결정적**). 각 행에는 게이트·
+        컷이 쓰는 내부 키 ``_cos``(kNN 코사인·없으면 None)·``_bm25``(어휘 매칭 여부)가 붙는다.
     """
     w_bm25, w_knn = weights
     bm25_list = list(bm25_hits)
@@ -287,6 +361,12 @@ def fuse_hybrid(
     merged: dict[str, dict[str, Any]] = {}
 
     def _entry(hit: dict[str, Any]) -> dict[str, Any]:
+        """hit 을 행으로 바꿔 ``merged`` 에 등록하고(이미 있으면 재사용) 그 항목을 돌려준다.
+
+        같은 자산이 BM25·kNN 양쪽에 나오면 **한 행으로 합쳐야** 하므로, 여기서 id 기준으로
+        모아 두고 점수만 각 루프가 채운다. 리랭크·증거 필터가 쓸 내부 키(``_rrtext``·``_about``·
+        ``_kwtext``)도 이 시점에 붙인다(응답 직전에 제거된다).
+        """
         row = os_hit_to_row(hit)
         # 028: rerank 문서측 입력은 **구조화 텍스트**("요약: …\n키워드: …") — 입력 변형 4종
         # 실측에서 최선(회식 0.003→0.071·인접-없음 차단 유지). 요약문에 없는 토픽 앵커(예:

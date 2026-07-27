@@ -60,9 +60,24 @@ def apply_bucket_policy(
     ``len(fused) - len(kept)`` 로 다시 구하므로 최종값은 게이트·컷·rescue·about 로 제거된 **총량**이다
     (요청 k 상한 절삭은 제외 — 컷 효과만 관측).
 
-    ``passes_cutoff_fn``·``cut_rows_fn``·``rerank_reorder_fn`` 은 ``opensearch_search`` 의
-    순수 함수를 주입받아 단위 테스트에서 mock·동일 구현을 공유한다(순환 import 방지).
-  """
+    Args:
+        fused: 그 버킷의 융합 완료 행들(``fuse_hybrid`` 결과).
+        query: 리랭크·증거 판정에 쓸 질의(정규화 적용된 값).
+        top: 이 버킷 kNN 표본의 최고 코사인(``gate_signal``).
+        baseline: 배경 수준(``gate_signal``).
+        k: 응답 상한. 마지막에 이 개수로 자른다.
+        tuning: 게이트·컷·리랭크·증거·about 튜닝 12종 묶음. per-request 값이 아니라 설정 파생이다.
+        rerank_fn: 리랭커 채점 함수. ``None`` 이면 기본 seam 을 지연 로드한다.
+        policy: 검색 정책(``mode`` 가 rescue 임계를 가른다).
+        passes_cutoff_fn: 게이트 판정 함수 **주입** — 순환 import 를 피하려고 인자로 받는다.
+        cut_rows_fn: per-result 컷 함수 주입.
+        rerank_reorder_fn: 재정렬 함수 주입.
+
+    Returns:
+        ``BucketPolicyOutcome`` — 정제된 행 + 게이트 통과 여부 + 어휘 증거 유무 + 제거 총량 +
+        리랭크 관측치. 게이트 실패이고 구제도 안 되면 ``rows`` 는 빈 리스트다(무관 결과를
+        보여주느니 "없음"을 반환하는 설계).
+    """
     has_lexical = any(r.get("_bm25") for r in fused)
     rerank_info: dict[str, Any] | None = None
 

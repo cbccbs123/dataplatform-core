@@ -51,8 +51,18 @@ _CACHE_LOCK = threading.Lock()
 def default_judge(query: str, asset_id: str, summary: str, *, client: Any | None = None) -> bool:
     """자산 1건 개별 판정(측정 프롬프트 그대로·단일 seam·temp=0).
 
-    스키마 위반·빈 응답은 **관련(True) 취급** — 판정 실패가 자산을 드롭하는 쪽으로 작동하지 않게
-    하는 fail-safe(드롭은 명시적 false 판정에만). ``client`` 주입 시 네트워크 없이 단위 검증.
+    **외부 호출**이 한 번 일어난다(단일 seam·temperature=0).
+
+    Args:
+        query: 사용자 원문 질의(의도가 담긴 쪽을 그대로 쓴다).
+        asset_id: 판정 대상 자산. **프롬프트에는 쓰지 않는다** — 주입 seam 시그니처를 맞추기
+            위한 자리다(캐시 키는 호출부가 만든다).
+        summary: 자산 요약. 앞 120자만 프롬프트에 넣는다.
+        client: **테스트용 LLM 클라이언트 주입 seam** — 미주입이면 운영 LLM.
+
+    Returns:
+        관련 있으면 True. **스키마 위반·빈 응답도 True** — 판정 실패가 자산을 지우는 쪽으로
+        작동하면 안 되기 때문이다(드롭은 명시적 false 일 때만).
     """
     _ = asset_id  # 시그니처 계약(judge_fn(query, asset_id, summary)) — 프롬프트엔 미사용.
     from src.llm.client import complete_json
@@ -69,7 +79,14 @@ def _top_candidates(
     """전 버킷 행을 (-similarity, id) 합산 정렬해 **중복 제거 상위 top_n** (asset_id, summary).
 
     측정 하니스와 동일 형상(flat 합산 상위) — 모달리티 섹션 표시와 무관하게 "융합 점수 기준
-    가장 먼저 보일 자산"을 검증 대상으로 삼는다. 같은 자산이 여러 버킷에 있으면 1회만.
+    가장 먼저 보일 자산"을 검증 대상으로 삼는다.
+
+    Args:
+        buckets: 모달리티별 행 목록.
+        top_n: 뽑을 최대 자산 수.
+
+    Returns:
+        ``[(asset_id, summary)]`` 최대 top_n 개. 같은 자산이 여러 버킷에 있어도 **한 번만** 넣는다.
     """
     rows = sorted(
         (r for rs in buckets.values() for r in (rs or [])),
@@ -103,9 +120,21 @@ def verify_top_assets(
 
     - ``query`` = 판정 프롬프트용 **사용자 원문**(의도 정보 보존 — 측정과 동일).
       ``norm_query`` = 캐시 키(072 정규화 질의 — 표현 변형을 한 키로 흡수).
-    - 반환 ``(buckets, meta)`` — meta = {verified, dropped, cache_hits, fallback, latency_ms}.
-      폴백 시 buckets 는 입력 그대로(드롭 0). 유지 행의 순서·내용 불변(드롭만 — 하위 승격은
-      소비자의 top-N 절단에서 자연 발생).
+    Args:
+        buckets: 모달리티별 행 목록(이 함수는 **드롭만** 하고 순서·점수는 건드리지 않는다).
+        query: 판정 프롬프트에 쓸 사용자 원문 질의.
+        norm_query: **캐시 키**로 쓸 정규화 질의 — 표현이 조금 달라도 같은 판정을 재사용한다.
+        judge_fn: 판정 함수 주입 seam. ``None`` 이면 ``default_judge``(운영 LLM).
+        cache: 판정 캐시. ``None`` 이면 프로세스 전역 캐시를 쓴다(테스트는 주입해 격리).
+            temperature=0 이라 같은 쌍은 늘 같은 판정이므로 TTL 없이 상한만 관리한다.
+        top_n: 검증할 상위 자산 수. 전수 검증은 동시 검색 몇 건만으로 포화된다.
+        deadline_s: 전체 판정 마감(초). **넘기면 전량 폴백** — 일부만 적용하면 타이밍에 따라
+            결과가 달라져 재현성이 깨지기 때문이다.
+        cache_max: 캐시 상한. 넘으면 오래된 항목부터 지운다.
+
+    Returns:
+        ``(buckets, meta)``. meta 는 ``{verified, dropped, cache_hits, fallback, latency_ms}``.
+        폴백이면 buckets 는 **입력 그대로**(드롭 0).
     """
     t0 = time.perf_counter()
     jf = judge_fn or default_judge
