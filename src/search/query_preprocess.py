@@ -1,12 +1,8 @@
-"""
-검색 질의 명사구 정규화(``noun_phrase_query``·``morph_noun_phrase_query``)의 단일 정의처.
+"""검색 질의를 핵심 명사구로 줄이는 두 가지 방법의 단일 정의처.
 
-069 US-C(037 잔재 철거): 037 이 OS 검색 read 경로에서 은퇴시킨 LLM 질의 구조화(``structure_user_query``
-+ ``reference_dates_block`` 의 ``datetime.now`` 비결정 패턴)를 삭제했다 — 운영 호출 0. 검색 시점 질의
-정규화는 query-norm 토글(072 형태소 / 075 gemma)이 담당한다.
-
-필요(``llm`` 방식 선택 시에만): 온프레미스 LLM seam 설정(``.env.dev``/``.env.prod``). 형태소(``morph``·
-기본) 경로는 nori ``_analyze`` 만 쓰므로 LLM/OPENAI 설정은 **불요**다.
+``morph_noun_phrase_query``(기본)는 형태소 분석기로 명사만 뽑아 LLM 없이 처리하고,
+``noun_phrase_query``는 온프레미스 LLM 에 맡긴다. 어느 쪽을 쓸지는 설정 토글이 정하며, 형태소
+경로는 LLM 설정이 전혀 필요 없다.
 """
 
 from __future__ import annotations

@@ -73,42 +73,11 @@ def _grouped_via_opensearch(
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
 ) -> dict[str, Any]:
-    """backend='opensearch' 경로의 모달리티 버킷을 조립한다(022·027, FR-002·FR-003·SC-005).
+    """OpenSearch 경로의 모달리티 버킷을 조립한다.
 
-    text·audio·**image·video 모든 버킷**을 020 OS 인덱스에서 동일 하이브리드(nori BM25 캡션·라벨 +
-    ``embedding`` kNN + **클라이언트 융합**)로 검색한다 — image/video 도 020 assets 인덱스에 한국어 VLM
-    캡션·활성 텍스트 채널 임베딩(현행 st_api·bge-m3)으로 색인돼 있어 text/audio 와 같은 경로다(CLIP 아님; 시각-내용 매칭은 후속).
-    요청 모달리티 전체를 **한 번의** ``os_search_fn`` 호출로 검색해 버킷을 만들고, 응답 표준 키
-    (text_documents·audio·image·video·meta)로 담는다(응답 동형, SC-005).
-
-    설계 판단:
-    - **LLM 미접촉(FR-002·SC-004)**: 검색 질의 구조화 LLM 을 호출하지 않는다 — 멀티모달 LLM 0·ms.
-      037 PG 검색 제거·069 US-C 정리로 PG 전용 파라미터(structured·alpha·fusion·query_model_name·
-      chunk_agg 등)는 search_hybrid 시그니처에서 철거됐다(이 경로에서 쓰이지 않았음).
-    - **query-norm 토글(072 — 029 seam 재사용, gemma 대체)**: ``search_os_query_norm_enabled`` on 이면
-      검색 직전 **자연어 질의(어절≥3)**를 **nori 형태소 명사추출 + 모달리티어 스톱워드 제거**로 정규화
-      (검색시점 LLM 0·결정적·``_analyze`` 사전 기반)한 뒤 OS 에 넘긴다 — 정규화를 service 레벨에서 1회만
-      수행해 정규화된 질의가 OS seam 안에서 임베딩·BM25·rerank 채점에 동일 적용되게 한다. 단어 질의
-      (어절<3)는 원문 그대로(정규화·_analyze 스킵·지연 0). 관측성은 top-level ``meta["query_norm"]`` 로
-      노출(os_gate 미오염). off 면 원문 passthrough(바이트 동일·정규화 미호출, SC-002). ``query_norm_fn``
-      은 테스트/커스텀 정규화 주입 seam(주입 시 형태소 대신 사용). **075**: ``search_os_query_norm_method``
-      (``morph`` 기본 / ``llm``)로 방식을 고른다 — ``llm`` 이면 형태소 대신 gemma ``noun_phrase_query``
-      (029 보존·검색시점 LLM)를 재배선하고 ``meta["query_norm"]["method"]`` 로 어느 방식이 돌았는지 노출한다.
-    - **(buckets, gate_meta) 튜플 수신(027)**: ``os_search_fn``(search_assets_os)은 클라이언트 융합
-      전환으로 버킷과 함께 게이트 메타(모달리티별 top·baseline·gate_passed·cut_count)를 돌려준다 →
-      ``meta["os_gate"]`` 로 합류시켜 빈 버킷이 no-match 판정인지 즉시 관측 가능하게 한다(F4 관측성).
-    - **모달리티 키 매핑**: ``os_search_fn`` 버킷 키는 모달리티명('text'/'image')이고 응답 grouped 키는
-      ('text_documents'/'image')이므로 ``_MODALITY_BUCKETS`` 로 변환해 담는다.
-    - **컷오프 설정(027)**: 게이트·per-result 컷 임계(eps·floor·result_floor·operator)를 cfg 에서 읽어
-      OS seam 에 전달한다(getattr 폴백은 search_constants 단일 출처 — settings 미초기화 순수 단위 방어).
-      ``disable_os_cutoff=True`` 면 ``cutoff_enabled=False`` 로 강제해 게이트·per-result 컷을 모두 끈다
-      (no_cutoff 디버그 우회 — 약한 후보까지 노출). per-result 컷은 search_assets_os 내부 코사인 스케일
-      (cut_rows·result_floor)에서 끝나므로 호출부에는 별도 하한 필터가 없다.
-    - **OS 미도달(FR-007)**: ``os_client_fn``/``os_search_fn`` 예외를 try/except 로 감싸지 않아 그대로
-      전파한다(silent pg 폴백 금지 — 결과가 백엔드 가용성에 따라 달라지지 않게).
-
-    ⚠️ 결정성(헌법 3조): 최종 응답 버킷 순서는 호출부의 ``label_keys`` 가 정하므로 여기 grouped 의
-    삽입 순서는 출력 순서에 영향하지 않는다.
+    요청한 모달리티 **전체를 한 번의 검색 호출**로 처리하고, 결과를 응답 표준 키
+    (text_documents·audio·image·video·meta)로 담는다. 질의 정규화·LLM 검증도 이 층에서 한 번씩만
+    수행해, 정규화된 질의가 임베딩·BM25·리랭크에 똑같이 적용되게 한다.
 
     Args:
         query: 사용자 질의 원문.
@@ -126,12 +95,13 @@ def _grouped_via_opensearch(
         search_filters: 확장자·기간·주제 선필터.
 
     Returns:
-        ``{text_documents, audio, image, video, meta}`` 형태의 grouped dict. ``meta`` 에는
-        ``os_gate``(버킷별 게이트 관측)·``search_plan``·정규화·검증 관측치가 담긴다.
+        ``{text_documents, audio, image, video, meta}`` grouped dict. ``meta.os_gate`` 는 버킷별
+        게이트 관측치(top·baseline·통과 여부·제거 수)라, **빈 버킷이 "정말 없음"인지 "게이트에
+        걸린 것"인지** 바로 확인할 수 있다. 버킷 출력 순서는 호출부가 정한다.
 
     Raises:
-        OpenSearch 미도달 예외를 감싸지 않고 그대로 올린다 — 결과가 백엔드 가용성에 따라
-        달라지지 않게 하려는 것이다.
+        OpenSearch 미도달 예외는 감싸지 않고 그대로 올린다 — 결과가 백엔드 가용성에 따라
+            달라지면 안 되기 때문이다.
     """
     requested = modalities if modalities is not None else list(_MODALITY_BUCKETS)
 
@@ -288,44 +258,19 @@ def search_hybrid(
 ) -> dict[str, Any]:
     """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
-    ``modalities`` 가 ``None`` 이면 전체 버킷(text/audio/image/video)을, 지정하면 해당
-    버킷만 반환한다. 알 수 없는 모달리티 라벨은 ``ValueError``.
-
-    037 OpenSearch 전용 정리: text·audio·image·video **모든 버킷**을 020 OS 인덱스(nori BM25 캡션·라벨
-    + ``embedding`` kNN + 클라이언트 융합)에서 ``_os_search_fn`` 으로 검색해 같은 키(text_documents·
-    audio·image·video)로 반환한다(022 — image/video 도 020 assets 인덱스에 한국어 VLM 캡션·활성 텍스트
-    채널 임베딩(현행 st_api·bge-m3)으로 색인돼 text/audio 와 동일 하이브리드, CLIP 아님). OS 미도달이면
-    ``_os_search_fn``/``_os_client_fn`` 예외를 **그대로 전파**한다(FR-007·SC-006 — silent 폴백 금지).
-
-    ``disable_os_cutoff`` 는 OS 경로의 **게이트·per-result 컷을 모두 끄는 디버그 우회**다(기본 False).
-    True 면 ``cutoff_enabled=False`` 로 전달돼 약한 후보까지 노출한다(포탈 ``/search?no_cutoff=true`` 배선·069 T407).
-    **072 query-norm 토글**(``search_os_query_norm_enabled``, 029 seam 재사용)이 on 이면 검색 직전
-    자연어 질의(어절≥3)를 **nori 형태소 명사추출+스톱워드 제거**(검색시점 LLM 0·결정적)한 뒤 임베딩·
-    BM25·rerank 채점에 동일 적용한다 — 단어 질의(어절<3)·off 는 원문 ``query`` 그대로(바이트 동일).
-
-    ``text_channel`` 은 텍스트 임베딩 채널 선택이다(텍스트 채널 한정). **미지정(None)** 이면 운영 활성
-    프로파일(018, 적재·검색·관계 단일 출처)로 해소한다 — ``active_embed_channel()``. 017 A/B 하니스처럼
-    **명시 전달은 그대로 우선**한다. 해소된 채널은 OS seam(``opensearch_search``)에 넘어가 질의 임베딩
-    모델(``model_for_channel(channel)``)을 일치시킨다(FR-004 질의-문서 모델 일치). settings 미초기화
-    (순수 단위 등)에서는 활성 해소가 ``RuntimeError`` 이므로 기존 기본 채널 ``'st'`` 로 보수적 폴백한다.
-
-    ``_os_search_fn``/``_os_client_fn`` 은 테스트 주입 seam(기본 ``opensearch_search.search_assets_os``/
-    ``get_client``). ``_query_norm_fn`` 은 query-norm seam(미주입+on 이면 072 ``morph_noun_phrase_query``
-    형태소 클로저를 client·index 로 배선).
-
-    069 US-C(037 잔재 철거): 037 로 죽어 있던 PG 전용 no-op 인자(``structured``·``fusion``·
-    ``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·``min_scores``·``text_query_model``)와
-    호출부 하한 필터(``_filter_by_min_score``)를 철거했다. per-result 컷은 ``search_assets_os`` 내부
-    코사인 스케일(``cut_rows``·``result_floor``)에서 끝난다.
+    text·audio·image·video 를 **모두 같은 인덱스에서 같은 방식**(nori BM25 + 벡터 kNN + 융합)으로
+    찾는다. 이미지·영상도 한국어 캡션과 텍스트 임베딩으로 색인돼 있어 별도 경로가 아니다.
 
     Args:
-        query: 사용자 질의.
+        query: 사용자 질의. 질의 정규화가 켜져 있으면 검색 직전 **한 번만** 정규화하고, 그 결과가
+            임베딩·BM25·리랭크 채점에 똑같이 쓰인다(어절 3개 미만인 짧은 질의는 원문 그대로).
         modalities: 검색할 버킷. ``None`` 이면 전체.
         limit_per_bucket: 버킷당 결과 상한.
-        disable_os_cutoff: 게이트·컷을 모두 끄는 디버그 우회(기본 꺼짐).
-        text_channel: 텍스트 임베딩 채널. **``None`` 이면 운영 활성 채널로 해소**한다 —
-            명시 전달은 그대로 우선한다(A/B 하니스용). 설정 미초기화면 ``'st'`` 로 보수 폴백.
-        backend: 검색 백엔드. ``'opensearch'`` 외 값은 즉시 예외(미지원 fail-fast).
+        disable_os_cutoff: 게이트·컷을 모두 끄는 디버그 우회(기본 꺼짐 — 약한 후보까지 노출된다).
+        text_channel: 텍스트 임베딩 채널. **문서 색인과 같아야** 같은 벡터 공간에서 비교된다.
+            ``None`` 이면 운영 활성 채널로 해소하고, 명시 전달은 그대로 우선한다(A/B 실험용).
+            설정 미초기화 환경에서는 ``'st'`` 로 보수 폴백한다.
+        backend: ``'opensearch'`` 만 지원한다.
         _os_search_fn: 검색 함수 주입 seam(테스트용).
         _os_client_fn: 클라이언트 팩토리 주입 seam(테스트용).
         _query_norm_fn: 질의 정규화 콜백 주입 seam. 미주입이고 토글이 켜져 있으면 설정된 방식
@@ -339,7 +284,10 @@ def search_hybrid(
 
     Raises:
         ValueError: 알 수 없는 모달리티 라벨이거나 ``backend`` 가 ``'opensearch'`` 가 아닐 때.
-        OpenSearch 미도달 예외도 감싸지 않고 그대로 올린다.
+        OpenSearch 미도달 예외는 감싸지 않고 그대로 올린다 — 빈 결과로 감추면 장애가
+            "검색 결과 없음"과 구분되지 않는다.
+
+    설계 배경: ``specs/037-opensearch-only-cleanup`` · ``specs/072-search-morph-query-norm``
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]
@@ -356,29 +304,24 @@ def search_hybrid(
             f"지원하지 않는 검색 백엔드: backend={backend!r} (지원: ['opensearch'])"
         )
 
-    # 텍스트 임베딩 채널 해소(018, FR-004). 명시 전달은 그대로 우선(A/B). 미지정(None)이면 운영 활성
-    # 프로파일(적재·검색·관계 단일 출처)로 해소한다 — text_channel 은 active_embed_channel().
-    # OS 경로는 채널만 쓴다(질의 모델은 opensearch_search 가 model_for_channel(channel) 로 해소).
-    # settings 미초기화(순수 단위 등)에서는 활성 해소가 RuntimeError 이므로 기존 기본 채널 'st' 로
-    # 보수적 폴백한다(검색 단위가 settings 없이 그대로 동작).
+    # 여기서 정하는 건 **채널뿐**이다. 그 채널로 어떤 임베딩 모델을 쓸지는 검색 seam 이 다시
+    # 해소하므로(모델명은 이 층에 없다), 채널만 맞으면 질의와 문서가 같은 공간에서 비교된다.
     try:
         if text_channel is None:
             text_channel = active_embed_channel()
     except RuntimeError:
-        # settings 미초기화: 운영 진입점(run_search 등)은 항상 init_settings 하므로 이 폴백은 비운영
-        # (테스트) 경로다 — 오설정(운영서 init_settings 누락)을 관측 가능하게 warning 으로 남긴다(동작 불변).
+        # 설정 미초기화는 테스트 경로뿐이다(운영 진입점은 항상 초기화한다) — 검색이 죽지 않게
+        # 폴백하되, 운영에서 이 경고가 보이면 초기화 누락이므로 warning 으로 남긴다.
         _LOG.warning("settings 미초기화 — 활성 임베딩 채널 'st' 보수 폴백(운영은 init_settings 필수)")
         if text_channel is None:
             text_channel = EMBEDDING_KIND_ST
 
-    # OS 컷오프 설정을 읽기 위한 cfg. settings 미초기화(순수 단위 등)면 cfg=None → _grouped_via_opensearch
-    # 가 None 을 명시 가드해 SearchTuning() 기본(search_constants 단일 출처·F1)·index 'assets' 로 폴백한다.
+    # cfg=None 이면 아래에서 상수 기본값으로 폴백한다(설정 없이도 도는 단위 테스트 경로).
     try:
         cfg = get_current_settings()
     except RuntimeError:
         cfg = None
 
-    # 037: text·audio·image·video 전 모달리티를 OS(020 인덱스)로 검색한다. OS 미도달 예외는 전파(FR-007).
     grouped = _grouped_via_opensearch(
         query,
         modalities=modalities,
@@ -393,8 +336,8 @@ def search_hybrid(
         search_mode=search_mode,
         search_filters=search_filters,
     )
-    # per-result 적합도 컷은 search_assets_os 내부 코사인 스케일(cut_rows·result_floor)에서 이미 끝나므로
-    # 호출부에는 별도 하한 필터가 없다(069 US-C: 037 로 no-op 였던 _filter_by_min_score 철거). 요청 라벨
-    # 키만 골라 표준 버킷으로 담는다.
+    # 여기에 점수 하한 필터가 없는 것은 누락이 아니다 — 약한 결과 제거는 검색 seam 안에서
+    # 코사인 척도로 이미 끝났다(같은 걸 여기서 또 걸면 이중 절삭이 된다).
+    # 출력 순서는 이 dict 가 아니라 label_keys 순서가 정한다(요청 라벨만 골라 담는다).
     results = {key: grouped.get(key, []) for _label, key in label_keys}
     return {"query": query, "results": results, "meta": grouped.get("meta", {})}

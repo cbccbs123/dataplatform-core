@@ -191,38 +191,11 @@ def search_assets_os(
     search_policy: SearchPolicy | None = None,
     search_filters: SearchFilters | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
-    """전 모달리티를 020 OS 인덱스에서 **클라이언트 융합** 검색한다(027 FR-001·002·003·004·007).
+    """전 모달리티를 OpenSearch 에서 하이브리드 검색한다(HTTP **1회**·읽기 전용).
 
-    흐름(검색 1회당 OS HTTP **1회**):
-    (a) ``embed_fn`` 으로 질의를 **1회만** 임베딩해 벡터를 전 modality 재사용한다(중복 임베딩 0).
-    (b) modality 마다 [plain kNN(k=max(요청k, ``OS_KNN_SAMPLE_K``)) + BM25(k=요청k)] 두 서브검색
-        본문을 만들어 **_msearch 1회**로 보낸다. msearch 본문 순서는 ``[m1-knn, m1-bm25, m2-knn,
-        m2-bm25, …]`` 로 결정적(헌법 3조) — 응답을 같은 순서로 분해한다. kNN 을 표본 하한까지 키우는
-        이유는 robust baseline(하위 절반 평균)이 흔들리지 않을 표본을 그 modality 안에서 확보하기 위함.
-    (c) ``fuse_hybrid`` 가 두 서브검색을 합집합·min-max+가중평균 융합한다(서버 파이프라인과 동일 수식,
-        순수 함수). 행에 원시 코사인(_cos)·BM25 매칭(_bm25)이 동반된다.
-    (d) **버킷 게이트**: kNN 코사인 표본에서 ``gate_signal`` → (top, robust baseline) → ``passes_cutoff``.
-        실패면 그 버킷을 비운다(no-match → 무관 결과 표출 차단, FR-003).
-    (e) **per-result 컷**: 게이트 통과 버킷에 ``cut_rows``(BM25 매칭 OR cos≥``result_floor``)로 노이즈
-        꼬리를 제거한다(FR-004, 단일 코사인 스케일).
-    (f) 내부키(_cos·_bm25)를 제거하고 요청 k 로 상한해 버킷에 담는다(SC-005 응답 동형·구 size=k 계약 보존).
-
-    반환 ``(buckets, gate_meta)`` — ``gate_meta[modality] = {top, baseline, gate_passed, cut_count}``
-    (F4 관측성: 빈 버킷이 no-match 판정인지 즉시 확인). ``cut_count`` 는 융합 행 중 게이트·컷으로
-    제거된 수(상한 절삭은 포함 안 함 — 컷 효과만).
-
-    **디버그 우회**(``cutoff_enabled=False``): 게이트·per-result 컷을 **모두 끈다** — 융합 전체를 그대로
-    노출한다(약한 후보까지 관측). 호출부(search_service)의 ``disable_os_cutoff`` 가 이 스위치로 배선된다.
-
-    OS 미도달(``client.msearch`` 예외)이면 **그대로 전파**한다(FR-007 — silent pg 폴백 금지: 결과가
-    백엔드 가용성에 따라 달라지면 결정성·관측성 훼손). 검색은 OS 를 **읽기 전용**으로만 만진다(헌법 6조).
-
-    **검색시점 LLM 질의 정규화(021 FR-004 — 029 토글 개정)**: 기본 off(``query_norm_enabled=False``)면
-    원문 질의를 nori·임베딩에 직접 쓴다(021 현행·회귀 0). ``query_norm_enabled=True`` 면 검색 직전 질의를
-    ``normalize_query`` 로 **핵심 명사구 정규화**(gemma·temp=0·env 입력 0·src/llm/client 단일 seam)한 뒤
-    임베딩·BM25·rerank 채점에 **동일 적용**한다 — 021 이 LLM-free 로 만든 OS 읽기 경로를 무단 회귀시키는
-    것이 아니라, 헌법 §Governance 절차로 021 FR-004 를 기본 off 토글 허용으로 정식 개정한 결과다(§3 결정성
-    제약 강제). ``query_norm_fn`` 미주입이고 enabled 면 ``noun_phrase_query`` 를 지연 import 해 쓴다.
+    한 번의 msearch 로 모달리티마다 [벡터 kNN + BM25] 두 서브검색을 보내고, 그 둘을 클라이언트에서
+    융합한 뒤 버킷 게이트 → per-result 컷 순으로 걸러 담는다. kNN 표본을 요청 개수보다 크게 뽑는
+    이유는 게이트 기준선(배경 수준)이 흔들리지 않을 만큼의 표본이 필요해서다.
 
     Args:
         client: OpenSearch 클라이언트. **읽기 전용으로만** 쓴다.

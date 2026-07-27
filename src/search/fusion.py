@@ -1,15 +1,15 @@
-"""OpenSearch 클라이언트 **융합·게이트·컷 수학** (검색 read path, spec 027·029).
+"""검색 결과의 **융합·게이트·컷 수학** — 전부 순수 함수(OpenSearch 없이 단위 검증 가능).
 
-069 US-E(FR-E5): 종전 ``opensearch_search`` 한 파일에서 **순수 융합/게이트/컷 수학**만 분리했다.
-여기의 함수는 OS·opensearch-py 없이 **순수·결정적**으로 동작하며 단위 게이트에서 항상 검증된다
-(헌법 3조). 본문 빌더는 ``query_builder``, IO(실행)는 ``opensearch_search`` 가 담당한다.
+모달리티마다 [벡터 kNN + BM25] 두 결과를 클라이언트에서 min-max 정규화 + 가중평균으로 합치고
+(``fuse_hybrid``), kNN 코사인 표본 하나로 게이트 신호(``gate_signal``)와 per-result 컷(``cut_rows``)을
+함께 얻는다. 이 계산을 서버 파이프라인이 아닌 코드로 들고 있는 이유는 재현성 때문이다 — 서버 상태에
+따라 결과가 달라지지 않고, 같은 입력이면 언제나 같은 순위가 나온다.
 
-027 클라이언트 융합: OS 서버 normalization-processor(min-max + arithmetic_mean)를 순수 함수로 이관.
-모달리티당 [plain kNN + BM25] 를 클라이언트가 min-max+가중평균으로 융합(``fuse_hybrid``)하고, kNN 원시
-코사인에서 게이트 신호(``gate_signal``)·per-result 컷(``cut_rows``)을 같은 표본 1회로 얻는다.
+**흐름에서의 위치**: ``opensearch_search`` 가 OpenSearch 를 호출해 hit 을 받아 오면, 이 모듈이 그것을
+행으로 바꾸고 합쳐서 걸러낸다. 검색 본문 조립은 ``query_builder`` 가 맡는다.
 
-하위호환: 기존 ``opensearch_search.<name>`` import·patch 경로는 그 모듈이 이 심볼들을 **재export**해
-그대로 유지된다(US-E patch seam 보존).
+``opensearch_search`` 는 이 모듈의 함수들을 **재export** 한다 — 그래서 테스트·호출부가
+``opensearch_search.passes_cutoff`` 처럼 참조하거나 patch 하는 코드가 있다(같은 함수다).
 """
 
 from __future__ import annotations
@@ -64,14 +64,11 @@ _CUTOFF_TOL = 1e-9
 
 
 def passes_cutoff(top: float, baseline: float, *, eps: float, floor: float) -> bool:
-    """적합도 게이트(순수·결정적, 023 FR-001·004 계승): 그 modality 버킷을 유지할지 판정한다.
+    """그 모달리티 버킷을 유지할지 판정한다(순수·결정적).
 
-    ``keep = (top − baseline) ≥ eps AND top ≥ floor``. 상대 신호 ``top − baseline``(background 흡수)이
-    주판정, 절대 ``floor`` 는 코퍼스 전체가 평평할 때의 느슨한 backstop. 둘 다 만족해야 유지(AND);
-    실패면 빈 버킷(no-match → 무관 결과 표출 차단). 비교는 ``_CUTOFF_TOL`` 로 경계를 포용한다.
-
-    027: ``baseline`` 은 ``gate_signal`` 이 주는 **하위 절반 평균**(robust)이다 — 023 의 전체 평균을
-    대체해 밀집 토픽('충전')에서 baseline 이 끌려 올라가는 오컷을 구조 해결한다.
+    ``유지 = (top − baseline) ≥ eps AND top ≥ floor``. 상대 신호가 주판정이고 절대 하한은 코퍼스
+    전체가 평평할 때를 위한 backstop 이다. 부동소수 표현오차로 경계값이 탈락하지 않도록 미세
+    허용오차를 두고 비교한다.
 
     Args:
         top: 그 버킷 kNN 표본의 최고 코사인.
@@ -111,16 +108,11 @@ def minmax_normalize(scores: Iterable[float]) -> list[float]:
 
 
 def gate_signal(cosines: Iterable[float]) -> tuple[float, float]:
-    """kNN 원시 코사인 리스트에서 게이트 신호 ``(top, robust baseline)`` 을 뽑는다(순수·결정적, FR-003).
+    """kNN 코사인 표본에서 게이트 신호 ``(최고값, 배경 수준)`` 을 뽑는다(순수·결정적).
 
-    023 probe(추가 kNN 호출)를 대체한다 — 융합이 클라이언트로 오면서 kNN 응답에 원시 코사인이
-    자연히 보존되므로, **추가 검색 없이** 같은 kNN 표본에서 신호를 잰다(SC-002: probe 소멸).
-
-    - ``top`` = 표본 최댓값(그 modality 의 최적합 신호).
-    - ``baseline`` = **코사인 하위 절반 평균**(robust). 023 의 '전체 평균' 은 밀집 토픽(예: '충전'
-      → 다수 영상이 고코사인)에서 baseline 이 끌어올려져 ``top−baseline`` 이 좁아지는 오컷을 낳았다.
-      하위 절반(정렬 후 floor(n/2)개)만 평균내면 background(무관 꼬리) 해석이 유지돼 밀집 토픽에서도
-      신호가 분리된다 — 신규 분기·상수 0 의 **구조 해결**(027 핵심).
+    배경 수준을 **하위 절반 평균**으로 잡는 이유: 전체 평균을 쓰면 관련 자산이 많은 질의('충전'처럼
+    비슷한 영상이 여럿)에서 배경이 끌려 올라가 최고값과의 격차가 좁아지고, 멀쩡한 버킷이 게이트에
+    걸린다. 하위 절반만 보면 "무관한 꼬리"의 수준이 유지된다.
 
     Args:
         cosines: 그 버킷 kNN 표본의 원시 코사인들(순서 무관).
@@ -177,28 +169,14 @@ def rerank_reorder(
     tau: float = 0.0,
     model_name: str,
 ) -> tuple[list[dict[str, Any]], list[float]]:
-    """게이트·컷 통과 행을 cross-encoder 로 **재정렬**한다(순수·결정적, 029 FR-002 — G3 실측 정정).
+    """게이트·컷을 통과한 행의 **순서만** cross-encoder 로 다시 매긴다(순수·결정적).
 
-    029 augment 의 잎 함수다 — 게이트(``passes_cutoff``)가 '없음' 버킷을 비우고 ``cut_rows`` 가
-    행을 선별(027·recall·차단 보존)한 **뒤**, 통과 버킷의 생존자를 재정렬한다.
-    ⚠️ **cut_rows 를 대체하지 않는다**. 초기 029 구현은 리랭크가 선별까지(τ 드롭·R 절삭) 맡았으나
-    G3 실OS 측정에서 recall 0.9396→0.8999·차단 23→22 로 회귀했다(τ 가 약한-정답 행을 드롭하고
-    R=10 절삭이 융합 11~20위 정답을 잘랐다). 028 의 +1.7%p 하이브리드는 '선별=cut_rows·리랭크=
-    재정렬'이었다 — 리랭크는 **순서만** 바꾼다.
+    걸러내는 일은 하지 않는다 — 선별은 ``cut_rows`` 몫이고 여기는 재정렬 전담이다(리랭크가 선별까지
+    맡았을 때 정답 행이 잘려 회수율이 떨어진 실측이 있다).
 
-    핵심(전역 union 랭킹과의 정합): 호출부의 자산 단위 합집합 랭킹이 ``similarity`` 로 재정렬하므로,
-    리랭크 점수(0~1 절대)를 그대로 덮으면 융합 점수(상대·min-max)와 **스케일이 어긋나** 모달리티
-    간 순위가 깨진다(reranked 행의 작은 절대점수가 타 버킷 융합점수에 밀려 recall 손실). 그래서
-    상위 R 행의 **융합 similarity 값 집합은 보존**하되 리랭크 점수 순서대로 **재배정**한다 —
-    best-reranked 행이 그 head 의 최고 융합점수를 받는다. 결과: 버킷이 union 에 기여하는 점수
-    분포 불변(recall 보존) + head 내 행 순서만 리랭크(p@3↑).
-
-    - ``head = rows[:top_r]`` 만 채점(지연 통제)·``tail = rows[top_r:]`` 은 융합 순서 유지(뒤에 붙임).
-      문서측 입력은 ``_rrtext``("요약: …\n키워드: …") 우선·없으면 ``summary`` 폴백(028 구조화 입력).
-    - ``tau > 0`` 이면 head 중 rerank 점수 < τ 행을 **선택적** 드롭(정밀 필터). 기본 ``τ=0`` 은
-      드롭 0·순수 재정렬 — G3 실측상 τ 드롭이 recall 손실이라 augment 기본은 재정렬만이다.
-    - 빈 head 는 ``(list(rows), [])``(rerank_fn 미호출). ``rerank_fn is None`` 이면 기본 seam
-      ``src.search.reranker.score_pairs`` 를 지연 import(무거운 의존을 플래그 off 환경에 안 당김).
+    **융합 점수 값 자체는 보존하고 순서만 바꾼다.** 리랭크 점수(0~1 절대값)로 덮어쓰면 다른 버킷의
+    융합 점수(상대값)와 척도가 어긋나 모달리티 간 순위가 망가지기 때문이다. 그래서 상위 행들이 갖고
+    있던 융합 점수 집합을 그대로 두고, 리랭크가 매긴 순서대로 **재배정**한다.
 
     Args:
         rows: 게이트·컷을 통과한 행들(융합 순서).
@@ -247,21 +225,10 @@ def normalize_query(
     enabled: bool,
     llm_fn: Callable[[str], str] | None = None,
 ) -> str:
-    """검색 질의를 LLM 핵심 명사구로 정규화하는 순수 토글 함수(029 FR-004, 기본 off).
+    """질의 정규화를 켜고 끄는 순수 토글 함수(기본 꺼짐).
 
-    028 후속 측정이 확인한 명사구 정규화('별 보는 방법'→'천체 관측' 0.009→0.227, 패러프레이즈
-    오컷 직격)를 **설정 토글**로 들인다. 021 FR-004(검색시점 LLM 금지)를 거버넌스 절차로 개정한
-    뒤에만 켜며(G2), 본 함수는 그 토글의 **순수 잎**이다 — ``llm_fn`` 주입 seam·네트워크 0·결정적.
-
-    072: ``llm_fn`` 은 LLM 전용이 아니라 **임의의 정규화 콜백**(nori 형태소 명사추출 등)을 받는다 —
-    파라미터명은 하위호환으로 유지하나 실제 주입체는 형태소 정규화(검색시점 LLM 0·결정적)일 수 있다.
-
-    - ``enabled=False``(기본): 원문 그대로 반환한다 — **바이트 동일 passthrough**(027 회귀 0의 봉인
-      지점). 빈/``None`` 질의도 정규화할 내용이 없으므로 그대로 반환한다(llm_fn 미호출 안전).
-    - ``enabled=True``: ``llm_fn(query)`` 가 돌려준 명사구를 반환한다. ``llm_fn`` 의 결정성(temp=0·
-      env 입력 0)은 호출부(G2 ``query_norm`` seam)가 보장한다 — 본 함수는 같은 입력에 같은 출력.
-      방어적으로 ``llm_fn`` 미주입(``None``)이면 정규화 수단이 없으므로 원문을 그대로 둔다(배선
-      누락이 결정성을 깨지 않게 — fail-safe to 027).
+    자기 자신은 정규화 로직을 갖지 않는다 — 켜져 있을 때 ``llm_fn`` 을 부를 뿐이다. 콜백의 결정성은
+    호출부가 보장한다.
 
     Args:
         query: 원본 질의.
@@ -278,18 +245,11 @@ def normalize_query(
 
 
 def os_hit_to_row(hit: dict[str, Any]) -> dict[str, Any]:
-    """OpenSearch hit 을 media_search 버킷 행과 동형(SC-005)인 dict 로 매핑한다(순수·결정적).
+    """OpenSearch hit 을 버킷 행 dict 로 옮긴다(순수·결정적).
 
-    media_search 버킷 행의 핵심 키(``id``·``file_uri``·``modality``·``summary``·``similarity``·
-    ``domain_label``)에 맞춘다 — 검색 서비스가 OS 버킷과 PG 버킷을 같은 모양으로 병합할 수 있게
-    한다(응답 동형). ``domain_label`` 은 020 인덱스 ``_source`` 에서 그대로 옮겨 042 포탈 tier
-    projection·``group_ranked`` 의료 배제 2차 방어에 쓴다(사용자 검색 파라미터 아님).
-    ``similarity`` 는 hit 의 원시 ``_score`` 다(서브검색 단독 점수) — 027 클라이언트 융합에서는
-    ``fuse_hybrid`` 가 이 값을 **융합 점수로 덮어쓴다**(min-max+가중평균). ``_source`` 누락·메타
-    None 도 안전 처리한다.
-
-    ⚠️ media_search 버킷 행의 자산 식별 키는 ``asset_id`` 가 아니라 ``id`` 다(검색 SQL alias
-    ``asset_id AS id``). 따라서 020 인덱스 ``_source.asset_id``(== ``_id``)를 이 ``id`` 로 옮긴다.
+    자산 식별 키가 ``asset_id`` 가 아니라 **``id``** 라는 점만 주의하면 된다 — 버킷 행 계약이 그렇게
+    정해져 있어 색인 문서의 ``asset_id`` 를 이 이름으로 옮긴다. 여기서 넣는 ``similarity`` 는
+    서브검색 단독 점수이고, 이후 ``fuse_hybrid`` 가 융합 점수로 덮어쓴다.
 
     Args:
         hit: OpenSearch 응답의 hit 하나. ``_source`` 가 없거나 필드가 비어도 안전하게 처리한다.
