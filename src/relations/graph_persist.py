@@ -34,8 +34,16 @@ def _topic_canonicalize_enabled() -> bool:
 
 
 def _as_uuid_str(value: Any) -> str | None:
-    # LLM이 반환한 target_media_item_id가 문자열이 아닌 타입일 수 있으므로 방어적 변환.
-    # 유효하지 않은 UUID면 None을 돌려 호출자가 엣지를 skip할 수 있게 한다.
+    """LLM이 돌려준 타깃 id 를 UUID 문자열로 방어적 변환한다.
+
+    LLM 출력은 타입이 보장되지 않아(숫자·None·잘린 문자열) 그대로 쓰면 SQL 단계에서 터진다.
+
+    Args:
+        value: 어떤 타입이든 받는다(LLM JSON 값).
+
+    Returns:
+        정규화된 UUID 문자열. 파싱 실패면 ``None`` — 호출자는 그 엣지를 skip 한다(예외 아님).
+    """
     try:
         return str(uuid.UUID(str(value)))
     except (TypeError, ValueError, AttributeError):
@@ -51,6 +59,15 @@ def _canonical_pair(src: str, dst: str, *, symmetric: bool) -> tuple[str, str]:
     문자열 대소 비교로 항상 작은 쪽을 src 로 고정한다.
     이 순서가 uq_graph_edge_kind(src_node, dst_node, relation_kind_id) 유니크 제약과
     맞물려 ON CONFLICT 1행 수렴을 보장한다.
+
+    Args:
+        src: 소스 자산의 node_id.
+        dst: 타깃 자산의 node_id.
+        symmetric: 관계 종류가 대칭인지(`relation_kind.is_symmetric`). **True 면 순서를 재배치**해
+            같은 쌍이 두 행으로 갈라지지 않게 한다. False 면 방향을 그대로 둔다.
+
+    Returns:
+        ``(src_node, dst_node)`` 저장 순서.
     """
     if symmetric and dst < src:
         return dst, src
@@ -63,12 +80,20 @@ def _decide_status(
     auto_approve_min: float,
     auto_approve_emb_min: float,
 ) -> str:
-    """신규 엣지 status 결정 — LLM conf AND emb_score 두 게이트(033 FR-001).
+    """신규 엣지의 status 를 정한다 — LLM 신뢰도 **AND** 임베딩 유사도 두 게이트(033 FR-001).
 
-    - conf 가 None 이거나 auto_approve_min 미만이면 'proposed'(현행과 동일).
-    - auto_approve_emb_min<=0.0 이면 emb 변이가 **무력**화돼 conf 단독 결정(동작 보존·SC-001).
-    - emb_min>0 이고 emb_score 가 그 하한 미달이면(또는 None) conf 충분해도 'proposed'(SC-002).
-    - 둘 다 통과해야 'active'.
+    둘 다 통과해야 ``active``(자동 승인), 하나라도 못 넘으면 ``proposed``(사람 검토 대기)다.
+
+    Args:
+        conf_f: LLM이 매긴 신뢰도(0~1). ``None`` 이면 판정 불가로 보고 무조건 ``proposed``.
+        emb_score: 타깃 후보의 코사인 유사도(0~1). ``None`` 은 미달과 같게 취급한다.
+        auto_approve_min: 자동 승인 신뢰도 하한. 호출부 기본 ``1.01`` 은 신뢰도가 1을 넘을 수 없어
+            **사실상 자동 승인을 끈 값**이다(전건 사람 검토).
+        auto_approve_emb_min: 자동 승인 임베딩 유사도 하한. **``0.0`` 이하면 이 게이트 자체를 끄고**
+            신뢰도 단독으로 결정한다.
+
+    Returns:
+        ``"active"`` 또는 ``"proposed"``.
     """
     if conf_f is None or conf_f < auto_approve_min:
         return "proposed"
@@ -78,7 +103,9 @@ def _decide_status(
 
 
 def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
-    """asset_id 의 asset-노드를 보장하고 node_id(UUID str) 반환.
+    """asset_id 의 asset-노드가 있는지 확인하고, **없으면 만들어서** node_id 를 돌려준다.
+
+    **DB에 쓴다**(노드가 없을 때만 INSERT). 호출자의 트랜잭션 안에서 실행된다.
 
     node 테이블은 asset 과 entity(단계 D 의료 ER)를 함께 수용하는 통합 노드 테이블이다.
     자산당 1개 asset-노드는 uq_node_asset 부분 유니크(node_kind='asset')로 강제된다.
@@ -86,6 +113,9 @@ def ensure_asset_node(conn: Connection[Any], asset_id: str) -> str:
     READ-then-INSERT 패턴 이유: 대부분의 호출은 이미 노드가 존재하는 경우이므로
     SELECT로 먼저 확인해 불필요한 INSERT 왕복을 줄인다. 동시 삽입 경쟁은
     ON CONFLICT DO NOTHING + 재조회로 처리해 중복 없이 항상 확정된 node_id를 반환한다.
+
+    Returns:
+        확정된 ``node_id``(UUID 문자열). 기존 노드면 그 값, 신규면 방금 만든 값.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -127,17 +157,35 @@ def sync_graph_edges(
     auto_approve_emb_min: float = 0.0,
     collect: list[dict[str, Any]] | None = None,
 ) -> tuple[int, int]:
-    """후보 집합 안 타깃·active kind 만 graph_edge 에 upsert. Returns (upserted, skipped).
+    """LLM이 제안한 엣지들을 검증해 ``graph_edge`` 에 upsert 한다.
 
-    ``collect`` 리스트를 주면 upsert 된 엣지마다 ``{target_asset_id, kind_code, confidence, status}``
-    를 append 한다(skip 제외). 계보(asset_lineage)에 "어떤 자산과 어떤 관계로 생성됐는지" 쌍을
-    남기기 위한 단일 출처(013) — 반환 튜플 계약은 불변(미전달 시 기존 동작 그대로).
+    **DB에 쓴다**: 필요한 ``node`` 생성 + ``graph_edge`` INSERT/UPDATE. 호출자의 트랜잭션 안에서
+    돈다(``asset_entry._run``). 세 가지를 걸러낸다 — 후보 집합 밖 타깃(LLM 환각) · 자기 자신 참조 ·
+    아직 ``active`` 가 아닌 관계 종류(미검토 kind).
 
-    신규 엣지 status: LLM conf AND emb_score 두 게이트를 모두 통과하면 'active'(자동승인),
-    아니면 'proposed'(검토 대기). conf>=auto_approve_min 이고 (emb_min>0 일 때) 타깃 emb_score>=emb_min.
-    기본 auto_approve_min=1.01·auto_approve_emb_min=0.0(또는 맵 미전달)이면 emb 변이 무력 →
-    현행과 비트-동일(동작 보존·033 SC-001). 충돌 시 status 는 보존(사람 결정 유지), confidence 만 GREATEST.
-    target_emb_scores: {타깃 id: 후보 코사인 유사도}. 미전달 타깃은 0.0(emb_min>0 이면 proposed).
+    같은 쌍이 다시 제안되면(ON CONFLICT) **신뢰도는 더 큰 값으로**, topic·reason 은 더 높은 신뢰도
+    쪽으로 갱신하되 **status 는 건드리지 않는다** — 사람이 내린 검토 결정(특히 ``rejected``)을 LLM
+    재제안이 덮어쓰면 안 되기 때문이다.
+
+    Args:
+        source_asset_id: 관계의 출발 자산.
+        edges: LLM 제안 엣지 목록(``parse_and_normalize_edges`` 결과).
+        allowed_target_ids: **환각 차단 화이트리스트** — 후보 검색이 실제로 내놓은 자산 id 집합.
+            여기 없는 타깃은 저장하지 않고 skip 으로 센다.
+        auto_approve_min: 자동 승인 신뢰도 하한. 기본 ``1.01`` 은 사실상 자동 승인 끔(전건 검토).
+        target_emb_scores: ``{타깃 id: 코사인 유사도}``. ``None`` 이거나 맵에 없는 타깃은 ``0.0``
+            으로 본다 — ``auto_approve_emb_min`` 이 0보다 크면 그 타깃은 자동 승인되지 않는다.
+        auto_approve_emb_min: 자동 승인 임베딩 유사도 하한. ``0.0`` 이면 이 게이트를 끈다.
+        collect: 주면 upsert 된 엣지마다 ``{target_asset_id, kind_code, confidence, status}`` 를
+            append 한다(skip 은 제외). 계보(``asset_lineage``)에 관계 쌍을 남기려는 호출부가 쓴다.
+            ``None`` 이면 수집하지 않는다 — 반환값 계약은 그대로다.
+
+    Returns:
+        ``(upserted, skipped)`` 개수.
+
+    Raises:
+        RuntimeError: upsert 가 행을 돌려주지 않을 때(현재 SQL로는 도달 불가한 방어적 가드).
+            조용히 넘기면 계보에 잘못된 status 가 남으므로 즉시 터뜨린다.
     """
     allowed = frozenset(str(t) for t in allowed_target_ids)
     upserted = 0

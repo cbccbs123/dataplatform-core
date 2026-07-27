@@ -36,7 +36,17 @@ def decide_resolution_status(
     error: BaseException | None,
     max_attempts: int,
 ) -> tuple[str, int]:
-    """다음 큐 상태를 결정하는 순수 함수. (status, attempts) 반환.
+    """다음 큐 상태를 결정한다 — **순수 함수**(DB·시각·난수 없음).
+
+    Args:
+        edges_upserted: 이번 시도에서 실제로 저장된 엣지 수. 0이면 "관계 없음"이다.
+        attempts: 지금까지의 누적 시도 횟수(이번 시도 전 값).
+        error: 이번 시도에서 난 예외. ``None`` 이면 성공적으로 평가를 마쳤다는 뜻이다 —
+            **엣지가 0이어도 실패가 아니다**(고립).
+        max_attempts: 재시도 상한. ``attempts+1`` 이 이 값에 닿으면 DLQ(``failed``)로 보낸다.
+
+    Returns:
+        ``(status, attempts)``. status 는 ``resolved``/``isolated``/``pending``/``failed`` 중 하나.
 
     규칙(FR-008 + 035 #2, 결정적):
       * error None & 엣지≥1 → ('resolved', attempts)           # 관계 생성 성공, attempts 불변
@@ -69,13 +79,21 @@ def upsert_resolution(
     attempts: int,
     reason: str | None,
 ) -> None:
-    """자산당 1행 큐 upsert. ``ON CONFLICT (asset_id) DO UPDATE`` 로 status·attempts·last_reason 갱신.
+    """자산당 1행짜리 재시도 큐를 갱신한다(없으면 삽입).
+
+    **DB에 쓴다**. 호출자의 트랜잭션 안에서 돈다.
 
     ⚠️ ``updated_at = now()`` 를 명시적으로 SET 한다 — 테이블에 자동갱신 트리거가 없으므로
     충돌 갱신 시 갱신 시각을 직접 기록해야 한다(insert 시는 컬럼 DEFAULT now() 가 채움).
 
-    ``reason``(last_reason)은 **비식별**이어야 한다 — 호출자가 예외 타입·고립 표식 같은
-    비식별 문자열만 넘기도록 보장한다(PHI/풀경로 금지, 헌법 10조). 본 함수는 받은 값을 그대로 저장한다.
+    Args:
+        asset_id: 큐 대상 자산(충돌 기준 키).
+        status: ``decide_resolution_status`` 가 정한 상태 문자열. 닫힌 어휘이며 DB CHECK 와
+            일치해야 한다.
+        attempts: 누적 시도 횟수(그대로 덮어쓴다).
+        reason: 마지막 사유. **비식별 문자열만** 넘겨야 한다 — 예외 타입·고립 표식 정도이며
+            PHI·전체 경로는 금지다(헌법 10조). 이 함수는 받은 값을 검사 없이 그대로 저장하므로
+            비식별 책임은 호출자에게 있다. ``None`` 이면 사유 없이 기록한다.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -113,8 +131,12 @@ _UNRESOLVED_SQL = """
 def fetch_unresolved_asset_ids(conn: Connection[Any]) -> list[str]:
     """``--retry`` 대상 자산 id — pending(미해소) + 미시도(큐 행 없음)만, 결정적 정렬.
 
-    conn-우선 시그니처(asset_candidates 관례) — 트랜잭션 경계는 호출자가 제어한다.
+    조회 전용(쓰기 없음). 트랜잭션 경계는 호출자가 제어한다.
     미시도 자산은 큐 행이 없어 rr.attempts 가 NULL 이므로 ``NULLS FIRST`` 로 가장 먼저 시도한다.
+
+    Returns:
+        자산 id 문자열 리스트. 덜 시도한 것 → 오래된 것 → id 순으로 **결정적** 정렬된다.
+        ``resolved``·``isolated``·``failed`` 자산은 애초에 뽑히지 않으므로 빈 리스트일 수 있다.
     """
     with conn.cursor() as cur:
         cur.execute(_UNRESOLVED_SQL)

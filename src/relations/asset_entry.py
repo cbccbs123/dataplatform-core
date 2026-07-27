@@ -74,6 +74,14 @@ def union_candidates(
 
     이 순서·dedup 규칙은 헌법 3조(재현성)를 위해 입력 정렬을 보존하는 안정 결합이다.
     union 총 후보 ≤ top_k + path_top_k(각 입력이 별도 LIMIT 됨, FR-013).
+
+    Args:
+        embedding_candidates: ``find_embedding_candidates`` 결과(유사도 정렬됨). 그대로 앞에 온다.
+        path_candidates: ``find_path_signal_candidates`` 결과(경로·파일명 신호). ``emb_score`` 는
+            실측값이 아닌 ``0.0`` sentinel 이라 자동승인 emb 게이트를 통과하지 못한다.
+
+    Returns:
+        중복 없는 후보 리스트(입력 순서 보존). 둘 다 비면 빈 리스트.
     """
     out: list[EmbeddingCandidate] = list(embedding_candidates)
     seen = {str(c["id"]) for c in embedding_candidates}
@@ -91,6 +99,13 @@ def target_emb_score_map(candidates: list[EmbeddingCandidate]) -> dict[str, floa
 
     path-only 후보는 ``emb_score=0.0`` sentinel 을 그대로 유지(``emb_min>0`` 이면 자동승인 불가).
     union 에서 임베딩 후보가 우선이라 겹친 id 는 실측 emb_score 가 담긴다.
+
+    Args:
+        candidates: ``union_candidates`` 결과(임베딩 ∪ 경로 신호).
+
+    Returns:
+        ``{asset_id: emb_score}``. 같은 id 가 겹치면 뒤 항목이 덮어쓰지만, union 이 이미 dedup 하므로
+        실제로는 발생하지 않는다.
     """
     return {str(c["id"]): float(c["emb_score"]) for c in candidates}
 
@@ -103,18 +118,36 @@ def propose_relations_for_asset(
     embedding_kind: EmbeddingKindFilter = "st",  # 036: bge-only 기본(단일 st_bge 공간·척도 일관)
     llm_fn: Callable[[str], dict[str, Any]] | None = None,  # 테스트용 주입(미주입=실 LLM 호출)
 ) -> tuple[int, int, int, int]:
-    """
-    후보 검색 → LLM JSON → 신규 kind inactive 등록 → ``graph_edge`` upsert.
+    """한 자산의 관계를 제안해 그래프에 반영한다 — 후보 검색 → LLM → kind 등록 → 엣지 upsert.
 
-    ``llm_fn`` 이 있으면 네트워크 대신 해당 함수로 프롬프트 문자열을 JSON으로 바꾼다(테스트용).
+    **DB에 쓴다**(단일 트랜잭션): ``relation_kind`` 신규 코드 inactive 등록 · ``graph_edge`` upsert ·
+    ``asset_lineage`` 에 ``relations.proposed.v1`` 기록. 트랜잭션은 ``idempotent=False`` 로 실행되어
+    **재시도하지 않는다** — 부분 적용된 쓰기를 다시 돌리면 중복 반영될 수 있어서다. 실패 시 전부 롤백.
+
+    LLM 호출이 한 번 일어난다(``llm_fn`` 미주입 시). 소스 자산이 없거나 **자기주제가 미부여**면
+    LLM·후보 검색을 아예 건너뛰고 ``(0, 0, 0, 0)`` 을 돌려준다.
+
+    Args:
+        source_asset_id: 관계를 제안할 기준 자산.
+        top_k: 임베딩 후보 상한. ``None`` 이면 설정값(``relations.top_k``)을 쓴다.
+            경로 신호 후보는 이 값과 **별도 한도**(``relations.path_top_k``)를 가진다.
+        embedding_kind: 후보 검색에 쓸 채널(``st``/``clip``/``both``). 기본은 텍스트 단일 공간.
+        llm_fn: **테스트용 주입 seam** — 미주입이면 운영 LLM(``propose_edges_json``)을 호출한다.
+            주입 시 프롬프트 문자열을 받아 제안 JSON(dict)을 돌려주는 함수여야 한다.
 
     Returns:
-        (``kinds_registered``, ``kinds_skipped``, ``edges_upserted``, ``edges_skipped``)
+        ``(kinds_registered, kinds_skipped, edges_upserted, edges_skipped)``.
+        자산 없음·주제 미부여면 ``(0, 0, 0, 0)``.
     """
     cfg = get_current_settings()
     k = top_k if top_k is not None else cfg.relations.top_k
 
     def _run(conn: Connection[Any]) -> tuple[int, int, int, int]:
+        """한 트랜잭션 안에서 실행되는 본체 — 조회·LLM·쓰기가 모두 여기서 일어난다.
+
+        ``execute_in_transaction`` 에 넘겨져 커넥션을 받는다. 중간에 예외가 나면 이 함수가 남긴
+        쓰기(kind 등록·엣지·계보)는 통째로 롤백된다.
+        """
         src = _fetch_source_row(conn, source_asset_id)
         if src is None:
             # asset 테이블에 없는 ID — 조용히 (0,0,0,0) 반환(호출자 로그에서 확인).

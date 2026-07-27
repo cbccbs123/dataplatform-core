@@ -1,15 +1,16 @@
-"""임베딩 기반 **관계 후보 검색** (pgvector) — asset_* 재배선판.
+"""임베딩 기반 **관계 후보 검색**(pgvector).
 
 역할
-    소스 ``asset`` 의 ``asset_embedding`` 벡터와, **동일 채널(channel)** 을 가진 다른 자산들의
-    임베딩 사이 **코사인 유사도**(``1 - (a <=> b)``)를 계산해, 자산당 최고 유사도로 집계한 뒤 상위 ``top_k`` 를 반환한다.
+    소스 자산의 ``asset_embedding`` 벡터와 **같은 채널(channel)** 을 가진 다른 자산의 임베딩 사이
+    **코사인 유사도**(``1 - (a <=> b)``)를 계산해, 자산당 최고 유사도로 집계한 뒤 상위 ``top_k`` 를
+    돌려준다. 여기서 걸러진 후보만 관계 제안 LLM 프롬프트에 실린다.
 
-설정
-    ``embedding_kind``: ``st`` / ``clip`` / ``both`` — ``asset_embedding.channel`` 값과 매핑된다.
-    차원은 ``FIX_EMBEDDING_DIMENSION`` 과 일치해야 한다(추출·적재 파이프라인과 동일).
+채널(channel)이란
+    임베딩을 만든 모델별 벡터 공간의 이름이다(``st``=텍스트 모델·``clip``=이미지 모델). 공간이 다르면
+    코사인 비교가 무의미하므로 **같은 채널끼리만** 비교한다. 차원은 ``FIX_EMBEDDING_DIMENSION``
+    (1536D)과 일치해야 한다 — 추출·적재 파이프라인과 같은 값이다.
 
-구 스키마(media_chunks/media_items) 대비
-    asset_embedding·asset(+asset_metadata) 재배선, id 는 UUID(str), 요약은 ``ext_meta->>'summary'``.
+이 모듈은 **조회 전용**이다(DB 쓰기 없음).
 """
 
 from __future__ import annotations
@@ -46,14 +47,21 @@ class EmbeddingCandidate(TypedDict):
 
 
 def _channels_param(kind: EmbeddingKindFilter) -> list[str]:
-    """필터 문자열 → ``asset_embedding.channel`` 에 넣을 값 목록.
+    """필터 문자열을 ``asset_embedding.channel`` 에 넣을 값 목록으로 바꾼다.
 
-    채널 간 벡터는 공간이 달라 코사인 비교가 무의미하므로, SQL에서 channel로 조인해
-    같은 채널끼리만 유사도를 계산한다. "both"는 채널별 독립 비교 후 자산 단위 MAX로 합산된다.
+    ``both`` 는 채널별로 따로 비교한 뒤 자산 단위 ``MAX`` 로 합산된다(호출부 SQL).
+    텍스트 채널의 실제 이름은 **운영 활성 임베딩 채널**을 따른다 — 적재·검색·관계가 같은 값을 써야
+    같은 공간에서 비교되기 때문이다. CLIP(이미지) 채널은 활성 설정과 무관하게 고정이다.
 
-    텍스트 채널은 운영 활성 임베딩 채널(018, 적재·검색·관계 단일 출처)을 따른다 — 기본 active='st'
-    이면 기존과 동치. settings 미초기화(순수 단위 등)에서는 활성 해소가 ``RuntimeError`` 이므로
-    기존 기본 'st' 로 보수적 폴백한다(회귀 0). CLIP 채널은 active 와 무관하게 무변경(텍스트 한정).
+    Args:
+        kind: ``st``(텍스트만) · ``clip``(이미지만) · ``both``(둘 다).
+
+    Returns:
+        채널 이름 목록. ``both`` 면 [텍스트, CLIP] 2개.
+
+    Raises:
+        없음. settings 미초기화(순수 단위 테스트 등)로 활성 채널 해소가 실패하면 예외를 올리지 않고
+        ``st`` 로 보수적 폴백한다(운영 경로인 관계 배치는 설정 초기화가 선행되므로 미발생).
     """
     if kind == "clip":
         return [EMBEDDING_KIND_CLIP]
@@ -76,8 +84,10 @@ def find_embedding_candidates(
     embedding_kind: EmbeddingKindFilter = "both",
     min_sim: float = 0.0,
 ) -> list[EmbeddingCandidate]:
-    """
-    소스와 **같은 채널** 임베딩끼리만 비교하여, 자산별 최대 코사인 유사도로 정렬한 상위 ``top_k`` 후보.
+    """소스와 **같은 채널** 임베딩끼리만 비교해, 자산별 최대 유사도 상위 ``top_k`` 후보를 반환한다.
+
+    **조회 전용**(DB 쓰기 없음). ``registered`` 상태이면서 자기주제가 부여된 자산만 후보가 된다 —
+    내용이 없어 엉터리 임베딩을 가진 자산이 남의 후보를 오염시키는 것을 SQL 단계에서 막는다.
 
     SQL 구조
         ``src_vecs``: 소스 자산의 (channel, embedding) 목록.
@@ -85,6 +95,17 @@ def find_embedding_candidates(
         ``per_item``: 자산 id 별 ``MAX(sim)`` — 한 자산에 청크/키프레임이 여러 개일 때 가장 가까운 쌍만 반영.
                       ``HAVING MAX(sim) >= min_sim`` 로 유사도 하한 미만 후보 제거.
         최종: ``asset`` + ``asset_metadata`` 와 조인해 경로·modality·요약을 붙인다.
+
+    Args:
+        source_asset_id: 관계를 찾을 기준 자산. 자기 자신은 후보에서 제외된다.
+        top_k: 반환할 최대 후보 **자산 수**(청크 수가 아니다).
+        embedding_kind: 비교할 채널(``st``/``clip``/``both``).
+        min_sim: 코사인 유사도 하한(0~1). 이 값 **미만**이면 후보에서 버려 LLM 토큰 낭비를 막는다.
+            ``0.0`` 이면 하한 없음(0-노름 제외는 별개로 항상 적용).
+
+    Returns:
+        ``EmbeddingCandidate`` 리스트. ``emb_score`` 내림차순, 동점이면 ``id`` 오름차순으로
+        **결정적** 정렬된다(헌법 3조 재현성). 조건에 맞는 후보가 없으면 빈 리스트.
     """
     channels = _channels_param(embedding_kind)
     sql = """
