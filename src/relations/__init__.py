@@ -3,7 +3,7 @@
 데이터 흐름(요약)
     1. ``find_embedding_candidates``: 소스 자산과 채널이 맞는 ``asset_embedding`` 끼리 pgvector 유사도 상위 k 후보.
     2. ``build_relation_proposal_prompt`` + ``propose_edges_json``: DB 카탈로그·후보 메타를 LLM에 넘겨 JSON 엣지 수신.
-    3. ``parse_and_normalize_edges`` / ``schema``: LLM 출력 정규화(관계 코드·토피 필드).
+    3. ``parse_and_normalize_edges`` / ``schema``: LLM 출력 정규화(관계 코드·주제 라벨 필드).
     4. 신규 kind 만 inactive 등록(``register_new_relation_kinds``) 후 ``sync_graph_edges`` 로 ``graph_edge`` upsert.
        진입점은 ``propose_relations_for_asset``.
 
@@ -31,7 +31,21 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    """패키지 속성 지연 로드: ``import src.relations as R; R.propose_relations_for_asset`` 형태만 지원."""
+    """패키지 속성을 **처음 쓸 때 import** 한다(지연 로드).
+
+    ``import src.relations as R; R.propose_relations_for_asset`` 형태만 지원한다.
+    ``from src.relations import X`` 도 파이썬이 이 훅을 거치므로 동작하지만, 무거운 의존성
+    (psycopg·LLM 클라이언트)을 피하려는 테스트는 하위 모듈을 직접 import 하는 편이 낫다.
+
+    Args:
+        name: 접근하려는 속성 이름.
+
+    Returns:
+        해당 함수 객체.
+
+    Raises:
+        AttributeError: ``__all__`` 에 없는 이름일 때(파이썬 기본 규약).
+    """
     if name == "propose_relations_for_asset":
         from src.relations.asset_entry import propose_relations_for_asset as fn
 

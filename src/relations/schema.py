@@ -3,7 +3,10 @@
 필드 모델
     - ``relation_type_code``: 관계 **종류**(``relation_kind.kind_code`` 와 동일한 snake_case). 프롬프트 허용 목록과 대조.
     - ``topic_ko`` / ``topic_en`` / ``subtopic_*``: 엣지 ``graph_edge.topic`` jsonb 로 들어갈 값.
-      토피는 **한글 첫 어절·영어 최대 2토큰(3토큰 이상이면 첫 토큰만)** 등으로 짧게 잘라 DB 행 폭주를 완화한다(하드코드 동의어 맵 없음).
+      주제 라벨은 **한글 첫 어절·영어 최대 2토큰(3토큰 이상이면 첫 토큰만)** 으로 짧게 잘라 서로
+      다른 표기가 무한히 늘어나는 것을 막는다(하드코드 동의어 맵은 쓰지 않는다).
+
+이 모듈은 전부 **순수 함수**다 — DB·네트워크·시각에 의존하지 않으므로 DB 없이 단위 테스트한다.
 
 신규 코드
     ``sanitize_llm_proposed_type_code``: 카탈로그에 없는 제안을 DB에 **inactive** 로 넣기 전 형식·레거시 검사.
@@ -38,11 +41,26 @@ _EDGE_PUNCT_STRIP = re.compile(r"^[\s.,;:!?·、，。]+|[\s.,;:!?·、，。]+$
 
 
 def _collapse_whitespace(s: str) -> str:
+    """연속 공백(탭·줄바꿈 포함)을 공백 하나로 합치고 앞뒤를 자른다.
+
+    Args:
+        s: 원본 문자열.
+
+    Returns:
+        공백이 정리된 문자열.
+    """
     return _MULTI_SPACE_RE.sub(" ", s).strip()
 
 
 def _strip_edge_punctuation(s: str) -> str:
-    """앞뒤 잡음 공백·구두점만 제거(본문 의미는 유지)."""
+    """문자열 **앞뒤**의 잡음 공백·구두점만 제거한다(가운데 내용은 건드리지 않는다).
+
+    Args:
+        s: 원본 문자열.
+
+    Returns:
+        앞뒤가 정리된 문자열. 전부 구두점이면 빈 문자열.
+    """
     # 정규식 한 번으로 제거되지 않는 중첩 패턴(예: " , " + " . ")에 대응하기 위해
     # 변경이 없을 때까지 반복한다. 일반 입력에서는 1~2회로 수렴한다.
     prev = None
@@ -53,16 +71,21 @@ def _strip_edge_punctuation(s: str) -> str:
 
 
 def parse_llm_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """
-    LLM 응답 루트에서 엣지 ``dict`` 리스트를 추출.
+    """LLM 응답 루트에서 엣지 ``dict`` 리스트를 꺼낸다.
 
     허용 형태
         - ``{"edges": [ {...}, ... ]}``
         - ``{"items": [ ... ]}`` (별칭)
         - 단일 엣지 객체(``target_media_item_id`` 키가 있으면 한 원소 리스트로 감쌈)
 
-    주의: LLM 이 ``edges`` 키를 빠뜨리고 객체를 직접 반환하는 경우를 단일 엣지 폴백으로 처리한다.
-    dict 가 아닌 원소(문자열 등)는 묵시적으로 버린다.
+    LLM 이 ``edges`` 키를 빠뜨리고 객체를 직접 반환하는 경우를 단일 엣지 폴백으로 처리한다.
+
+    Args:
+        data: LLM 응답 루트 dict.
+
+    Returns:
+        엣지 dict 리스트. dict 가 아닌 원소(문자열 등)는 **조용히 버린다**. 알아볼 수 있는 형태가
+        없으면 빈 리스트 — "응답이 망가졌다"는 판정은 호출부(``propose_edges_json``)가 한다.
     """
     raw = data.get("edges")
     if raw is None and isinstance(data.get("items"), list):
@@ -75,7 +98,14 @@ def parse_llm_edges(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def normalize_relation_type_code(raw: Any) -> str | None:
-    """``relation_type_code`` 를 소문자·trim. 없음/빈 문자열이면 None."""
+    """``relation_type_code`` 를 소문자로 맞추고 앞뒤 공백을 자른다.
+
+    Args:
+        raw: LLM이 준 값. 어떤 타입이든 문자열로 변환해 처리한다.
+
+    Returns:
+        정규화된 코드. 값이 없거나 공백뿐이면 ``None``(호출자가 그 엣지를 건너뛴다).
+    """
     if raw is None:
         return None
     s = str(raw).strip().lower()
@@ -83,15 +113,20 @@ def normalize_relation_type_code(raw: Any) -> str | None:
 
 
 def sanitize_llm_proposed_type_code(code: str) -> str | None:
-    """
-    카탈로그 밖 코드를 **inactive 자동 등록**하기 전 안전 필터.
+    """카탈로그에 없는 코드를 **inactive 로 자동 등록하기 전** 통과시킬지 검사한다.
 
     거부 조건
         - 길이 0 또는 100 초과
-        - ``LEGACY_DOMAIN_TYPE_CODES`` (과거 도메인 코드)
+        - ``LEGACY_DOMAIN_TYPE_CODES``(도메인을 관계 종류로 쓰던 과거 코드 — 섞이면 LLM이 도메인과
+          관계를 혼동해 제안한다)
         - 정규식 ``[a-z][a-z0-9_]{0,99}`` 불일치
 
-    통과 시 원본(소문자 정규화는 호출 전 ``normalize_relation_type_code`` 권장) 문자열 반환.
+    Args:
+        code: 검사할 코드. **호출 전에** ``normalize_relation_type_code`` 로 소문자화해 두어야
+            한다(이 함수는 대문자를 정규식 불일치로 거부한다).
+
+    Returns:
+        통과하면 입력 그대로, 거부되면 ``None``.
     """
     if not code or len(code) > 100:
         return None
@@ -103,7 +138,17 @@ def sanitize_llm_proposed_type_code(code: str) -> str | None:
 
 
 def normalize_topic_ko(raw: Any) -> str:
-    """한글 토피: trim → 공백이 있으면 첫 어절만 → 길이 상한."""
+    """한글 주제 라벨을 정규화한다 — 앞뒤 공백 제거 → 여러 어절이면 **첫 어절만** → 길이 상한.
+
+    문장형 라벨("여행 사진 모음")이 그대로 저장되면 주제 값이 무한히 늘어나 패싯이 망가지므로
+    첫 어절로 줄인다.
+
+    Args:
+        raw: LLM이 준 값(문자열이 아니어도 된다).
+
+    Returns:
+        정규화된 라벨. 값이 없으면 빈 문자열(폴백은 ``coerce_topic_fields_mvp`` 소관).
+    """
     s = str(raw or "").strip()
     if not s:
         return s
@@ -115,7 +160,16 @@ def normalize_topic_ko(raw: Any) -> str:
 
 
 def normalize_subtopic_ko(raw: Any) -> str:
-    """한글 세부토피: 공백 정리·앞뒤 구두점 제거·**첫 어절만**(토피와 동일한 단어 수 규칙)·길이 상한."""
+    """한글 세부주제를 정규화한다 — 공백 정리 · 앞뒤 구두점 제거 · **첫 어절만** · 길이 상한.
+
+    대주제와 같은 단어 수 규칙을 쓴다(일관된 카디널리티).
+
+    Args:
+        raw: LLM이 준 값.
+
+    Returns:
+        정규화된 세부주제. 값이 없으면 빈 문자열.
+    """
     s = _collapse_whitespace(str(raw or ""))
     s = _strip_edge_punctuation(s)
     if not s:
@@ -128,7 +182,16 @@ def normalize_subtopic_ko(raw: Any) -> str:
 
 
 def normalize_topic_en(raw: Any) -> str:
-    """영어 토피: 소문자·3토큰 초과 시 첫 토큰만·그 외는 공백 유지(최대 2토큰)·길이 상한."""
+    """영어 주제 라벨을 정규화한다 — 소문자 · **3토큰 이상이면 첫 토큰만** · 길이 상한.
+
+    2토큰까지는 공백을 살린다("machine learning" 처럼 두 단어가 한 개념인 경우가 있어서다).
+
+    Args:
+        raw: LLM이 준 값.
+
+    Returns:
+        정규화된 영문 라벨. 값이 없으면 빈 문자열.
+    """
     s = str(raw or "").strip()
     if not s:
         return s
@@ -144,7 +207,14 @@ def normalize_topic_en(raw: Any) -> str:
 
 
 def normalize_subtopic_en(raw: Any) -> str:
-    """영어 세부토피: 소문자·공백 정리·앞뒤 구두점 제거·**첫 토큰만**·길이 상한."""
+    """영어 세부주제를 정규화한다 — 소문자 · 공백 정리 · 앞뒤 구두점 제거 · **첫 토큰만** · 길이 상한.
+
+    Args:
+        raw: LLM이 준 값.
+
+    Returns:
+        정규화된 영문 세부주제. 값이 없으면 빈 문자열.
+    """
     s = _collapse_whitespace(str(raw or "")).lower()
     s = _strip_edge_punctuation(s)
     if not s:
@@ -157,10 +227,17 @@ def normalize_subtopic_en(raw: Any) -> str:
 
 
 def extract_topic_fields_from_edge(edge: dict[str, Any]) -> tuple[str, str, str, str]:
-    """
-    엣지 dict 에서 토피 4튜플 추출 후 ``normalize_*`` 적용.
+    """엣지 dict 에서 주제 4필드를 꺼내 정규화한다.
 
-    LLM 키 별칭: ``topic`` → ``topic_ko``, ``subtopic`` / ``sub_topic_ko`` 등.
+    LLM이 키 이름을 흔들기 때문에 별칭을 함께 본다 — ``topic`` → ``topic_ko``,
+    ``subtopic``/``sub_topic_ko`` → ``subtopic_ko``, ``sub_topic_en`` → ``subtopic_en``.
+
+    Args:
+        edge: LLM 엣지 dict 하나.
+
+    Returns:
+        ``(topic_ko, subtopic_ko, topic_en, subtopic_en)``. 없는 값은 빈 문자열이다
+        (기본값 채우기는 ``coerce_topic_fields_mvp`` 가 한다).
     """
     tk = edge.get("topic_ko")
     if tk is None or not str(tk).strip():
@@ -181,8 +258,10 @@ def extract_topic_fields_from_edge(edge: dict[str, Any]) -> tuple[str, str, str,
 
 
 def coerce_topic_fields_mvp(edge: dict[str, Any]) -> tuple[str, str, str, str, bool]:
-    """
-    ``topic_ko`` 가 비어 있으면 MVP 폴백으로 채운다.
+    """``topic_ko`` 가 비어 있으면 폴백으로 채운다 — 주제가 없다고 엣지를 버리지 않기 위해서다.
+
+    Args:
+        edge: LLM 엣지 dict 하나.
 
     우선순위
         1. 엣지에 유효한 ``topic_ko`` 가 있으면 그대로(``topic_en`` 비면 ``general``).
@@ -226,10 +305,16 @@ def coerce_topic_fields_mvp(edge: dict[str, Any]) -> tuple[str, str, str, str, b
 
 
 def type_label_from_kind_code(code: str, *, max_len: int = 120) -> str:
-    """
-    ``kind_code``(snake_case) 에 대한 읽기용 라벨 폴백.
+    """``kind_code``(snake_case)를 사람이 읽을 라벨로 바꾼다 — 밑줄을 공백으로.
 
-    DB 시드에 ``kind_name_ko`` 가 있으면 그쪽을 쓰는 것이 원칙이며, 없을 때만 이 값을 쓴다.
+    DB 시드에 ``kind_name_ko`` 가 있으면 그쪽이 우선이고, 없을 때만 이 폴백을 쓴다.
+
+    Args:
+        code: 관계 종류 코드(예: ``same_series``).
+        max_len: 라벨 길이 상한. 넘으면 잘라낸다.
+
+    Returns:
+        읽기용 라벨(예: ``same series``). 코드가 비면 ``"기타"``.
     """
     s = (code or "").strip().lower()
     if not s:
@@ -241,8 +326,16 @@ def type_label_from_kind_code(code: str, *, max_len: int = 120) -> str:
 
 
 def description_ko_from_type_name_ko(type_name_ko: str) -> str:
-    """
-    ``type_name_ko`` 를 ``… 도메인 연관`` 형태로 만든다(비한글 라벨에도 동일 규칙 적용).
+    """관계 종류 이름을 ``… 도메인 연관`` 형태의 기본 설명문으로 만든다.
+
+    신규 kind 를 등록할 때 description 이 비어 있으면 쓰는 폴백 문구다. 비한글 라벨에도 같은
+    규칙을 적용한다.
+
+    Args:
+        type_name_ko: 관계 종류의 표시 이름.
+
+    Returns:
+        설명 문자열. 이름이 비면 ``"기타 도메인 연관"``.
     """
     raw = type_name_ko.replace("·", " ").split()
     parts = [p for p in raw if p]

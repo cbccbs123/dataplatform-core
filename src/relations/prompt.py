@@ -47,6 +47,12 @@ def _load_taxonomy_topics() -> tuple[tuple[str, str], ...]:
 
     시드 파일이 없으면(패키징 누락 등) 무엇이 빠졌는지 명확한 한국어 에러로 실패시킨다 —
     조용한 빈 목록으로 프롬프트가 망가지지 않도록.
+
+    Returns:
+        ``((topic_ko, topic_en), ...)`` 튜플. 파일에 적힌 순서를 그대로 유지한다.
+
+    Raises:
+        FileNotFoundError: 시드 파일이 없을 때(패키징에서 빠진 경우가 대표적).
     """
     try:
         with open(_TAXONOMY_SEED_PATH, encoding="utf-8") as f:
@@ -60,7 +66,13 @@ def _load_taxonomy_topics() -> tuple[tuple[str, str], ...]:
 
 
 def _build_topic_taxonomy_block() -> str:
-    """topic 지시부에 주입할 닫힌 목록 Markdown 블록(``topic_ko`` · ``topic_en`` 병기)."""
+    """프롬프트의 topic 지시부에 넣을 **닫힌 목록** Markdown 블록을 만든다.
+
+    목록을 통째로 보여줘 LLM이 그 안에서만 고르게 한다(자유 기입 방지).
+
+    Returns:
+        ``- ``주제``(topic_en)`` 형태의 여러 줄 문자열.
+    """
     return "\n".join(f"- ``{ko}`` ({en})" for ko, en in _load_taxonomy_topics())
 
 # 경로 패턴 가이드(레버 A, FR-009): 파일명·폴더 신호가 same_series/derived_from/references
@@ -93,10 +105,15 @@ RELATION_KIND_HINTS_KO: dict[str, str] = {
 
 
 def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
-    """
-    카탈로그에 등장하는 ``type_code`` 마다 한 줄 힌트(또는 DB 설명)를 붙인 Markdown 블록.
+    """카탈로그의 ``type_code`` 마다 한 줄 힌트를 붙인 선택 가이드 블록을 만든다.
 
-    ``duplicate_near`` 와 ``same_domain`` 이 동시에 있으면 혼동 방지 문구를 추가한다.
+    ``duplicate_near`` 와 ``same_domain`` 이 동시에 있으면 혼동 방지 문구를 덧붙인다.
+
+    Args:
+        catalog: 활성 relation_kind 목록(``fetch_active_relation_kinds`` 결과).
+
+    Returns:
+        Markdown 블록 문자열. 카탈로그가 비면 **빈 문자열**(프롬프트에서 이 절이 통째로 빠진다).
 
     힌트 우선순위
         ``RELATION_KIND_HINTS_KO`` 에 정의된 5종 통제어휘는 미리 작성된 한국어 힌트를 쓴다.
@@ -130,8 +147,13 @@ def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
 def _fmt_topic(topic: Mapping[str, Any] | None) -> str:
     """(topic_ko / subtopic_ko) 를 사람이 읽는 한 줄 표기로 — 미부여/부분값도 견고하게.
 
-    066 FR-202: 관계 LLM 에 주제를 **참고 신호**로 보여줄 문자열. subtopic 이 있으면
-    ``topic_ko / subtopic_ko`` 로, 없으면 ``topic_ko`` 만. 둘 다 없으면 ``(주제 없음)``.
+    관계 LLM 에 주제를 **참고 신호**로 보여줄 문자열이다.
+
+    Args:
+        topic: ``{"topic_ko", "subtopic_ko"}`` dict. ``None`` 이나 빈 dict 도 받는다.
+
+    Returns:
+        ``대주제 / 세부주제``, 한쪽만 있으면 그 값, 둘 다 없으면 ``(주제 없음)``.
     """
     if not topic:
         return "(주제 없음)"
@@ -161,16 +183,22 @@ def build_relation_proposal_prompt(
     relation_kinds_catalog: Sequence[Mapping[str, Any]],
     source_topic: Mapping[str, Any] | None = None,
 ) -> str:
-    """
-    관계 제안 전체 프롬프트(단일 문자열)를 조립한다.
+    """관계 제안 프롬프트 전체를 하나의 문자열로 조립한다.
+
+    순수 함수(DB·LLM 호출 없음). 후보 경로는 **파일명만** 싣는다 — 디렉터리 전체 경로는 LLM 입력에
+    노출하지 않는다(결정성·개인정보 누출 방지).
 
     Args:
         source_summary: 소스 자산 요약(길이 상한은 본문에서 잘라 씀).
         source_media_type: 매체 타입 구분용 문자열.
         candidates: ``find_embedding_candidates`` 결과 행들(066: topic_ko/subtopic_ko 동반 가능).
         relation_kinds_catalog: **active** ``relation_kind`` 목록(``type_code``/``type_name``/``description``/``is_symmetric``).
-        source_topic: 소스 자산의 자기주제 ``{"topic_ko","subtopic_ko"}`` (066 FR-202·soft 신호).
-            ``None`` 이면 주제 표기를 생략(하위호환 — 기존 호출부·미부여 경로).
+        source_topic: 소스 자산의 자기주제 ``{"topic_ko","subtopic_ko"}``. 주제가 달라도 내용이
+            맞으면 연결하라는 **soft 신호**로만 쓰인다(하드 배제 금지). ``None`` 이면 주제 표기를
+            통째로 생략한다 — 주제 미부여 자산·구 호출부 경로.
+
+    Returns:
+        LLM에 그대로 넘길 단일 프롬프트 문자열.
     """
     cand_lines: list[str] = []
     for c in candidates:

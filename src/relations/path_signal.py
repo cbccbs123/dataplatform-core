@@ -52,6 +52,12 @@ def split_dir_and_name(fs_path: str) -> tuple[str, str]:
     """``fs_path`` 를 (디렉터리, basename) 으로 분리(POSIX 경로 규칙, 결정적).
 
     posixpath 를 쓰는 이유: 결정성·로케일 비의존을 위해 실행 OS(os.sep)에 의존하지 않는다.
+
+    Args:
+        fs_path: 자산 경로 문자열. 구분자는 ``/`` 로 간주한다.
+
+    Returns:
+        ``(디렉터리, 파일명)``. 디렉터리가 없으면 앞이 빈 문자열이다.
     """
     d = posixpath.dirname(fs_path)
     name = posixpath.basename(fs_path)
@@ -59,7 +65,14 @@ def split_dir_and_name(fs_path: str) -> tuple[str, str]:
 
 
 def _raw_stem(filename: str) -> str:
-    """확장자만 제거한 stem(소문자 정규화). 접미사는 남긴다 — 정확 raw 일치 판정용."""
+    """확장자만 제거한 stem(소문자 정규화). 접미사는 남긴다 — 정확 raw 일치 판정용.
+
+    Args:
+        filename: 디렉터리를 뺀 파일명.
+
+    Returns:
+        소문자 stem. ``report_v1.pdf`` → ``report_v1``.
+    """
     stem = posixpath.splitext(filename)[0]
     return stem.lower()
 
@@ -70,6 +83,12 @@ def normalize_stem(filename: str) -> str:
     예) ``manual_v1.pdf`` / ``manual_v2.pdf`` → ``manual`` , ``report_summary.txt`` → ``report`` ,
         ``강의_1부.mp4`` → ``강의`` , ``a_summary_copy.txt`` → ``a_summary``(1회만 제거).
     소문자 정규화로 로케일 비의존·결정적(헌법 3조).
+
+    Args:
+        filename: 디렉터리를 뺀 파일명.
+
+    Returns:
+        정규화 stem. 접미사가 없으면 ``_raw_stem`` 과 같은 값이다.
     """
     stem = _raw_stem(filename)
     return _SUFFIX_PATTERN.sub("", stem)
@@ -84,6 +103,15 @@ def proximity_rank(
     raw 는 다르지만 접미사 제거 후 정규화 stem 이 같으면 파생/연작으로 보고 근접도 1.
     소스 stem 이 비면(예 ``_v1.txt`` 처럼 접미사만 있는 파일) 의미 있는 매칭이 아니므로 제외한다 —
     빈 stem 끼리 ''로 일치하는 오탐(서로 무관한 접미사-only 파일)을 막는다.
+
+    Args:
+        src_raw: 소스의 raw stem(확장자만 제거).
+        src_norm: 소스의 정규화 stem(접미사까지 제거).
+        cand_raw: 후보의 raw stem.
+        cand_norm: 후보의 정규화 stem.
+
+    Returns:
+        근접도 ``2``(raw 일치) · ``1``(정규화 일치) · ``None``(후보 아님 — 호출자가 버린다).
     """
     if src_raw and cand_raw == src_raw:
         return 2
@@ -98,12 +126,20 @@ def find_path_signal_candidates(
     source_asset_id: str,
     limit: int,
 ) -> list[EmbeddingCandidate]:
-    """동일 디렉터리 + C-1 stem 일치 registered 자산을 결정적 정렬·LIMIT 으로 산출.
+    """같은 폴더에 있고 파일명 stem 이 맞는 자산을 관계 후보로 산출한다(임베딩 보완).
 
-    반환은 임베딩 후보와 동일한 ``EmbeddingCandidate`` 형태(id/file_uri/media_type/emb_score/summary
-    + 066 ``topic_ko``/``subtopic_ko`` — 2026-07-15 B4 로 임베딩 후보와 계약 통일).
-    path-only 이므로 ``emb_score=0.0``(C-3 sentinel). self 제외. 미부여(무내용) 자산은
-    ``asset_topic`` EXISTS 로 배제(066 FR-101 — 임베딩 후보와 동일).
+    **조회 전용**(DB 쓰기 없음). 반환 형태는 임베딩 후보와 **동일한 계약**(``EmbeddingCandidate``)이라
+    호출자가 두 후보를 그대로 합칠 수 있다. path-only 라 ``emb_score`` 는 실측값이 아닌 ``0.0``
+    sentinel 이다. 자기 자신과 무내용(자기주제 미부여) 자산은 임베딩 후보와 같은 기준으로 배제한다.
+
+    Args:
+        source_asset_id: 기준 자산. 이 자산의 폴더·파일명이 매칭 기준이 된다.
+        limit: 반환할 최대 후보 수. **임베딩 후보의 ``top_k`` 와는 별도 한도**이며, 파일이 많은
+            폴더에서 후보가 폭주하는 것을 막는 상한이다.
+
+    Returns:
+        후보 리스트(근접도 내림차순 → asset_id 오름차순으로 결정적 정렬). 소스 경로를 못 찾거나
+        맞는 파일이 없으면 빈 리스트.
 
     정렬·LIMIT(C-2)
         근접도 DESC(정확 raw 일치 > 정규화 일치), 동률은 asset_id ASC, 상위 ``limit`` 만.
@@ -194,11 +230,16 @@ def find_path_signal_candidates(
 
 
 def like_escape(value: str) -> str:
-    """LIKE 패턴의 메타문자(% _ \\)를 이스케이프해 입력을 리터럴로 매칭(공용).
-
-    2026-07-15 B9: review 검색 q 등 다른 모듈도 쓰도록 공개 승격(동일 규칙 사본 방지·SSOT).
+    """LIKE 패턴의 메타문자(``%`` ``_`` ``\\``)를 이스케이프해 입력을 **리터럴**로 매칭시킨다.
 
     디렉터리 경로에 ``_`` 가 흔하므로(예: ``my_docs``) 와일드카드로 오인되지 않게 escape 한다.
-    PostgreSQL 기본 escape 문자는 백슬래시다.
+    PostgreSQL 기본 escape 문자는 백슬래시다. 관계 검토 화면의 검색어 등 다른 모듈도 이 함수를
+    공유한다(같은 규칙을 여러 곳에 복사하지 않기 위한 단일 출처).
+
+    Args:
+        value: 사용자·경로에서 온 원본 문자열.
+
+    Returns:
+        LIKE 에 안전하게 넣을 수 있는 문자열. 호출자가 뒤에 ``%`` 를 붙여 prefix 매칭에 쓴다.
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

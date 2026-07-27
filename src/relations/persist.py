@@ -28,11 +28,19 @@ def register_new_relation_kinds(
     edges: list[dict[str, Any]],
     active_kind_codes: frozenset[str],
 ) -> tuple[int, int]:
-    """엣지 코드 중 active 집합 밖·형식 통과한 것만 relation_kind 에 inactive 등록. Returns (registered, skipped).
+    """LLM이 쓴 관계 코드 중 **아직 통제 어휘에 없는 것**만 검토 대기(inactive)로 등록한다.
+
+    **DB에 쓴다**(신규 코드가 있을 때만). 호출자의 트랜잭션 안에서 돈다. 여기서 등록된 코드는
+    같은 사이클에서 엣지가 되지 못하고, 사람이 승인한 다음 주기부터 쓰인다.
 
     Args:
+        edges: 정규화된 LLM 제안 엣지 목록. 각 항목의 ``relation_type_code``·``reason`` 만 본다.
         active_kind_codes: 호출 전에 DB에서 읽어온 활성 kind_code 집합.
                            이 집합에 속하는 코드는 이미 통제어휘에 있으므로 건너뛴다.
+
+    Returns:
+        ``(registered, skipped)`` — registered 는 **이번에 새로 등록한 코드 수**(배치 내 중복은
+        1회만 센다), skipped 는 이미 있거나 형식 검사에서 버린 수.
 
     단일 배치 내 중복 코드 처리
         ``seen`` 집합으로 같은 배치 내 중복 코드를 걸러낸다.
