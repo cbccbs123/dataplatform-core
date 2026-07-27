@@ -59,8 +59,14 @@ def noun_phrase_query(query: str, *, client: Any | None = None) -> str:
     비-문자열이면 **원문 질의를 그대로 반환**한다 — 정규화 실패가 검색을 깨지 않게(SC-001). 빈/None 질의도
     정규화할 내용이 없어 LLM 호출 없이 원문 그대로 반환한다.
 
-    ``client`` 미주입 시 공통 seam(``complete_json``)이 현 설정의 온프레미스 LLM 클라이언트를 쓴다 —
-    테스트는 ``client`` 주입으로 네트워크 없이 결정성을 검증한다.
+    Args:
+        query: 사용자 질의 원문. 비었거나 공백뿐이면 **LLM 을 부르지 않고** 그대로 돌려준다.
+        client: **테스트용 LLM 클라이언트 주입 seam** — 미주입이면 설정의 온프레미스 클라이언트를
+            쓴다. 주입하면 네트워크 없이 결정성을 검증할 수 있다.
+
+    Returns:
+        정규화된 핵심 명사구. 응답이 비었거나 스키마를 어기면 **원문 질의 그대로**(정규화 실패가
+        검색을 깨지 않게 하는 안전장치).
     """
     if not query or not query.strip():
         return query
@@ -97,6 +103,18 @@ def morph_noun_phrase_query(
     - **명사 추출(FR-002)**: ``noun_pos`` 품사만 남기고 **순서 보존·중복 제거**.
     - **스톱워드(FR-003)**: ``stopwords`` 의 모달리티어·지시성 명사 제거.
     - **폴백(FR-004)**: 남은 명사가 없으면 **원문 질의 그대로** 반환(정규화가 검색을 깨지 않게 — SC-001).
+
+    Args:
+        query: 사용자 질의 원문.
+        analyze_fn: ``text → [(토큰, 품사)]`` **주입 seam**. 운영은 nori ``_analyze`` 래퍼,
+            단위 테스트는 가짜 함수를 넣어 OpenSearch 없이 검증한다.
+        stopwords: 제거할 명사(모달리티어·지시성 명사). 비어 있어도 된다.
+        noun_pos: 남길 품사 태그 집합. 여기 없는 품사는 버린다.
+        min_word_tokens: **이 어절 수 미만이면 정규화하지 않는다** — 단어 질의는 이미 핵심어라
+            건드릴 필요가 없고, ``analyze_fn`` 을 부르지 않아 지연도 0 이다.
+
+    Returns:
+        공백으로 이어붙인 명사구. 짧은 질의·빈 결과면 원문 그대로.
     """
     if not query or not query.strip():
         return query

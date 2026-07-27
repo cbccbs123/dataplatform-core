@@ -22,7 +22,17 @@ def embed_query_for_media_search(
     문서 임베딩과 같은 벡터 공간에서 비교한다(FR-004 질의-문서 모델 일치).
 
     062: ``channel`` 을 주고 그 채널 백엔드가 API 면 ``embed_texts_for`` 로 API 임베딩한다(적재=질의 백엔드
-    일치). 로컬 채널·``channel`` 미지정이면 기존 로컬 경로 그대로(동작 불변). 적재와 동일하게 raw→패딩.
+    일치). 로컬 채널·``channel`` 미지정이면 기존 로컬 경로 그대로. 적재와 동일하게 raw→패딩.
+
+    Args:
+        query: 질의 텍스트. **빈 문자열이면 공백 한 칸으로 대체**한다 — 빈 입력은 임베더가
+            0-노름 벡터를 내놓아 코사인 비교가 무의미해지기 때문이다.
+        model_name: 쓸 임베딩 모델. ``None`` 이면 설정의 기본 모델.
+        channel: 임베딩 채널. 이 채널의 백엔드가 API 면 원격 임베딩을 타고, ``None`` 이거나
+            로컬이면 로컬 모델로 임베딩한다. **문서와 같은 채널을 줘야** 같은 공간에서 비교된다.
+
+    Returns:
+        저장 차원(1536D)까지 패딩된 임베딩 벡터.
     """
     cfg = get_current_settings()
     raw = query.strip() if query.strip() else " "

@@ -56,6 +56,12 @@ class SearchTuning:
         이름(weights·cutoff_eps 등)과 SearchConfig 의 필드명(fusion_weights·os_cutoff_eps 등)이 달라
         매핑은 명시한다. ``cutoff_enabled`` 의 디버그 우회(``disable_os_cutoff``)는 호출부가
         ``dataclasses.replace(tuning, cutoff_enabled=False)`` 로 덮으므로 여기선 cfg 값만 읽는다.
+
+        Args:
+            cfg: ``PipelineSettings``. ``cfg.search`` 하위 필드만 읽는다.
+
+        Returns:
+            불변 ``SearchTuning``. 무인자 ``SearchTuning()`` 은 상수 기본값과 같다.
         """
         s = cfg.search
         return cls(

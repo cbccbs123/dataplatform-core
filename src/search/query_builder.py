@@ -67,16 +67,29 @@ def build_bm25_body(
 ) -> dict[str, Any]:
     """BM25 필드별 named query 서브검색 본문(순수·결정적, 027 FR-001 · 044 FR-101).
 
-    044: ``multi_match`` 대신 ``bool.should`` + ``_name`` 으로 ``matched_queries`` 관측.
-    boost 차등(summary^3…file_name^0.5)은 clause ``boost`` 로 계승. operator='and' 면 match 절에
-    전 토큰 매칭(025 FR-001). ``labels`` 는 keyword ``term``(+ casefold). ``size`` 는 ``k``.
-    (2026-07-24: 057 must_include/exclude 서버 lexical 필터 제거.)
+    필드마다 별도 절(``bool.should`` + ``_name``)로 쪼개는 이유: 응답의 ``matched_queries`` 로
+    **어느 필드에서 맞았는지**를 관측해야 뒤쪽 증거 판정(``query_evidence``)이 가능하기 때문이다.
+    boost 차등(summary^3 … file_name^0.5)은 파일명 노이즈가 랭킹을 압도하지 못하게 한다.
+
+    Args:
+        query: 검색어(정규화가 끝난 문자열).
+        modality_values: 이 버킷이 매칭할 저장 modality 값들. 정렬해 terms 필터로 넣는다.
+        k: 가져올 문서 수(``size``).
+        operator: ``or``(기본·한 토큰만 맞아도 후보) 또는 ``and``(**모든 토큰**이 맞아야 후보).
+            ``and`` 는 정밀하지만 다어절 자연어 질의에서 결과가 비기 쉽다.
+        exclude_medical: 의료 자산을 빼는 필터. **기본 꺼짐** — 도메인 균일 노출 결정에 따라
+            현재 운영에서 켜지 않는다(의료 트랙 복귀 시 재사용할 자리).
+        search_filters: 확장자·기간·주제 선필터. ``None`` 이면 modality 필터만 걸린다.
+
+    Returns:
+        OpenSearch 검색 본문 dict(순수 데이터 — 실행은 호출부가 한다).
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
     filters.extend(filters_to_opensearch_bool(search_filters))
     label_term = query.strip().casefold()
 
     def _match(field: str, boost: float, _name: str) -> dict[str, Any]:
+        """텍스트 필드 하나에 대한 match 절을 만든다(``_name`` 으로 hit 관측 가능하게)."""
         inner: dict[str, Any] = {"query": query, "_name": _name}
         if boost != 1.0:
             inner["boost"] = boost
@@ -85,6 +98,7 @@ def build_bm25_body(
         return {"match": {field: inner}}
 
     def _cross_meta(*, boost: float, _name: str) -> dict[str, Any]:
+        """summary+keywords 를 **한 필드처럼** 보는 절 — 토큰이 두 필드에 나뉘어 있어도 맞는다."""
         inner: dict[str, Any] = {
             "query": query,
             "type": "cross_fields",
@@ -133,7 +147,17 @@ def build_knn_body(
     컷(_cos)을 **같은 표본 1회**로 얻는다(추가 게이트 검색 소멸 — SC-002). 023 게이트와 동일하게
     modality terms·의료배제를 **knn native filter(pre-filter)**로 적용한다 — bool 사후필터로 감싸면
     전역 k 최근접을 먼저 뽑고 걸러 작은 k 에서 비우세 모달리티(image 등)가 0 건이 되는 회귀(022 G3
-    실OS 발견)를 막고, 그 모달리티 안에서 k 최근접을 뽑는다. ``size`` 는 ``k``(게이트 표본 하한 적용은 호출부).
+    실OS 발견)를 막고, 그 모달리티 안에서 k 최근접을 뽑는다.
+
+    Args:
+        query_vector: 질의 임베딩(1536D).
+        modality_values: 이 버킷이 매칭할 저장 modality 값들.
+        k: 최근접 문서 수(``size`` 와 knn ``k`` 모두에 쓴다). 게이트 표본 하한 적용은 호출부 몫.
+        exclude_medical: 의료 자산 제외. **기본 꺼짐**(도메인 균일 노출).
+        search_filters: 확장자·기간·주제 선필터.
+
+    Returns:
+        OpenSearch knn 검색 본문 dict.
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
     filters.extend(filters_to_opensearch_bool(search_filters))

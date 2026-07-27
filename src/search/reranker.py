@@ -24,6 +24,17 @@ def get_reranker(model_name: str):
     디바이스는 mps(맥북 GPU) 가용 시 mps, 아니면 기본(cpu) — 지연이 도입 판정의 관문이라
     가속 가능 환경에서는 자동으로 쓴다. sentence-transformers CrossEncoder 는 num_labels=1
     분류 head 에 기본 sigmoid 활성화를 적용해 predict 가 곧 0~1 확률이다.
+
+    Args:
+        model_name: 로드할 cross-encoder 모델 이름. **캐시 키이기도 하다** — 이름이 다르면
+            별도 인스턴스가 뜨므로 최대 2개까지 메모리에 남는다.
+
+    Returns:
+        로드된 ``CrossEncoder``.
+
+    Raises:
+        로드 실패 시 예외를 **그대로 올린다**(조용한 폴백 금지 — 평가 체제가 소리 없이 바뀌면
+        측정 결과를 신뢰할 수 없기 때문).
     """
     import torch
     from sentence_transformers import CrossEncoder
@@ -33,7 +44,16 @@ def get_reranker(model_name: str):
 
 
 def score_pairs(query: str, texts: list[str], *, model_name: str) -> list[float]:
-    """(질의, 문서) 쌍들의 절대 적합도(0~1)를 배치 채점한다(결정적 — 같은 입력=같은 출력)."""
+    """(질의, 문서) 쌍들의 절대 적합도를 한 번에 채점한다(결정적 — 같은 입력이면 같은 출력).
+
+    Args:
+        query: 질의 문자열.
+        texts: 채점할 문서 텍스트들. **비면 모델을 로드하지 않고** 빈 리스트를 돌려준다.
+        model_name: 쓸 cross-encoder 모델 이름.
+
+    Returns:
+        입력 순서와 같은 길이의 0~1 점수 리스트.
+    """
     if not texts:
         return []
     model = get_reranker(model_name)

@@ -32,7 +32,14 @@ def topic_of_filename(file_name: str) -> str:
     - `youtube_사막_<id>.jpg`·`wikipedia_고려청자_<id>.txt` → 2번째 토큰(`사막`·`고려청자`).
     - `등산_입문_<id>_<제목>.mp4` → `등산`(구형: 첫 토큰). `<uuid>__` 접두가 있으면 벗기고 적용한다.
     - 언더스코어가 없으면 확장자 뗀 stem 전체가 토픽(예: `manifest.json` → `manifest` — 위생
-      대상이 가드에 노출되도록 그대로 둔다)."""
+      대상이 가드에 노출되도록 그대로 둔다).
+
+    Args:
+        file_name: 코퍼스 파일명(경로 아님).
+
+    Returns:
+        토픽 키 문자열. 파일명이 비었거나 stem 이 없으면 빈 문자열.
+    """
     stem = (file_name.rsplit(".", 1)[0] if "." in file_name else file_name).strip()
     if not stem:
         return ""
@@ -50,5 +57,14 @@ def topic_of_filename(file_name: str) -> str:
 
 
 def uncovered_topics(corpus_topics: set[str], golden_topics: set[str]) -> list[str]:
-    """골든 질의가 커버하지 않는 코퍼스 토픽 목록(정렬·결정적). 비어 있어야 정상."""
+    """골든 질의가 아직 덮지 못한 코퍼스 토픽을 찾는다(순수·결정적).
+
+    Args:
+        corpus_topics: 코퍼스 파일명에서 뽑은 토픽 집합.
+        golden_topics: 골든 질의가 태그로 달고 있는 토픽 집합.
+
+    Returns:
+        덮이지 않은 토픽 목록(정렬). **비어 있어야 정상**이며, 비어 있지 않으면 gated e2e 가
+        실패해 골든 질의 추가를 강제한다.
+    """
     return sorted(corpus_topics - golden_topics)

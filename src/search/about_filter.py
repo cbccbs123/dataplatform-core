@@ -30,6 +30,13 @@ def _amatch(nouns: list[str], about: list[str]) -> bool:
     """질의 명사 ↔ about 개체 양방향 부분일치(073 측정 규칙 그대로).
 
     완전일치는 길이 무관, 부분일치는 포함되는 쪽이 2자 이상일 때만("배"⊂"배드민턴" 오매칭 차단).
+
+    Args:
+        nouns: 질의에서 뽑은 명사 목록.
+        about: 그 행이 적재 때 확정한 개체 목록.
+
+    Returns:
+        하나라도 겹치면 True. 둘 중 하나가 비면 False.
     """
     return any(
         n == a or (len(n) >= 2 and n in a) or (len(a) >= 2 and a in n)
@@ -46,9 +53,19 @@ def about_or_filter(
 ) -> list[dict[str, Any]]:
     """OR-증거 필터(순수·결정적·행 순서 보존 — 드롭만, 재정렬·점수 변경 없음).
 
-    ``query`` 는 검색이 실제 사용한 질의(072 query-norm on 이면 명사구)다 — 공백 split 이 명사
-    리스트가 된다. 행의 ``_about``(적재시 확정 개체)·``_kwtext``(keywords+파일명 합본)는
-    ``os_hit_to_row`` 가 실어주는 내부키다(응답 전 bucket_policy clean 이 제거).
+    Args:
+        rows: 융합·컷을 통과한 버킷 행들. 각 행의 ``_about``(적재 때 확정한 개체)·``_kwtext``
+            (keywords+파일명 합본)를 증거로 본다 — ``os_hit_to_row`` 가 싣고 응답 직전에 제거되는
+            내부 키다.
+        query: 검색이 **실제로 사용한** 질의(질의 정규화가 켜져 있으면 명사구). 공백으로 쪼갠
+            것이 명사 목록이 된다.
+        max_match_ratio: 흔한 명사를 걸러내는 기준. 후보 행의 이 비율을 **넘겨** 등장하는 명사는
+            변별력이 없다고 보고 keywords 매칭에서 뺀다(정적 불용어 사전 없이 질의마다 자가 적응).
+
+    Returns:
+        살아남은 행(입력 순서·점수 그대로). **두 경우엔 원본을 그대로 돌려준다** — 증거 키가 아예
+        없는 구 색인이거나, 필터 결과가 0건일 때(어휘가 안 겹치는 정상 질의를 죽이지 않기 위한
+        안전장치).
     """
     nouns = [w for w in (query or "").split() if w]
     if not rows or not nouns:

@@ -23,10 +23,29 @@ class SearchFilters:
 
 
 def _norm_ext(value: str) -> str:
+    """확장자를 비교 가능한 형태로 정규화한다 — 유니코드 정규화·소문자화·앞 ``.`` 제거.
+
+    Args:
+        value: 사용자가 준 확장자(``.JPG``·``jpg`` 등 표기가 제각각).
+
+    Returns:
+        정규화된 확장자(``jpg``).
+    """
     return unicodedata.normalize("NFKC", value.strip()).casefold().lstrip(".")
 
 
 def _parse_date_param(raw: str) -> date | datetime:
+    """ISO 문자열을 날짜 또는 일시로 파싱한다.
+
+    Args:
+        raw: ``YYYY-MM-DD``(10자) 또는 ISO 8601 일시. 끝의 ``Z`` 는 ``+00:00`` 으로 바꿔 받는다.
+
+    Returns:
+        10자면 ``date``, 그 외는 ``datetime``.
+
+    Raises:
+        ValueError: ISO 형식이 아닐 때(``fromisoformat`` 이 던진다). 호출자(API)가 400 으로 변환한다.
+    """
     text = raw.strip()
     if len(text) == 10:
         return date.fromisoformat(text)
@@ -41,7 +60,23 @@ def parse_search_filters(
     topic: str | None = None,
     subtopic: str | None = None,
 ) -> SearchFilters | None:
-    """portal repeated query params → SearchFilters. 전부 비어 있으면 None."""
+    """API 질의 파라미터를 ``SearchFilters`` 로 파싱한다(순수).
+
+    Args:
+        file_ext: 확장자 목록(반복 파라미터). 정규화·중복 제거·정렬해 담는다.
+        created_from: 생성일 시작(ISO 문자열). 빈 문자열은 미지정으로 본다.
+        created_to: 생성일 끝(ISO 문자열).
+        topic: 주제 정확 일치 필터. 색인된 keyword 원문과 맞춰야 하므로 **소문자화하지 않고**
+            앞뒤 공백만 자른다.
+        subtopic: 세부주제 정확 일치 필터(같은 규칙).
+
+    Returns:
+        ``SearchFilters``. **하나도 지정되지 않았으면 ``None``** — 호출부가 "필터 없음"을
+        빈 객체와 구분해 처리한다.
+
+    Raises:
+        ValueError: 날짜 문자열이 ISO 형식이 아닐 때.
+    """
     exts = tuple(
         sorted({_norm_ext(x) for x in (file_ext or []) if x and x.strip()})
     )
@@ -62,14 +97,30 @@ def parse_search_filters(
 
 
 def _to_utc_date(value: date | datetime) -> str:
-    """OS date 필드용 ISO date(UTC 일 단위)."""
+    """OpenSearch date 필드에 넣을 ISO 날짜 문자열로 바꾼다(일 단위).
+
+    Args:
+        value: 날짜 또는 일시. 일시면 **시각을 버리고 날짜만** 쓴다.
+
+    Returns:
+        ``YYYY-MM-DD``.
+    """
     if isinstance(value, datetime):
         return value.date().isoformat()
     return value.isoformat()
 
 
 def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, Any]]:
-    """SearchFilters → OpenSearch bool.filter 절 리스트(BM25·kNN 공통)."""
+    """``SearchFilters`` 를 OpenSearch ``bool.filter`` 절 목록으로 바꾼다(BM25·kNN 공통).
+
+    filter 절은 **점수에 기여하지 않는다** — 걸러내기만 하므로 랭킹이 흔들리지 않는다.
+
+    Args:
+        filters: 파싱된 필터. ``None`` 이면 빈 목록을 돌려준다(필터 없음).
+
+    Returns:
+        절 dict 목록. 지정된 항목만 들어가며, 아무것도 없으면 빈 목록.
+    """
     if filters is None:
         return []
     clauses: list[dict[str, Any]] = []
