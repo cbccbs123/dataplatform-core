@@ -109,6 +109,29 @@ def _grouped_via_opensearch(
 
     ⚠️ 결정성(헌법 3조): 최종 응답 버킷 순서는 호출부의 ``label_keys`` 가 정하므로 여기 grouped 의
     삽입 순서는 출력 순서에 영향하지 않는다.
+
+    Args:
+        query: 사용자 질의 원문.
+        modalities: 검색할 모달리티 목록. ``None`` 이면 전체, **빈 리스트면 OpenSearch 를 아예
+            호출하지 않고** 빈 결과를 돌려준다(불필요한 IO 회피).
+        limit_per_bucket: 버킷당 결과 상한.
+        text_channel: 텍스트 임베딩 채널(문서 색인과 일치해야 한다).
+        cfg: 설정 객체. ``None`` 이면(순수 단위 테스트 등) 상수 기본값으로 폴백한다.
+        disable_os_cutoff: 디버그 우회 — 게이트와 per-result 컷을 **모두 끈다**(약한 후보까지 노출).
+        os_search_fn: 실제 검색 함수 주입 seam.
+        os_client_fn: 클라이언트 팩토리 주입 seam. 여기서 만든 클라이언트를 정규화·검색이 공유한다.
+        query_norm_fn: 정규화 콜백 주입. 주면 설정의 방식(형태소/LLM)보다 **우선**한다.
+        llm_verify_judge_fn: 상위 결과 LLM 검증의 판정 함수 주입.
+        search_mode: ``auto``|``keyword``.
+        search_filters: 확장자·기간·주제 선필터.
+
+    Returns:
+        ``{text_documents, audio, image, video, meta}`` 형태의 grouped dict. ``meta`` 에는
+        ``os_gate``(버킷별 게이트 관측)·``search_plan``·정규화·검증 관측치가 담긴다.
+
+    Raises:
+        OpenSearch 미도달 예외를 감싸지 않고 그대로 올린다 — 결과가 백엔드 가용성에 따라
+        달라지지 않게 하려는 것이다.
     """
     requested = modalities if modalities is not None else list(_MODALITY_BUCKETS)
 
@@ -166,6 +189,7 @@ def _grouped_via_opensearch(
             from src.search.query_preprocess import noun_phrase_query
 
             def norm_fn(q: str) -> str:
+                """LLM(gemma) 정규화 경로 — 실패 시 원문 폴백은 noun_phrase_query 가 보장한다."""
                 return noun_phrase_query(q)
         else:
             # 072(기본): 검색시점 질의 정규화를 **nori 형태소 명사추출+스톱워드**로(측정 2026-07-13: 자연어
@@ -177,6 +201,11 @@ def _grouped_via_opensearch(
             _norm_index = os_index_name
 
             def norm_fn(q: str, _client: Any = client, _index: str = _norm_index) -> str:
+                """형태소 정규화 경로 — client·index 를 기본값 인자로 **바인딩 시점에 고정**한다.
+
+                클로저 변수로 잡지 않고 기본값으로 묶는 이유는, 이후 루프·재대입이 생겨도 이
+                함수가 보는 값이 흔들리지 않게 하기 위해서다.
+                """
                 return morph_noun_phrase_query(
                     q,
                     analyze_fn=lambda text: nori_analyze_tokens(_client, text, index=_index),
@@ -287,8 +316,30 @@ def search_hybrid(
     069 US-C(037 잔재 철거): 037 로 죽어 있던 PG 전용 no-op 인자(``structured``·``fusion``·
     ``text_hybrid_alpha``·``image_search_alpha``·``chunk_agg``·``min_scores``·``text_query_model``)와
     호출부 하한 필터(``_filter_by_min_score``)를 철거했다. per-result 컷은 ``search_assets_os`` 내부
-    코사인 스케일(``cut_rows``·``result_floor``)에서 끝난다. ``backend`` 만 남긴다 — 'opensearch' 외
-    값을 받으면 ``ValueError``(미지원 백엔드 fail-fast).
+    코사인 스케일(``cut_rows``·``result_floor``)에서 끝난다.
+
+    Args:
+        query: 사용자 질의.
+        modalities: 검색할 버킷. ``None`` 이면 전체.
+        limit_per_bucket: 버킷당 결과 상한.
+        disable_os_cutoff: 게이트·컷을 모두 끄는 디버그 우회(기본 꺼짐).
+        text_channel: 텍스트 임베딩 채널. **``None`` 이면 운영 활성 채널로 해소**한다 —
+            명시 전달은 그대로 우선한다(A/B 하니스용). 설정 미초기화면 ``'st'`` 로 보수 폴백.
+        backend: 검색 백엔드. ``'opensearch'`` 외 값은 즉시 예외(미지원 fail-fast).
+        _os_search_fn: 검색 함수 주입 seam(테스트용).
+        _os_client_fn: 클라이언트 팩토리 주입 seam(테스트용).
+        _query_norm_fn: 질의 정규화 콜백 주입 seam. 미주입이고 토글이 켜져 있으면 설정된 방식
+            (형태소 기본 / LLM)으로 배선한다.
+        _llm_verify_judge_fn: 상위 결과 LLM 검증 판정 함수 주입 seam.
+        search_mode: ``auto``|``keyword``.
+        search_filters: 확장자·기간·주제 선필터.
+
+    Returns:
+        ``{text_documents, audio, image, video, meta}`` grouped dict.
+
+    Raises:
+        ValueError: 알 수 없는 모달리티 라벨이거나 ``backend`` 가 ``'opensearch'`` 가 아닐 때.
+        OpenSearch 미도달 예외도 감싸지 않고 그대로 올린다.
     """
     if modalities is not None:
         unknown = [m for m in modalities if m not in _MODALITY_BUCKETS]

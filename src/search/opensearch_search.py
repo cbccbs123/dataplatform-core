@@ -95,6 +95,13 @@ def embed_query(query: str, *, channel: str) -> list[float]:
     (017 A/B)로 한다(``'st'`` → KoSimCSE·``'st_bge'`` → 로컬 BGE-M3·``'st_api'`` → 원격 API bge-m3·062).
     020 인덱스가 활성 채널 임베딩을 색인하므로, 질의도 같은 채널 모델로 임베딩해야 같은 벡터 공간에서
     비교된다.
+
+    Args:
+        query: 임베딩할 질의 텍스트.
+        channel: 임베딩 채널. 모델·백엔드(로컬/원격 API) 해소의 단일 기준이다.
+
+    Returns:
+        1536D 질의 벡터.
     """
     from src.config.settings import model_for_channel
     from src.search.query_embed import embed_query_for_media_search
@@ -113,8 +120,19 @@ def nori_analyze_tokens(
     ``morph_noun_phrase_query`` 의 ``analyze_fn`` 실체다. ``decompound_mode`` 를 즉석 지정한 nori_tokenizer
     + ``explain=True`` 로 각 토큰의 품사(``leftPOS`` 앞 코드, 예 'NNG(General Noun)'→'NNG')를 얻는다.
     **색인 재색인 없이 질의 분석만** 모드를 정할 수 있고, 인덱스는 **읽기 전용**으로만 만진다(헌법 6조·
-    운영 인덱스 무접촉). OS 미도달 예외는 그대로 전파(FR-007 동형 — silent 폴백 금지). 빈/공백 텍스트는
-    OS 미접촉·빈 리스트. 응답 누락 키도 안전 처리(None → 빈).
+    운영 인덱스 무접촉).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        text: 분석할 텍스트. **비었으면 OS 를 호출하지 않고** 빈 리스트를 돌려준다.
+        index: 분석기 설정을 빌려올 인덱스(읽기만 한다).
+        decompound: nori 복합어 분해 모드. **재색인 없이 질의 분석만** 모드를 바꿀 수 있다.
+
+    Returns:
+        ``[(토큰, 품사코드)]``. 응답 키가 없으면 빈 리스트로 안전 처리한다.
+
+    Raises:
+        OpenSearch 미도달 예외를 그대로 올린다(조용한 폴백 금지).
     """
     if not text or not text.strip():
         return []
@@ -140,7 +158,13 @@ def _resp_hits(resp: dict[str, Any] | None) -> tuple[list[dict[str, Any]], bool]
 
     msearch 는 HTTP 200 이어도 서브검색별로 ``{"error": …}`` 를 돌려줄 수 있다 — 이를 조용히
     빈 결과로 격하하면 **부분 실패가 no-match 와 구분 불가**해진다(FR-007 관측성·silent 폴백
-    금지 취지). 오류 여부를 함께 돌려 호출부가 gate_meta 에 표식·로그를 남긴다(리뷰 후속).
+    금지 취지). 오류 여부를 함께 돌려 호출부가 gate_meta 에 표식·로그를 남긴다.
+
+    Args:
+        resp: 서브검색 응답 하나. ``None``(배열이 짧아 자리가 빈 경우)도 받는다.
+
+    Returns:
+        ``(hits, 오류 여부)``. 응답이 없거나 ``error`` 키가 있으면 ``([], True)``.
     """
     if not resp:
         return [], True  # 응답 누락(배열 짧음 등)도 오류로 본다
@@ -199,6 +223,33 @@ def search_assets_os(
     임베딩·BM25·rerank 채점에 **동일 적용**한다 — 021 이 LLM-free 로 만든 OS 읽기 경로를 무단 회귀시키는
     것이 아니라, 헌법 §Governance 절차로 021 FR-004 를 기본 off 토글 허용으로 정식 개정한 결과다(§3 결정성
     제약 강제). ``query_norm_fn`` 미주입이고 enabled 면 ``noun_phrase_query`` 를 지연 import 해 쓴다.
+
+    Args:
+        client: OpenSearch 클라이언트. **읽기 전용으로만** 쓴다.
+        query: 사용자 질의. 정규화가 켜져 있으면 이 함수 안에서 한 번 정규화되고, 그 결과가
+            임베딩·BM25·리랭크에 **똑같이** 쓰인다.
+        modalities: 검색할 버킷 라벨들(text·image·video·audio).
+        k: 버킷당 응답 상한. kNN 표본은 게이트 안정성을 위해 이보다 크게 뽑을 수 있다.
+        channel: 질의 임베딩 채널. **문서 색인과 같은 채널이어야** 같은 공간에서 비교된다.
+        index: 검색할 인덱스 이름.
+        exclude_medical: 의료 자산 제외. 기본 꺼짐(도메인 균일 노출).
+        embed_fn: 질의 임베딩 함수 주입 seam(테스트가 네트워크 없이 대체).
+        tuning: 게이트·컷·리랭크·증거 튜닝 묶음. 무인자 기본값 = 설정 상수 기본 동작.
+        rerank_fn: 리랭커 채점 함수 주입. ``None`` 이면 필요할 때 기본 seam 을 지연 로드.
+        query_norm_enabled: 질의 정규화 토글. 꺼짐(기본)이면 원문을 그대로 쓴다.
+        query_norm_fn: 정규화 콜백 주입. 미주입인데 토글이 켜져 있으면 LLM 정규화를 지연 import
+            한다 — 꺼진 환경에 LLM 의존을 끌어오지 않으려는 배치다.
+        search_mode: ``auto``|``keyword``. ``search_policy`` 를 안 주면 이 값으로 정책을 만든다.
+        search_policy: 이미 만들어 둔 정책. 주면 ``search_mode`` 보다 우선한다.
+        search_filters: 확장자·기간·주제 선필터.
+
+    Returns:
+        ``(buckets, gate_meta)``. ``gate_meta[모달리티]`` 는 ``{top, baseline, gate_passed,
+        cut_count}`` — 빈 버킷이 "정말 없음"인지 "게이트에 걸린 것"인지 구분하게 해 준다.
+
+    Raises:
+        OpenSearch 미도달 예외를 **그대로 올린다** — 조용히 빈 결과로 격하하면 장애가 no-match 와
+        구분되지 않는다.
     """
     labels = list(modalities)
     # 029 query-norm(021 FR-004 토글 개정): 검색 직전 질의를 명사구로 **1회** 정규화한다(off=원문
@@ -282,7 +333,14 @@ def search_assets_os(
 
 
 def get_client(url: str | None = None) -> Any:
-    """검색용 OpenSearch 클라이언트 — 020 ``opensearch_sync.get_client`` 재사용(단일 출처)."""
+    """검색용 OpenSearch 클라이언트를 만든다 — 색인 쪽 팩토리를 그대로 재사용한다(단일 출처).
+
+    Args:
+        url: 접속 URL. ``None`` 이면 설정값을 쓴다.
+
+    Returns:
+        OpenSearch 클라이언트.
+    """
     from src.search.opensearch_sync import get_client as _sync_get_client
 
     return _sync_get_client(url)
