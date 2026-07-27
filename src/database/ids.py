@@ -14,7 +14,14 @@ import uuid
 
 
 def uuid7() -> uuid.UUID:
-    """현재 시각 기반 UUIDv7 한 개 생성."""
+    """현재 시각을 앞자리에 담은 UUIDv7 을 하나 만든다.
+
+    UUIDv4(완전 난수) 대신 v7 을 쓰는 이유: **만든 순서대로 정렬된다**. PK 로 쓰면 인덱스가
+    한쪽 끝에만 쌓여 조각화가 적고, id 만 보고도 생성 시점 순서를 알 수 있다.
+
+    Returns:
+        UUIDv7 객체(밀리초 타임스탬프 48비트 + 난수).
+    """
     ts_ms = int(time.time() * 1000)
     rand = os.urandom(10)  # rand_a(2B) + variant/rand_b(8B) 재료
 
@@ -32,5 +39,12 @@ def uuid7() -> uuid.UUID:
 
 
 def uuid7_str() -> str:
-    """UUIDv7 문자열."""
+    """UUIDv7 을 문자열로 만든다.
+
+    DB 조회 결과를 다룰 때 id 를 문자열로 통일하는 관례가 있어(비교·JSON 직렬화 일관성),
+    새 id 를 만들 때도 대부분 이쪽을 쓴다.
+
+    Returns:
+        하이픈 포함 UUID 문자열.
+    """
     return str(uuid7())

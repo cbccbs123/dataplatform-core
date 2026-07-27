@@ -169,6 +169,20 @@ _SETTINGS: PipelineSettings | None = None
 
 
 def _require_env(name: str) -> str:
+    """**필수** 환경변수를 읽는다 — 없거나 비어 있으면 기동을 멈춘다.
+
+    설정 누락을 기본값으로 덮으면 어떤 값으로 돌고 있는지 아무도 모르게 되므로,
+    필수 항목은 조용히 넘기지 않고 즉시 실패시킨다.
+
+    Args:
+        name: 환경변수 이름.
+
+    Returns:
+        앞뒤 공백을 자른 값.
+
+    Raises:
+        ValueError: 미설정이거나 공백뿐일 때.
+    """
     value = os.getenv(name)
     if value is None or not value.strip():
         raise ValueError(f"필수 환경변수 누락: {name}")
@@ -176,6 +190,17 @@ def _require_env(name: str) -> str:
 
 
 def _require_env_int(name: str) -> int:
+    """필수 환경변수를 정수로 읽는다.
+
+    Args:
+        name: 환경변수 이름.
+
+    Returns:
+        정수 값.
+
+    Raises:
+        ValueError: 미설정이거나 정수로 바꿀 수 없을 때(원본 값을 메시지에 담는다).
+    """
     raw = _require_env(name)
     try:
         return int(raw)
@@ -184,6 +209,20 @@ def _require_env_int(name: str) -> int:
 
 
 def _require_env_bool(name: str) -> bool:
+    """필수 환경변수를 불리언으로 읽는다.
+
+    참으로 보는 값: ``1``·``true``·``yes``·``y``·``on`` / 거짓: ``0``·``false``·``no``·``n``·``off``.
+    **그 밖의 값은 예외**다 — 오타를 False 로 조용히 해석하면 기능이 꺼진 줄 모르게 된다.
+
+    Args:
+        name: 환경변수 이름.
+
+    Returns:
+        불리언 값.
+
+    Raises:
+        ValueError: 미설정이거나 인식할 수 없는 표기일 때.
+    """
     raw = _require_env(name).lower()
     if raw in {"1", "true", "yes", "y", "on"}:
         return True
@@ -193,6 +232,19 @@ def _require_env_bool(name: str) -> bool:
 
 
 def _env_int_default(name: str, default: int) -> int:
+    """선택 환경변수를 정수로 읽는다(미설정이면 기본값).
+
+    Args:
+        name: 환경변수 이름.
+        default: 미설정·빈 값일 때 쓸 값.
+
+    Returns:
+        정수 값 또는 기본값.
+
+    Raises:
+        ValueError: 값이 있는데 정수가 아닐 때 — **기본값으로 넘기지 않는다**(오타를
+            숨기면 의도와 다른 설정으로 운영된다).
+    """
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return default
@@ -203,6 +255,15 @@ def _env_int_default(name: str, default: int) -> int:
 
 
 def _env_str_default(name: str, default: str) -> str:
+    """선택 환경변수를 문자열로 읽는다(미설정·공백뿐이면 기본값).
+
+    Args:
+        name: 환경변수 이름.
+        default: 미설정일 때 쓸 값.
+
+    Returns:
+        앞뒤 공백을 자른 값 또는 기본값.
+    """
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -210,6 +271,18 @@ def _env_str_default(name: str, default: str) -> str:
 
 
 def _env_float_default(name: str, default: float) -> float:
+    """선택 환경변수를 실수로 읽는다(미설정이면 기본값).
+
+    Args:
+        name: 환경변수 이름.
+        default: 미설정·빈 값일 때 쓸 값.
+
+    Returns:
+        실수 값 또는 기본값.
+
+    Raises:
+        ValueError: 값이 있는데 실수가 아닐 때(조용히 기본값으로 넘기지 않는다).
+    """
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return default
@@ -220,7 +293,20 @@ def _env_float_default(name: str, default: float) -> float:
 
 
 def _env_bool_default(name: str, default: bool) -> bool:
-    """불리언 선택 환경변수(미설정 시 기본값). ``_require_env_bool`` 의 선택 필드 판본(020)."""
+    """선택 환경변수를 불리언으로 읽는다(미설정이면 기본값).
+
+    표기 규칙은 필수판과 같고, **인식 못 하는 값은 예외**다(기본값으로 흡수하지 않는다).
+
+    Args:
+        name: 환경변수 이름.
+        default: 미설정·빈 값일 때 쓸 값.
+
+    Returns:
+        불리언 값 또는 기본값.
+
+    Raises:
+        ValueError: 값이 있는데 인식할 수 없는 표기일 때.
+    """
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return default
@@ -458,23 +544,35 @@ def _resolve_os_rerank_tau() -> float:
 
 
 def _opt_int(default: int) -> Callable[[str], int]:
+    """기본값을 미리 묶어 "환경변수 키 → 정수" 읽기 함수를 만든다.
+
+    아래 필드 표가 한 줄에 하나씩 선언되도록 하는 장치다 — 표에는 기본값만 적고,
+    실제 읽기는 만들어진 함수가 한다.
+    """
     return lambda key: _env_int_default(key, default)
 
 
 def _opt_str(default: str) -> Callable[[str], str]:
+    """기본값을 묶어 "키 → 문자열" 읽기 함수를 만든다(``_opt_int`` 와 같은 방식)."""
     return lambda key: _env_str_default(key, default)
 
 
 def _opt_float(default: float) -> Callable[[str], float]:
+    """기본값을 묶어 "키 → 실수" 읽기 함수를 만든다."""
     return lambda key: _env_float_default(key, default)
 
 
 def _opt_bool(default: bool) -> Callable[[str], bool]:
+    """기본값을 묶어 "키 → 불리언" 읽기 함수를 만든다."""
     return lambda key: _env_bool_default(key, default)
 
 
 def _video_max_keyframes(key: str) -> int:
-    # 0/음수 입력은 48 로 보정(현행 동작 보존) — 특이 로직이라 전용 read.
+    """영상 키프레임 상한을 읽는다 — **0 이하는 기본값으로 보정**한다.
+
+    0을 그대로 쓰면 키프레임을 하나도 뽑지 않아 영상이 통째로 검색에서 빠진다.
+    "제한 없음"을 0으로 표현하려던 입력을 사고로 만들지 않으려는 보정이다.
+    """
     vk = _env_int_default(key, 48)
     return 48 if vk <= 0 else vk
 
@@ -586,8 +684,21 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
 
 
 def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
-    # _FIELD_SPECS 단일 출처를 그룹별로 모아 하위 dataclass 를 먼저 조립한 뒤 PipelineSettings 를 만든다
-    # (동작 불변 — read 별로 종전과 동일한 env 키·기본값·검증 호출). profile 만 env 유래가 아니라 직접 주입.
+    """환경변수를 읽어 설정 객체를 조립한다.
+
+    필드 표(``_FIELD_SPECS``)를 그룹별로 모아 하위 설정부터 만들고 마지막에 전체를 조립한다 —
+    필드가 표 한 줄로 선언되므로 env 키·기본값·검증이 한곳에 모인다.
+    ``profile`` 만 환경변수가 아니라 인자로 받는다(어느 환경으로 띄울지는 호출자가 정한다).
+
+    Args:
+        profile: ``dev`` 또는 ``prod``.
+
+    Returns:
+        조립된 설정 객체.
+
+    Raises:
+        ValueError: 필수 환경변수 누락·형식 오류·설정 간 모순.
+    """
     by_group: dict[str, dict[str, Any]] = {}
     for spec in _FIELD_SPECS:
         by_group.setdefault(spec.group, {})[spec.attr] = spec.read(spec.env)
@@ -601,12 +712,33 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
 
 
 def init_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
+    """설정을 만들어 **프로세스 전역에 고정**한다 — 실행 진입점이 가장 먼저 부른다.
+
+    이후 어디서든 ``get_current_settings()`` 가 같은 객체를 돌려준다. 한 프로세스가 도중에 다른
+    설정으로 바뀌면 앞뒤 동작이 달라지므로, 설정 확정은 기동 시 한 번뿐이어야 한다.
+
+    Args:
+        profile: ``dev`` 또는 ``prod``.
+
+    Returns:
+        확정된 설정 객체.
+    """
     global _SETTINGS
     _SETTINGS = _build_settings(profile)
     return _SETTINGS
 
 
 def get_current_settings() -> PipelineSettings:
+    """전역에 고정된 설정을 돌려준다.
+
+    Returns:
+        ``init_settings`` 로 확정된 설정 객체.
+
+    Raises:
+        RuntimeError: 아직 초기화되지 않았을 때. **이 예외를 잡아 기본값으로 폴백하는
+            코드가 여럿 있다**(설정 없이 도는 단위 테스트 경로) — 운영 진입점은 항상
+            먼저 초기화하므로 그 폴백이 운영에서 쓰이면 초기화 누락이다.
+    """
     if _SETTINGS is None:
         raise RuntimeError("settings가 초기화되지 않았습니다. 먼저 init_settings(profile)를 호출하세요.")
     return _SETTINGS

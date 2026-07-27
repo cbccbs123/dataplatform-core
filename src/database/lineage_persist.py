@@ -35,8 +35,21 @@ def record_lineage(
     - ``generated``: 출력 자원 기술 (메타 키 목록, 임베딩 채널 등)
     - ``payload``  : 위에 맞지 않는 부가 정보 (자유형 jsonb)
 
-    ``occurred_at`` 은 DB 서버 ``now()`` 로 기록된다(DDL DEFAULT). 앱 시계와 무관해
-    시간대·NTP 편차 없이 일관된 순서를 보장한다.
+    ``occurred_at`` 은 앱이 아니라 **DB 서버 시계**로 찍힌다 — 여러 워커가 각자 시계로 찍으면
+    시간대·시각 오차 때문에 순서가 뒤엉킨다.
+
+    **DB에 쓴다**(INSERT 1건). 커밋은 호출자 몫이다.
+
+    Args:
+        asset_id: 활동 대상 자산.
+        activity: 무슨 처리였는지(예: ``extract_text``·``relations.proposed.v1``).
+        agent: 누가 했는지(실행 주체 이름).
+        used: 입력 자원 기술. ``None`` 이면 빈 객체로 저장한다.
+        generated: 산출 기술. **결정적으로 정렬해 넣을 것** — 같은 입력이면 계보도 같아야 비교가 된다.
+        payload: 위 셋에 맞지 않는 부가 정보.
+
+    Returns:
+        새로 만든 ``lineage_id``.
     """
     lineage_id = uuid7()
     with conn.cursor() as cur:
