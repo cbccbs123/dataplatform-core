@@ -78,7 +78,14 @@ class PostgresConfig:
 
     @classmethod
     def from_env(cls) -> PostgresConfig:
-        """Build config from env (used when neither ``PostgresUtil(dsn=...)`` nor explicit config is given)."""
+        """환경변수에서 접속 설정을 만든다 — DSN 도 설정 객체도 주어지지 않았을 때의 마지막 수단.
+
+        Returns:
+            채워진 ``PostgresConfig``. 호스트·포트·계정은 값이 없으면 로컬 기본값을 쓴다.
+
+        Raises:
+            PostgresConfigError: 포트가 정수가 아닐 때.
+        """
         port_raw = os.getenv("POSTGRES_PORT", "5432")
         try:
             port = int(str(port_raw).strip())
@@ -95,6 +102,20 @@ class PostgresConfig:
 
 
 def _resolve_min_server_version(explicit: int | None) -> int:
+    """요구할 최소 PostgreSQL 버전을 정한다(인자 → 환경변수 → 기본값 순).
+
+    버전 가드를 두는 이유: 이 프로젝트는 특정 버전 이상의 기능(벡터 집계 등)에 의존해서,
+    낮은 서버에 붙으면 한참 뒤 모호한 SQL 오류로 터진다. 접속 시점에 막는 편이 낫다.
+
+    Args:
+        explicit: 코드에서 직접 지정한 값. 있으면 그대로 쓴다(환경변수보다 우선).
+
+    Returns:
+        숫자 버전(예: 170000).
+
+    Raises:
+        PostgresConfigError: 환경변수 값이 정수가 아닐 때.
+    """
     if explicit is not None:
         return explicit
     raw = os.getenv(_POSTGRES_MIN_VER_ENV)
@@ -127,6 +148,22 @@ class PostgresUtil:
         on_failure: Callable[[Mapping[str, Any]], None] | None = None,
         on_success: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
+        """접속 설정을 확정한다(연결은 하지 않는다 — 첫 사용 시점에 풀이 열린다).
+
+        설정 출처는 **인자 → 환경변수 DSN → 환경변수 개별 항목** 순으로 찾는다.
+
+        Args:
+            config: 접속 설정 객체. ``dsn`` 과 함께 주면 ``dsn`` 이 우선한다.
+            dsn: 접속 문자열. 주면 개별 항목을 조립하지 않는다.
+            min_server_version: 요구 최소 서버 버전. ``None`` 이면 환경변수·기본값.
+            logger: 로거. ``None`` 이면 이 모듈 로거.
+            on_retry: 재시도할 때마다 부를 콜백(관측·지표용).
+            on_failure: 최종 실패 시 콜백.
+            on_success: 성공 시 콜백.
+
+        Raises:
+            PostgresConfigError: 설정 값이 서로 모순일 때(``_validate_config``).
+        """
         if not config and not dsn:
             env_dsn = (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_DSN") or "").strip()
             if env_dsn:
@@ -148,6 +185,14 @@ class PostgresUtil:
         self._validate_config()
 
     def _validate_config(self) -> None:
+        """설정 값의 앞뒤가 맞는지 확인한다 — 어긋나면 **기동 시점에** 실패시킨다.
+
+        풀 크기가 뒤집혀 있거나 재시도 간격이 음수인 설정은 실행 중에야 이상하게 드러난다.
+        DSN 만 준 경우(``config is None``)는 검사할 항목이 없어 그냥 통과한다.
+
+        Raises:
+            PostgresConfigError: 값이 범위를 벗어나거나 서로 모순일 때.
+        """
         if self.config is None:
             return
 
@@ -172,6 +217,11 @@ class PostgresUtil:
             raise PostgresConfigError("retry_jitter_ms must be >= 0.")
 
     def _build_conninfo(self) -> str:
+        """접속 문자열을 만든다 — DSN 이 있으면 그대로, 없으면 항목을 조립한다.
+
+        Returns:
+            libpq 접속 문자열.
+        """
         if self.dsn:
             return self.dsn
         assert self.config is not None
@@ -194,6 +244,14 @@ class PostgresUtil:
 
     @staticmethod
     def _extract_sqlstate(exc: BaseException) -> str | None:
+        """예외에서 SQL 오류 코드를 꺼낸다(드라이버마다 속성 이름이 달라 둘 다 본다).
+
+        Args:
+            exc: 잡힌 예외.
+
+        Returns:
+            5자리 오류 코드. DB 유래가 아닌 예외면 ``None``.
+        """
         sqlstate = getattr(exc, "sqlstate", None)
         if isinstance(sqlstate, str) and sqlstate:
             return sqlstate
@@ -225,6 +283,11 @@ class PostgresUtil:
         return False
 
     def _retry_config(self) -> tuple[int, int, int, int]:
+        """재시도 파라미터를 한 번에 꺼낸다(설정이 없으면 기본값).
+
+        Returns:
+            ``(시도 횟수, 기본 대기 ms, 최대 대기 ms, 지터 ms)``.
+        """
         if self.config is None:
             return (3, 100, 2000, 50)
         return (
@@ -348,7 +411,13 @@ class PostgresUtil:
 
     @contextmanager
     def connection(self) -> Iterator[Connection[Any]]:
-        """풀에서 커넥션을 빌려 제공하고, 블록 종료 시 풀에 반환한다."""
+        """풀에서 커넥션을 빌려 주고, 블록이 끝나면 풀에 돌려준다.
+
+        빌릴 때마다 서버 버전을 확인하지만 **실제 검사는 첫 번째 한 번뿐**이다.
+
+        Yields:
+            빌린 커넥션. 커밋·롤백은 호출자 몫이다(트랜잭션이 필요하면 ``transaction()``).
+        """
         pool = self.open_pool()
         with pool.connection() as conn:
             self._ensure_version_checked(conn)
@@ -356,10 +425,11 @@ class PostgresUtil:
 
     @contextmanager
     def transaction(self) -> Iterator[Connection[Any]]:
-        """
-        Transaction context manager.
+        """트랜잭션 안에서 커넥션을 빌려 준다 — 정상 종료면 커밋, 예외면 롤백.
 
-        Commits on success and rolls back on error.
+        Yields:
+            트랜잭션이 열린 커넥션. 블록 안에서 예외가 나면 그때까지의 쓰기가 **전부**
+            되돌아간다(부분 반영 없음).
         """
         with self.connection() as conn:
             self.logger.debug("Starting transaction.")
@@ -373,20 +443,36 @@ class PostgresUtil:
                 self.logger.debug("Transaction committed.")
 
     def close(self) -> None:
+        """커넥션 풀을 닫는다(이미 닫혔으면 아무 것도 하지 않는다).
+
+        다시 쓰면 풀이 새로 열리므로 종료 후 재사용도 가능하다.
+        """
         if self._pool is not None:
             self.logger.debug("Closing PostgreSQL connection pool.")
             self._pool.close()
             self._pool = None
 
     def __enter__(self) -> PostgresUtil:
-        # Default path in services is pooling, so warm up pool first.
+        """``with`` 진입 — 풀을 **미리 열어 둔다**.
+
+        첫 질의에서 연결 비용을 물지 않게 하려는 예열이다.
+        """
         self.open_pool()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        """``with`` 종료 — 예외 여부와 무관하게 풀을 닫는다."""
         self.close()
 
     def _validate_server_version(self, conn: psycopg.Connection[Any]) -> None:
+        """서버 버전이 요구 사양에 못 미치면 **접속 직후 실패시킨다**.
+
+        낮은 버전에서도 대부분의 질의는 통과하다가, 뒤늦게 특정 기능(벡터 집계 등)에서
+        모호한 오류로 터진다. 원인이 분명한 시점에 막는 편이 낫다.
+
+        Raises:
+            PostgreSQLVersionError: 서버 버전이 최소 요구보다 낮을 때.
+        """
         server_version = conn.info.server_version
         if server_version < self.min_server_version:
             raise PostgreSQLVersionError(
@@ -397,7 +483,10 @@ class PostgresUtil:
         self._version_checked = True
 
     def _ensure_version_checked(self, conn: Connection[Any]) -> None:
-        # PG 버전 가드는 풀 수명 동안 1회만(첫 커넥션 사용 시점)에 수행한다 — 매 borrow 마다 재검증 회피.
+        """버전 검사를 **풀 수명 동안 한 번만** 수행한다.
+
+        같은 서버에 붙는 커넥션마다 다시 물으면 왕복만 늘고 얻는 게 없다.
+        """
         if not self._version_checked:
             self._validate_server_version(conn)
 
@@ -414,6 +503,7 @@ class PostgresUtil:
         멱등 쿼리에 한해 ``idempotent=True`` 로 호출한다(``run_with_retry`` 불변식 참고).
         """
         def _op() -> int:
+            """재시도 단위 — 커넥션을 빌려 질의하고 커밋까지 마친다(실패 시 통째로 재실행)."""
             self.logger.debug("Execute query: %s", query)
             with self.connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
@@ -437,12 +527,18 @@ class PostgresUtil:
         *,
         idempotent: bool = False,
     ) -> Any:
-        """
-        Run arbitrary DB logic inside a managed transaction.
+        """여러 문장을 **한 트랜잭션으로 묶어** 실행한다 — 전부 성공하거나 전부 되돌아간다.
 
-        Useful in services where multiple statements must succeed/fail together.
+        Args:
+            callback: 커넥션을 받아 실제 작업을 하는 함수. 이 안에서 난 예외는 롤백을 부른다.
+            idempotent: **여러 번 실행해도 결과가 같은 작업일 때만 True**. True 면 일시
+                오류에서 재시도하는데, 멱등하지 않은 쓰기를 재시도하면 중복 반영된다.
+
+        Returns:
+            ``callback`` 의 반환값.
         """
         def _op() -> Any:
+            """재시도 단위 — 트랜잭션을 열고 콜백을 실행한다."""
             with self.transaction() as conn:
                 return callback(conn)
 
