@@ -53,7 +53,19 @@ _ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s AND a.status = 'register
 
 
 def parse_vector(value: Any) -> list[float]:
-    """pgvector 반환값(리스트 또는 ``'[0.1,0.2,...]'`` 문자열)을 float 리스트로 정규화(순수)."""
+    """pgvector 가 돌려준 값을 float 리스트로 정규화한다(순수).
+
+    드라이버·쿼리에 따라 리스트로도, ``'[0.1,0.2,...]'`` 문자열로도 온다.
+
+    Args:
+        value: 리스트/튜플 또는 대괄호 문자열.
+
+    Returns:
+        float 리스트.
+
+    Raises:
+        ValueError: 숫자로 바꿀 수 없는 원소가 섞여 있을 때(형식이 깨진 값을 조용히 넘기지 않는다).
+    """
     if isinstance(value, list | tuple):
         return [float(x) for x in value]
     s = str(value).strip()
@@ -75,6 +87,12 @@ def _looks_like_natural_word(token: str) -> bool:
     사전을 두지 않고, **숫자 없음 + 규칙적 대소문자**(전부 소문자/전부 대문자/첫글자만 대문자)면
     자연어로 본다 — 'Maintenance'·'SAMSUNG'·'galaxy' 는 보존되고, 숫자 혼입·불규칙 대소문자 교차
     ('HAi1OZD1OMM' 등)는 ID 로 분류된다. 하이픈 포함은 토큰성이 약해 자연어로 보지 않는다.
+
+    Args:
+        token: 판정할 토큰(빈 문자열은 넘기지 말 것 — 호출부가 걸러 준다).
+
+    Returns:
+        자연어로 보이면 True.
     """
     if any(c.isdigit() for c in token) or "-" in token:
         return False
@@ -89,6 +107,13 @@ def _is_id_like_token(token: str) -> bool:
     제거 조건(AND): 순수 영숫자([A-Za-z0-9-]) · 길이≥8 · (모음 비율<25% **또는**
     (대문자·소문자·숫자 중 2종 이상 혼합 and 사전식 단어 아님)). 한글 등 비-ASCII 토큰은
     첫 정규식에서 탈락해 **항상 보존**된다(외래어 명사 = 검색 신호이지 잡음이 아님).
+
+    Args:
+        token: 판정할 파일명 토큰.
+
+    Returns:
+        잡음 ID 로 보이면 True(호출부가 제거). **판정이 애매하면 False**(보존) 쪽으로 기운다 —
+        검색 신호를 잃는 쪽보다 잡음이 조금 남는 쪽이 안전하기 때문이다.
     """
     if not _ALNUM_TOKEN_RE.match(token) or len(token) < _ID_MIN_LEN:
         return False
@@ -119,6 +144,14 @@ def clean_file_name(name: str, *, noise_patterns: Iterable[str] = ()) -> str:
 
     ``vlm_text_for_embedding`` 의 파일명 처리와 결을 맞춰, 파일명 노이즈가
     BM25·임베딩을 오염시키지 않게 한다(F8 — 어떤 명명 규약의 파일이 와도 피해 반경을 제한).
+
+    Args:
+        name: 원본 파일명(경로 아님). 빈 값이면 빈 문자열을 돌려준다.
+        noise_patterns: 수집원별 잡음 정규식들. **코드를 고치지 않고 설정으로** 새 명명 규약에
+            대응하려는 확장점이다. 여기 매칭되면 ID 판정 전에 먼저 버린다.
+
+    Returns:
+        공백으로 이어붙인 정제 파일명. 모든 토큰이 잡음이면 **빈 문자열**(파일명 신호를 0으로 둔다).
     """
     if not name:
         return ""
@@ -149,6 +182,14 @@ def build_index_body(
     커스텀 토크나이저를 반드시 정의한다(FR-004). ``nori_user_words`` 미지정 시 단일 출처 기본
     (``search_constants.NORI_USER_WORDS_DEFAULT`` — settings resolver 와 공유·069 T302)을 쓴다.
     임베딩은 lucene HNSW + cosinesimil. 차원은 단일 출처 ``FIX_EMBEDDING_DIMENSION``(1536D, 헌법 6조).
+
+    Args:
+        dim: 벡터 차원. 기본값이 정본이며 **바꾸면 기존 색인과 호환되지 않는다**(재색인 필요).
+        nori_user_words: 분해를 막을 외래어·고유명사 목록. ``None`` 이면 설정 기본 목록을 쓴다.
+            빈 리스트를 명시하면 사전 없이 만든다(테스트용).
+
+    Returns:
+        인덱스 생성에 그대로 넘길 ``{settings, mappings}`` dict(순수 데이터 — 생성은 호출부가 한다).
     """
     words = list(nori_user_words) if nori_user_words is not None else list(NORI_USER_WORDS_DEFAULT)
     return {
@@ -232,7 +273,13 @@ def _flatten_labels(raw: Any) -> list[str]:
     과거엔 ``str(label)`` 직렬화라 ``{'label':'텍스트','score':0.51}`` dict 가 통째로
     ``"{'label': '텍스트', 'score': 0.519}"`` 로 색인돼 'label'·'score'·숫자가 BM25 를 오염시키고
     labels 정확매칭을 무력화했다. dict 면 ``label`` 문자열만, str 은 그대로 — ``vlm_text_for_embedding``
-    의 처리와 **동형**(임베딩 입력과 색인 입력의 labels 표현을 일치). 빈/공백·비대상 타입은 제외.
+    의 처리와 **동형**(임베딩 입력과 색인 입력의 labels 표현을 일치).
+
+    Args:
+        raw: ext_meta 의 labels 값. 리스트가 아니면 빈 결과로 안전 처리한다(스키마 위반 방어).
+
+    Returns:
+        라벨 문자열 리스트. 빈 문자열·공백뿐인 항목·알 수 없는 타입은 제외한다.
     """
     out: list[str] = []
     for item in raw if isinstance(raw, list) else []:
@@ -251,7 +298,17 @@ def _flatten_labels(raw: Any) -> list[str]:
 
 
 def _dedup_in_order(values: Iterable[Any]) -> list[str]:
-    """빈/None 을 제외하고 첫 등장 순서를 보존해 중복 제거(keyword 필드용·결정적)."""
+    """빈 값을 빼고 **첫 등장 순서를 보존한 채** 중복을 제거한다(keyword 필드용·결정적).
+
+    정렬하지 않는 이유: 입력(자기주제 정본)의 순서가 곧 의미 순서이고, 재정렬하면 같은 자산의
+    색인 결과가 입력 순서에 따라 달라 보이기 때문이다.
+
+    Args:
+        values: 임의의 값들(None·빈 문자열 섞여도 된다).
+
+    Returns:
+        문자열 리스트(중복·빈 값 제거, 순서 보존).
+    """
     seen: set[str] = set()
     out: list[str] = []
     for v in values:
@@ -272,8 +329,13 @@ def _topic_pair(topic_ko: Any, subtopic_ko: Any) -> str:
     파싱 계약(C2). **프론트 파싱 계약: 첫 ``>`` 로만 분할한다**(``split('>', 1)``) — topic 층은
     닫힌 통제어휘(058·``>`` 불포함)라 항상 첫 토큰으로 정확히 복원되고, 만에 하나 열린 subtopic
     라벨에 ``>`` 가 섞여도 부모 오배치(교차곱)는 나지 않는다(subtopic 표기만 그대로 보존).
-    ``topic_ko`` 가 falsy 면 빈 문자열을 돌려주고 ``_dedup_in_order`` 가 스킵한다
-    (평면 ``topics`` 가 falsy topic_ko 를 스킵하는 것과 동형).
+    Args:
+        topic_ko: 대주제 라벨.
+        subtopic_ko: 세부주제 라벨. 비면 대주제 단독 문자열이 된다.
+
+    Returns:
+        ``"대주제>세부주제"`` 또는 ``"대주제"``. **대주제가 비면 빈 문자열** — 호출부의
+        ``_dedup_in_order`` 가 이를 스킵한다(평면 ``topics`` 처리와 동형).
     """
     tk = str(topic_ko) if topic_ko else ""
     if not tk:
@@ -295,8 +357,14 @@ def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
     ``_dedup_in_order`` 로 순서 보존·중복 제거만 한다. **평면 ``topics``/``subtopics`` 반환값·로직은 불변**(짝 필드는
     표시·패싯 전용·랭킹 미반영 — 검색 무회귀, C5).
 
-    BM25 관련도 보강 필드(``topics_text``·한/영 토큰 공백결합)는 스코프 철회로 색인하지 않는다
-    (FR-504·SC-04 제거). 주제는 keyword terms 필터/패싯으로만 검색에 반영한다.
+    주제는 keyword terms 필터·패싯으로만 검색에 반영한다(BM25 관련도에는 넣지 않는다 — 랭킹
+    회귀 위험 대비 이득이 낮아 철회했다).
+
+    Args:
+        topics: 자기주제 정본 리스트(``{topic_ko, subtopic_ko, ...}``).
+
+    Returns:
+        ``{topics, subtopics, topic_pairs}`` 3필드. 입력이 비면 각 값이 빈 리스트다.
     """
     return {
         "topics": _dedup_in_order(t.get("topic_ko") for t in topics),
@@ -328,6 +396,17 @@ def asset_to_doc(
     않으면** ``topics``/``subtopics``/``topic_pairs``(059) 3필드(keyword)를 수록하고, ``None``/빈
     리스트면 이 필드들을 **넣지 않는다**(주제 미부여 자산·하위호환 — 기존 문서 형상 불변). 이 경로가 전체문서 색인마다
     자산 자기주제를 함께 실어, 재수집/재색인이 색인된 topics 를 지우지 않게 한다(C5·SC-03).
+
+    Args:
+        row: PG 조회 행(asset + metadata + 평균 임베딩).
+        channel: 임베딩 채널. **문서에는 저장하지 않는다** — 인덱스가 활성 채널 하나만 담는 전제라
+            호출부 시그니처 호환용으로만 받는다.
+        noise_patterns: 파일명 정제용 잡음 정규식(설정에서 주입).
+        topics: 자기주제 정본 리스트. ``None``·빈 리스트면 주제 3필드를 **아예 넣지 않는다**.
+
+    Returns:
+        색인용 문서 dict. **0-노름 임베딩이면 ``embedding`` 필드를 생략**한다 — 코사인 kNN 이
+        거부하는 값이라, 색인 자체를 실패시키는 대신 그 자산을 BM25 로만 찾히게 둔다.
     """
     _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
     ext = row.get("ext_meta") or {}
@@ -379,8 +458,13 @@ def asset_to_doc(
 def get_client(url: str | None = None) -> Any:
     """현재 설정(`OPENSEARCH_URL`, 미지정 시 기본 http://localhost:9200)의 OpenSearch 클라이언트.
 
-    DEV 무인증(http) 기준. ``url`` 미지정 시 020 에서 추가된 정식 선택 필드 ``settings.opensearch.url``
-    (기본 http://localhost:9200)을 참조한다.
+    개발 환경 무인증(http) 기준이다.
+
+    Args:
+        url: 접속 URL. ``None`` 이면 설정값(기본 ``http://localhost:9200``)을 쓴다.
+
+    Returns:
+        OpenSearch 클라이언트(타임아웃 60초·압축 on).
     """
     from opensearchpy import OpenSearch
 
@@ -408,8 +492,16 @@ def ensure_index(
 ) -> str:
     """인덱스가 없으면 생성한다. ``recreate=True`` 면 **명시적으로** 삭제 후 재생성(파괴적·옵트인).
 
-    반환: ``'created'`` | ``'recreated'`` | ``'exists'``. 매핑은 단일 출처 ``build_index_body``.
-    ``nori_user_words`` 미지정 시 ``build_index_body`` 기본 외래어 목록을 쓴다(IO 층이 settings 주입).
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 인덱스 이름.
+        recreate: **True 면 기존 인덱스를 지우고 다시 만든다** — 색인된 문서가 전부 사라지는
+            파괴적 동작이라 명시적으로 켤 때만 수행한다.
+        dim: 벡터 차원(기본 = 정본 1536D).
+        nori_user_words: 분해 방지 외래어 목록. ``None`` 이면 기본 목록.
+
+    Returns:
+        ``'created'``(신규) · ``'recreated'``(삭제 후 재생성) · ``'exists'``(그대로 둠).
     """
     body = build_index_body(dim=dim, nori_user_words=nori_user_words)
     exists = client.indices.exists(index=index)
@@ -424,7 +516,16 @@ def ensure_index(
 
 
 def _fetch_one(conn: Any, sql: str, params: tuple) -> dict[str, Any] | None:
-    """단건 행을 dict 로 조회(읽기전용). psycopg 는 지연 import."""
+    """단건 행을 dict 로 조회한다(읽기 전용). psycopg 는 함수 안에서 지연 import 한다.
+
+    Args:
+        conn: DB 커넥션.
+        sql: 실행할 SELECT.
+        params: 바인딩 파라미터 튜플.
+
+    Returns:
+        행 dict. 결과가 없으면 ``None``.
+    """
     from psycopg.rows import dict_row
 
     with conn.cursor(row_factory=dict_row) as cur:
@@ -438,8 +539,18 @@ def check_pgvector_version(conn: Any, *, minimum: tuple[int, int] = (0, 5)) -> s
     동기화 SELECT 가 자산당 청크 임베딩을 ``avg(embedding)`` 으로 평균 풀링하는데, vector 타입
     집계(avg/sum)는 pgvector **0.5.0** 에서 추가됐다(그 이전엔 집계 함수 자체가 없다). 미설치/구버전
     환경에서 동기화가 런타임에 모호한 SQL 오류로 깨지는 대신, 복구 도구(run_opensearch_resync)
-    시작 시 한 번 선검사해 원인이 분명한 오류로 막는다. 반환: 확인된 확장 버전 문자열.
-    미설치·구버전이면 ``RuntimeError``.
+    시작 시 한 번 선검사해 원인이 분명한 오류로 막는다.
+
+    Args:
+        conn: DB 커넥션(읽기만 한다).
+        minimum: 요구 최소 버전 ``(major, minor)``.
+
+    Returns:
+        확인된 확장 버전 문자열.
+
+    Raises:
+        RuntimeError: 확장 미설치이거나 버전이 낮을 때. **버전 문자열을 못 읽으면 ``(0,0)`` 으로
+            보고 차단한다** — 모호하게 통과시키느니 명확히 거부하는 쪽을 택했다.
     """
     from psycopg.rows import dict_row
 
@@ -473,7 +584,14 @@ def _default_topics_fn(conn: Any, asset_id: Any) -> list[dict[str, Any]]:
     출력 형상(``[{topic_ko, subtopic_ko, topic_en, subtopic_en, weight}]``)은 유지해 topics/subtopics/
     topic_pairs 필드 계약(059)이 불변이다(FR-401). ``fetch_asset_topic`` 은 ``psycopg`` 를 모듈 상단에서
     당기므로 **호출 시 지연 import** 한다 — 플래그 off(미도입) 환경의 순수 함수 게이트가 이 무거운
-    의존 없이 opensearch_sync 를 import 할 수 있게 하기 위함이다. 반환 [] 면 자산에 주제 미부여.
+    의존 없이 opensearch_sync 를 import 할 수 있게 하기 위함이다.
+
+    Args:
+        conn: DB 커넥션.
+        asset_id: 조회할 자산.
+
+    Returns:
+        ``[{topic_ko, subtopic_ko, topic_en, subtopic_en, weight}]``. **빈 리스트면 주제 미부여**.
     """
     from src.topic.asset_topic_query import fetch_asset_topic
 
@@ -500,8 +618,17 @@ def iter_asset_docs(
 
     구현 주의(실 DB): 바깥 커서를 순회하며 자산마다 ``topics_fn`` 이 conn 에 **중첩 커서**로 topic 을
     조회한다. psycopg3 기본(client-side) 커서는 ``execute`` 시 결과를 클라이언트로 내려받아 버퍼링하므로,
-    순회 중 같은 conn 에 다른 커서로 조회해도 안전하다(server-side named 커서가 아님). 이 중첩 조회의
-    실 DB 동작·성능은 T404 resync 게이트에서 확인한다.
+    순회 중 같은 conn 에 다른 커서로 조회해도 안전하다(server-side named 커서가 아님).
+
+    Args:
+        conn: DB 커넥션(읽기 전용).
+        channel: 평균 임베딩을 뽑을 채널.
+        noise_patterns: 파일명 정제용 잡음 정규식.
+        topics_fn: 자산별 주제를 읽는 함수 **주입 seam**. 테스트는 가짜 함수를 넣어 실 DB 없이
+            문서 조립만 검증한다.
+
+    Yields:
+        색인용 문서 dict(registered 자산만).
     """
     from psycopg.rows import dict_row
 
@@ -531,7 +658,22 @@ def index_asset(
     ``topics_fn``(065·기본 ``fetch_asset_topic``) 으로 그 자산의 **자기주제 정본**을 읽어
     전체문서에 함께 싣는다 — run_ingest 증분 훅이 재수집 자산을 이 경로로 재색인해도 앞서
     색인된 topics 를 지우지 않는다(C5·SC-03). ``_fetch_one`` 커서는 ``with`` 종료로 닫힌 뒤
-    ``topics_fn`` 이 conn 에 조회하므로 커서 충돌이 없다. 주제 미부여 자산은 [] → topics 필드 생략.
+    ``topics_fn`` 이 conn 에 조회하므로 커서 충돌이 없다.
+
+    **OpenSearch 에 쓴다**(PG 는 읽기만).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        conn: DB 커넥션.
+        asset_id: 색인할 자산.
+        index: 대상 인덱스.
+        channel: 평균 임베딩 채널.
+        noise_patterns: 파일명 정제 패턴.
+        topics_fn: 주제 조회 함수 주입 seam.
+
+    Returns:
+        색인한 문서 dict. **자산이 없거나 임베딩이 없으면 ``None``**(아무 것도 하지 않는다).
+        같은 asset_id 로 다시 부르면 덮어쓰므로 재실행에 안전하다.
     """
     row = _fetch_one(conn, _ASSET_ONE_SQL, (channel, asset_id))
     if row is None:
@@ -552,7 +694,16 @@ def update_asset_topics(
     3필드를 덮어쓴다 — ``asset_to_doc`` 과 동일한 ``_topics_doc_fields`` 로 조립해 두 경로의 주제 표현을 일치시킨다.
     ``topics`` 가 비면 두 필드를 **빈 값으로 갱신**해 강등/제거된 stale 주제를 지운다(SC-02). ``asset_to_doc``
     은 관계 없는 자산에서 필드를 생략하지만, 여기서는 이미 색인된 문서의 주제를 갱신·삭제해야 하므로
-    비어도 필드를 실어 보낸다(전체문서 색인과 의도적으로 다른 대칭). ``_id`` 는 ``index`` 색인과 동형으로 str.
+    비어도 필드를 실어 보낸다(전체문서 색인과 의도적으로 다른 대칭).
+
+    **OpenSearch 에 쓴다**(부분 갱신).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 대상 인덱스.
+        asset_id: 갱신할 자산.
+        topics: 새 주제 목록. **빈 리스트를 주면 기존 주제를 지운다** — 강등·제거된 주제가
+            색인에 남지 않게 하는 의도적 동작이다.
     """
     client.update(index=index, id=str(asset_id), body={"doc": _topics_doc_fields(topics)})
 
@@ -560,8 +711,15 @@ def update_asset_topics(
 def update_asset_about(client: Any, index: str, asset_id: Any, about: list[str]) -> None:
     """자산 문서의 ``about`` 필드만 부분 갱신한다(073 백필용 — 전체 재색인 아님).
 
-    ``update_asset_topics`` 동형: OS ``update`` 부분문서로 aboutness 개체만 덮어쓴다. 빈 리스트도
-    실어 보내 stale 값을 지운다(--refresh 재추출 대칭). ``_id`` 는 색인과 동형으로 str.
+    ``update_asset_topics`` 와 같은 방식이다.
+
+    **OpenSearch 에 쓴다**(부분 갱신).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 대상 인덱스.
+        asset_id: 갱신할 자산.
+        about: 새 개체 목록. **빈 리스트도 그대로 실어 보내** 예전 값을 지운다.
     """
     client.update(index=index, id=str(asset_id), body={"doc": {"about": [str(a) for a in about]}})
 
@@ -570,13 +728,28 @@ def ensure_about_mapping(client: Any, index: str) -> None:
     """기존 인덱스에 ``about``(keyword) 매핑을 추가한다(073 — put_mapping 은 멱등·재색인 불요).
 
     새 인덱스는 ``build_index_body`` 가 이미 포함하므로 이 함수는 **백필이 구 인덱스에 1회** 호출한다.
-    이미 있으면 OS 가 no-op 처리한다(동일 타입 재선언 허용).
+
+    **OpenSearch 매핑을 바꾼다**(문서 재색인은 필요 없다).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 대상 인덱스.
     """
     client.indices.put_mapping(index=index, body={"properties": {"about": {"type": "keyword"}}})
 
 
 def _bulk_actions(index: str, docs: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    """문서를 bulk upsert 액션으로 감싼다(``_id=asset_id`` → 재실행 시 덮어쓰기·중복 없음)."""
+    """문서들을 bulk 액션으로 감싼다.
+
+    ``_id`` 를 ``asset_id`` 로 고정하므로 재실행하면 **덮어쓰기**가 되어 중복 문서가 생기지 않는다.
+
+    Args:
+        index: 대상 인덱스.
+        docs: 색인할 문서들.
+
+    Yields:
+        bulk API 액션 dict.
+    """
     for doc in docs:
         yield {"_index": index, "_id": doc["asset_id"], "_source": doc}
 
@@ -600,8 +773,25 @@ def sync_all(
     스키마 변경 시에만 ``recreate=True``. ``bulk_fn`` 은 색인 seam(기본 opensearch-py ``helpers.bulk``)
     으로, 단위 테스트가 가짜를 주입해 OS 없이 액션을 검증한다. 반환: ``(인덱스상태, 색인 건수, 오류 목록)``.
     ``nori_user_words``(인덱스 analyzer 사전)·``noise_patterns``(파일명 정제) 는 settings 단일 출처를
-    IO 층(복구 도구)이 주입한다 — 미지정 시 순수 함수 기본값(026 기본 사전·빈 패턴). ``topics_fn``(056)
-    은 문서마다 현재 active 관계 주제를 실어 전체 재색인(백필·복구)이 topics 를 포함하게 한다(R3·C5).
+    IO 층(복구 도구)이 주입한다 — 미지정 시 순수 함수 기본값을 쓴다.
+
+    **OpenSearch 에 쓴다**(PG 는 읽기만).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        conn: DB 커넥션.
+        index: 대상 인덱스.
+        channel: 평균 임베딩 채널.
+        recreate: **True 면 인덱스를 지우고 다시 만든다**(파괴적 — 스키마를 바꿀 때만).
+        dim: 벡터 차원.
+        bulk_fn: 색인 함수 주입 seam. ``None`` 이면 opensearch-py ``helpers.bulk`` 를 지연 로드한다.
+        nori_user_words: 분해 방지 외래어 목록.
+        noise_patterns: 파일명 정제 패턴.
+        topics_fn: 자산별 주제 조회 함수 주입 seam. 전체 재색인이 주제를 함께 실어야 색인된
+            주제가 지워지지 않는다.
+
+    Returns:
+        ``(인덱스 상태, 색인 건수, 오류 목록)``. 상태는 ``created``·``recreated``·``exists``.
     """
     if bulk_fn is None:
         from opensearchpy import helpers
@@ -621,7 +811,14 @@ def sync_all(
 
 
 def resolve_channel(channel: str | None) -> str:
-    """미지정이면 운영 활성 임베딩 채널(018)로 해소한다(적재·검색과 같은 채널을 색인)."""
+    """색인에 쓸 임베딩 채널을 정한다 — 적재·검색과 **같은 채널**이어야 비교가 성립한다.
+
+    Args:
+        channel: 명시 채널. ``None`` 이면 운영 활성 채널로 해소한다.
+
+    Returns:
+        해소된 채널 이름.
+    """
     from src.config.settings import active_embed_channel
 
     return channel if channel is not None else active_embed_channel()
