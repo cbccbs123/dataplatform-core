@@ -54,12 +54,18 @@ def _build_video_summary_prompt(
 ) -> str:
     """영상 장면 타임라인을 종합하는 reduce 프롬프트를 만든다(순수 — LLM·settings 미접촉).
 
-    함수 내 f-string 에 숨어 있던 프롬프트를 순수 빌더로 노출해 토픽화 지시(FR-001)를 단위로
-    가드한다(동작 불변 — 이 빌더 출력이 그대로 LLM 입력). timeline_lines 는 scene 순서를 보존한다.
+    프롬프트를 따로 빼 둔 이유: 지시문이 바뀌면 요약이 통째로 달라지므로 문구를 테스트로
+    못박아 둘 수 있어야 한다.
 
-    049: ``v2=False``(기본) 면 현행 v1 프롬프트를 **바이트 동일**하게 반환한다(FR-102 회귀 안전판).
-    ``v2=True`` 면 흐름 중심 요약 지시 직전에 종합 추가 지시(_V2_REDUCE_EXTRA_INSTRUCTION)를 끼워
-    넣는다 — v1 본문·장면 결과 꼬리는 그대로 두고 덧붙이기만 한다.
+    Args:
+        timeline_lines: 장면별 분석을 한 줄씩 담은 목록. ⚠️ **시간 순서를 그대로 보존해야**
+            흐름 중심 요약이 나온다 — 정렬을 바꾸면 이야기 순서가 뒤집힌다.
+        summary_max_chars: 요약 길이 상한.
+        top_k_keywords: 키워드 개수 상한.
+        v2: 종합 지시를 끼워 넣을지. **끄면 기존 문구가 글자 그대로** 나온다(되돌릴 안전판).
+
+    Returns:
+        LLM 에 그대로 넣을 프롬프트.
     """
     v2_extra = _V2_REDUCE_EXTRA_INSTRUCTION if v2 else ""
     return (
@@ -82,13 +88,17 @@ def summarize_video_from_scene_results(
 ) -> VideoSummaryResult:
     """장면별 이미지 요약 결과를 종합해 영상 전체 요약을 생성한다.
 
-    scene_results 각 항목은 최소한 아래 키를 포함해야 한다.
-    - scene_index, start_sec, end_sec, frame_sec
-    - summary: {"summary": str, "keywords": list[str], "objects": list[str]}
+    장면마다 LLM 을 다시 부르지 않는다 — 장면 분석 결과를 한 덩어리 텍스트로 만들어 **한 번만**
+    종합한다(장면 수만큼 호출하면 비용과 지연이 선형으로 늘어난다).
 
-    각 장면을 타임라인 텍스트로 직렬화한 뒤 단일 LLM 호출로 reduce 한다.
-    장면 순서(시간 흐름)를 반영한 요약을 위해 timeline_lines 는 scene_results 순서를 보존한다.
-    ``jpeg_bytes`` 는 이미 extract 단계에서 제거되어 있어야 하며, 여기서는 참조하지 않는다.
+    Args:
+        scene_results: 장면별 분석 결과. 각 항목에 장면 순번·구간 시각과 장면 요약이 있어야 한다.
+            ⚠️ **순서를 그대로 쓴다** — 시간 흐름이 요약에 반영되어야 한다.
+            ⚠️ 프레임 이미지 바이트는 **이미 제거된 상태**여야 한다(여기서 참조하지 않으며,
+            남아 있으면 메모리만 붙잡는다).
+
+    Returns:
+        영상 전체 요약·키워드·객체. 장면이 하나도 없으면 빈 결과.
     """
     cfg = get_current_settings()
     if not scene_results:

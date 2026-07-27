@@ -41,11 +41,16 @@ class TextChunkEmbedding(TypedDict):
 def pad_embedding_to_storage_dim(raw: list[float]) -> list[float]:
     """모델 출력 벡터를 DB ``vector(FIX_EMBEDDING_DIMENSION)`` 저장 형식으로 맞춘다.
 
-    - 빈 리스트(추출 실패 fallback) → 전체 zero 벡터.
-    - 모델 차원 < 1536 → 뒤를 0 으로 패딩(다른 체크포인트 전환 시 주의).
-    - 모델 차원 == 1536 → 그대로 반환(정상 경로).
-    패딩된 벡터는 코사인 유사도에서 방향 왜곡을 일으킬 수 있으므로,
-    체크포인트는 실제 1536D 모델로 고정하는 것이 원칙이다(``embedding_constants.py`` 참조).
+    ⚠️ **패딩은 최후 수단이다.** 짧은 벡터 뒤를 0 으로 채우면 저장은 되지만 코사인 유사도의
+    방향이 왜곡된다 — 모델은 저장 차원과 **같은 차원**인 것으로 고정하는 것이 원칙이다
+    (``embedding_constants.py`` 참조).
+
+    Args:
+        raw: 모델이 낸 벡터. **빈 리스트여도 된다** — 추출이 실패한 자산은 전부 0인 벡터가
+            되어, 행은 남고 검색에서는 아무것과도 닮지 않는다.
+
+    Returns:
+        저장 차원에 맞춘 벡터.
     """
     vec = np.asarray(raw, dtype=np.float32)
     if vec.size == 0:
@@ -84,8 +89,16 @@ def embed_texts(
 ) -> list[list[float]]:
     """문자열 배치를 그대로 ST 인코딩하는 저수준 seam(패딩 전·청크 분할 없음).
 
-    인덱싱(skills)과 검색 쿼리(query_embed → OpenSearch kNN)가 함께 호출하는 지점 — 양측이 같은
-    ``model_name``·``normalize_embeddings`` 를 줘야 벡터 공간이 일치한다.
+    ⚠️ **적재와 질의가 함께 부르는 자리**다. 두 쪽이 같은 모델·같은 정규화 설정을 줘야 벡터가
+    같은 공간에 놓인다 — 어긋나면 검색이 조용히 엉뚱한 결과를 낸다.
+
+    Args:
+        texts: 인코딩할 문자열들. **빈 목록이면 모델을 부르지 않는다**.
+        model_name: 쓸 모델.
+        normalize_embeddings: 벡터 길이를 1로 맞출지. 적재와 질의가 **같아야** 한다.
+
+    Returns:
+        입력 순서대로의 벡터 목록(패딩 전·청크 분할 없음).
     """
     if not texts:
         return []
@@ -106,10 +119,19 @@ def embed_texts_for(
 ) -> list[list[float]]:
     """채널의 **백엔드**로 텍스트 배치를 임베딩한다(062·raw·패딩 없음 — ``embed_texts`` 대칭).
 
-    ``backend_for_channel(channel)=='api'`` → 온프레미스 API(``embed_texts_api``·bge-m3 서빙), 그 외
-    (``'st'``·``'st_bge'``) → 로컬 SentenceTransformer(``embed_texts``). 적재·질의·관계가 공유하는 단일
-    라우팅 지점(018 채널 위에 얹는 직교 백엔드 축). **로컬 채널은 기존 ``embed_texts`` 그대로**라 동작 불변.
-    순환 방지를 위해 settings/api 임베더는 함수 내부에서 지연 import 한다.
+    **채널이 "어느 모델"과 "로컬이냐 원격이냐"를 함께 정한다.** 적재·질의·관계가 이 한 지점을
+    공유하므로 세 경로가 자동으로 같은 공간을 쓴다.
+
+    설정과 원격 임베더는 함수 **안에서** import 한다 — 모듈 상단에 두면 순환 import 가 생긴다.
+
+    Args:
+        texts: 인코딩할 문자열들.
+        channel: 임베딩 채널. 원격 채널이면 API 로, 그 밖이면 로컬 모델로 보낸다.
+        settings: 설정. ``None`` 이면 현재 활성 설정을 쓴다.
+        normalize_embeddings: 벡터 길이를 1로 맞출지(적재·질의가 같아야 한다).
+
+    Returns:
+        입력 순서대로의 벡터 목록(패딩 전).
     """
     from src.config.settings import backend_for_channel, model_for_channel
 
@@ -140,19 +162,25 @@ def _embed_many(
     embedding_model_name: str,
     normalize_embeddings: bool,
 ) -> list[list[float]]:
-    """청크 여러 개를 **1회 배치**로 임베딩 — ``channel`` 있으면 백엔드 라우팅(``embed_texts_for``),
-    없으면 로컬 모델(``embed_texts``). 입력 순서대로 벡터 리스트 반환.
+    """청크 전부를 **한 번의 배치**로 임베딩한다.
 
-    069 D7(P2-32): 과거 ``_embed_one`` 이 청크마다 1회(로컬 model.encode / API HTTP 요청 1건)를 돌던
-    것을 전 청크 1회 배치로 대체한다. 하부 ``embed_texts``·``embed_texts_api`` 는 내부에서 batch_size 로
-    나눠 처리하므로 API 요청 왕복이 청크수→⌈청크수/batch_size⌉ 로 급감한다. **수치 동일성 실측**(120
-    실코퍼스 청크): 운영 API bge-m3 개별 vs 배치 bit-identical(차이 0), 로컬 bge cos이탈 8.8e-12 —
-    검색 무영향·재백필 불필요(동작 불변). 빈 입력은 빈 리스트(호출 생략).
+    청크마다 따로 부르면 원격 채널에서 HTTP 왕복이 청크 수만큼 발생한다. 한 번에 넘기면 하부
+    구현이 알맞은 크기로 나눠 처리해 왕복이 크게 줄어든다.
 
-    메모리: 호출자가 문서 전체의 정제 청크 텍스트를 리스트로 모아 넘긴다 — 지배적 요인인 결과 벡터
-    누적(1536D)은 기존과 동일하나 원문 청크 텍스트를 배치 호출 직전 동시에 들고 있다. embed_texts_api
-    의 batch_size 분할은 **HTTP 왕복만** 줄일 뿐 이 초기 리스트 메모리는 완화하지 않는다(초대형 문서
-    피크 메모리는 미측정 — 필요 시 후속에서 스트리밍 배치로 분할)."""
+    ⚠️ **메모리 주의**: 호출자가 문서 전체의 청크 텍스트를 목록으로 들고 있게 된다. 하부의
+    배치 분할은 왕복만 줄이고 이 초기 목록은 줄이지 않으므로, 아주 큰 문서에서는 최대 메모리가
+    올라간다(그때는 스트리밍 배치로 나눠야 한다).
+
+    Args:
+        texts: 임베딩할 청크 텍스트. **빈 목록이면 아무것도 부르지 않는다**.
+        channel: 채널. 주면 백엔드 라우팅을 거치고, ``None`` 이면 로컬 모델로 바로 간다.
+        settings: 설정.
+        embedding_model_name: 채널이 없을 때 쓸 로컬 모델.
+        normalize_embeddings: 벡터 길이를 1로 맞출지.
+
+    Returns:
+        입력 순서대로의 벡터 목록.
+    """
     if not texts:
         return []
     if channel is not None:
@@ -216,10 +244,25 @@ def embedding_text_chunks(
     channel: str | None = None,
     settings: Any = None,
 ) -> list[TextChunkEmbedding]:
-    """문서를 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문 텍스트는 DB에 저장하지 않음).
+    """문서를 청크로 쪼개 임베딩한다 — **본문 텍스트는 DB 에 저장하지 않는다**(벡터만).
 
-    062: ``channel`` 이 주어지면 그 채널의 **백엔드**(로컬/API)로 임베딩한다(``embed_texts_for``). 미지정이면
-    기존대로 로컬 ``embed_texts(embedding_model_name)`` — 기존 호출 완전 동치(회귀 0).
+    Args:
+        file_path: 대상 문서.
+        file_kind: 파일 종류. 쪼개는 방식이 여기서 갈린다.
+        encoding: 읽을 인코딩.
+        chunk_size: 청크 크기. ⚠️ **모델 최대 입력의 2배를 넘으면 조용히 잘린다** — 로컬
+            채널에서는 경고를 한 번 남긴다(원격은 모델 한계를 알 수 없어 생략).
+        embedding_model_name: 채널이 없을 때 쓸 로컬 모델. 기본값은 **테스트 폴백**이며 운영
+            경로는 항상 채널과 모델을 함께 주입한다.
+        normalize_embeddings: 벡터 길이를 1로 맞출지.
+        channel: 임베딩 채널. 주면 백엔드 라우팅을 거친다.
+        settings: 설정. 청크 겹침 크기를 여기서 읽는다 — ``None`` 이면 겹치지 않는다.
+
+    Returns:
+        청크 순번과 벡터 목록. 순번은 **빈 청크를 걸러 낸 뒤의 연속 번호**다.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
     """
     path = Path(file_path)
     if not path.is_file():
@@ -293,9 +336,21 @@ def embedding_plain_text_chunks(
     channel: str | None = None,
     settings: Any = None,
 ) -> list[TextChunkEmbedding]:
-    """STT 등 단일 문자열을 청크 단위로 임베딩한다. ``media_chunks`` 임베딩 적재용(본문은 DB 미저장).
+    """문자열 하나를 청크로 쪼개 임베딩한다(전사 텍스트 등 — 파일이 아닌 입력).
 
-    062: ``channel`` 지정 시 그 채널 백엔드(로컬/API)로 임베딩(``embed_texts_for``). 미지정=기존 로컬(회귀 0).
+    Args:
+        text: 임베딩할 원문.
+        chunk_size: 청크 크기.
+        embedding_model_name: 채널이 없을 때 쓸 로컬 모델(기본값은 테스트 폴백).
+        normalize_embeddings: 벡터 길이를 1로 맞출지.
+        overlap_size: 인접 청크를 겹칠 글자 수. 겹치면 경계에서 잘린 문맥 손실이 줄어든다.
+        max_input_chars: 읽을 최대 글자 수(아주 긴 입력의 상한).
+        channel: 임베딩 채널.
+        settings: 설정.
+
+    Returns:
+        청크 순번과 벡터 목록. **쓸 청크가 하나도 없으면 0번 자리에 전부 0인 벡터 한 개**를
+        돌려준다 — 행이 아예 없으면 그 자산은 검색에서 통째로 사라진다.
     """
     # 069 D7: 파일 경로와 동일하게 청크를 모아 1회 배치 임베딩(과거 청크별 _embed_one 대체).
     # chunk_index 는 빈 청크를 건너뛴 뒤의 연속 순번(0,1,2,…) — 기존과 동일.

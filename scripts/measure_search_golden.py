@@ -74,7 +74,20 @@ def main() -> int:
     client = get_client()
 
     def run(query: str, *, cutoff: bool, rerank: bool, qnorm: bool) -> dict[str, list]:
-        """한 설정으로 search_assets_os 를 호출(.env 무변경·파라미터 직접 주입)."""
+        """한 설정 조합으로 검색을 한 번 돌린다.
+
+        ⚠️ 설정 파일을 고치지 않고 **파라미터로 직접 주입한다** — 환경을 바꿔 가며 재는 방식은
+        측정 도중 운영 설정을 오염시킨다.
+
+        Args:
+            query: 질의 문자열.
+            cutoff: 적합도 컷오프를 켤지.
+            rerank: 리랭커를 켤지.
+            qnorm: 질의 형태소 정규화를 켤지.
+
+        Returns:
+            모달리티별 결과 버킷.
+        """
         return search_assets_os(
             client, query, modalities=_MODALITIES, k=20,
             channel=cfg.embed.active_channel, index=cfg.opensearch.index,
@@ -91,7 +104,16 @@ def main() -> int:
     avg = lambda xs: (sum(xs) / len(xs)) if xs else 0.0  # noqa: E731
 
     def _dedup_ranking(rows_by_bucket: dict[str, list]) -> list[str]:
-        """모달리티 버킷 → 자산 단위 합집합 랭킹(점수 내림차순 dedup·결정적·헌법 3조)."""
+        """모달리티 버킷을 자산 단위 하나의 순위로 합친다.
+
+        측정에서는 "몇 번째에 나왔나"가 지표라 자산 단위 단일 순위가 필요하다.
+
+        Args:
+            rows_by_bucket: 모달리티별 결과 행.
+
+        Returns:
+            자산 id 순위 목록. 점수 내림차순이며 **동점은 id 로 갈라** 매번 같은 순위가 나온다.
+        """
         rows = sorted(
             (r for b in rows_by_bucket.values() for r in (b or [])),
             key=lambda r: (-float(r.get("similarity") or 0.0), str(r.get("id"))),
@@ -118,7 +140,19 @@ def main() -> int:
     absent = [q for q in queries if q.get("expect_empty")]
 
     def measure(label: str, *, cutoff: bool, rerank: bool, qnorm: bool, nomatch: bool) -> dict[str, Any]:
-        """한 설정 조합의 recall@20·p@3·(옵션)차단율을 잰다."""
+        """한 설정 조합의 지표를 잰다 — 재현율·상위 정확도·(선택)빈결과 차단율.
+
+        Args:
+            label: 표에 찍을 조합 이름.
+            cutoff: 적합도 컷오프를 켤지.
+            rerank: 리랭커를 켤지.
+            qnorm: 질의 형태소 정규화를 켤지.
+            nomatch: **"결과가 없어야 하는 질의"** 도 함께 잴지. 켜면 그 질의들이 실제로
+                차단되는지 세고, 새어 나온 것을 목록으로 남긴다.
+
+        Returns:
+            지표 dict.
+        """
         recalls: list[float] = []
         p3s: list[float] = []
         for q in scored:
@@ -141,7 +175,13 @@ def main() -> int:
         return {"label": label, "recall": r, "p3": p, "blocked": blocked, "total": len(absent), "leaks": leaks}
 
     def report(m: dict[str, Any], base: dict[str, Any] | None = None) -> None:
-        """측정 결과를 표로 출력한다(``base`` 를 주면 항목마다 증감을 함께 보여준다)."""
+        """측정 결과를 표로 출력한다.
+
+        Args:
+            m: 이번 측정 결과.
+            base: 비교 기준. 주면 **항목마다 증감**을 함께 찍는다 — 절대값만 보면 좋아진
+                것인지 나빠진 것인지 판단할 수 없다.
+        """
         d = ""
         if base is not None:
             d = f" (Δrecall={m['recall']-base['recall']:+.4f}·Δp@3={m['p3']-base['p3']:+.4f})"

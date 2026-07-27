@@ -73,7 +73,18 @@ _SUMMARY_TOPIC_INSTRUCTION = (
 
 
 def _build_chunk_summary_prompt(chunk_text: str, *, summary_max_chars: int) -> str:
-    """청크 1개 요약(map) 프롬프트(순수 — LLM·settings 미접촉). 토픽화 지시를 단위로 가드 가능하게 노출."""
+    """청크 하나를 요약하는 프롬프트를 만든다(순수 함수).
+
+    프롬프트를 함수 안에 묻어 두지 않고 빼 둔 이유: 지시문이 바뀌면 요약 결과가 통째로
+    달라지므로 문구 자체를 테스트로 못박아 둘 수 있어야 한다.
+
+    Args:
+        chunk_text: 요약할 청크 본문.
+        summary_max_chars: 요약 길이 상한(글자).
+
+    Returns:
+        LLM 에 그대로 넣을 프롬프트.
+    """
     return (
         "다음 텍스트를 간단히 요약해서 반드시 JSON만 출력해.\n"
         "형식:\n"
@@ -86,7 +97,16 @@ def _build_chunk_summary_prompt(chunk_text: str, *, summary_max_chars: int) -> s
 
 
 def _build_reduce_prompt(merged: str, *, summary_max_chars: int, top_k_keywords: int) -> str:
-    """청크 요약 목록 종합(reduce) 프롬프트(순수). 토픽화 지시를 단위로 가드 가능하게 노출."""
+    """청크별 요약을 하나로 종합하는 프롬프트를 만든다(순수 함수).
+
+    Args:
+        merged: 청크 요약들을 이어 붙인 문자열.
+        summary_max_chars: 최종 요약 길이 상한.
+        top_k_keywords: 키워드 개수 상한.
+
+    Returns:
+        LLM 에 그대로 넣을 프롬프트.
+    """
     return (
         "아래는 긴 문서의 청크별 요약 목록이다. 이를 종합해 반드시 JSON만 출력해.\n"
         "형식:\n"
@@ -100,11 +120,19 @@ def _build_reduce_prompt(merged: str, *, summary_max_chars: int, top_k_keywords:
 
 
 def _build_audio_prompt(text: str, *, summary_max_chars: int, top_k_keywords: int) -> str:
-    """STT 전사 전문 요약·키워드 프롬프트(순수). 토픽화 지시를 단위로 가드 가능하게 노출.
+    """음성 전사 전문을 요약하는 프롬프트를 만든다(순수 함수).
 
-    069 B6(P2-6): 첫 문장을 reduce 프롬프트("청크별 요약 목록") 복붙에서 STT 전용 문구로 교체한다.
-    오디오 입력은 청크 요약 목록이 아니라 전사 전문(원문)이라 지시가 어긋나면 summary 품질이 낮아지고
-    그 summary 가 임베딩·BM25 의 단일 원천이라 검색 품질까지 전파된다. JSON 키·파싱은 불변.
+    ⚠️ 문서 종합 프롬프트를 그대로 쓰면 안 된다 — 그쪽은 "청크별 요약 목록"을 준다고 말하지만
+    오디오는 **전사 원문**을 준다. 지시가 어긋나면 요약 품질이 떨어지고, 그 요약이 임베딩과
+    키워드 검색의 유일한 원천이라 검색 품질까지 함께 나빠진다.
+
+    Args:
+        text: 전사 전문.
+        summary_max_chars: 요약 길이 상한.
+        top_k_keywords: 키워드 개수 상한.
+
+    Returns:
+        LLM 에 그대로 넣을 프롬프트.
     """
     return (
         "아래는 오디오 음성 전사(STT) 전문 요약 작업이다. 다음 전사 전문을 종합해 반드시 JSON만 출력해.\n"
@@ -123,7 +151,16 @@ def _summarize_chunk_only(
     *,
     summary_max_chars: int,
 ) -> str:
-    """청크 하나를 요약해 문자열로 반환한다. 공통 seam(complete_json) 사용."""
+    """청크 하나를 요약해 문자열로 돌려준다(LLM 단일 통로 경유).
+
+    Args:
+        chunk_text: 요약할 청크.
+        summary_max_chars: 요약 길이 상한. **응답도 이 길이로 잘라 낸다** — 모델이 지시를
+            넘겨 답할 수 있어 프롬프트만으로는 보장되지 않는다.
+
+    Returns:
+        요약 문자열(빈 응답이면 빈 문자열).
+    """
     prompt = _build_chunk_summary_prompt(chunk_text, summary_max_chars=summary_max_chars)
     data = complete_json(prompt)
     return str(data.get("summary", "")).strip()[:summary_max_chars]
@@ -140,8 +177,13 @@ def summarize_and_extract_keywords(
     문서가 청크 하나에 수렴하더라도 map→reduce 경로를 동일하게 밟으므로
     긴 문서와 짧은 문서 모두 동일한 코드 경로를 따른다.
 
-    반환값은 ``SummaryKeywords`` TypedDict 이지만 ``stt`` 필드를 채우지 않는다.
-    오디오 경로는 ``summarize_and_extract_keywords_from_audio`` 를 사용할 것.
+    Args:
+        file_path: 요약할 문서 경로.
+        file_kind: 파일 종류. 청크로 쪼개는 방식이 여기서 갈린다.
+
+    Returns:
+        요약·키워드. ⚠️ **전사 필드는 채우지 않는다**(선언에는 있지만 문서 경로에는 없는 값이라,
+        소비자는 ``.get()`` 으로 조회해야 한다). 오디오는 전용 함수를 쓸 것.
     """
     path = Path(file_path)
     if not path.is_file():

@@ -57,12 +57,17 @@ def _build_image_caption_prompt(
 ) -> str:
     """이미지 캡션·키워드·객체 추출용 비전 프롬프트를 만든다(순수 — LLM·settings 미접촉).
 
-    함수 내 f-string 에 숨어 있던 프롬프트를 순수 빌더로 노출해 토픽화 지시(FR-001)를
-    단위로 가드할 수 있게 한다(동작 불변 — 이 빌더 출력이 그대로 비전 LLM 입력).
+    프롬프트를 함수 안 f-string 에 묻어 두지 않고 **따로 빼 둔 이유**: 지시문이 바뀌면 요약
+    결과가 통째로 달라지므로, 문구 자체를 단위 테스트로 못박아 둘 수 있어야 한다.
 
-    049: ``v2=False``(기본) 면 현행 v1 프롬프트를 **바이트 동일**하게 반환한다(FR-102 회귀 안전판).
-    ``v2=True`` 면 통계 표현 금지 문장 직전에 검색지향 추가 지시(_V2_CAPTION_EXTRA_INSTRUCTION)를
-    끼워 넣는다 — v1 본문은 그대로 두고 덧붙이기만 한다.
+    Args:
+        summary_max_chars: 요약 길이 상한(글자).
+        top_k_keywords: 키워드 개수 상한.
+        v2: 검색 지향 추가 지시를 끼워 넣을지. **끄면 기존 문구가 글자 그대로** 나온다 —
+            문구를 바꿨을 때 되돌릴 수 있는 안전판이다.
+
+    Returns:
+        비전 모델에 그대로 넣을 프롬프트.
     """
     v2_extra = _V2_CAPTION_EXTRA_INSTRUCTION if v2 else ""
     return (
@@ -88,8 +93,16 @@ def _encode_image_as_jpeg_data_url(
 ) -> str:
     """비전 API 호환을 위해 RGB JPEG로 인코딩한 data URL을 반환한다.
 
-    RGBA/팔레트 모드를 ``convert("RGB")`` 로 강제 변환해 JPEG 포맷 제약을 우회한다.
-    ``thumbnail`` 은 비율을 유지하면서 max_side 이하로 축소한다(이미 작으면 무동작).
+    ⚠️ **RGB 로 강제 변환한다** — 투명도가 있는 이미지는 JPEG 로 바로 저장할 수 없다.
+
+    Args:
+        image_path: 원본 이미지 경로.
+        max_side: 긴 변의 최대 픽셀. **비율은 유지**하며 이미 작으면 아무 일도 하지 않는다.
+            줄이는 이유는 고해상도 원본을 그대로 보내면 요청이 지나치게 커지기 때문이다.
+        jpeg_quality: JPEG 품질.
+
+    Returns:
+        ``data:image/jpeg;base64,...`` 문자열.
     """
     with Image.open(image_path) as img:
         rgb = img.convert("RGB")
@@ -106,7 +119,18 @@ def _encode_jpeg_bytes_as_data_url_resized(
     max_side: int = 1024,
     jpeg_quality: int = 85,
 ) -> str:
-    """OpenCV 등에서 온 고해상도 JPEG도 비전 API용으로 max_side 기준으로 축소한다."""
+    """이미 JPEG 바이트로 들고 있는 이미지를 축소해 data URL 로 만든다.
+
+    영상 키프레임처럼 **파일로 떨어뜨리지 않은** 이미지를 위한 경로다.
+
+    Args:
+        jpeg_bytes: 원본 JPEG 바이트.
+        max_side: 긴 변의 최대 픽셀(비율 유지·이미 작으면 무동작).
+        jpeg_quality: 재인코딩 품질.
+
+    Returns:
+        ``data:image/jpeg;base64,...`` 문자열.
+    """
     with Image.open(BytesIO(jpeg_bytes)) as img:
         rgb = img.convert("RGB")
         rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
@@ -122,10 +146,18 @@ def summarize_image_caption_keywords_objects(
     max_side: int = 1024,
     jpeg_quality: int = 85,
 ) -> ImageSummaryResult:
-    """
-    이미지 한 장에 대해 캡션, 키워드, 객체 목록을 LLM으로 추출한다.
+    """이미지 한 장에서 캡션·키워드·객체 목록을 뽑는다(LLM 호출).
 
-    설정은 ``get_current_settings()``(``init_settings`` 이후)를 사용한다.
+    Args:
+        file_path: 이미지 경로.
+        max_side: 보낼 이미지의 긴 변 최대 픽셀(요청 크기 억제).
+        jpeg_quality: 재인코딩 품질.
+
+    Returns:
+        요약 결과.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
     """
     path = Path(file_path)
     if not path.is_file():
@@ -141,7 +173,16 @@ def summarize_image_caption_keywords_objects_from_jpeg_bytes(
     max_side: int = 1024,
     jpeg_quality: int = 85,
 ) -> ImageSummaryResult:
-    """메모리의 JPEG bytes를 바로 받아 요약/키워드/객체를 추출한다. 파일 경로 API와 동일하게 리사이즈한다."""
+    """메모리의 JPEG 바이트에서 바로 요약·키워드·객체를 뽑는다(파일 경로 판과 동일 처리).
+
+    Args:
+        jpeg_bytes: 원본 JPEG 바이트.
+        max_side: 보낼 이미지의 긴 변 최대 픽셀.
+        jpeg_quality: 재인코딩 품질.
+
+    Returns:
+        요약 결과.
+    """
     image_url = _encode_jpeg_bytes_as_data_url_resized(
         jpeg_bytes, max_side=max_side, jpeg_quality=jpeg_quality
     )

@@ -172,9 +172,16 @@ def _fetch_assets(conn: Any) -> list[dict[str, Any]]:
 def build_drafts(conn: Any, *, min_group: int = 2) -> list[dict[str, Any]]:
     """주제별 그룹으로 골든셋 초안 ``[{"query", "relevant_asset_ids"}]`` 을 만든다(결정적).
 
-    파일명에서 (그룹키, 표시주제)를 추출해 그룹키로 자산을 묶고(출처 교차 병합), 자산 수
-    ``min_group`` 미만 그룹은 제외한다. 질의 = 그룹 내 가장 서술적인(긴) 표시주제(밑줄→공백),
-    정답 = 그룹 자산 전부(중복 제거·asset_id 정렬). 그룹키 정렬로 결정적.
+    파일명에서 주제를 뽑아 같은 주제끼리 묶는다(출처가 달라도 주제가 같으면 한 그룹).
+    질의는 그룹 안에서 가장 서술적인(긴) 주제 문구를 쓰고, 정답은 그룹의 자산 전부다.
+
+    Args:
+        conn: DB 연결.
+        min_group: 그룹 최소 자산 수. **이 미만은 버린다** — 자산이 하나뿐인 주제는 재현율을
+            0 또는 1로만 만들어 지표를 요동시킨다.
+
+    Returns:
+        초안 목록. 그룹 키 순서로 정렬돼 같은 코퍼스면 같은 초안이 나온다.
     """
     rows = _fetch_assets(conn)
     groups: dict[str, set[str]] = {}

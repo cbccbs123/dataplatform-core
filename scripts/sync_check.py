@@ -125,6 +125,9 @@ def check_changed(base: str, head: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     """마이그레이션과 DB 변경이력이 어긋나지 않는지 확인한다(CI 게이트).
 
+    Args:
+        argv: 명령행 인자. ``None`` 이면 실제 인자를 읽는다(테스트 주입용).
+
     Returns:
         0=이상 없음, 0이 아니면 차단.
     """

@@ -89,9 +89,15 @@ def _choose_encoding(path: Path, preferred_encoding: str) -> str:
 def _chunk_from_segments(segments: Iterable[str], chunk_size: int) -> Iterator[str]:
     """세그먼트들을 ``chunk_size`` 문자 한도 안에 그리디로 묶어 청크를 흘린다.
 
-    빈/공백 세그먼트는 버리고, 한 세그먼트가 한도를 넘으면 버퍼를 먼저 비운 뒤 그 세그먼트만
-    ``chunk_size`` 조각으로 하드 분할한다. 그 외에는 ``\\n`` 으로 이어 붙여 한도까지 채우다가
-    넘치면 현재 버퍼를 내보내고 새 버퍼를 시작한다(가능한 한 세그먼트=문단/행/페이지 경계 보존).
+    **가능한 한 문단·행·페이지 경계를 지킨다** — 아무 데서나 자르면 문맥이 끊겨 임베딩 품질이
+    떨어진다. 다만 한 세그먼트 자체가 한도를 넘으면 어쩔 수 없이 그것만 잘라 낸다.
+
+    Args:
+        segments: 문단·행·페이지 단위 조각들. 빈 조각은 버린다.
+        chunk_size: 청크 하나의 글자 한도.
+
+    Yields:
+        묶인 청크.
     """
     buf = ""
     for seg in segments:
@@ -122,7 +128,15 @@ def _chunk_from_segments(segments: Iterable[str], chunk_size: int) -> Iterator[s
 
 
 def _limit_segments(segments: Iterable[str], max_chars: int) -> Iterator[str]:
-    """세그먼트 스트림을 최대 max_chars 문자까지만 통과시킨다."""
+    """세그먼트를 정해진 글자 수까지만 통과시킨다(아주 긴 문서의 상한).
+
+    Args:
+        segments: 원본 세그먼트 스트림.
+        max_chars: 누적 글자 상한. **0 이하면 아무것도 통과시키지 않는다**.
+
+    Yields:
+        상한 안의 세그먼트. 마지막 세그먼트는 상한에 맞춰 **잘라서** 낸다(버리지 않는다).
+    """
     if max_chars <= 0:
         return
     remaining = max_chars
@@ -140,7 +154,15 @@ def _limit_segments(segments: Iterable[str], max_chars: int) -> Iterator[str]:
 
 
 def _apply_overlap(chunks: Iterable[str], overlap_size: int) -> Iterator[str]:
-    """이미 생성된 청크들에 문자 단위 오버랩을 부여한다."""
+    """인접 청크가 서로 겹치게 만든다 — 경계에서 끊긴 문맥을 메운다.
+
+    Args:
+        chunks: 이미 만들어진 청크 스트림.
+        overlap_size: 앞 청크에서 가져올 글자 수. **0 이하면 겹치지 않는다**(그대로 통과).
+
+    Yields:
+        앞부분이 겹쳐진 청크. **첫 청크는 그대로** 나온다(앞이 없다).
+    """
     prev: str | None = None
     for chunk in chunks:
         if prev is None:
@@ -166,9 +188,22 @@ def _iter_document_chunks(
 ) -> Iterator[str]:
     """``file_kind`` 에 맞는 형식별 파서로 원문을 세그먼트로 뽑아 청크 스트림으로 흘린다(공개 API의 실제 구현).
 
-    형식이 무엇이든 공통 파이프라인은 같다: 파서가 낸 세그먼트 → ``_limit_segments`` 로 누적
-    ``max_input_chars`` 까지만 통과 → ``_chunk_from_segments`` 로 묶기 → ``_apply_overlap``.
-    ``file_kind`` 와 실제 확장자가 어긋나면 ``ValueError`` 로 막는다(라우팅 일관성 가드).
+    형식이 무엇이든 공통 흐름은 같다: 파서가 낸 세그먼트 → 상한까지만 통과 → 묶기 → 겹치기.
+
+    Args:
+        path: 대상 파일.
+        file_kind: 파일 종류. ⚠️ **실제 확장자와 어긋나면 막는다** — 엉뚱한 파서를 태우면
+            깨진 텍스트가 조용히 임베딩된다.
+        encoding: 읽을 인코딩.
+        chunk_size: 청크 글자 한도.
+        overlap_size: 겹칠 글자 수. 청크 크기 이상이면 무한 반복이 되므로 막는다.
+        max_input_chars: 문서에서 읽을 누적 글자 상한.
+
+    Yields:
+        청크 문자열.
+
+    Raises:
+        ValueError: 겹침이 음수이거나 청크 크기 이상일 때, 종류와 확장자가 어긋날 때.
     """
     if overlap_size < 0:
         raise ValueError("overlap_size는 0 이상이어야 합니다.")
@@ -276,11 +311,22 @@ def iter_plain_text_chunks(
     overlap_size: int = 0,
     max_input_chars: int = _MAX_INPUT_CHARS,
 ) -> Iterator[str]:
-    """
-    파일 없이 문자열만 받아 ``_chunk_from_segments`` 규칙으로 나눈다.
+    """파일 없이 문자열만 받아 문서와 **같은 규칙**으로 청크를 낸다.
 
-    STT 전체 텍스트 등을 ``iter_document_chunks``와 같은 크기·오버랩 정책으로
-    잘라 임베딩할 때 사용한다.
+    전사 텍스트처럼 파일로 떨어지지 않은 입력을 위한 경로다. 규칙이 문서 쪽과 같아야
+    같은 내용이 어디서 들어왔는지에 따라 다르게 쪼개지지 않는다.
+
+    Args:
+        text: 쪼갤 원문. 비어 있거나 공백뿐이면 아무것도 내지 않는다.
+        chunk_size: 청크 글자 한도.
+        overlap_size: 겹칠 글자 수.
+        max_input_chars: 읽을 누적 글자 상한. **0 이하면 아무것도 내지 않는다**.
+
+    Yields:
+        청크 문자열.
+
+    Raises:
+        ValueError: 겹침이 음수이거나 청크 크기 이상일 때(후자는 무한 반복이 된다).
     """
     if overlap_size < 0:
         raise ValueError("overlap_size는 0 이상이어야 합니다.")

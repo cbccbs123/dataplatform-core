@@ -38,7 +38,15 @@ def fetch_allowed_ext_keys(conn: Connection[Any], domain: str) -> set[str]:
 
 
 def _schema_is_validatable(schema: dict[str, Any] | None) -> bool:
-    """``type`` 이 있는 JSON Schema 만 값 검증 대상(039 — 빈 스키마는 skip)."""
+    """값 검증을 돌릴 만한 스키마인지 본다.
+
+    Args:
+        schema: 등록된 스키마(없을 수도 있다).
+
+    Returns:
+        타입이 정의돼 있으면 참. **빈 스키마는 건너뛴다** — 검증할 규칙이 없는데 돌리면
+        무엇이든 통과해, "검증했다"는 착각만 남는다.
+    """
     return bool(schema and isinstance(schema, dict) and schema.get("type"))
 
 
@@ -48,8 +56,14 @@ def check_ext_meta_values(
 ) -> list[tuple[str, str]]:
     """ext_meta **값** 검증 (039).
 
-    ``ext_meta`` 에 존재하고 ``schemas`` 에 validatable 스키마가 있는 키만 Draft202012 검증.
-    결정성: 위반 목록은 (key, message) 로 정렬해 반환.
+    Args:
+        schemas: 키별 등록 스키마.
+        ext_meta: 검사할 확장 메타. ``None``·빈 dict 면 검사할 것이 없다.
+
+    Returns:
+        ``[(키, 사유)]`` 위반 목록. **정렬해 돌려준다** — 순서가 흔들리면 같은 입력에
+        다른 오류 메시지가 나와 테스트와 로그가 불안정해진다. 스키마가 없거나 검증할 규칙이
+        없는 키는 조용히 넘어간다.
     """
     if not ext_meta:
         return []
@@ -101,8 +115,21 @@ def fetch_access_tiers(conn: Connection[Any], domain: str) -> dict[str, str]:
 def validate_ext_meta(conn: Connection[Any], domain: str, ext_meta: dict[str, Any] | None) -> None:
     """write path 일괄 검증 (039 키·값). 위반 시 ``ExtMetaValidationError``.
 
-    순서: 허용 키 집합 → 미등록 키 거부 → JSON Schema 값 검증.
-    tier(access_tier)는 **검사하지 않음** — 노출 등급은 read path(042)에서만 집행.
+    순서: 허용 키 조회 → 등록되지 않은 키 거부 → 값 검증.
+
+    ⚠️ **열람 등급은 여기서 검사하지 않는다** — 등급은 읽기 경로에서 집행한다. 쓰기에서
+    막으면 등급 정책이 바뀔 때 이미 저장된 데이터가 규칙에 안 맞는 상태로 남는다.
+
+    Args:
+        conn: DB 연결.
+        domain: 도메인. 허용 키 집합이 도메인마다 다르다.
+        ext_meta: 검사할 확장 메타.
+
+    Raises:
+        ExtMetaValidationError: 등록되지 않은 키가 있거나 값이 스키마를 어겼을 때.
+
+    ⚠️ 그 도메인에 등록된 키가 **하나도 없으면 검증을 건너뛴다** — 시드가 안 된 도메인에서
+    게이트가 통째로 무력해지므로, 새 도메인을 열 때 키 등록을 빠뜨리지 말 것.
     """
     allowed = fetch_allowed_ext_keys(conn, domain)
     if not allowed:

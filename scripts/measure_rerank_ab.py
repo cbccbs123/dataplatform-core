@@ -25,7 +25,14 @@ _MODALITIES = ["text", "audio", "image", "video"]
 
 
 def _union_rank(buckets) -> list[str]:
-    """모달리티별 버킷을 하나의 순위 목록으로 합친다(점수 기준·중복 제거)."""
+    """모달리티별 버킷을 자산 단위 하나의 순위로 합친다.
+
+    Args:
+        buckets: 모달리티별 결과 행.
+
+    Returns:
+        자산 id 순위 목록(점수 내림차순·동점은 id 순으로 고정).
+    """
     rows = sorted(
         (r for b in buckets.values() for r in b),
         key=lambda r: (-float(r.get("similarity") or 0.0), str(r.get("id"))),
@@ -39,10 +46,18 @@ def _union_rank(buckets) -> list[str]:
 
 
 def _rrtext_map(client, index: str, ids: list[str]) -> dict[str, str]:
-    """후보 id → 프로덕션 채점 텍스트 _rrtext("요약: …\n키워드: …") 매핑(OS mget·fuse_hybrid 동일 규칙).
+    """후보 id → 리랭커 채점 입력 텍스트 매핑을 만든다.
 
-    search_assets_os 가 응답에서 _rrtext 를 떼므로(clean), 스윕의 채점 입력을 프로덕션과 동치로 맞추려
-    OS 에서 summary·keywords 를 한 번에 mget 한다(요약 단독 채점의 τ 왜곡 제거 — 028 입력변형 결론).
+    ⚠️ **운영과 같은 입력으로 채점해야 한다.** 검색 응답은 이 내부 텍스트를 떼어 내고 돌려주므로,
+    여기서 색인에 직접 물어 같은 형태로 다시 만든다. 요약만으로 채점하면 임계 선택이 왜곡된다.
+
+    Args:
+        client: 검색 엔진 클라이언트.
+        index: 조회할 인덱스.
+        ids: 후보 자산 id. **비어 있으면 호출하지 않는다**.
+
+    Returns:
+        ``{asset_id: 채점 입력 텍스트}``.
     """
     if not ids:
         return {}
@@ -124,7 +139,14 @@ def main() -> int:
                         nonrel_scores.append(sc)
             print(f"[sweep] {q['id']} 완료", file=sys.stderr)
         def stats(xs):
-            """숫자 목록의 요약값(평균·중앙·p95 등) — 지연 비교용."""
+            """숫자 목록의 분포 요약 문자열을 만든다 — 임계를 고를 근거다.
+
+            Args:
+                xs: 점수 목록. 비어 있으면 "(없음)" 을 돌려준다.
+
+            Returns:
+                최소·사분위·최대를 담은 한 줄.
+            """
             if not xs:
                 return "(없음)"
             xs = sorted(xs)

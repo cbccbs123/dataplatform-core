@@ -51,8 +51,15 @@ def complete_text(
     ``response_format=json_object`` 를 강제해 LLM 이 마크다운 코드블록 없이
     순수 JSON 만 출력하도록 유도한다. 단, 내용 보장은 아니므로 파싱은 호출부 책임.
 
-    ``temperature=0.0`` 기본값은 결정 재현성 100% 보장(과제 요건)을 위한 것이다.
-    변경이 필요하면 명시적으로 전달해야 하며, 의료 경로에서는 절대 0 이상으로 올리지 말 것.
+    Args:
+        prompt: 보낼 프롬프트.
+        model: 모델 이름. ``None`` 이면 설정의 기본 모델을 쓴다.
+        temperature: ⚠️ **0 을 기본으로 둔다** — 같은 입력이 같은 답을 내야 한다(결정 재현성은
+            과제 요건이다). 의료 경로에서는 절대 올리지 말 것.
+        client: LLM 클라이언트. **주입할 수 있게 열어 둔 자리**라 네트워크 없이 검증된다.
+
+    Returns:
+        응답 원문. 빈 응답이면 빈 문자열(예외를 올리지 않는다).
     """
     client = client or get_llm_client()
     resp = client.chat.completions.create(
@@ -86,7 +93,18 @@ def complete_json(
     temperature: float = 0.0,
     client: OpenAI | None = None,  # 테스트용 모의 클라이언트 주입 seam(미주입=운영 클라이언트)
 ) -> dict[str, Any]:
-    """``complete_text`` + JSON 파싱. 빈응답/파싱실패/비객체 → ``{}``."""
+    """``complete_text`` 결과를 dict 로 파싱한다.
+
+    Args:
+        prompt: 보낼 프롬프트.
+        model: 모델 이름. ``None`` 이면 설정의 기본 모델.
+        temperature: 결정 재현성을 위해 0 이 기본이다.
+        client: LLM 클라이언트(주입 가능).
+
+    Returns:
+        파싱된 dict. **빈 응답·파싱 실패·객체가 아닌 응답은 모두 빈 dict** — 호출부가
+        ``.get()`` 으로 안전하게 접근할 수 있게 모양을 통일한다.
+    """
     return _parse_json_or_empty(
         complete_text(prompt, model=model, temperature=temperature, client=client)
     )
@@ -105,8 +123,18 @@ def complete_vision_json(
     ``image_data_url`` 은 ``data:image/jpeg;base64,...`` 형태여야 한다.
     이미지 summarizer 가 PIL 로 리사이즈 + JPEG 재인코딩 후 전달하므로
     여기서는 포맷 검증 없이 그대로 사용한다.
-    비전 모델은 ``complete_text`` / ``complete_json`` 과 같은 온프레미스 엔드포인트를 공유한다
-    (다른 모델명이 필요하면 ``model=`` 으로 명시).
+    비전 모델도 같은 온프레미스 엔드포인트를 쓴다(헌법 2조 — 외부로 나가지 않는다).
+
+    Args:
+        text: 이미지와 함께 보낼 지시문.
+        image_data_url: ``data:image/jpeg;base64,...`` 형태여야 한다. **형식을 검증하지 않는다** —
+            호출부(요약기)가 리사이즈·재인코딩을 끝낸 값을 넘기는 계약이다.
+        model: 모델 이름. 비전 전용 모델이 필요하면 여기로 명시한다.
+        temperature: 결정 재현성을 위해 0 이 기본이다.
+        client: LLM 클라이언트(주입 가능).
+
+    Returns:
+        파싱된 dict. 빈 응답·파싱 실패는 빈 dict.
     """
     client = client or get_llm_client()
     resp = client.chat.completions.create(

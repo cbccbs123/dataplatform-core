@@ -171,6 +171,9 @@ def _aggregate(ref: str | None) -> tuple[int, int, int]:
 def main(argv: list[str] | None = None) -> int:
     """기준 시점과 현재를 비교해 **테스트가 약해졌으면 실패**한다.
 
+    Args:
+        argv: 명령행 인자. ``None`` 이면 실제 인자를 읽는다(테스트 주입용).
+
     Returns:
         0=이상 없음, 0이 아니면 차단(CI 가 이 값으로 판단한다).
     """

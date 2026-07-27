@@ -46,12 +46,18 @@ CANONICAL_MODALITIES = ("text", "image", "video", "audio", "unknown")
 
 
 def modality_of(file_kind: str) -> str:
-    """file_kind(``detect_file_kind`` 판정값) → canonical modality. 결정적·순수(헌법 3·6조·053).
+    """세부 파일 종류를 저장용 **큰 갈래**로 좁힌다(순수 함수).
 
-    저장(asset.modality)만 canonical 5종으로 좁힌다 — 추출은 file_kind 를 그대로 쓰므로
-    (dispatcher·data_loader) 이 매핑은 오직 ``create_asset`` 저장 경계에서만 적용한다(A안).
-    세분류(txt vs json vs pdf…)는 fs_path 확장자로 재도출 가능(file_ext)이라 저장값 정규화가
-    추출 정확성을 해치지 않는다.
+    ⚠️ **저장 경계에서만 쓴다.** 추출·청크 분할은 세부 종류를 그대로 봐야 알맞은 파서를 고를 수
+    있다. 저장값만 좁히는 이유는 집계 축이 무한정 늘어나는 것을 막기 위해서고, 세부 종류가
+    필요하면 경로의 확장자에서 다시 구할 수 있다.
+
+    Args:
+        file_kind: 파일 종류 판정값.
+
+    Returns:
+        큰 갈래 이름. 지원 밖·판별 불가는 **모달리티가 아닌 격리 표식**을 돌려준다 —
+        "모른다"를 텍스트 같은 실제 갈래에 섞어 넣지 않기 위해서다.
     """
     if file_kind in ALLOWED_TEXT_META_FILE_KINDS:      # txt,pdf,json,word,excel,powerpoint
         return "text"

@@ -55,10 +55,14 @@ def _bootstrap(env: str) -> Any:
 def _registered_source_ids(conn: Connection[Any], limit: int, *, spread: bool = True) -> list[str]:
     """registered 자산 id 를 결정적으로 ``limit`` 개 표본.
 
-    - ``spread=True``(기본): 전체 코퍼스를 asset_id ASC 로 정렬한 뒤 **균등 간격**으로 뽑아
-      한 적재 배치(동일 주제 군집)에 표본이 몰리지 않게 한다 → topic 다양성 확보.
-    - ``spread=False``: 앞에서부터 ``limit`` 개(빠른 스모크).
-    두 경로 모두 asset_id 순서 기반이라 **재현 가능**하다.
+    Args:
+        conn: DB 연결.
+        limit: 뽑을 개수. 0 이하면 빈 목록.
+        spread: ⚠️ **켜면 균등 간격으로 뽑는다.** 앞에서부터 자르면 같은 배치에 함께 들어온
+            자산들만 잡혀 주제가 한쪽으로 쏠린다 — 표본이 코퍼스를 대표하지 못한다.
+
+    Returns:
+        자산 id 목록. 두 방식 모두 id 순서에 기반해 **같은 코퍼스면 같은 표본**이 나온다.
     """
     from psycopg.rows import dict_row
 
@@ -78,7 +82,17 @@ def _read_prompts(
 ) -> list[dict[str, Any]]:
     """표본 자산별 (asset_id, prompt, candidate 수) 를 **읽기 전용**으로 조립(LLM 미호출).
 
-    프로덕션 ``propose_relations_for_asset`` 와 **동일 함수**로 후보·프롬프트를 만든다.
+    ⚠️ **운영과 같은 함수로** 후보와 프롬프트를 만든다 — 여기서 따로 만들면 관측한 품질이
+    실제 운영 품질과 다른 것을 보게 된다.
+
+    Args:
+        conn: DB 연결(읽기만 한다).
+        cfg: 설정.
+        limit: 표본 개수.
+        spread: 균등 간격으로 뽑을지.
+
+    Returns:
+        자산별 프롬프트와 후보 수(LLM 은 아직 부르지 않는다).
     """
     from src.relations.asset_candidates import find_embedding_candidates
     from src.relations.asset_entry import _fetch_source_row, union_candidates
@@ -126,7 +140,16 @@ def _closed_topic_set() -> set[str]:
 
 
 def run_sample(*, env: str, limit: int, spread: bool = True) -> dict[str, Any]:
-    """dry 샘플 실행 → 리포트 dict. **persist 없음**(읽기 전용 DB + LLM 제안 관측만)."""
+    """표본 실행 → 리포트 — **아무것도 저장하지 않는다**(읽기 전용 + 제안 관측만).
+
+    Args:
+        env: 설정 프로파일 이름.
+        limit: 표본 개수.
+        spread: 균등 간격으로 뽑을지(쏠림 방지).
+
+    Returns:
+        리포트 dict(출력은 별도 함수가 한다).
+    """
     from src.database.postgres_util import PostgresUtil
     from src.relations.llm_propose import (
         parse_and_normalize_edges,
@@ -200,7 +223,11 @@ def run_sample(*, env: str, limit: int, spread: bool = True) -> dict[str, Any]:
 
 
 def _print_report(rep: dict[str, Any]) -> None:
-    """표본 결과를 사람이 읽을 형태로 출력한다(후보·주제·프롬프트 발췌)."""
+    """표본 결과를 사람이 읽을 형태로 출력한다(후보·주제·프롬프트 발췌).
+
+    Args:
+        rep: 표본 리포트 dict.
+    """
     print("=" * 72)
     print(f"[058 T1102] 관계 제안 topic 품질 dry 샘플 (env={rep['env']}·비저장)")
     print("=" * 72)

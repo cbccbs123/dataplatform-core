@@ -83,6 +83,10 @@ def _update_index(snapshot: Path, feature: str, note: str, source: Path) -> None
 def main(argv: list[str] | None = None) -> int:
     """설계 문서의 현재 상태를 스냅샷으로 떠 이력 디렉터리에 남긴다.
 
+    Args:
+        argv: 명령행 인자. ``None`` 이면 실제 인자를 읽는다 — **테스트가 인자를 주입할 수
+            있게** 열어 둔 자리다.
+
     Returns:
         0=성공.
     """

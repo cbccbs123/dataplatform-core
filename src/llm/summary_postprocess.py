@@ -23,7 +23,15 @@ _GENERIC_KEYWORDS: frozenset[str] = frozenset(
 
 
 def normalize_keywords(keywords: list[object]) -> list[str]:
-    """strip·casefold dedup·generic 제거·first-seen 순서 보존(결정적)."""
+    """키워드를 정리한다 — 공백 제거·대소문자 무시 중복 제거·너무 흔한 말 제거.
+
+    Args:
+        keywords: 원본 키워드 목록(문자열이 아닌 원소가 섞여도 된다).
+
+    Returns:
+        정리된 목록. **처음 나온 순서를 보존한다** — 정렬하면 모델이 중요한 것을 앞에 둔
+        의도가 사라진다. "영상"·"장면" 같은 매체 일반어는 검색에 쓸모가 없어 걸러 낸다.
+    """
     seen: set[str] = set()
     out: list[str] = []
     for kw in keywords or []:
@@ -37,7 +45,19 @@ def normalize_keywords(keywords: list[object]) -> list[str]:
 
 
 def promote_objects_to_keywords(keywords: list[object], objects: list[object], *, limit: int) -> list[str]:
-    """normalize_keywords(keywords) 뒤에 objects 를 키워드 후보로 합쳐(중복·generic 제외) limit 까지."""
+    """키워드가 모자랄 때 객체 목록을 키워드로 끌어올려 채운다.
+
+    이미지·영상은 키워드가 적게 나올 때가 있는데, 화면에 보이는 객체는 검색어로 쓸모가 있다.
+
+    Args:
+        keywords: 원본 키워드(먼저 정리된다).
+        objects: 승격 후보 객체 목록.
+        limit: 최종 개수 상한. **키워드가 이미 상한을 채웠으면 객체는 하나도 안 들어간다** —
+            원래 키워드가 우선이다.
+
+    Returns:
+        합쳐진 목록(중복·일반어 제외·상한 적용).
+    """
     out = normalize_keywords(keywords)
     seen = {k.casefold() for k in out}
     for obj in objects or []:

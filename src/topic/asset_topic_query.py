@@ -79,15 +79,17 @@ def find_same_topic_groups(
       - 대상 subtopic 이 None 이면(가진 신호가 topic 뿐) **topic 단독 매칭** — 그 topic 의 자산을
         각자의 subtopic 버킷으로 모은다.
 
+    Args:
+        conn: DB 연결.
+        asset_id: 기준 자산. **주제가 없으면 후보 조회조차 하지 않고** 빈 목록을 돌려준다.
+        max_topics: 담을 주제 수 상한.
+        max_subtopics_per_topic: 주제당 하위주제 수 상한.
+        max_assets_per_subtopic: 하위주제당 자산 수 상한. **상한은 표시용 절단이고**,
+            함께 담는 개수는 절단 전 실제 수다(화면이 "더 있음"을 알 수 있게).
+
     Returns:
-        ``[{topic_ko, asset_count, subtopics:[{subtopic_ko, asset_count,
-        assets:[{asset_id(str), file_name, modality, already_linked}]}]}]`` (구 형상 동일).
-        - 상위 ``asset_count`` = 그 주제를 공유하는 distinct 자산 수(대상 제외).
-        - 하위 ``asset_count`` = 그 하위주제의 distinct 자산 수(``assets`` 절단 전 실수).
-        - 정렬(결정적): 주제 ``asset_count desc → topic_ko asc``(max_topics 절단) · 하위주제는
-          이름있는 것 먼저(``asset_count desc → subtopic_ko asc``)·None(기타)은 항상 마지막
-          (max_subtopics_per_topic 절단) · 자산은 ``asset_id asc``(max_assets_per_subtopic 절단).
-    대상 자산 자기주제 행이 없으면(미부여) 빈 리스트(후보 조회도 안 함).
+        주제 → 하위주제 → 자산 3단 목록. 정렬은 전부 고정되며(개수 내림차순, 동수는 이름순),
+        이름 없는 하위주제는 **항상 마지막**에 온다(화면에서 '기타'로 표시된다).
     """
     # 1) 대상 자산 자기주제 정본(asset_id PK → 0/1행). 없으면 미부여 → 빈 결과.
     with conn.cursor(row_factory=dict_row) as cur:
@@ -237,9 +239,17 @@ def list_topics(conn) -> list[dict]:
 
 
 def _asset_list_item(r: dict) -> dict:
-    """조회 행 → 파일 목록 항목(공용·assets_in_topic/assets_unclassified 공유). 파일탐색기 목록에서
-    파일명·모달리티와 함께 **키워드·라벨을 미리보기**로 표시하도록 상위 일부만 담는다(응답 비대화 방지).
-    labels 는 ``[{label,score}]`` 에서 label 만 추출(문자열 원소도 방어적 허용). keywords 상위 8·labels 상위 5.
+    """조회 행을 파일 목록 항목으로 바꾼다(주제별·미분류 목록이 공유).
+
+    키워드·라벨을 **상위 일부만** 담는다 — 목록에는 미리보기로 충분하고, 전부 담으면 자산 수만큼
+    응답이 커진다.
+
+    Args:
+        r: 조회 행. 라벨은 ``{label, score}`` 형태를 가정하되 **문자열 원소도 받는다**
+            (형태가 섞여 들어와도 죽지 않게).
+
+    Returns:
+        목록 항목 dict.
     """
     return {
         "asset_id": str(r["asset_id"]),

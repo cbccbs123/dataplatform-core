@@ -10,14 +10,18 @@ def list_file_paths_under_directory(
     *,
     recursive: bool = True,
 ) -> list[str]:
-    """
-    ``directory`` 아래 일반 파일만 모아 경로 문자열 리스트로 반환한다(경로순 정렬).
+    """디렉터리 아래의 **일반 파일만** 모아 경로 목록으로 돌려준다(경로순 정렬).
 
-    - ``recursive=True``: 하위 디렉터리까지 탐색.
-    - 숨김 항목 제외: 루트 기준 상대 경로에 ``.`` 로 시작하는 이름이 있으면 건너뛴다.
+    Args:
+        directory: 훑을 디렉터리.
+        recursive: 하위 디렉터리까지 볼지.
 
-    (069 US-F: ``include_hidden``·``dedup_by_prefix``·``sample_seed`` 옵션은 운영 소비 0 으로 제거.
-    이제 항상 숨김 제외·중복샘플링 없음 = 종전 기본 동작.)
+    Returns:
+        경로 문자열 목록(정렬 고정 — 같은 디렉터리면 항상 같은 순서). **숨김 항목은 항상
+        제외한다** — 편집기 임시 파일·OS 메타 파일이 자산으로 잡히면 안 된다.
+
+    Raises:
+        NotADirectoryError: 경로가 디렉터리가 아니거나 없을 때.
     """
     root = Path(directory).expanduser().resolve()
     if not root.is_dir():

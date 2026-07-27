@@ -48,10 +48,19 @@ def embed_video_keyframes_clip(
     korean_labels_per_frame: list[list[str]] | None = None,
     text_template: str = "사진 속 {label}",
 ) -> VideoClipEmbeddingsResult:
-    """
-    각 키프레임 JPEG에 대해 CLIP 이미지 임베딩(1536)과,
-    ``korean_labels_per_frame``(보통 VLM objects)가 있으면 제로샷 라벨 점수를 붙인다.
-    이미지 인코딩은 프레임당 1회.
+    """키프레임마다 시각 벡터를 만들고, 라벨 후보가 있으면 라벨 점수도 붙인다.
+
+    프레임당 인코딩은 **한 번만** 한다(벡터와 점수가 같은 결과를 나눠 쓴다).
+
+    Args:
+        frame_items: 키프레임 목록(JPEG 바이트 포함). **비어 있으면 모델을 올리지 않는다**.
+        model_name: 쓸 모델.
+        korean_labels_per_frame: **프레임과 같은 순서**의 라벨 후보 목록. 프레임 수보다 짧으면
+            그 뒤 프레임은 점수 없이 벡터만 만든다(길이가 어긋나도 죽지 않는다).
+        text_template: 라벨을 끼워 넣을 문장 틀.
+
+    Returns:
+        프레임별 벡터·라벨 점수.
     """
     if not frame_items:
         return {"keyframes": []}

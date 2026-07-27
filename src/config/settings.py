@@ -563,7 +563,14 @@ def _opt_float(default: float) -> Callable[[str], float]:
 
 
 def _opt_bool(default: bool) -> Callable[[str], bool]:
-    """기본값을 묶어 "키 → 불리언" 읽기 함수를 만든다."""
+    """기본값을 묶어 "키 → 불리언" 읽기 함수를 만든다.
+
+    Args:
+        default: 환경변수가 없을 때 쓸 값.
+
+    Returns:
+        키를 받아 불리언을 돌려주는 함수(값을 바로 읽는 것이 아니라 **읽는 함수**를 만든다).
+    """
     return lambda key: _env_bool_default(key, default)
 
 
@@ -752,9 +759,20 @@ _TEXT_EMBED_CHANNELS = frozenset({"st", "st_bge", "st_api"})
 def model_for_channel(channel: str, settings: PipelineSettings | None = None) -> str:
     """텍스트 임베딩 채널 → 질의 임베딩 모델 매핑(017 A/B). 질의-문서 모델을 일치(FR-004)시키는 단일 출처.
 
-    ``'st'``=KoSimCSE(기존), ``'st_bge'``=BGE-M3. ``settings`` 미지정 시 활성 설정을 사용한다
-    (테스트는 ``settings`` 를 주입해 순수 단위로 검증). 미지원 채널은 잘못된 모델로 검색하지 않도록
-    즉시 ``ValueError`` 로 차단한다(시각 'clip' 채널은 본 텍스트 매핑 대상이 아님)."""
+    **적재와 질의가 같은 모델을 쓰게 하는 단일 출처**다 — 두 쪽이 각자 모델을 고르면 벡터가
+    다른 공간에 놓여 검색이 조용히 엉뚱한 결과를 낸다.
+
+    Args:
+        channel: 텍스트 임베딩 채널. 시각 채널은 이 매핑 대상이 아니다.
+        settings: 설정. ``None`` 이면 활성 설정을 쓴다(테스트는 주입해 순수 단위로 검증).
+
+    Returns:
+        그 채널이 쓸 모델 이름.
+
+    Raises:
+        ValueError: 모르는 채널일 때. **기본 모델로 접지 않는다** — 잘못된 모델로 검색하면
+            결과가 조용히 무의미해진다.
+    """
     cfg = settings if settings is not None else get_current_settings()
     mapping = {
         "st": cfg.embed.model,
@@ -779,17 +797,29 @@ _API_EMBED_CHANNELS = frozenset({"st_api"})
 def backend_for_channel(channel: str, settings: PipelineSettings | None = None) -> str:
     """텍스트 임베딩 채널 → 계산 백엔드 ``'local'`` | ``'api'`` (062).
 
-    ``'st_api'``=온프레미스 API 서빙(bge-m3·``/v1/embeddings``), 그 외(``'st'``·``'st_bge'``)=로컬
-    SentenceTransformer. 채널은 "무슨 모델(공간)", 백엔드는 "어떻게 계산" — 018 채널 위에 얹는 직교 축.
-    ``settings`` 인자는 시그니처 대칭용(현재 매핑은 채널만으로 결정·향후 확장 여지)."""
+    **채널과 백엔드는 다른 축**이다 — 채널은 "어느 모델(=어느 벡터 공간)", 백엔드는 "어디서
+    계산하나(내 프로세스냐 원격 서버냐)"를 뜻한다.
+
+    Args:
+        channel: 텍스트 임베딩 채널.
+        settings: ⚠️ **현재는 쓰이지 않는다** — 형제 함수들과 시그니처를 맞추고, 나중에 설정에
+            따라 갈릴 여지를 남겨 둔 인자다.
+
+    Returns:
+        ``'local'`` 또는 ``'api'``.
+    """
     return "api" if channel in _API_EMBED_CHANNELS else "local"
 
 
 def active_embed_channel(settings: PipelineSettings | None = None) -> str:
     """운영 텍스트 임베딩 활성 채널(018). 적재·검색·관계가 공유하는 단일 출처.
 
-    ``settings`` 미지정 시 활성 설정을 사용한다(테스트는 ``settings`` 주입으로 순수 단위 검증).
-    기본값은 ``'st'``(KoSimCSE) — 회귀 0."""
+    Args:
+        settings: 설정. ``None`` 이면 활성 설정을 쓴다(테스트는 주입해 순수 단위로 검증).
+
+    Returns:
+        활성 채널 이름. 적재·검색·관계가 **모두 이 값을 봐야** 같은 벡터 공간에서 만난다.
+    """
     cfg = settings if settings is not None else get_current_settings()
     return cfg.embed.active_channel
 
@@ -797,6 +827,13 @@ def active_embed_channel(settings: PipelineSettings | None = None) -> str:
 def active_embed_model(settings: PipelineSettings | None = None) -> str:
     """활성 채널의 임베딩 모델(018). ``active_embed_channel`` → ``model_for_channel`` 합성.
 
-    기본 active='st' → KoSimCSE(``text_embedding_model``), 'st_bge' → BGE-M3. 미지원 활성 채널은
-    ``model_for_channel`` 이 즉시 ``ValueError`` 로 차단한다(잘못된 모델 사용 방지)."""
+    Args:
+        settings: 설정. ``None`` 이면 활성 설정을 쓴다.
+
+    Returns:
+        활성 채널의 모델 이름.
+
+    Raises:
+        ValueError: 활성 채널이 지원 목록 밖일 때(설정 실수를 조용히 넘기지 않는다).
+    """
     return model_for_channel(active_embed_channel(settings), settings)

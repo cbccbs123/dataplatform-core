@@ -81,9 +81,18 @@ def build_snapshot(
 ) -> tuple[Snapshot, dict[str, str], list[str]]:
     """골든 소스마다 후보 union + 제안(llm_fn 또는 실 LLM)을 모아 (Snapshot, key_to_id, missing) 반환.
 
-    graph_edge/relation_kind 무기록(측정 전용·SC-004) — 후보 조회 + 제안 파싱만.
-    ``llm_fn`` 주입 시 실 LLM 대신 그 함수로 프롬프트→JSON(테스트·e2e용). 미주입이면 단일 seam ``propose_edges_json``.
-    LLM 호출은 **트랜잭션 밖**에서(헌법 ⑤ — 풀 점유 최소).
+    ⚠️ **아무것도 저장하지 않는다** — 측정 전용이라 엣지·관계 어휘를 기록하지 않는다.
+    ⚠️ LLM 호출은 **트랜잭션 밖**에서 한다 — 느린 호출이 커넥션을 붙잡으면 다른 작업이 밀린다.
+
+    Args:
+        db: DB 핸들.
+        golden: 정답 묶음.
+        config: 후보 조회 설정(임계·상한 등).
+        llm_fn: 제안 함수. **바꿔 끼울 수 있게 열어 뒀다** — 실제 LLM 없이 고정 응답으로
+            측정 배선을 검증한다.
+
+    Returns:
+        ``(스냅샷, 골든 키→자산 id 매핑, 해소 못 한 키 목록)``.
     """
     from src.relations.asset_entry import target_emb_score_map
     from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
@@ -166,7 +175,15 @@ def _bootstrap_candidate_pairs(conn: Connection[Any], *, edge_conf_min: float) -
 
 
 def _asset_fs_path(conn: Connection[Any], ids: set[str]) -> dict[str, str]:
-    """자산 id → 경로 매핑을 한 번에 조회한다(리포트에 사람이 읽을 이름을 붙이려고)."""
+    """자산 id 를 경로로 바꿀 매핑을 **한 번에** 조회한다(리포트에 이름을 붙이려고).
+
+    Args:
+        conn: DB 연결.
+        ids: 조회할 자산 id 집합. **비어 있으면 DB 를 건드리지 않는다**.
+
+    Returns:
+        ``{asset_id: 경로}``.
+    """
     if not ids:
         return {}
     with conn.cursor() as cur:
@@ -242,7 +259,16 @@ _AA_EMB_GRID = [0.0, 0.3, 0.4, 0.5, 0.6]
 
 
 def _resolve_golden_pairs(golden: Golden, key_to_id: dict[str, str]) -> list[tuple[str, str]]:
-    """골든 쌍을 asset_id 공간으로 정합(양쪽 해소된 쌍만). 스윕 입력용·결정적."""
+    """골든 쌍을 자산 id 공간으로 옮긴다.
+
+    Args:
+        golden: 정답 묶음(사람이 읽는 키로 적혀 있다).
+        key_to_id: 키 → 자산 id 매핑.
+
+    Returns:
+        자산 id 쌍 목록. **양쪽이 모두 해소된 쌍만** 담는다 — 한쪽만 아는 쌍을 넣으면
+        재현율 분모가 부풀어 지표가 실제보다 나빠 보인다.
+    """
     pairs: list[tuple[str, str]] = []
     for p in golden.pairs:
         a, b = key_to_id.get(p.a), key_to_id.get(p.b)
@@ -285,7 +311,15 @@ def cmd_measure(golden: Golden, snapshot_path: str, *, confidence_min: float = 0
 
 
 def _dump_report(report: dict, path: str) -> None:
-    """measure 리포트를 baseline 산출물로 동결한다 — 정렬·결정적(051 FR-301)."""
+    """측정 리포트를 비교 기준 파일로 동결한다.
+
+    Args:
+        report: 측정 결과.
+        path: 저장 경로.
+
+    **키를 정렬해 쓴다** — 그래야 내용이 같을 때 파일 diff 가 비고, 무엇이 실제로 달라졌는지
+    바로 보인다.
+    """
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2, sort_keys=True)
 

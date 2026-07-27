@@ -157,10 +157,16 @@ def _grouped_via_opensearch(
             _norm_index = os_index_name
 
             def norm_fn(q: str, _client: Any = client, _index: str = _norm_index) -> str:
-                """형태소 정규화 경로 — client·index 를 기본값 인자로 **바인딩 시점에 고정**한다.
+                """질의를 형태소 정규화한다(검색 시점에 LLM 을 부르지 않는다).
 
-                클로저 변수로 잡지 않고 기본값으로 묶는 이유는, 이후 루프·재대입이 생겨도 이
-                함수가 보는 값이 흔들리지 않게 하기 위해서다.
+                Args:
+                    q: 원본 질의.
+                    _client: 검색 엔진 클라이언트. ⚠️ **기본값 인자로 묶어 정의 시점에 고정**한다 —
+                        클로저로 잡으면 이후 루프·재대입에 따라 함수가 보는 값이 흔들린다.
+                    _index: 형태소 분석에 쓸 인덱스(위와 같은 이유로 고정).
+
+                Returns:
+                    명사만 남긴 정규화 질의.
                 """
                 return morph_noun_phrase_query(
                     q,

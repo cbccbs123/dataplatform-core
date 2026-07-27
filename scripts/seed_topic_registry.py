@@ -69,7 +69,14 @@ def load_taxonomy_seed(path: Path | str = _DEFAULT_SEED_PATH) -> dict[str, Any]:
 def taxonomy_registry_entries(seed: dict[str, Any]) -> list[dict[str, str]]:
     """시드 → registry 적재 행 ``[{topic_ko, topic_en}]`` (파일 순서 보존·라벨 str() 강제).
 
-    닫힌 분류체계이므로 각 행이 곧 정본 topic(병합·alias 없음). 순서는 taxonomy_draft §1 표 순서.
+    닫힌 분류체계라 각 행이 곧 정본이다(합칠 것도 별칭도 없다).
+
+    Args:
+        seed: 시드 파일을 읽은 dict.
+
+    Returns:
+        ``[{topic_ko, topic_en}]``. **파일에 적힌 순서를 그대로 보존한다** — 정렬하면 문서의
+        표 순서와 어긋나 대조가 어려워진다.
     """
     return [
         {"topic_ko": str(t["topic_ko"]), "topic_en": str(t["topic_en"])}
@@ -86,8 +93,13 @@ def load_alias_seed(path: Path | str = _DEFAULT_ALIAS_SEED_PATH) -> dict[str, An
 def alias_seed_entries(alias_seed: dict[str, Any]) -> list[dict[str, str]]:
     """alias 시드 → 적재 행 ``[{raw_ko, canonical_ko}]`` (파일 순서 보존·라벨 str() 강제).
 
-    §3 커버리지 매핑(raw 120 → 27+미분류)에서 자기참조(raw==canonical·음악/과학/동물)는 이미 제외됐다
-    (닫힌 집합 정확일치가 처리). 각 행은 topic 층(parent NULL) alias 로 동결된다.
+    자기 자신을 가리키는 매핑은 시드 단계에서 이미 빠져 있다(정확 일치로 처리되므로 별칭이 불필요).
+
+    Args:
+        alias_seed: 별칭 시드 파일을 읽은 dict.
+
+    Returns:
+        ``[{raw_ko, canonical_ko}]``(파일 순서 보존).
     """
     return [
         {"raw_ko": str(a["raw_ko"]), "canonical_ko": str(a["canonical_ko"])}
@@ -132,8 +144,17 @@ def subtopic_registry_entries(seed: dict[str, Any]) -> list[dict[str, Any]]:
       ③ **부모-소분류 '·' 토큰 겹침 차단(068 강화)**: subtopic 이 부모 topic 과 '·' 토큰을 하나라도
          공유하면(예: '음식·요리' 밑 '요리·레시피') 부모를 되풀이한 약한 소분류이므로 ``ValueError``.
          부분문자열(②)은 '요리·레시피 ⊄ 음식·요리' 라 못 잡으므로 정확 토큰 교집합을 별도 검사한다.
-    라벨은 ``str()`` 강제(graph_query 관례). ``subtopic_en`` 은 None 을 그대로 보존한다(정본
-    미확정 여지 — register_topic 이 topic_en=None 허용). str('None') 로 오염시키지 않는다.
+    ⚠️ 영문 라벨은 ``None`` 을 **그대로 보존한다** — 문자열로 바꾸면 "None" 이라는 이름의
+    라벨이 DB 에 들어간다(아직 정하지 않았다는 뜻을 잃는다).
+
+    Args:
+        seed: 소분류 시드를 읽은 dict.
+
+    Returns:
+        ``[{parent_topic, subtopic_ko, subtopic_en}]``(파일 순서 보존).
+
+    Raises:
+        ValueError: 부모가 정본 목록 밖일 때, 또는 소분류가 부모 이름과 토큰을 공유할 때.
     """
     valid_parents = _valid_parent_topics()
     entries: list[dict[str, Any]] = []
@@ -175,10 +196,16 @@ def apply_taxonomy_seed(
 ) -> dict[str, int]:
     """시드의 각 topic 을 topic 층(parent_topic=None)으로 registry 등록. 적재 수 ``{n_registry, n_alias}``.
 
-    - 각 topic: ``register_topic(conn, topic_ko, topic_en, source='taxonomy', parent_topic=None)``
-      — 라벨 임베딩 계산·부분 유니크 인덱스(parent NULL) ON CONFLICT 로 멱등.
-    - alias 는 쓰지 않는다(닫힌 분류체계는 쌍별 병합 없음 → n_alias=0). 커밋은 호출부 책임.
-    - ``register_fn`` 주입 가능(단위 테스트용·기본은 topic_canonicalize seam).
+    **DB에 쓴다**(커밋은 호출부 몫). 같은 시드를 여러 번 적용해도 행이 늘지 않는다.
+
+    Args:
+        conn: DB 연결.
+        seed: 시드 dict.
+        register_fn: 등록 함수. **바꿔 끼울 수 있게 열어 뒀다** — 기본 구현은 라벨 임베딩을
+            계산하느라 무거워서, 배선만 검증하는 테스트는 가벼운 것을 주입한다.
+
+    Returns:
+        ``{n_registry, n_alias}``. 별칭은 이 경로에서 만들지 않아 항상 0이다.
     """
     if register_fn is None:
         # 지연 import(모듈 기동 경량 유지). 무거운 임베더는 register_topic 내부에서만 로드.
@@ -199,12 +226,17 @@ def apply_alias_seed(
 ) -> dict[str, int]:
     """§3 커버리지 매핑을 topic 층 alias(parent NULL·decided_by='seed')로 동결. 적재 수 ``{n_alias}``.
 
-    - 각 alias: ``_freeze_alias(conn, raw_ko, canonical_ko, 'seed', parent_topic=None)`` — 부분 유니크
-      ON CONFLICT 로 멱등. **registry(taxonomy 28) 적재 직후** 호출해야 한다(canonical 정본이 먼저 있어야
-      canonicalize_topic 의 alias 히트 경로가 registry en 을 조회할 수 있음).
-    - 효과: 백필 ``canonicalize_topic`` 이 off-list raw(에너지·천문 등)를 **LLM 재분류 없이** alias 히트로
-      결정적 해소(SC-04v2·헌법 3조). subtopic 층은 이 시드가 다루지 않는다(열린 성장·LLM).
-    - ``freeze_fn`` 주입 가능(단위 테스트용·기본은 topic_canonicalize seam).
+    **DB에 쓴다**(멱등). 별칭이 있으면 목록 밖 라벨을 **LLM 없이** 정본으로 해소할 수 있다.
+
+    ⚠️ **정본 등록 뒤에 불러야 한다** — 정본이 먼저 있어야 별칭 히트가 영문 라벨을 찾을 수 있다.
+
+    Args:
+        conn: DB 연결.
+        alias_seed: 별칭 시드 dict.
+        freeze_fn: 동결 함수(테스트가 바꿔 끼울 수 있게 열어 둔 자리).
+
+    Returns:
+        ``{n_alias}``.
     """
     if freeze_fn is None:
         # 지연 import — alias 동결 seam(ON CONFLICT 스코프 로직)을 재사용해 중복 정의를 피한다.
@@ -223,13 +255,17 @@ def apply_subtopic_seed(
 ) -> dict[str, int]:
     """subtopic 시드의 각 행을 **부모 topic 스코프**(parent_topic=<topic_ko>)로 registry 등록.
 
-    - 각 subtopic: ``register_topic(conn, subtopic_ko, subtopic_en, source='taxonomy',
-      parent_topic=parent_topic)`` — 라벨 임베딩 1536D 계산·부분 유니크 인덱스
-      (parent_topic, topic_ko) WHERE parent_topic IS NOT NULL 로 ON CONFLICT 멱등.
-    - topic 층(parent NULL) 시드와 **독립**이며 subtopic 층을 삭제하지 않는다(가산 적재·
-      governance §4 '전역 재빌드 없음'). 커밋은 호출부 책임.
-    - ``register_fn`` 주입 가능(단위 테스트용·기본은 topic_canonicalize seam).
-    Returns ``{"n_subtopic": N}``.
+    **DB에 쓴다**(커밋은 호출부 몫·멱등). 대분류 시드와 **독립**이며 기존 소분류를 지우지
+    않는다 — 더하기만 한다(통째로 다시 만들면 이미 붙은 자산 주제가 흔들린다).
+
+    Args:
+        conn: DB 연결.
+        seed: 소분류 시드 dict.
+        register_fn: 등록 함수(테스트가 바꿔 끼울 수 있게 열어 둔 자리 — 기본은 라벨 임베딩을
+            계산해 무겁다).
+
+    Returns:
+        ``{n_subtopic}``.
     """
     if register_fn is None:
         # 지연 import(모듈 기동 경량 유지). 무거운 임베더는 register_topic 내부에서만 로드.
@@ -253,7 +289,14 @@ def apply_subtopic_seed(
 # 3) 콘솔 요약 (순수)
 # ────────────────────────────────────────────────────────────────────────────
 def summarize_lines(seed: dict[str, Any]) -> list[str]:
-    """콘솔 요약 줄 — 버전·정본 수·topic_ko 목록."""
+    """콘솔에 찍을 요약 줄을 만든다 — 버전·정본 수·대분류 목록.
+
+    Args:
+        seed: 시드 dict.
+
+    Returns:
+        출력할 줄 목록(순수 — 직접 찍지 않는다).
+    """
     entries = taxonomy_registry_entries(seed)
     lines = [
         f"[taxonomy 시드] version={seed.get('version')} · 정본 topic {len(entries)}개"
@@ -265,7 +308,14 @@ def summarize_lines(seed: dict[str, Any]) -> list[str]:
 
 
 def summarize_subtopic_lines(seed: dict[str, Any]) -> list[str]:
-    """subtopic 시드 콘솔 요약 — 버전·출처·총 subtopic 수·부모별 개수(결정적 순서)."""
+    """소분류 시드 요약 줄을 만든다 — 버전·출처·총수·부모별 개수.
+
+    Args:
+        seed: 소분류 시드 dict.
+
+    Returns:
+        출력할 줄 목록(부모 순서 고정).
+    """
     entries = subtopic_registry_entries(seed)
     per_parent: dict[str, int] = {}
     for e in entries:  # 파일 순서 보존(부모 첫 등장 순).
@@ -302,11 +352,18 @@ def run_seed(
 ) -> dict[str, int]:
     """taxonomy 시드 + alias 선시드 적재(apply) 또는 dry-run(파싱만).
 
-    - ``apply=False``: DB 미접촉(파싱·요약은 호출부). 카운트만 계산해 반환.
-    - ``apply=True``: 한 트랜잭션에서 **topic 층만 스코프 삭제**(``_delete_topic_layer`` ·
-      parent_topic IS NULL) → registry 28행 등록 → **직후 alias 선시드**(있으면·§3 매핑) → 커밋.
-      registry→alias 순서를 지켜 alias 히트가 정본 en 을 조회할 수 있게 한다. subtopic 층
-      (parent NOT NULL)은 삭제하지 않고 **보존**한다(governance §4·재실행 시 subtopic 무사).
+    Args:
+        db: DB 핸들.
+        seed: 대분류 시드 dict.
+        alias_seed: 별칭 시드. ``None`` 이면 별칭을 적재하지 않는다.
+        apply: **거짓이면 DB 를 건드리지 않고** 개수만 센다(미리보기). 참이면 한 트랜잭션에서
+            대분류 층을 지우고 다시 넣은 뒤 별칭까지 적재하고 커밋한다.
+
+    Returns:
+        적재 개수.
+
+    ⚠️ 지우는 대상은 **대분류 층뿐**이다 — 소분류는 보존한다(함께 지우면 이미 붙은 자산
+    주제가 부모를 잃는다). 등록 → 별칭 순서도 지켜야 한다.
     """
     if not apply:
         n_alias = len(alias_seed_entries(alias_seed)) if alias_seed is not None else 0
@@ -326,11 +383,17 @@ def run_subtopic_seed(
 ) -> dict[str, int]:
     """subtopic 시드 적재(apply) 또는 dry-run(카운트만) — **topic 시드와 독립**(spec 068 G3).
 
-    - ``apply=False``: DB 미접촉(파싱·요약은 호출부). subtopic 행 수만 계산해 반환.
-    - ``apply=True``: 한 트랜잭션에서 ``apply_subtopic_seed`` 로 subtopic 층에 **가산 적재** 후 커밋.
-      topic 층 정리(``_delete_topic_layer``)를 호출하지 않는다 — subtopic 층은 삭제 없이 ON CONFLICT
-      멱등으로만 재적용된다(governance §4 전역 재빌드 없음). 기존 topic 시드 경로는 불변.
-    - ``register_fn`` 주입 가능(단위 테스트용 — 실 register_topic 임베딩 없이 배선 검증).
+    Args:
+        db: DB 핸들.
+        subtopic_seed: 소분류 시드 dict.
+        apply: 거짓이면 DB 를 건드리지 않고 개수만 센다.
+        register_fn: 등록 함수(테스트가 바꿔 끼울 수 있게 열어 둔 자리).
+
+    Returns:
+        ``{n_subtopic}``.
+
+    ⚠️ **아무것도 지우지 않는다** — 더하기만 한다. 대분류 시드 경로와 독립이므로 둘을 따로
+    돌려도 서로를 망가뜨리지 않는다.
     """
     if not apply:
         return {"n_subtopic": len(subtopic_registry_entries(subtopic_seed))}

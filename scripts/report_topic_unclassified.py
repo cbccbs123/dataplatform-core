@@ -48,14 +48,31 @@ _DEFAULT_THRESHOLD = 0.05
 # 1) 순수 집계 (실 DB/LLM 없이 단위테스트로 덮는다)
 # ────────────────────────────────────────────────────────────────────────────
 def unclassified_rate(edge_rows: list[dict[str, Any]]) -> tuple[int, int]:
-    """SC-02v2·§4-2: (미분류로 분류된 엣지 수, 전체 active 엣지 수) — 미분류율 근거(분모=전체)."""
+    """미분류 비율을 낼 근거 수치를 센다(순수 함수).
+
+    Args:
+        edge_rows: 활성 엣지 행 목록.
+
+    Returns:
+        ``(미분류 건수, 전체 건수)``. **분모는 전체**다 — 미분류만 세면 비율을 낼 수 없다.
+    """
     total = len(edge_rows)
     n_unc = sum(1 for r in edge_rows if str(r.get("topic_ko") or "") == _UNCLASSIFIED_KO)
     return n_unc, total
 
 
 def unclassified_subtopics(edge_rows: list[dict[str, Any]]) -> Counter:
-    """미분류 엣지의 subtopic(제안 라벨) 빈도 누적(순수·§4-3 범주 추가 근거). 빈 subtopic 제외."""
+    """미분류로 떨어진 엣지들이 어떤 하위 라벨을 제안했는지 센다(순수 함수).
+
+    ⚠️ 이 빈도가 **분류 범주를 추가할 근거**다 — 특정 라벨이 반복해서 미분류로 떨어지면
+    그것을 정식 범주로 올릴 때가 됐다는 신호다.
+
+    Args:
+        edge_rows: 활성 엣지 행 목록.
+
+    Returns:
+        라벨별 빈도(빈 라벨은 제외).
+    """
     c: Counter = Counter()
     for r in edge_rows:
         if str(r.get("topic_ko") or "") == _UNCLASSIFIED_KO:
@@ -72,7 +89,18 @@ def build_report(
     classify_raw_labels: list[str],
     threshold: float = _DEFAULT_THRESHOLD,
 ) -> dict[str, Any]:
-    """감시 지표 리포트 조립(순수). 미분류율·건강 판정·제안 라벨 누적·classify 후보 라벨."""
+    """감시 리포트를 조립한다(순수 함수 — DB·LLM 미접촉).
+
+    Args:
+        edge_rows: 활성 엣지 행 목록.
+        n_unclassified_assets: 미분류에 걸린 자산 수(엣지 수와 다르다 — 자산 하나가 여러
+            엣지를 가질 수 있다).
+        classify_raw_labels: 분류가 실제로 낸 원본 라벨 목록(범주 추가 검토용).
+        threshold: 건강 판정 임계. 미분류율이 이 값을 넘으면 범주 추가를 검토하라는 뜻이다.
+
+    Returns:
+        리포트 dict(출력은 별도 함수가 한다).
+    """
     n_unc, total = unclassified_rate(edge_rows)
     rate = (n_unc / total) if total else 0.0
     subs = unclassified_subtopics(edge_rows)
@@ -89,7 +117,14 @@ def build_report(
 
 
 def format_report_lines(report: dict[str, Any]) -> list[str]:
-    """리포트 dict → 콘솔 줄(순수·사람 검수용)."""
+    """리포트를 사람이 읽을 줄 목록으로 바꾼다(순수 — 직접 찍지 않는다).
+
+    Args:
+        report: 조립된 리포트 dict.
+
+    Returns:
+        출력할 줄 목록.
+    """
     pct = 100.0 * report["unclassified_rate"]
     thr_pct = 100.0 * report["threshold"]
     health = "건강(healthy·임계 이하)" if report["healthy"] else "⚠ 임계 초과 — 범주 추가 검토"
@@ -168,7 +203,15 @@ def fetch_classify_unclassified_aliases(conn) -> list[str]:
 
 
 def run_report(*, env: str, threshold: float = _DEFAULT_THRESHOLD) -> dict[str, Any]:
-    """감시 리포트 실행(읽기전용 DB·LLM 0). .env.{env} 로드 → init_settings → 집계."""
+    """감시 리포트를 실행한다 — **DB 를 읽기만** 하고 LLM 을 부르지 않는다.
+
+    Args:
+        env: 설정 프로파일 이름(``.env.{env}`` 를 읽는다).
+        threshold: 건강 판정 임계.
+
+    Returns:
+        리포트 dict.
+    """
     from dotenv import load_dotenv
 
     from src.config.settings import init_settings

@@ -313,7 +313,17 @@ class PostgresUtil:
         **불변식(중요)**: ``idempotent=False`` 면 단 1회만 시도한다(재시도 안 함). 부분 적용된 비멱등
         쓰기를 재시도하면 중복 적용될 수 있어서다 — 안전한 재시도는 호출자의 멱등성 보장이 전제다.
 
-        ``on_retry``/``on_success``/``on_failure`` 는 메트릭·로깅용 관측 훅(주입 콜백)이다.
+        관측 훅(``on_retry``·``on_success``·``on_failure``)은 지표·로깅용으로 주입한다.
+
+        Args:
+            operation: 재시도 단위. **통째로 다시 실행되므로** 안에서 커밋까지 끝내는 형태여야
+                한다(중간 상태를 밖에 남기면 재시도가 그 위에 겹친다).
+            operation_name: 로그·지표에 남길 이름.
+            idempotent: ⚠️ **거짓이면 단 한 번만 시도한다.** 부분 적용된 비멱등 쓰기를 다시
+                돌리면 중복 적용된다 — 안전한 재시도는 호출자가 멱등성을 보장할 때만 성립한다.
+
+        Returns:
+            ``operation`` 의 반환값.
         """
         attempts, base_delay_ms, max_delay_ms, jitter_ms = self._retry_config()
         if not idempotent:
@@ -461,7 +471,16 @@ class PostgresUtil:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        """``with`` 종료 — 예외 여부와 무관하게 풀을 닫는다."""
+        """``with`` 종료 — **예외 여부와 무관하게** 풀을 닫는다.
+
+        Args:
+            exc_type: 발생한 예외의 종류(없으면 ``None``).
+            exc: 예외 객체.
+            tb: 트레이스백.
+
+        세 인자를 받기만 하고 **쓰지 않는다** — 예외를 삼키지 않고 그대로 전파시키기 위해
+        아무 값도 돌려주지 않는다(참을 돌려주면 예외가 조용히 사라진다).
+        """
         self.close()
 
     def _validate_server_version(self, conn: psycopg.Connection[Any]) -> None:
@@ -499,8 +518,14 @@ class PostgresUtil:
     ) -> int:
         """단일 쿼리를 실행하고 영향 행 수(rowcount)를 반환한다(자체 connection→commit).
 
-        ``idempotent`` 기본 False(재시도 안 함) — 임의 쿼리는 멱등 보장이 없어서다. 안전히 재시도하려면
-        멱등 쿼리에 한해 ``idempotent=True`` 로 호출한다(``run_with_retry`` 불변식 참고).
+        Args:
+            query: 실행할 SQL.
+            params: 바인딩 파라미터. **문자열 포매팅 대신 반드시 이 인자로** 넘긴다.
+            idempotent: ⚠️ **기본이 거짓(재시도 안 함)** 이다 — 임의 쿼리는 여러 번 돌려도
+                안전하다는 보장이 없다. 멱등한 쿼리에 한해 참으로 준다.
+
+        Returns:
+            영향받은 행 수.
         """
         def _op() -> int:
             """재시도 단위 — 커넥션을 빌려 질의하고 커밋까지 마친다(실패 시 통째로 재실행)."""

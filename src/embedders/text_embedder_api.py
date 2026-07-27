@@ -18,7 +18,14 @@ _LOG = logging.getLogger("meta_extract.text_embedder_api")
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
-    """L2 정규화(로컬 ``normalize_embeddings=True`` 와 동일 의미) — 영벡터는 그대로 둔다."""
+    """벡터 길이를 1로 맞춘다(로컬 임베더의 정규화와 같은 의미).
+
+    Args:
+        vec: 원본 벡터.
+
+    Returns:
+        길이 1인 벡터. **길이가 0인 벡터는 그대로** 돌려준다(0으로 나눌 수 없다).
+    """
     norm = math.sqrt(sum(x * x for x in vec))
     if norm == 0.0:
         return vec
@@ -32,7 +39,22 @@ def _post_embeddings(
     timeout_s: float,
     max_retries: int,
 ) -> list[dict[str, Any]]:
-    """``POST {url}`` 1배치 호출 후 ``data`` 반환. 실패는 ``max_retries`` 회 재시도(마지막엔 전파)."""
+    """배치 하나를 원격 임베딩 API 로 보내 결과를 받는다.
+
+    Args:
+        url: 호출할 엔드포인트.
+        headers: 요청 헤더(인증 포함).
+        payload: 요청 본문(모델·입력).
+        timeout_s: 요청 제한 시간.
+        max_retries: 재시도 횟수. **네트워크·응답 형식 오류만 재시도**하고 프로그래밍 오류는
+            그대로 올린다 — 코드 버그를 재시도로 덮으면 원인을 못 찾는다.
+
+    Returns:
+        응답의 데이터 배열.
+
+    Raises:
+        RuntimeError: 모든 재시도가 실패했을 때(마지막 예외를 원인으로 붙인다).
+    """
     import requests  # 지연 import — 로컬 백엔드 환경 순수성 보존
 
     last_exc: Exception | None = None
@@ -61,9 +83,26 @@ def embed_texts_api(
 ) -> list[list[float]]:
     """텍스트 배치를 OpenAI 호환 ``/embeddings`` 로 임베딩한다(raw·정규화·**패딩 없음**).
 
-    로컬 ``embed_texts`` 대칭 — 반환 벡터는 모델 raw 차원이며 순서는 응답 ``data[].index`` 로 복원한다
-    (서버가 순서를 바꿔도 안전). ``batch_size`` 로 나눠 요청하고 각 요청은 ``max_retries`` 회 재시도한다.
-    빈 입력은 ``[]``. 응답 개수가 배치 입력 수와 다르면 ``ValueError`` (재시도로 삼키지 않는 계약 위반).
+    ⚠️ **응답 순서를 믿지 않는다** — 응답에 담긴 색인 값으로 원래 순서를 복원한다. 서버가 순서를
+    바꿔 보내도 청크와 벡터의 짝이 어긋나지 않게 하기 위해서다.
+
+    Args:
+        texts: 임베딩할 문자열들. **빈 목록이면 호출하지 않는다**.
+        base_url: API 기준 주소.
+        model: 쓸 모델 이름.
+        api_key: 인증 키. 없으면 인증 헤더를 붙이지 않는다.
+        timeout_s: 요청 제한 시간.
+        batch_size: 한 요청에 담을 개수. 나눠 보내 요청 하나가 지나치게 커지는 것을 막는다.
+        max_retries: 요청별 재시도 횟수.
+        normalize_embeddings: 벡터 길이를 1로 맞출지. **서버가 정규화하지 않는 경우를 대비**해
+            여기서 한 번 더 맞춘다(적재와 질의가 같은 설정이어야 한다).
+
+    Returns:
+        입력 순서대로의 벡터 목록(모델 원래 차원·패딩 없음).
+
+    Raises:
+        ValueError: 응답 개수가 요청 개수와 다를 때. **재시도로 삼키지 않는다** — 개수가 안 맞으면
+            어느 청크의 벡터인지 알 수 없어, 조용히 넘기면 엉뚱한 짝이 저장된다.
     """
     if not texts:
         return []

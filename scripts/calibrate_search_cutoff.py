@@ -79,7 +79,16 @@ def main() -> None:
     )
 
     def knn_cosines(vec: list[float], label: str) -> list[float]:
-        """그 modality 의 kNN 코사인 리스트(robust baseline 표본). 별도 검색 1회(probe 아님 — 같은 본문)."""
+        """그 모달리티의 벡터 유사도 목록을 받아 온다(임계 판정의 배경 표본).
+
+        Args:
+            vec: 질의 임베딩.
+            label: 대상 모달리티.
+
+        Returns:
+            유사도 목록(내림차순). **운영과 같은 본문 질의**를 쓴다 — 다른 질의로 재면
+            여기서 고른 임계가 운영에서 맞지 않는다.
+        """
         values = _MODALITY_VALUES.get(label, frozenset({label}))
         body = build_knn_body(vec, modality_values=values, k=_SIGNAL_K)
         resp = client.search(index=index, body=body)
@@ -132,7 +141,16 @@ def main() -> None:
 
     # ── 3) 비용(멀티모달 게이트 p50/max Δ, ms) ────────────────────────────────────
     def timed(enabled: bool, q: str) -> float:
-        """게이트를 켜고/끄고 같은 질의를 돌려 걸린 시간(초)을 잰다."""
+        """같은 질의를 한 번 돌려 걸린 시간을 잰다(밀리초).
+
+        Args:
+            enabled: 컷오프 게이트를 켤지. **켜고/끄고 같은 질의로 재야** 게이트가 더하는
+                비용만 분리된다.
+            q: 질의 문자열.
+
+        Returns:
+            걸린 시간(밀리초).
+        """
         t0 = time.perf_counter()
         search_assets_os(
             client, q, modalities=MODALITIES, k=20, channel=cfg.embed.active_channel,

@@ -267,7 +267,19 @@ def clip_zero_shot_label_scores_from_image_emb(
     *,
     text_template: str = "사진 속 {label}",
 ) -> dict[str, float]:
-    """이미 L2 정규화된 이미지 임베딩 배치(보통 1xD)와 정리된 한글 라벨로 소프트맥스 점수."""
+    """이미지 벡터와 라벨 후보로 라벨별 점수를 낸다(학습 없이 — 헌법 1조).
+
+    Args:
+        processor: 텍스트 전처리기.
+        model: 시각·언어 모델.
+        image_emb: **이미 길이가 1로 맞춰진** 이미지 벡터 배치. 정규화되지 않은 벡터를 넣으면
+            유사도가 벡터 크기에 좌우돼 점수가 무의미해진다.
+        cleaned: 정리된 라벨 후보. **비어 있으면 빈 dict** 를 돌려주고 모델을 부르지 않는다.
+        text_template: 라벨을 문장에 끼워 넣는 틀. 라벨 단어만 넣는 것보다 문장 형태가 더 잘 맞는다.
+
+    Returns:
+        ``{라벨: 점수}``. 점수 합은 1이다(후보들 사이의 상대 비중).
+    """
     if not cleaned:
         return {}
     prompt_texts = [text_template.format(label=lab) for lab in cleaned]
@@ -278,7 +290,15 @@ def clip_zero_shot_label_scores_from_image_emb(
 
 
 def clip_zero_shot_ko_meta_items(label_scores: dict[str, float]) -> list[dict[str, float | str]]:
-    """메타 JSON용: 각 한글 라벨과 CLIP 제로샷 소프트맥스 점수(높은 순)."""
+    """라벨 점수를 메타에 담을 목록 형태로 바꾼다(점수 높은 순).
+
+    Args:
+        label_scores: ``{라벨: 점수}``.
+
+    Returns:
+        ``[{label, score}]``. ⚠️ **점수가 같으면 라벨 이름으로 갈라** 순서를 못박는다 —
+        2차 키가 없으면 동점 라벨의 순서가 입력 dict 순서에 좌우돼 상위 N 컷이 흔들린다.
+    """
     items: list[dict[str, float | str]] = [
         {"label": lab, "score": float(s)} for lab, s in label_scores.items()
     ]
@@ -289,11 +309,16 @@ def clip_zero_shot_ko_meta_items(label_scores: dict[str, float]) -> list[dict[st
 
 
 def normalize_korean_label_candidates(korean_labels: list[str]) -> list[str]:
-    """VLM 등에서 온 한글 후보 문자열을 중복 제거·trim 한 리스트로 만든다.
+    """라벨 후보를 다듬는다 — 공백 제거·중복 제거.
 
-    069 B1(P2-1): ``set`` 은 해시 순서(비결정)라 동일 입력이라도 후보 순서가 흔들려 하위 CLIP
-    제로샷 점수 계산·top-k 컷의 재현성을 저해했다. ``dict.fromkeys`` 로 바꿔 **첫 등장 순서를
-    보존**하면서 중복만 제거한다(헌법 3조·결정성). score 는 순서와 무관하므로 값 자체는 불변.
+    ⚠️ **집합(set)을 쓰면 안 된다.** 집합은 순서가 실행마다 달라질 수 있어, 같은 입력인데도
+    후보 순서가 흔들려 상위 N 컷의 결과가 바뀐다. 첫 등장 순서를 보존하는 방식으로 중복만 없앤다.
+
+    Args:
+        korean_labels: 원본 후보(문자열이 아닌 원소가 섞여도 된다).
+
+    Returns:
+        다듬은 후보 목록(첫 등장 순서 유지).
     """
     return list(dict.fromkeys(lab for raw in korean_labels if (lab := str(raw).strip())))
 
@@ -305,9 +330,19 @@ def zero_shot_tag_rgb_korean_clip(
     model_name: str = DEFAULT_CLIP_MODEL_NAME,
     text_template: str = "사진 속 {label}",
 ) -> ZeroShotKoTagResult:
-    """
-    RGB ``PIL.Image`` 에 대해 VLM 후보 라벨로 CLIP 제로샷 점수(소프트맥스)와
-    검색용 이미지 벡터(1536)를 반환한다. 이미지 인코딩은 1회.
+    """이미지 객체에서 라벨 점수와 검색용 벡터를 함께 낸다.
+
+    **이미지 인코딩은 한 번만** 한다 — 점수와 벡터가 같은 인코딩 결과를 나눠 쓴다(두 번 돌리면
+    시간이 두 배가 된다).
+
+    Args:
+        rgb_img: 대상 이미지.
+        korean_labels: 라벨 후보. 비어 있어도 되고, 그때는 점수만 빈 dict 가 된다.
+        model_name: 쓸 모델.
+        text_template: 라벨을 끼워 넣을 문장 틀.
+
+    Returns:
+        라벨 점수와 저장 차원에 맞춘 이미지 벡터.
     """
     cleaned = normalize_korean_label_candidates(korean_labels)
     processor, model = get_clip(model_name)
@@ -330,9 +365,19 @@ def zero_shot_tag_image_korean_clip(
     model_name: str = DEFAULT_CLIP_MODEL_NAME,
     text_template: str = "사진 속 {label}",
 ) -> ZeroShotKoTagResult:
-    """
-    VLM이 준 한글 후보 라벨로 CLIP 제로샷 점수(소프트맥스)와,
-    검색용 이미지 벡터(1536차원, 부족분 0 패딩)를 반환한다. 이미지 인코딩은 1회.
+    """파일 경로에서 라벨 점수와 검색용 벡터를 함께 낸다(이미지 객체 판과 동일 처리).
+
+    Args:
+        file_path: 이미지 경로.
+        korean_labels: 라벨 후보.
+        model_name: 쓸 모델.
+        text_template: 라벨을 끼워 넣을 문장 틀.
+
+    Returns:
+        라벨 점수와 저장 차원에 맞춘 이미지 벡터(모자란 차원은 0으로 채운다).
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
     """
     path = Path(file_path)
     if not path.is_file():

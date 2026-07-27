@@ -45,11 +45,14 @@ def max_tier(*tiers: str | AccessTier | None) -> str:
 
 
 def principal_clearance(*, authenticated: bool) -> str:
-    """요청 principal clearance (042 MVP · 2-tier).
+    """요청자의 열람 등급을 정한다(현재 2단계).
 
-    anonymous → ``public``. 유효 JWT → ``authorized`` (general 전 필드·``stt`` 포함).
-    ``regulated`` 는 부여하지 않음 — medical 등은 ``domain_floor`` 로 read 차단.
-    역할·Policy RBAC(OM ②)는 IdP·계정 도입 후 별 spec.
+    Args:
+        authenticated: 인증을 통과했는지.
+
+    Returns:
+        등급 문자열. ⚠️ **가장 높은 등급은 여기서 부여하지 않는다** — 그 등급이 필요한 도메인은
+        도메인 자체의 하한으로 읽기를 막는다. 역할 기반 권한은 계정 체계가 들어온 뒤에 다룬다.
     """
     return AUTHORIZED.value if authenticated else PUBLIC.value
 
