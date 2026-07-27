@@ -146,7 +146,7 @@ def _grouped_via_opensearch(
             from src.search.query_preprocess import noun_phrase_query
 
             def norm_fn(q: str) -> str:
-                """LLM(gemma) 정규화 경로 — 실패 시 원문 폴백은 noun_phrase_query 가 보장한다."""
+                """LLM 정규화 경로 — 실패 시 원문 폴백은 ``noun_phrase_query`` 가 보장한다."""
                 return noun_phrase_query(q)
         else:
             # 기본 경로. 형태소 분석기로 명사만 뽑으므로 검색 시점에 LLM 을 부르지 않고,

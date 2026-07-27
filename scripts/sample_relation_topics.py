@@ -40,7 +40,6 @@ from psycopg import Connection
 # ────────────────────────────────────────────────────────────────────────────
 def _bootstrap(env: str) -> Any:
     """지정 환경으로 설정을 초기화해 돌려준다."""
-    """지정 환경으로 설정을 초기화해 돌려준다."""
     from dotenv import load_dotenv
 
     from src.config.settings import get_current_settings, init_settings

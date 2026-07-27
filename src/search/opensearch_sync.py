@@ -462,7 +462,7 @@ def get_client(url: str | None = None) -> Any:
     개발 환경 무인증(http) 기준이다.
 
     Args:
-        url: 접속 URL. ``None`` 이면 설정값(기본 ``http://localhost:9200``)을 쓴다.
+        url: 접속 URL. ``None`` 이면 설정값을 쓴다.
 
     Returns:
         OpenSearch 클라이언트(타임아웃 60초·압축 on).
