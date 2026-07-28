@@ -88,8 +88,13 @@ SAMPLE_SQL = """
            coalesce(dam.ext_meta->>'keywords','[]') AS b_kw
     FROM graph_edge ge
     JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
-    JOIN node sn ON sn.node_id = ge.src_node   JOIN asset sa ON sa.asset_id = sn.asset_id
-    JOIN node dn ON dn.node_id = ge.dst_node   JOIN asset da ON da.asset_id = dn.asset_id
+    -- node_kind='asset' 가드는 레포 관례다(graph_query·review·asset_topic_query 동일).
+    -- entity 노드는 asset_id 가 NULL 이라(chk_node_kind 가 asset 일 때만 NOT NULL 강제)
+    -- 가드가 없으면 asset 조인에 기대 "우연히" 걸러지는 상태가 된다 — 명시해 둔다.
+    JOIN node sn ON sn.node_id = ge.src_node AND sn.node_kind = 'asset'
+    JOIN asset sa ON sa.asset_id = sn.asset_id
+    JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'
+    JOIN asset da ON da.asset_id = dn.asset_id
     LEFT JOIN asset_metadata sam ON sam.asset_id = sa.asset_id
     LEFT JOIN asset_metadata dam ON dam.asset_id = da.asset_id
     LEFT JOIN asset_topic sat ON sat.asset_id = sa.asset_id

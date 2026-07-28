@@ -12,10 +12,14 @@
   python -m scripts.measure_relation_quality --env dev curate   --out tests/golden/relations/relation_golden.draft.json
   python -m scripts.measure_relation_quality --env dev snapshot --golden <golden.json> --out <snapshot.json>
   python -m scripts.measure_relation_quality --env dev measure  --golden <golden.json> --snapshot <snapshot.json>
+  # shadow A/B(079) — 골든 대신 active 엣지 보유 자산 표본으로 두 변형을 각각 동결한다.
+  python -m scripts.measure_relation_quality --env dev snapshot \
+      --sample-active 200 --seed 20260728 --prompt-variant no-circular-hint --out <snapshot_B.json>
 """
 from __future__ import annotations
 
 import json
+import random
 from collections.abc import Callable
 from typing import Any
 
@@ -70,6 +74,47 @@ def _source_summary_modality(conn: Connection[Any], asset_id: str) -> tuple[str,
     if not r:
         return "", ""
     return str(r["summary"] or ""), str(r["modality"] or "")
+
+
+def sample_active_sources(db: PostgresUtil, *, n: int, seed: int) -> list[str]:
+    """active 엣지를 가진 자산에서 시드 고정으로 ``n`` 건을 뽑는다(읽기 전용).
+
+    골든이 아니라 표본으로 스냅샷을 뜨는 이유: A/B 는 구·신 **상대 비교**라 정답셋이 필요 없다.
+    골든 재스냅샷은 머지의 선행조건이지 실험의 선행조건이 아니다(ADR 결정 7).
+
+    Args:
+        db: DB 핸들.
+        n: 뽑을 자산 수.
+        seed: 난수 시드.
+
+    Returns:
+        정렬된 자산 id 목록. 풀이 ``n`` 보다 작으면 전수.
+
+    Raises:
+        ValueError: active 엣지를 가진 자산이 하나도 없을 때. 조용히 빈 스냅샷을 만들면
+            A/B 가 "차이 없음"으로 보이는데 실은 아무것도 재지 않은 것이다.
+    """
+    # node_kind='asset' 가드는 레포 관례(graph_query·review·asset_topic_query 동일) —
+    # entity 노드는 asset_id 가 NULL 이라 빼지 않으면 None 이 소스 id 로 섞인다.
+    sql = """
+        SELECT DISTINCT nd.asset_id::text AS asset_id
+        FROM graph_edge ge
+        JOIN node nd ON nd.node_id IN (ge.src_node, ge.dst_node) AND nd.node_kind = 'asset'
+        WHERE ge.status = 'active'
+        ORDER BY 1
+    """  # 대칭 엣지는 행이 하나라 양끝을 IN 으로 함께 본다(한쪽만 보면 절반이 빠진다).
+    with db.transaction() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql)
+        ids = [r["asset_id"] for r in cur.fetchall()]
+    if not ids:
+        raise ValueError(
+            "active 엣지를 가진 자산이 없다 — 표본을 뽑을 수 없다. "
+            "관계 생성이 한 번도 돌지 않았거나 잘못된 DB 를 보고 있는지 확인하라.")
+    if len(ids) < n:
+        print(f"⚠️ 표본 풀 {len(ids)}건 < 요청 {n}건 — 전수를 쓴다. "
+              f"비율만 보고하지 말고 실제 n 을 함께 적어라.", flush=True)
+    # 정렬된 모집단 + 고정 시드 = 같은 시드면 항상 같은 표본(SC-002 재현성).
+    return sorted(random.Random(seed).sample(ids, min(n, len(ids))))
 
 
 def _read_candidates_prompt(
@@ -281,20 +326,73 @@ def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict
 
 # ── snapshot / measure ───────────────────────────────────────────────────────
 def _make_config(args: Any, cfg: Any) -> dict:
-    """측정 조건을 dict 로 굳힌다 — 스냅샷에 함께 저장돼 "어떤 조건의 수치인지" 남는다."""
+    """측정 조건을 dict 로 굳힌다 — 스냅샷에 함께 저장돼 "어떤 조건의 수치인지" 남는다.
+
+    ``prompt_variant`` 를 함께 굳히는 이유: shadow A/B 는 같은 표본을 두 번 떠서 비교하는데,
+    파일명(``snap_A``/``snap_B``)으로만 구분하면 **보고서에서 두 팔을 뒤바꿔 적는 사고**를
+    막을 방법이 없다. 스냅샷 자체가 자기가 어느 팔인지 알고 있어야 한다.
+    측정 로직은 이 키를 읽지 않으므로 수치에는 영향이 없다.
+
+    Args:
+        args: 파싱된 CLI 인자. ``top_k``·``embedding_kind``·``prompt_variant`` 를 읽는다.
+        cfg: 활성 설정. ``args`` 가 비운 값의 기본값 출처다.
+
+    Returns:
+        스냅샷 ``config`` 에 그대로 실릴 dict.
+    """
     return {"top_k": args.top_k or cfg.relations.top_k, "min_sim": cfg.relations.min_sim,
-            "embedding_kind": args.embedding_kind}
+            "embedding_kind": args.embedding_kind,
+            # 골든 경로(변형 개념이 없는 호출)에서도 "baseline" 이 박힌다 — 사후에
+            # "이 스냅샷은 운영 프롬프트였다"를 단언할 수 있으니 그편이 낫다.
+            "prompt_variant": getattr(args, "prompt_variant", None) or "baseline"}
 
 
-def cmd_snapshot(db: PostgresUtil, golden: Golden, *, config: dict, out_path: str) -> dict:
-    """골든 소스마다 후보·LLM 제안을 받아 **파일로 동결**한다.
+def assert_same_candidates(a: Snapshot, b: Snapshot) -> None:
+    """두 스냅샷의 후보 집합이 같은지 단언한다(A/B 오염 검출).
+
+    프롬프트만 바꾼 A/B 에서 후보가 달라졌다면 후보 단계가 함께 흔들렸다는 뜻이고, 그러면
+    "프롬프트 때문에 좋아졌다"고 말할 수 없다. **실험을 계속하기 전에 멈춘다.**
+
+    Args:
+        a: 대조군 스냅샷.
+        b: 실험군 스냅샷.
+
+    Raises:
+        AssertionError: 소스 집합이나 어느 소스의 후보 목록이 다를 때.
+    """
+    if set(a.sources) != set(b.sources):
+        raise AssertionError(
+            f"소스 집합이 다르다: A만 {sorted(set(a.sources) - set(b.sources))[:5]} / "
+            f"B만 {sorted(set(b.sources) - set(a.sources))[:5]}")
+    for sid in sorted(a.sources):
+        ca, cb = a.sources[sid].candidates, b.sources[sid].candidates
+        if ca != cb:
+            raise AssertionError(f"후보가 다르다(source={sid}): A={ca[:3]} B={cb[:3]}")
+
+
+def cmd_snapshot(
+    db: PostgresUtil, golden: Golden | None = None, *, config: dict, out_path: str,
+    source_ids: list[str] | None = None, prompt_variant: dict | None = None,
+) -> dict:
+    """골든(또는 표본) 소스마다 후보·LLM 제안을 받아 **파일로 동결**한다.
 
     이후 임계를 바꿔 가며 재측정할 때 LLM 을 다시 부르지 않기 위한 단계다.
+
+    Args:
+        db: DB 핸들.
+        golden: 정답 묶음. 주면 여기서 소스를 도출한다. ``None`` 이면 ``source_ids`` 경로.
+        config: 후보 조회 설정(임계·상한 등) — 스냅샷에 함께 저장된다.
+        out_path: 동결 JSON 을 쓸 경로.
+        source_ids: 골든 없이 쓸 소스 자산 id 목록(shadow A/B 표본). ``None`` 이면 ``golden`` 경로.
+            ``golden`` 과 **정확히 하나만** 준다(둘 다/둘 다 아님이면 ``build_snapshot`` 이 거부).
+        prompt_variant: 프롬프트 변형 정의(``PROMPT_VARIANTS`` 의 한 항목).
+            ``None``·빈 dict(=baseline)이면 운영과 바이트 동일한 프롬프트다.
 
     Returns:
         동결 결과 요약 dict(파일 경로·소스 수·미해소 키 등).
     """
-    snap, mapping, missing = build_snapshot(db, golden, config=config)
+    snap, mapping, missing = build_snapshot(
+        db, golden, config=config, source_ids=source_ids, prompt_variant=prompt_variant)
     payload = {"snapshot": dump_snapshot(snap), "key_to_id": mapping, "missing_keys": missing}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -402,11 +500,17 @@ def main() -> int:
     pc.add_argument("--out", required=True)
     pc.add_argument("--edge-conf-min", type=float, default=0.8)
 
-    ps = sub.add_parser("snapshot", help="골든 소스 LLM 제안 동결")
-    ps.add_argument("--golden", required=True)
+    ps = sub.add_parser("snapshot", help="골든(또는 active 표본) 소스 LLM 제안 동결")
+    ps.add_argument("--golden", default=None, help="골든 파일 경로(--sample-active 와 택일)")
     ps.add_argument("--out", required=True)
     ps.add_argument("--top-k", dest="top_k", type=int, default=None)
     ps.add_argument("--embedding-kind", dest="embedding_kind", choices=["st", "clip", "both"], default="both")
+    ps.add_argument("--sample-active", dest="sample_active", type=int, default=None,
+                    help="골든 대신 active 엣지 보유 자산 N건을 시드 고정 표본으로 쓴다(A/B용)")
+    ps.add_argument("--seed", type=int, default=None, help="--sample-active 의 표본 시드")
+    ps.add_argument("--prompt-variant", dest="prompt_variant",
+                    choices=sorted(PROMPT_VARIANTS), default="baseline",
+                    help="프롬프트 변형(baseline=운영과 동일). shadow A/B 전용")
 
     pm = sub.add_parser("measure", help="골든+스냅샷 → 리포트(LLM 0)")
     pm.add_argument("--golden", required=True)
@@ -416,6 +520,14 @@ def main() -> int:
                     help="accepted 판정 임계(미지정 시 RELATION_AUTO_APPROVE_MIN — 프로덕션 자동승인)")
 
     args = p.parse_args()
+    if args.cmd == "snapshot":
+        # 소스가 골든인지 표본인지 모호하면 "무엇을 측정했는가"가 흐려진다 — DB 를 열기 전에 막는다.
+        if (args.golden is None) == (args.sample_active is None):
+            ps.error("--golden 과 --sample-active 중 정확히 하나를 지정한다")
+        # 시드가 없으면 매 실행 표본이 달라져 A/B 두 팔의 소스가 어긋난다(재현성 SC-002).
+        if args.sample_active is not None and args.seed is None:
+            ps.error("--sample-active 를 쓸 때는 --seed 를 함께 준다(같은 시드 = 같은 표본)")
+
     dotenv_path = Path(__file__).resolve().parents[1] / f".env.{args.env}"
     if dotenv_path.is_file():
         load_dotenv(dotenv_path=dotenv_path, override=False)
@@ -434,9 +546,14 @@ def main() -> int:
     with db:
         if args.cmd == "curate":
             out = cmd_curate(db, args.out, edge_conf_min=args.edge_conf_min)
-        else:  # snapshot
+        else:  # snapshot — 소스는 골든 또는 active 표본 중 하나(위에서 상호배타 검증됨)
             cfg = _settings()
-            out = cmd_snapshot(db, _load_golden(args.golden), config=_make_config(args, cfg), out_path=args.out)
+            sids = (sample_active_sources(db, n=args.sample_active, seed=args.seed)
+                    if args.sample_active is not None else None)
+            out = cmd_snapshot(
+                db, _load_golden(args.golden) if args.golden else None,
+                config=_make_config(args, cfg), out_path=args.out, source_ids=sids,
+                prompt_variant=PROMPT_VARIANTS[args.prompt_variant])
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
