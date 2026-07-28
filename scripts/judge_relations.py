@@ -214,7 +214,10 @@ def human_kappa(vs: VerdictSet) -> tuple[float, int]:
     return (cohen_kappa(pairs), len(pairs))
 
 
-def run_judge(db, *, measure_id, method, status, strata, per_cell, seed, out_path) -> VerdictSet:
+def run_judge(
+    db: PostgresUtil, *, measure_id: str, method: str, status: str, strata: str,
+    per_cell: int, seed: int, out_path: str,
+) -> VerdictSet:
     """표본을 뽑아 맹검 판정하고 파일로 저장한다.
 
     Args:
@@ -279,6 +282,15 @@ def run_human(path: str, *, limit: int) -> tuple[float, int]:
         return human_kappa(vs)
 
     rows = _fetch_display_rows(tuple(v.edge_id for v in todo))
+    # 내용을 못 읽은 엣지는 화면이 '?' 로만 채워진다 — 그 상태로 판정하면 κ 가 무의미해지므로
+    # 조용히 넘기지 않고 알린다(엣지가 삭제됐거나 다른 DB 를 보고 있다는 신호다).
+    if len(rows) < len(todo):
+        missing = [v.edge_id for v in todo if v.edge_id not in rows]
+        print(f"⚠️ 표시 내용을 못 읽은 엣지 {len(missing)}건 — 내용 없이 판정하지 말고 원인을 먼저 "
+              f"확인하라(예: {missing[:3]}). 다른 DB 를 보고 있거나 엣지가 삭제된 경우다.")
+        todo = [v for v in todo if v.edge_id in rows]
+        if not todo:
+            return human_kappa(vs)
     answers: dict[str, str] = {}
     key_to_verdict = {"s": "strong", "w": "weak", "n": "none"}
     for i, v in enumerate(todo, 1):
@@ -310,23 +322,49 @@ def run_human(path: str, *, limit: int) -> tuple[float, int]:
     return (kappa, n)
 
 
+# 표시용 조회 — 요청한 edge_id 만 **상태와 무관하게** 집어 온다.
+# ⚠️ SAMPLE_SQL 을 재사용하면 안 된다. 그쪽은 `WHERE ge.status = %s` 라, `--status proposed` 로
+#    만든 판정 파일(M5·M6)을 `--human` 으로 열면 한 건도 못 찾고 화면이 '?' 로만 채워진다.
+#    예외도 경고도 없이 사람이 **내용 없이 판정하게 되는** 조용한 실패다(리뷰 지적).
+DISPLAY_SQL = """
+    SELECT ge.edge_id::text AS edge_id,
+           sa.modality AS a_mod, regexp_replace(sa.fs_path,'^.*/','') AS a_name,
+           coalesce(sat.topic_ko,'(없음)') AS a_topic,
+           left(coalesce(sam.ext_meta->>'summary',''), 300) AS a_sum,
+           da.modality AS b_mod, regexp_replace(da.fs_path,'^.*/','') AS b_name,
+           coalesce(dat.topic_ko,'(없음)') AS b_topic,
+           left(coalesce(dam.ext_meta->>'summary',''), 300) AS b_sum
+    FROM graph_edge ge
+    JOIN node sn ON sn.node_id = ge.src_node AND sn.node_kind = 'asset'
+    JOIN asset sa ON sa.asset_id = sn.asset_id
+    JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'
+    JOIN asset da ON da.asset_id = dn.asset_id
+    LEFT JOIN asset_metadata sam ON sam.asset_id = sa.asset_id
+    LEFT JOIN asset_metadata dam ON dam.asset_id = da.asset_id
+    LEFT JOIN asset_topic sat ON sat.asset_id = sa.asset_id
+    LEFT JOIN asset_topic dat ON dat.asset_id = da.asset_id
+    WHERE ge.edge_id = ANY(%s)
+"""
+
+
 def _fetch_display_rows(edge_ids: tuple[str, ...]) -> dict[str, dict]:
-    """사람에게 보여줄 양끝 자산 내용을 읽는다(읽기 전용).
+    """사람에게 보여줄 양끝 자산 내용을 읽는다(읽기 전용·상태 무관).
 
     판정 파일에는 본문을 저장하지 않으므로(개인정보) 화면 표시용으로 그때그때 DB 에서 읽는다.
+    ``active``·``proposed`` 어느 표본이든 열 수 있어야 하므로 **status 를 조건에 넣지 않고**
+    ``edge_id`` 로 직접 집는다.
 
     Args:
         edge_ids: 표시할 엣지들.
 
     Returns:
-        ``{edge_id: 표시용 행}``. 못 찾은 엣지는 키가 없다.
+        ``{edge_id: 표시용 행}``. 못 찾은 엣지는 키가 없다(호출부가 경고한다).
     """
     db = PostgresUtil()
     with db, db.transaction() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(SAMPLE_SQL.format(cell="''") + " ", ("active",))
+        cur.execute(DISPLAY_SQL, (list(edge_ids),))
         # ⚠️ dict_row 커서다 — dict(cur.fetchall()) 로 감싸면 키/값이 뒤집힌다(실제로 겪은 사고).
-        wanted = set(edge_ids)
-        return {r["edge_id"]: r for r in cur.fetchall() if r["edge_id"] in wanted}
+        return {r["edge_id"]: r for r in cur.fetchall()}
 
 
 def main(argv: list[str] | None = None) -> int:
