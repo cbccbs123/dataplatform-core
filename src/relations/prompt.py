@@ -100,14 +100,35 @@ RELATION_KIND_HINTS_KO: dict[str, str] = {
     "derived_from": "한쪽이 다른쪽에서 **파생·생성**된 관계일 때",
 }
 
+# ``duplicate_near`` 와 ``same_domain`` 이 함께 활성일 때만 덧붙는 혼동 방지 문구.
+# 인라인 문자열이 아니라 모듈 상수인 이유: shadow A/B 측정이 **이 문구만** 갈아끼워 비교할 수 있어야
+# 한다(조립을 복제하면 "운영 프롬프트 vs 재구현" 비교가 돼 실험이 무효가 된다).
+# ⚠️ 문구를 고치면 운영 관계 생성 출력이 바뀐다 — 변형은 측정 스크립트의 override 로만 주고,
+#    검증된 뒤에야 여기를 바꾼다.
+RELATION_ANTI_DUP_HINT_KO = (
+    "\n\n**구분:** 단순히 주제가 같으면 ``same_domain`` , "
+    "유사도·근접 후보라면 ``duplicate_near`` 를 우선 고려한다."
+)
 
-def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
+
+def _build_relation_kind_guide(
+    catalog: Sequence[Mapping[str, Any]],
+    *,
+    kind_hints_override: Mapping[str, str] | None = None,
+    anti_dup_override: str | None = None,
+) -> str:
     """카탈로그의 ``type_code`` 마다 한 줄 힌트를 붙인 선택 가이드 블록을 만든다.
 
     ``duplicate_near`` 와 ``same_domain`` 이 동시에 있으면 혼동 방지 문구를 덧붙인다.
 
     Args:
         catalog: 활성 relation_kind 목록(``fetch_active_relation_kinds`` 결과).
+        kind_hints_override: kind 별 힌트를 **부분 교체**한다(주지 않은 kind 는 원래 힌트 유지).
+            ``None``(기본)이면 운영 힌트를 그대로 쓴다. **측정 전용 seam** — A/B 에서 프롬프트
+            조립을 복제하면 "운영 프롬프트 vs 재구현" 비교가 돼 실험이 무효가 되므로, 조립은
+            한 곳에 두고 문구만 주입한다.
+        anti_dup_override: ``duplicate_near``/``same_domain`` 구분 문구를 통째로 교체한다.
+            ``None``(기본)이면 ``RELATION_ANTI_DUP_HINT_KO``.
 
     Returns:
         Markdown 블록 문자열. 카탈로그가 비면 **빈 문자열**(프롬프트에서 이 절이 통째로 빠진다).
@@ -117,12 +138,16 @@ def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
         그 외 DB 에 직접 추가된 kind 는 description 첫 200자를 보조 설명으로 표시한다.
         따라서 새 통제어휘를 추가할 때 ``RELATION_KIND_HINTS_KO`` 에도 등록하면 프롬프트 품질이 올라간다.
     """
+    # 힌트 출처를 지역 변수로 뽑는다 — override 가 오면 그 kind 만 덮어쓴 사본을 쓴다
+    # (기본 ``None`` 이면 운영 dict 그대로라 출력이 바이트 단위로 동일하다).
+    hints = (RELATION_KIND_HINTS_KO if kind_hints_override is None
+             else {**RELATION_KIND_HINTS_KO, **kind_hints_override})
     codes = sorted({str(r.get("type_code", "")).strip() for r in catalog if str(r.get("type_code", "")).strip()})
     if not codes:
         return ""
     lines: list[str] = []
     for code in codes:
-        hint = RELATION_KIND_HINTS_KO.get(code)
+        hint = hints.get(code)
         if hint:
             lines.append(f"- ``{code}``: {hint}")
         else:
@@ -131,9 +156,8 @@ def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
     body = "\n".join(lines)
     anti_dup = ""
     if "duplicate_near" in codes and "same_domain" in codes:
-        anti_dup = (
-            "\n\n**구분:** 단순히 주제가 같으면 ``same_domain`` , 유사도·근접 후보라면 ``duplicate_near`` 를 우선 고려한다."
-        )
+        anti_dup = (RELATION_ANTI_DUP_HINT_KO if anti_dup_override is None
+                    else anti_dup_override)
     return f"""### relation_kind (= ``type_code``) 선택 가이드
 아래는 **왜 두 미디어가 연결되는지**에 대한 거친 분류다. **업종·소재(의료·게임 등)** 는 여기서 고르지 말고 ``topic_ko`` / ``topic_en`` 에 넣는다.
 
@@ -179,6 +203,8 @@ def build_relation_proposal_prompt(
     candidates: Sequence[Mapping[str, Any]],
     relation_kinds_catalog: Sequence[Mapping[str, Any]],
     source_topic: Mapping[str, Any] | None = None,
+    kind_hints_override: Mapping[str, str] | None = None,
+    anti_dup_override: str | None = None,
 ) -> str:
     """관계 제안 프롬프트 전체를 하나의 문자열로 조립한다.
 
@@ -193,6 +219,12 @@ def build_relation_proposal_prompt(
         source_topic: 소스 자산의 자기주제 ``{"topic_ko","subtopic_ko"}``. 주제가 달라도 내용이
             맞으면 연결하라는 **soft 신호**로만 쓰인다(하드 배제 금지). ``None`` 이면 주제 표기를
             통째로 생략한다 — 주제 미부여 자산·구 호출부 경로.
+        kind_hints_override: kind 별 선택 힌트를 **부분 교체**한다(주지 않은 kind 는 원래 힌트
+            유지). ``None``(기본)이면 운영 힌트를 그대로 쓴다. **측정 전용 seam** — A/B 에서
+            프롬프트 조립을 복제하면 "운영 프롬프트 vs 재구현" 비교가 돼 실험이 무효가 되므로,
+            조립은 한 곳에 두고 문구만 주입한다.
+        anti_dup_override: ``duplicate_near``/``same_domain`` 구분 문구를 통째로 교체한다.
+            ``None``(기본)이면 ``RELATION_ANTI_DUP_HINT_KO``.
 
     Returns:
         LLM에 그대로 넘길 단일 프롬프트 문자열.
@@ -239,7 +271,10 @@ def build_relation_proposal_prompt(
             ensure_ascii=False,
             indent=2,
         )
-        selection_guide = _build_relation_kind_guide(relation_kinds_catalog)
+        selection_guide = _build_relation_kind_guide(
+            relation_kinds_catalog,
+            kind_hints_override=kind_hints_override,
+            anti_dup_override=anti_dup_override)
         catalog_rules = f"""아래는 현재 DB의 **활성 relation_kind** 목록(JSON). 각 엣지의 ``relation_type_code`` 는 **반드시** 아래 ``type_code``(= 관계 종류 코드) 중 하나와 **완전히 동일**해야 한다(소문자).
 
 {catalog_block}

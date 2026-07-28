@@ -36,6 +36,25 @@ from src.relations.quality.snapshot import (
 
 LlmFn = Callable[[str], dict[str, Any]]
 
+# shadow A/B 변형 — **운영 프롬프트는 바꾸지 않는다.** 여기 테이블만 갈아끼워 비교하고,
+# 통과한 변형만 나중에 운영 상수로 옮긴다(spec 폐기 기준 4항).
+PROMPT_VARIANTS: dict[str, dict] = {
+    # 대조군 — 현행 운영 프롬프트 그대로.
+    "baseline": {},
+    # 순환 지시 제거. 현행 두 문장은 함께 읽으면 "전 후보에 duplicate_near 를 붙여라"가 된다 —
+    # 모든 후보가 정의상 임베딩 유사도로 온 것이기 때문이다(active 83% 쏠림의 유력 원인).
+    "no-circular-hint": {
+        "kind_hints_override": {
+            "duplicate_near": "**같은 구체적 대상**을 거의 같은 형식으로 담은 사실상 중복본일 때",
+            "same_domain": "대상은 다르지만 같은 분야로 묶일 때",
+        },
+        "anti_dup_override": (
+            "\n\n**구분:** 주제·세부주제가 같아도 **다루는 대상이 다르면** "
+            "``duplicate_near`` 가 아니다. 대상이 다르고 분야만 같으면 ``same_domain`` 이다."
+        ),
+    },
+}
+
 
 # ── 읽기 헬퍼(graph 무기록) ──────────────────────────────────────────────────
 def _source_summary_modality(conn: Connection[Any], asset_id: str) -> tuple[str, str]:
@@ -61,9 +80,9 @@ def _read_candidates_prompt(
 
     Args:
         sid: 소스 자산 id — 이 자산을 기준으로 후보를 모은다.
-        prompt_variant: shadow A/B 프롬프트 변형 정의. ``None``(기본)이면 운영과 같은 프롬프트다.
-            ⚠️ 지금은 **받아 두기만 하고 쓰지 않는다** — 실제 문구 주입은 프롬프트 seam(079 T402)
-            몫이라, 이 배선만으로는 어떤 값을 줘도 출력이 달라지지 않는다(동작 불변).
+        prompt_variant: shadow A/B 프롬프트 변형 정의(``PROMPT_VARIANTS`` 의 한 항목).
+            ``build_relation_proposal_prompt`` 의 override 인자로 **그대로 풀어 넣는다**.
+            ``None`` 이나 빈 dict(=``baseline``)이면 운영과 바이트 동일한 프롬프트다.
 
     Returns:
         ``(후보 목록, LLM 프롬프트)``.
@@ -85,7 +104,7 @@ def _read_candidates_prompt(
     prompt = build_relation_proposal_prompt(
         source_summary=summary, source_media_type=modality,
         candidates=cands, relation_kinds_catalog=kinds,
-    )
+        **(prompt_variant or {}))
     return cands, prompt
 
 
