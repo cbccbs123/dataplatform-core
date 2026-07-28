@@ -77,20 +77,54 @@ def pair_key(source: str, target: str) -> str:
     return f"{a}__{b}"
 
 
-def collect_pairs(snap: Snapshot) -> dict[str, tuple[str, str]]:
+def collect_pairs(snap: Snapshot, *, apply_production_gate: bool = True) -> dict[str, tuple[str, str]]:
     """스냅샷의 제안 엣지를 판정 대상 자산 쌍으로 모은다(순수 함수).
+
+    **운영과 같은 게이트를 적용한다**(`graph_persist.sync_graph_edges` :199-201와 동일):
+    ① 후보 집합 밖 타깃 = LLM 환각 → 거부  ② 자기 자신 참조 → 거부.
+
+    이 게이트가 없으면 **실제로는 절대 관계가 되지 않을 엣지를 판정**하게 되고, A/B 비교가
+    "운영에 반영될 관계"가 아니라 "LLM 이 뱉은 문자열"을 비교하는 것이 된다. 실제로 A 스냅샷에
+    길이가 틀린 UUID(``…950a5734f1f`` — 마지막 자리 11자)가 섞여 DB 조회가 터졌다.
 
     Args:
         snap: 동결 스냅샷.
+        apply_production_gate: 운영 게이트 적용 여부. ``False`` 는 게이트가 실제로 무엇을
+            걸러내는지 **재는 용도**로만 쓴다(운영 비교에는 쓰지 말 것).
 
     Returns:
         ``{쌍 키: (소스 자산 id, 타깃 자산 id)}``. 같은 쌍이 여러 소스에서 나와도 하나로 접힌다.
     """
     out: dict[str, tuple[str, str]] = {}
     for sid, ss in snap.sources.items():
+        allowed = {c for c, _ in ss.candidates}
         for e in ss.proposed:
+            if apply_production_gate and (e.target not in allowed or e.target == sid):
+                continue
             out.setdefault(pair_key(sid, e.target), (sid, e.target))
     return out
+
+
+def gate_stats(snap: Snapshot) -> dict[str, int]:
+    """운영 게이트가 걸러내는 양 — 환각·자기참조를 따로 센다.
+
+    Args:
+        snap: 동결 스냅샷.
+
+    Returns:
+        ``{proposed, hallucinated, self_ref, kept}``. ``hallucinated`` 는 후보 밖 타깃이다.
+    """
+    proposed = hall = selfref = 0
+    for sid, ss in snap.sources.items():
+        allowed = {c for c, _ in ss.candidates}
+        for e in ss.proposed:
+            proposed += 1
+            if e.target == sid:
+                selfref += 1
+            elif e.target not in allowed:
+                hall += 1
+    return {"proposed": proposed, "hallucinated": hall, "self_ref": selfref,
+            "kept": proposed - hall - selfref}
 
 
 def fetch_assets(db: PostgresUtil, asset_ids: list[str]) -> dict[str, dict]:
@@ -188,7 +222,12 @@ def compare_arms(snaps: dict[str, Snapshot], vs: VerdictSet, arm_pairs: dict[str
         assets: set[str] = set()
         n_edges = 0
         for sid, ss in snap.sources.items():
+            # 운영 게이트 통과분만 센다 — `collect_pairs` 와 모집단이 어긋나면 kind 분포와
+            # 판정 결과가 서로 다른 집합을 가리키게 된다.
+            allowed = {c for c, _ in ss.candidates}
             for e in ss.proposed:
+                if e.target not in allowed or e.target == sid:
+                    continue
                 n_edges += 1
                 kinds[e.kind] = kinds.get(e.kind, 0) + 1
                 assets.add(sid)

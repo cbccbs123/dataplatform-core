@@ -6,7 +6,13 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.judge_snapshot import collect_pairs, compare_arms, pair_key, to_judge_row
+from scripts.judge_snapshot import (
+    collect_pairs,
+    compare_arms,
+    gate_stats,
+    pair_key,
+    to_judge_row,
+)
 
 from src.relations.quality.snapshot import ProposedEdge, Snapshot, SourceSnapshot
 from src.relations.quality.verdicts import Verdict, VerdictSet
@@ -19,13 +25,46 @@ _META = {
 
 
 def _snap(*specs):
-    """(소스, [(타깃, kind)…]) 들로 스냅샷을 만든다."""
+    """(소스, [(타깃, kind)…]) 들로 스냅샷을 만든다.
+
+    후보 집합은 제안된 타깃 전부로 채운다 — 운영 게이트를 통과시켜 기존 테스트 의도를 유지한다.
+    게이트 자체를 시험하려면 `_snap_gated` 를 쓴다.
+    """
     sources = {
         sid: SourceSnapshot(
-            candidates=(),
+            candidates=tuple((t, 0.9) for t, _ in edges),
             proposed=tuple(ProposedEdge(t, k, 0.9) for t, k in edges))
         for sid, edges in specs}
     return Snapshot(config={}, sources=sources)
+
+
+def _snap_gated(sid, candidates, proposed):
+    """후보와 제안을 따로 줘서 게이트 동작을 시험한다."""
+    return Snapshot(config={}, sources={sid: SourceSnapshot(
+        candidates=tuple((c, 0.9) for c in candidates),
+        proposed=tuple(ProposedEdge(t, "duplicate_near", 0.9) for t in proposed))})
+
+
+class TestProductionGate(unittest.TestCase):
+    """운영 게이트(graph_persist:199-201)와 같은 것을 적용하는지."""
+
+    def test_후보_집합_밖_타깃은_환각으로_보고_뺀다(self):
+        # 실제로 LLM 이 길이가 틀린 UUID 를 뱉어 DB 조회가 터진 적이 있다.
+        snap = _snap_gated("s1", ["t1"], ["t1", "없는타깃"])
+        self.assertEqual(set(collect_pairs(snap)), {pair_key("s1", "t1")})
+
+    def test_자기_자신_참조는_뺀다(self):
+        snap = _snap_gated("s1", ["s1", "t1"], ["s1", "t1"])
+        self.assertEqual(set(collect_pairs(snap)), {pair_key("s1", "t1")})
+
+    def test_게이트를_끄면_전부_남는다(self):
+        snap = _snap_gated("s1", ["t1"], ["t1", "없는타깃"])
+        self.assertEqual(len(collect_pairs(snap, apply_production_gate=False)), 2)
+
+    def test_gate_stats_가_환각과_자기참조를_따로_센다(self):
+        snap = _snap_gated("s1", ["t1"], ["t1", "없는타깃", "s1"])
+        self.assertEqual(gate_stats(snap),
+                         {"proposed": 3, "hallucinated": 1, "self_ref": 1, "kept": 1})
 
 
 class TestPairKey(unittest.TestCase):
