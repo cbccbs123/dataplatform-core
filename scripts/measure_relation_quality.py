@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import random
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from psycopg import Connection
@@ -39,6 +40,23 @@ from src.relations.quality.snapshot import (
 )
 
 LlmFn = Callable[[str], dict[str, Any]]
+
+# 🔴 스냅샷 생성은 **반드시 순차**다(1). 병렬로 올리지 마라 — 헌법 3조(결정 재현성) 위반이다.
+#
+# 2026-07-28 실측: 같은 시드·같은 프롬프트로 20자산을 두 번 돌렸을 때
+#   · 순차(1) → 제안 20/20 완전 동일
+#   · 동시(6) → 1/20 소스의 제안이 달라짐(duplicate_near→same_domain · confidence 0.8→0.85)
+# 원인은 LLM 서버의 연속 배칭(continuous batching)으로 보인다 — 같은 프롬프트가 다른 배치
+# 구성에 실리면 배치 행렬곱의 부동소수점 결합 순서가 달라져 로짓이 미세하게 흔들리고, 긴 생성에서
+# 그 편차가 누적돼 토큰 선택이 갈린다. temperature=0 으로는 막을 수 없다(샘플링이 아니라
+# 로짓 자체가 다르다).
+#
+# ⚠️ 판정(`scripts/judge_relations.py`)은 동시 6 이어도 결정적이다(39건 × 4회 실행 전부 동일).
+#    출력이 `verdict`·`why` 두 필드로 짧아 미세 편차가 토큰 선택을 뒤집지 못한다. 즉 이 제약은
+#    **긴 구조적 출력을 생성하는 호출에만** 적용된다.
+#
+# 대가: 자산당 ~13초라 1,000자산에 약 3.5시간이 걸린다. 그래도 재현 불가능한 측정보다는 낫다.
+_SNAPSHOT_CONCURRENCY = 1
 
 # shadow A/B 변형 — **운영 프롬프트는 바꾸지 않는다.** 여기 테이블만 갈아끼워 비교하고,
 # 통과한 변형만 나중에 운영 상수로 옮긴다(spec 폐기 기준 4항).
@@ -198,8 +216,8 @@ def build_snapshot(
         # 표본 경로 — 정답셋이 없으니 해소할 키도 없다(매핑·미해소는 빈 값).
         mapping, missing, sids = {}, [], sorted(source_ids or [])
 
-    sources: dict[str, SourceSnapshot] = {}
-    for sid in sids:
+    def _one(sid: str) -> tuple[str, SourceSnapshot]:
+        """소스 하나를 동결한다 — 다른 소스와 완전히 독립이라 병렬 실행이 안전하다."""
         with db.transaction() as conn:  # 짧은 읽기 트랜잭션 — 후보·프롬프트만
             cands, prompt = _read_candidates_prompt(
                 conn, sid, _settings(), config, prompt_variant=prompt_variant)
@@ -208,7 +226,7 @@ def build_snapshot(
         emb_map = target_emb_score_map(cands)
         raw = fn(prompt)  # ★ LLM(또는 주입) — 트랜잭션 밖
         edges = parse_and_normalize_edges(raw)
-        sources[sid] = SourceSnapshot(
+        return sid, SourceSnapshot(
             # 033 FR-004: 후보를 (id, emb_score) 로 동결 → N1 min_sim 스윕이 후보 단계 recall 을
             # 점수 임계로 재측정(전체 후보 기준 — proposed 부분집합 아님). path-only=0.0 그대로.
             candidates=tuple((str(c["id"]), float(c["emb_score"])) for c in cands),
@@ -223,6 +241,18 @@ def build_snapshot(
                 for e in edges
             ),
         )
+
+    # 소스별로 병렬 처리한다 — LLM 이 자산당 ~13초라 순차로는 1,000자산에 3시간 넘는다.
+    # **결정성은 유지된다**: ① 소스마다 결과가 독립이라 서로 영향이 없고 ② `ex.map` 이 입력
+    # 순서대로 결과를 돌려주며 ③ `sids` 가 이미 정렬돼 있어 dict 삽입 순서까지 같다.
+    # ⚠️ 동시성 상한은 DB 풀(max_pool_size 기본 10)보다 작게 유지한다 — 넘으면 커넥션 대기로
+    #    오히려 느려진다. 각 워커가 짧은 트랜잭션을 하나씩만 쓴다.
+    workers = min(_SNAPSHOT_CONCURRENCY, max(1, len(sids)))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            sources = dict(ex.map(_one, sids))
+    else:
+        sources = dict(_one(sid) for sid in sids)
     return Snapshot(config=config, sources=sources), mapping, missing
 
 
