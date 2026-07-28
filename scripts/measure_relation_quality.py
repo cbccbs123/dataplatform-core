@@ -53,8 +53,21 @@ def _source_summary_modality(conn: Connection[Any], asset_id: str) -> tuple[str,
     return str(r["summary"] or ""), str(r["modality"] or "")
 
 
-def _read_candidates_prompt(conn: Connection[Any], sid: str, cfg: Any, config: dict) -> tuple[list, str]:
-    """소스 sid 의 후보(union)와 LLM 프롬프트를 만든다(읽기 전용). LLM 호출은 호출자가 트랜잭션 밖에서."""
+def _read_candidates_prompt(
+    conn: Connection[Any], sid: str, cfg: Any, config: dict,
+    *, prompt_variant: dict | None = None,
+) -> tuple[list, str]:
+    """소스 sid 의 후보(union)와 LLM 프롬프트를 만든다(읽기 전용). LLM 호출은 호출자가 트랜잭션 밖에서.
+
+    Args:
+        sid: 소스 자산 id — 이 자산을 기준으로 후보를 모은다.
+        prompt_variant: shadow A/B 프롬프트 변형 정의. ``None``(기본)이면 운영과 같은 프롬프트다.
+            ⚠️ 지금은 **받아 두기만 하고 쓰지 않는다** — 실제 문구 주입은 프롬프트 seam(079 T402)
+            몫이라, 이 배선만으로는 어떤 값을 줘도 출력이 달라지지 않는다(동작 불변).
+
+    Returns:
+        ``(후보 목록, LLM 프롬프트)``.
+    """
     from src.relations.asset_candidates import find_embedding_candidates
     from src.relations.asset_entry import union_candidates
     from src.relations.path_signal import find_path_signal_candidates
@@ -77,36 +90,55 @@ def _read_candidates_prompt(conn: Connection[Any], sid: str, cfg: Any, config: d
 
 
 def build_snapshot(
-    db: PostgresUtil, golden: Golden, *, config: dict, llm_fn: LlmFn | None = None
+    db: PostgresUtil, golden: Golden | None = None, *, config: dict,
+    llm_fn: LlmFn | None = None, source_ids: list[str] | None = None,
+    prompt_variant: dict | None = None,
 ) -> tuple[Snapshot, dict[str, str], list[str]]:
-    """골든 소스마다 후보 union + 제안(llm_fn 또는 실 LLM)을 모아 (Snapshot, key_to_id, missing) 반환.
+    """소스마다 후보 union + 제안(llm_fn 또는 실 LLM)을 모아 (Snapshot, key_to_id, missing) 반환.
 
     ⚠️ **아무것도 저장하지 않는다** — 측정 전용이라 엣지·관계 어휘를 기록하지 않는다.
     ⚠️ LLM 호출은 **트랜잭션 밖**에서 한다 — 느린 호출이 커넥션을 붙잡으면 다른 작업이 밀린다.
 
     Args:
         db: DB 핸들.
-        golden: 정답 묶음.
+        golden: 정답 묶음. 주면 **여기서 소스를 도출한다**(쌍 양끝 + 고립). ``None`` 이면
+            ``source_ids`` 로 소스를 받는다.
         config: 후보 조회 설정(임계·상한 등).
         llm_fn: 제안 함수. **바꿔 끼울 수 있게 열어 뒀다** — 실제 LLM 없이 고정 응답으로
-            측정 배선을 검증한다.
+            측정 배선을 검증한다. ``None``(기본)이면 실 LLM(``propose_edges_json``).
+        source_ids: 소스 자산 id 목록. **골든 없이** 표본으로 스냅샷을 뜰 때 쓴다
+            (구·신 프롬프트 A/B 는 상대 비교라 정답셋이 필요 없다). ``None`` 이면 ``golden`` 경로.
+        prompt_variant: 프롬프트 변형 정의. ``None``(기본)이면 운영과 동일한 프롬프트를 쓴다.
 
     Returns:
         ``(스냅샷, 골든 키→자산 id 매핑, 해소 못 한 키 목록)``.
+        ``source_ids`` 경로에서는 골든이 없으므로 매핑·미해소가 빈 값이다.
+
+    Raises:
+        ValueError: ``golden`` 과 ``source_ids`` 를 둘 다 주거나 둘 다 안 줬을 때.
     """
     from src.relations.asset_entry import target_emb_score_map
     from src.relations.llm_propose import parse_and_normalize_edges, propose_edges_json
 
+    # 소스가 어디서 오는지 모호하면 "무엇을 측정했는가"가 흐려진다 — DB 를 건드리기 전에 막는다.
+    if (golden is None) == (source_ids is None):
+        raise ValueError("golden 과 source_ids 중 **정확히 하나**를 준다")
+
     fn: LlmFn = llm_fn if llm_fn is not None else propose_edges_json
-    with db.transaction() as conn:
-        mapping, missing = resolve_asset_keys(conn, golden)
-    source_keys = {k for p in golden.pairs for k in (p.a, p.b)} | set(golden.isolated)
-    source_ids = sorted({mapping[k] for k in source_keys if k in mapping})
+    if golden is not None:
+        with db.transaction() as conn:
+            mapping, missing = resolve_asset_keys(conn, golden)
+        source_keys = {k for p in golden.pairs for k in (p.a, p.b)} | set(golden.isolated)
+        sids = sorted({mapping[k] for k in source_keys if k in mapping})
+    else:
+        # 표본 경로 — 정답셋이 없으니 해소할 키도 없다(매핑·미해소는 빈 값).
+        mapping, missing, sids = {}, [], sorted(source_ids or [])
 
     sources: dict[str, SourceSnapshot] = {}
-    for sid in source_ids:
+    for sid in sids:
         with db.transaction() as conn:  # 짧은 읽기 트랜잭션 — 후보·프롬프트만
-            cands, prompt = _read_candidates_prompt(conn, sid, _settings(), config)
+            cands, prompt = _read_candidates_prompt(
+                conn, sid, _settings(), config, prompt_variant=prompt_variant)
         # 033 FR-006: 후보의 {id: emb_score} 맵을 동결해 제안 엣지에 부착(2D 자동승인 스윕/AND 게이트가 참조).
         # path-only 후보·후보 맵 밖 타깃(LLM 환각)은 0.0 sentinel — target_emb_score_map 이 union 후보 그대로 보존.
         emb_map = target_emb_score_map(cands)
