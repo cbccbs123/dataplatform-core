@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -207,6 +208,8 @@ def build_snapshot(
         raise ValueError("golden 과 source_ids 중 **정확히 하나**를 준다")
 
     fn: LlmFn = llm_fn if llm_fn is not None else propose_edges_json
+    # 소스별 제안 실패를 모은다 — 조용히 넘기면 "제안이 없는 자산"과 구분되지 않는다.
+    _failures: list[tuple[str, str]] = []
     if golden is not None:
         with db.transaction() as conn:
             mapping, missing = resolve_asset_keys(conn, golden)
@@ -224,8 +227,22 @@ def build_snapshot(
         # 033 FR-006: 후보의 {id: emb_score} 맵을 동결해 제안 엣지에 부착(2D 자동승인 스윕/AND 게이트가 참조).
         # path-only 후보·후보 맵 밖 타깃(LLM 환각)은 0.0 sentinel — target_emb_score_map 이 union 후보 그대로 보존.
         emb_map = target_emb_score_map(cands)
-        raw = fn(prompt)  # ★ LLM(또는 주입) — 트랜잭션 밖
-        edges = parse_and_normalize_edges(raw)
+        # ★ LLM(또는 주입) — 트랜잭션 밖.
+        # ⚠️ **한 소스의 실패가 전체 실행을 죽이지 않게 흡수한다.** 450자산 순차 실행이 90분인데,
+        #    LLM 응답 하나가 파싱 불가하면(빈 응답·스키마 불능) 그 시간이 통째로 날아간다.
+        #    실제로 겪었다 — `RelationProposalParseError` 한 건으로 A팔이 소멸했고, 부분 결과도
+        #    남지 않아 재시작밖에 없었다. 판정 러너(`judge_relations.judge_one`)는 처음부터
+        #    건별로 흡수했는데 여기만 빠져 있었다.
+        #    실패한 소스는 **제안 0건으로 기록**한다 — 스냅샷에서 사라지면 "후보는 있었는데 제안이
+        #    없었다"와 "실행이 실패했다"를 구분할 수 없다. `_failures` 로 별도 집계해 보고한다.
+        try:
+            raw = fn(prompt)
+            edges = parse_and_normalize_edges(raw)
+        except Exception as exc:  # noqa: BLE001 — 한 건 실패가 측정 전체를 멈추지 않게
+            print(f"⚠️ 제안 실패(소스 {sid}): {type(exc).__name__} — 제안 0건으로 기록하고 계속한다.",
+                  flush=True)
+            _failures.append((sid, type(exc).__name__))
+            edges = []
         return sid, SourceSnapshot(
             # 033 FR-004: 후보를 (id, emb_score) 로 동결 → N1 min_sim 스윕이 후보 단계 recall 을
             # 점수 임계로 재측정(전체 후보 기준 — proposed 부분집합 아님). path-only=0.0 그대로.
@@ -253,7 +270,19 @@ def build_snapshot(
             sources = dict(ex.map(_one, sids))
     else:
         sources = dict(_one(sid) for sid in sids)
-    return Snapshot(config=config, sources=sources), mapping, missing
+    if _failures:
+        rate = len(_failures) / max(1, len(sids))
+        kinds = Counter(k for _, k in _failures)
+        print(f"⚠️ 제안 실패 {len(_failures)}/{len(sids)}건 ({100 * rate:.1f}%) — {dict(kinds)}",
+              flush=True)
+        # 실패가 많으면 그 스냅샷으로 A/B 를 하면 안 된다 — "개입 효과"와 "실패 분포 차이"가
+        # 섞여 구분되지 않는다. 임계는 판정 러너의 error 게이트(5%)와 같이 둔다.
+        if rate > 0.05:
+            print(f"🔴 실패율 {100 * rate:.1f}% > 5% — 이 스냅샷은 A/B 비교에 쓰지 말 것"
+                  f"(개입 효과와 실패 분포가 섞인다).", flush=True)
+    # config 에 실패 요약을 남긴다 — 스냅샷 파일만 보고도 신뢰도를 판단할 수 있어야 한다.
+    config_out = {**config, "propose_failures": len(_failures), "sources_total": len(sids)}
+    return Snapshot(config=config_out, sources=sources), mapping, missing
 
 
 def _settings() -> Any:
