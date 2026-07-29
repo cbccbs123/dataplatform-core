@@ -45,6 +45,16 @@ migrate = ["alembic>=1.13.0"]
 where = ["."]
 include = ["src*"]
 
+# 🔴 코드가 런타임에 읽는 데이터 파일 — 없으면 **설치본에서 import 가 터진다.**
+# `src/relations/prompt.py:36` 이 `Path(__file__).resolve().parent / "taxonomy_seed.json"` 으로
+# 읽으므로 wheel 에 함께 담겨야 한다. editable 설치(`pip install -e .`)는 소스 트리를 가리켜
+# 문제가 없어서 로컬에서는 드러나지 않고, **비-editable 설치에서만 FileNotFoundError** 가 난다.
+# 실제로 파이프라인 CI 가 코어를 처음 실제 설치해 테스트를 돌리자 드러났다(2026-07-29).
+# ⚠️ 와일드카드(`*.json`) 대신 **파일명을 명시**한다 — 새 JSON 이 실수로 배포에 섞이는 것도 막는다.
+#    시드를 추가하면 여기도 함께 추가해야 한다. `tests/test_package_data.py` 가 누락을 잡는다.
+[tool.setuptools.package-data]
+"src.relations" = ["taxonomy_seed.json", "subtopic_seed.json"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
