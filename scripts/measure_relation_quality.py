@@ -62,18 +62,20 @@ _SNAPSHOT_CONCURRENCY = 1
 # shadow A/B 변형 — **운영 프롬프트는 바꾸지 않는다.** 여기 테이블만 갈아끼워 비교하고,
 # 통과한 변형만 나중에 운영 상수로 옮긴다(spec 폐기 기준 4항).
 PROMPT_VARIANTS: dict[str, dict] = {
-    # 대조군 — 현행 운영 프롬프트 그대로.
+    # 대조군 — 현행 운영 프롬프트 그대로. 2026-07-29 채택으로 옛 "no-circular-hint" 변형이
+    # 운영 기본값이 됐으므로 baseline 이 곧 그 문구다.
     "baseline": {},
-    # 순환 지시 제거. 현행 두 문장은 함께 읽으면 "전 후보에 duplicate_near 를 붙여라"가 된다 —
-    # 모든 후보가 정의상 임베딩 유사도로 온 것이기 때문이다(active 83% 쏠림의 유력 원인).
-    "no-circular-hint": {
+    # 채택 이전의 운영 문구(순환 지시 포함) — §4 shadow A/B 를 현재 코드에서 재현하거나
+    # 회귀 비교할 때만 쓴다. 순환 지시: 후보는 정의상 전부 임베딩 유사도로 온 것이라
+    # "임베딩 유사도로 가져온 후보처럼" 힌트는 "전 후보에 duplicate_near"가 된다.
+    "circular-hint-legacy": {
         "kind_hints_override": {
-            "duplicate_near": "**같은 구체적 대상**을 거의 같은 형식으로 담은 사실상 중복본일 때",
-            "same_domain": "대상은 다르지만 같은 분야로 묶일 때",
+            "duplicate_near": "임베딩 유사도로 가져온 후보처럼 **내용·장면·주제 근접**할 때",
+            "same_domain": "같은 주제·분야·도메인으로 묶일 때(예: 둘 다 게임, 둘 다 교통)",
         },
         "anti_dup_override": (
-            "\n\n**구분:** 주제·세부주제가 같아도 **다루는 대상이 다르면** "
-            "``duplicate_near`` 가 아니다. 대상이 다르고 분야만 같으면 ``same_domain`` 이다."
+            "\n\n**구분:** 단순히 주제가 같으면 ``same_domain`` , "
+            "유사도·근접 후보라면 ``duplicate_near`` 를 우선 고려한다."
         ),
     },
 }

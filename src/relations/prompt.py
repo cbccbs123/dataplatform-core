@@ -92,10 +92,13 @@ _PATH_SIGNAL_GUIDE_KO = """### 파일명·폴더 경로 신호 가이드 (보조
 """
 
 # relation_type_code(= kind_code) 선택 힌트: DB에 없을 때 프롬프트에 보조 설명으로 쓴다.
+# ⚠️ duplicate_near 힌트에 "임베딩 유사도로 가져온 후보처럼" 류의 표현을 쓰지 말 것 —
+#    후보는 정의상 전부 임베딩 유사도로 온 것이라 "모든 후보=duplicate_near" 순환 지시가 된다
+#    (shadow A/B 로 검증된 오분류 원인 · docs/관계_품질_측정_20260728.md §4).
 RELATION_KIND_HINTS_KO: dict[str, str] = {
-    "same_domain": "같은 주제·분야·도메인으로 묶일 때(예: 둘 다 게임, 둘 다 교통)",
+    "same_domain": "대상은 다르지만 같은 분야로 묶일 때",
     "same_series": "같은 시리즈·연작·브랜드 라인업 등 **연속·묶음**일 때",
-    "duplicate_near": "임베딩 유사도로 가져온 후보처럼 **내용·장면·주제 근접**할 때",
+    "duplicate_near": "**같은 구체적 대상**을 거의 같은 형식으로 담은 사실상 중복본일 때",
     "references": "명시적 인용·링크·제목 참조 등 **참조** 관계일 때",
     "derived_from": "한쪽이 다른쪽에서 **파생·생성**된 관계일 때",
 }
@@ -106,8 +109,8 @@ RELATION_KIND_HINTS_KO: dict[str, str] = {
 # ⚠️ 문구를 고치면 운영 관계 생성 출력이 바뀐다 — 변형은 측정 스크립트의 override 로만 주고,
 #    검증된 뒤에야 여기를 바꾼다.
 RELATION_ANTI_DUP_HINT_KO = (
-    "\n\n**구분:** 단순히 주제가 같으면 ``same_domain`` , "
-    "유사도·근접 후보라면 ``duplicate_near`` 를 우선 고려한다."
+    "\n\n**구분:** 주제·세부주제가 같아도 **다루는 대상이 다르면** "
+    "``duplicate_near`` 가 아니다. 대상이 다르고 분야만 같으면 ``same_domain`` 이다."
 )
 
 
