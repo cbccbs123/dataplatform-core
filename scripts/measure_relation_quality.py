@@ -22,7 +22,6 @@ import json
 import random
 from collections import Counter
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from psycopg import Connection
@@ -42,21 +41,28 @@ from src.relations.quality.snapshot import (
 
 LlmFn = Callable[[str], dict[str, Any]]
 
-# 🔴 스냅샷 생성은 **반드시 순차**다(1). 병렬로 올리지 마라 — 헌법 3조(결정 재현성) 위반이다.
+# 🔴 스냅샷 생성은 **반드시 순차**다(1). 병렬로 올리지 마라 — 집계 잡음이 10배로 커진다.
 #
-# 2026-07-28 실측: 같은 시드·같은 프롬프트로 20자산을 두 번 돌렸을 때
-#   · 순차(1) → 제안 20/20 완전 동일
-#   · 동시(6) → 1/20 소스의 제안이 달라짐(duplicate_near→same_domain · confidence 0.8→0.85)
-# 원인은 LLM 서버의 연속 배칭(continuous batching)으로 보인다 — 같은 프롬프트가 다른 배치
-# 구성에 실리면 배치 행렬곱의 부동소수점 결합 순서가 달라져 로짓이 미세하게 흔들리고, 긴 생성에서
-# 그 편차가 누적돼 토큰 선택이 갈린다. temperature=0 으로는 막을 수 없다(샘플링이 아니라
-# 로짓 자체가 다르다).
+# ⚠️ **LLM 생성은 순차로도 완전 재현되지 않는다.** 같은 시드·같은 프롬프트로 20자산을 2회 돌린
+# 실측(2026-07-29):
+#   · 순차 · 개입안 변형   → 제안 0/20 상이 · 집계 차이 0.0pp
+#   · 순차 · **운영 프롬프트** → 제안 **2/20 상이** · 집계 차이 0.3pp   ← 순차도 흔들린다
+#   · 동시(6)              → 제안 1/20 상이 · 집계 차이 **3.2pp**      ← 잡음이 10배
+# 원인은 LLM 서버의 연속 배칭(continuous batching)이다 — 같은 프롬프트가 다른 배치 구성에 실리면
+# 배치 행렬곱의 부동소수점 결합 순서가 달라져 로짓이 미세하게 흔들리고, 긴 생성에서 그 편차가
+# 누적돼 토큰 선택이 갈린다. **temperature=0 으로 막을 수 없다**(샘플링이 아니라 로짓이 다르다).
 #
-# ⚠️ 판정(`scripts/judge_relations.py`)은 동시 6 이어도 결정적이다(39건 × 4회 실행 전부 동일).
-#    출력이 `verdict`·`why` 두 필드로 짧아 미세 편차가 토큰 선택을 뒤집지 못한다. 즉 이 제약은
+# 그래서 순차를 유지하는 근거는 "순차면 동일하다"가 **아니라** "순차가 집계 잡음을 10배 작게
+# 유지한다"다. 재현성 기준도 "2회 실행 100% 동일"에서 **"후보 집합 100% 동일 + 집계 잡음이
+# 개입 효과의 1/10 이하"** 로 교체됐다 — 근거·전체 표는 `docs/decisions/2026-07-29-llm-determinism-layers.md`
+# (앞선 "순차는 결정적, 병렬이 원인" 보고는 표본 1회로 단정한 오보였고 같은 ADR 에서 정정했다).
+#
+# ⚠️ 판정(`scripts/judge_relations.py`)은 동시 6 이어도 관측상 안정적이다(39건 × 4회 전부 동일).
+#    출력이 `verdict`·`why` 두 필드로 짧아 미세 편차가 토큰 선택을 뒤집지 못한다 — 즉 이 제약은
 #    **긴 구조적 출력을 생성하는 호출에만** 적용된다.
 #
-# 대가: 자산당 ~13초라 1,000자산에 약 3.5시간이 걸린다. 그래도 재현 불가능한 측정보다는 낫다.
+# 대가: 자산당 ~13초라 1,000자산에 약 3.5시간이 걸린다. 그래도 잡음에 파묻힌 측정보다는 낫다.
+# 값을 바꾸면 `tests/test_measure_relation_quality.py` 의 봉인 테스트가 실패한다(의도적 장치).
 _SNAPSHOT_CONCURRENCY = 1
 
 # shadow A/B 변형 — **운영 프롬프트는 바꾸지 않는다.** 여기 테이블만 갈아끼워 비교하고,
@@ -69,7 +75,7 @@ PROMPT_VARIANTS: dict[str, dict] = {
     # 착안: 채택본의 "거의 같은 형식" 조건이 DB 정의보다 좁아 매체만 다른 같은-대상 쌍을
     # same_domain 으로 밀어냄(골든 실증). 형식 조건을 제거하면 그 오분류가 실제로 고쳐진다
     # (골든 kind_acc 61.2→79.7% · 모집단에서 same_domain 오배치 strong 59→14건).
-    # 폐기 이유: **자동승인 정밀도가 82.1→66.5% 로 무너진다**(081 이 쓰는 결정 지표) —
+    # 폐기 이유: **자동승인 정밀도가 82.1→66.5% 로 무너진다**(`specs/081-relation-approval-exposure/spec.md` 가 쓰는 결정 지표) —
     # duplicate_near 가 331쌍으로 넓어지며 weak 157건을 함께 삼킨다. 명시적 관계도 27→3쌍 붕괴.
     # 보존 이유: "형식 조건 제거"는 직관적으로 옳아 보여 재시도 유혹이 큰 안이다. 측정 결과를
     # 코드에 남겨 같은 길을 두 번 가지 않게 한다.
@@ -274,17 +280,10 @@ def build_snapshot(
             ),
         )
 
-    # 소스별로 병렬 처리한다 — LLM 이 자산당 ~13초라 순차로는 1,000자산에 3시간 넘는다.
-    # **결정성은 유지된다**: ① 소스마다 결과가 독립이라 서로 영향이 없고 ② `ex.map` 이 입력
-    # 순서대로 결과를 돌려주며 ③ `sids` 가 이미 정렬돼 있어 dict 삽입 순서까지 같다.
-    # ⚠️ 동시성 상한은 DB 풀(max_pool_size 기본 10)보다 작게 유지한다 — 넘으면 커넥션 대기로
-    #    오히려 느려진다. 각 워커가 짧은 트랜잭션을 하나씩만 쓴다.
-    workers = min(_SNAPSHOT_CONCURRENCY, max(1, len(sids)))
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            sources = dict(ex.map(_one, sids))
-    else:
-        sources = dict(_one(sid) for sid in sids)
+    # 소스를 **하나씩 순차로** 처리한다(위 `_SNAPSHOT_CONCURRENCY` 주석의 근거).
+    # 병렬 분기를 남겨두지 않는 이유: 상한이 1 이라 그 분기는 도달 불가능한 죽은 코드였고,
+    # 죽은 병렬 경로는 "올려도 되나 보다"는 오해를 부른다. 되살릴 땐 위 ADR 을 먼저 읽어라.
+    sources = dict(_one(sid) for sid in sids)
     if _failures:
         rate = len(_failures) / max(1, len(sids))
         kinds = Counter(k for _, k in _failures)
@@ -377,7 +376,7 @@ def cmd_curate(db: PostgresUtil, out_path: str, *, edge_conf_min: float) -> dict
         raw_pairs = _bootstrap_candidate_pairs(conn, edge_conf_min=edge_conf_min)
         # 부트스트랩 쌍(고conf graph_edge + path_signal)에 등장한 자산 = 관계/경로 후보 보유.
         ids = {p["a"] for p in raw_pairs} | {p["b"] for p in raw_pairs}
-        # C2(051): registered 중 그 집합에 없는 자산 = 관계 0 ∧ path 0 = 고립 후보(관계 단계·FR-101).
+        # `specs/051-relation-golden-coverage/spec.md` C2: registered 중 그 집합에 없는 자산 = 관계 0 ∧ path 0 = 고립 후보(관계 단계·FR-101).
         #   035 isolation 의미(평가완료·엣지 0)와 일치. min_sim 이 낮아 임베딩 후보는 거의 모두 존재하므로
         #   "임베딩 후보 0" 대신 "관계/경로 후보 0"으로 고립을 정의한다(임베딩 전수 스캔 불요·결정적).
         reg_ids = _registered_asset_ids(conn)
@@ -504,7 +503,7 @@ def cmd_measure(golden: Golden, snapshot_path: str, *, confidence_min: float = 0
     """골든+스냅샷 → 리포트. LLM 0·DB 0(스냅샷에 key_to_id 포함 — 결정적·SC-002).
 
     ``confidence_min``: 제안 엣지 accepted 판정 임계. **프로덕션 자동승인(RELATION_AUTO_APPROVE_MIN=0.9)
-    으로 측정해야 precision/recall/isolation 이 실제 동작을 반영**한다(051 — 0.0 이면 저신뢰 제안까지
+    으로 측정해야 precision/recall/isolation 이 실제 동작을 반영**한다(`specs/051-relation-golden-coverage/spec.md` — 0.0 이면 저신뢰 제안까지
     accepted 로 세어 isolation_accuracy 가 항상 0). 비회귀 게이트는 baseline 의 confidence_min 을 재사용한다.
 
     033 FR-004·005: 동결 스냅샷 위에서 min_sim 스윕(N1)·2D 자동승인 스윕(#3) 표를 더해 출력한다.

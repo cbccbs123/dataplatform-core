@@ -306,5 +306,30 @@ class TestSampleActiveSources(unittest.TestCase):
             sample_active_sources(self._db([]), n=10, seed=1)
 
 
+class TestSnapshotConcurrencySealed(unittest.TestCase):
+    """스냅샷 동시성 상한 봉인 — 값을 올리면 집계 잡음이 10배가 된다.
+
+    이 상수는 🔴 주석까지 달린 안전 장치인데 봉인 테스트가 없었다(2026-07-30 리뷰 지적).
+    형제 스크립트 `judge_relations.py` 의 `ERROR_RATE_MAX` 는 이미 봉인돼 있어 비대칭이었다.
+    실측 근거: 순차 0.3pp vs 동시6 3.2pp(`docs/decisions/2026-07-29-llm-determinism-layers.md`).
+    """
+
+    def test_동시성_상한이_1이다(self):
+        import scripts.measure_relation_quality as mrq
+        self.assertEqual(
+            mrq._SNAPSHOT_CONCURRENCY, 1,
+            "스냅샷 생성 동시성을 올렸다 — 집계 잡음이 개입 효과를 덮는다. "
+            "docs/decisions/2026-07-29-llm-determinism-layers.md 를 먼저 읽어라.")
+
+    def test_병렬_실행기를_import_하지_않는다(self):
+        # 죽은 병렬 경로가 남아 있으면 "올려도 되나 보다"는 오해를 부른다.
+        import inspect
+
+        import scripts.measure_relation_quality as mrq
+        src = inspect.getsource(mrq)
+        self.assertNotIn("ThreadPoolExecutor", src.split('"""', 2)[-1],
+                         "스냅샷 러너에 병렬 실행기가 다시 들어왔다")
+
+
 if __name__ == "__main__":
     unittest.main()

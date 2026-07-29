@@ -10,6 +10,7 @@ from scripts.judge_snapshot import (
     collect_pairs,
     compare_arms,
     gate_stats,
+    judge_snapshots,
     pair_key,
     to_judge_row,
 )
@@ -148,6 +149,83 @@ class TestCompareArms(unittest.TestCase):
         got = compare_arms(snaps, empty, arm_pairs)
         self.assertEqual(got["A"]["rated"], 0)
         self.assertEqual(got["A"]["strong_count"], 0)
+
+
+class _FakeDb:
+    """`fetch_assets` 가 요구하는 최소 인터페이스만 흉내낸다(LLM·실 DB 없이 계약만 본다)."""
+
+    class _Cur:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def execute(self, *_a, **_k):
+            return None
+
+        def fetchall(self):
+            return self._rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    class _Conn:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def cursor(self, **_k):
+            return _FakeDb._Cur(self._rows)
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def transaction(self):
+        conn = _FakeDb._Conn(self._rows)
+
+        class _Ctx:
+            def __enter__(self_inner):
+                return conn
+
+            def __exit__(self_inner, *_a):
+                return False
+
+        return _Ctx()
+
+
+def _asset_row(aid):
+    return {"asset_id": aid, "name": f"{aid}.txt", "modality": "text",
+            "topic": "역사", "summary": "요약", "keywords": "키워드"}
+
+
+class TestJudgeSnapshotsContract(unittest.TestCase):
+    """`judge_snapshots` 의 메타데이터·재사용 계약.
+
+    측정 식별자를 **인자로 받아야** 한다 — 본문에 박으면 다음 실험의 산출 파일이 이전 실험의
+    이름표를 달고, 사후에 "무엇을 쟀나"를 판별할 수 없어진다(2026-07-30 리뷰 지적).
+    """
+
+    def _run(self, **kw):
+        snaps = {"A": _snap(("s1", [("t1", "duplicate_near")]))}
+        db = _FakeDb([_asset_row("s1"), _asset_row("t1")])
+        return judge_snapshots(db, snaps, llm=lambda _p: {"verdict": "strong", "why": "같은 대상"},
+                               judge_model="fake-model", **kw)
+
+    def test_측정_식별자와_설명을_인자로_받는다(self):
+        vs, _ = self._run(measure_id="20260930-my-exp", method="내 실험 설명")
+        self.assertEqual(vs.measure_id, "20260930-my-exp")
+        self.assertEqual(vs.method, "내 실험 설명")
+
+    def test_하드코딩된_옛_식별자가_남아_있지_않다(self):
+        vs, _ = self._run(measure_id="20260930-my-exp", method="설명")
+        self.assertNotEqual(vs.measure_id, "20260728-shadow-ab")
+        self.assertNotIn("순환 지시", vs.method)
+
+    def test_재사용_라벨이_있는_쌍은_다시_판정하지_않는다(self):
+        key = pair_key("s1", "t1")
+        vs, arm_pairs = self._run(measure_id="m", method="설명", reuse={key: "weak"})
+        self.assertEqual(len(vs.verdicts), 0, "재사용 대상인데 새로 판정했다")
+        self.assertEqual(arm_pairs["A"], {key}, "팔의 쌍 목록은 재사용과 무관하게 온전해야 한다")
 
 
 if __name__ == "__main__":

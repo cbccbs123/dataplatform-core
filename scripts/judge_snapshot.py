@@ -26,13 +26,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 from scripts.judge_relations import _CONCURRENCY, judge_one
+from scripts.measure_relation_quality import assert_same_candidates
 
 from src.config.settings import get_current_settings, init_settings
 from src.database.postgres_util import PostgresUtil
@@ -161,44 +164,71 @@ def to_judge_row(key: str, a: dict, b: dict) -> dict:
             "b_sum": b["summary"], "b_kw": b["keywords"]}
 
 
-def judge_snapshots(db: PostgresUtil, snaps: dict[str, Snapshot]) -> tuple[VerdictSet, dict]:
+def judge_snapshots(
+    db: PostgresUtil,
+    snaps: dict[str, Snapshot],
+    *,
+    measure_id: str,
+    method: str,
+    reuse: dict[str, str] | None = None,
+    llm: Callable[[str], dict[str, Any]] | None = None,
+    judge_model: str | None = None,
+) -> tuple[VerdictSet, dict]:
     """여러 스냅샷의 제안 쌍을 **합집합으로 한 번씩** 판정한다.
 
     같은 쌍이 두 팔에 모두 있으면 한 번만 판정해 양쪽이 같은 결과를 공유한다 — 판정을 두 번 하면
     같은 쌍에 다른 라벨이 붙어 A/B 차이가 판정 잡음으로 오염된다.
 
+    ``measure_id``·``method`` 를 **인자로 받는다**: 이 함수는 여러 실험에 재사용되므로
+    (ADR 2026-07-29 가 이 방식을 프롬프트 개입 판정의 표준으로 정했다) 값을 본문에 박으면
+    나중에 저장된 파일이 **다른 실험의 이름표를 달게 된다** — 사후에 "무엇을 쟀나"를 판별할
+    수 없어지고, 그게 이 측정 인프라의 존재 이유를 무너뜨린다.
+
     Args:
         db: DB 핸들(읽기 전용).
         snaps: ``{팔 이름: 스냅샷}``.
+        measure_id: 이 측정의 식별자(``YYYYMMDD-<축>`` · 저장 파일명과 같게 쓴다).
+        method: 이 측정이 무엇을 반증·비교하려 하는지 사람이 읽는 설명.
+        reuse: ``{쌍 키: 판정}`` — 이미 판정된 쌍의 라벨. 준 쌍은 **다시 판정하지 않는다**.
+            맹검 판정은 쌍의 내용만 보므로 팔이 달라도 같은 라벨을 공유하는 것이 원칙이고,
+            재사용하면 LLM 호출과 판정 잡음이 함께 줄어든다. ``None`` 이면 전부 새로 판정한다.
+        llm: 판정에 쓸 LLM 함수(주입 seam · 레포 관례). ``None`` 이면 온프레미스 seam
+            ``src.llm.client.complete_json`` 을 쓴다 — 테스트는 가짜 함수를 주입해 실 LLM 없이
+            계약만 검증한다(헌법 2조: 운영 호출은 항상 이 seam 경유).
+        judge_model: 판정 모델 표기(재현용 메타). ``None``(운영 기본)이면 활성 설정에서 읽는다 —
+            테스트처럼 설정 초기화 없이 부를 때만 명시한다.
 
     Returns:
-        ``(판정 묶음, {팔 이름: 그 팔의 쌍 키 집합})``.
+        ``(판정 묶음, {팔 이름: 그 팔의 쌍 키 집합})``. 판정 묶음에는 **새로 판정한 쌍만**
+        담긴다(재사용분은 호출부가 이미 갖고 있다).
     """
     per_arm = {arm: collect_pairs(s) for arm, s in snaps.items()}
     union: dict[str, tuple[str, str]] = {}
     for pairs in per_arm.values():
         union.update(pairs)
 
-    need = sorted({x for pair in union.values() for x in pair})
+    todo = {k: v for k, v in union.items() if not reuse or k not in reuse}
+    if reuse:
+        print(f"기존 판정 재사용 {len(union) - len(todo)}쌍 · 신규 판정 {len(todo)}쌍")
+
+    need = sorted({x for pair in todo.values() for x in pair})
     assets = fetch_assets(db, need)
-    missing = [k for k, (s, t) in union.items() if s not in assets or t not in assets]
+    missing = [k for k, (s, t) in todo.items() if s not in assets or t not in assets]
     if missing:
         print(f"⚠️ 자산 내용을 못 읽은 쌍 {len(missing)}건 — 판정에서 제외한다(예: {missing[:2]}).")
 
-    rows = [to_judge_row(k, assets[s], assets[t]) for k, (s, t) in sorted(union.items())
+    rows = [to_judge_row(k, assets[s], assets[t]) for k, (s, t) in sorted(todo.items())
             if s in assets and t in assets]
     print(f"판정 대상 쌍 {len(rows)}건(합집합) — 시작(동시 {_CONCURRENCY})", flush=True)
     with ThreadPoolExecutor(max_workers=_CONCURRENCY) as ex:
         results = list(ex.map(
-            lambda r: judge_one(r, rubric=RUBRIC_KO_V1, llm=complete_json), rows))
+            lambda r: judge_one(r, rubric=RUBRIC_KO_V1, llm=llm or complete_json), rows))
 
     vs = VerdictSet(
-        measure_id="20260728-shadow-ab",
-        method=("shadow A/B — 관계 종류 힌트의 순환 지시 제거(prompt.py:98 duplicate_near · "
-                ":135 anti_dup) 효과 측정. 두 팔의 제안 쌍을 합집합으로 한 번씩 판정하고, "
-                "판정자에게는 kind·confidence 는 물론 **어느 팔인지도** 숨긴다."),
+        measure_id=measure_id,
+        method=method,
         rubric_version=RUBRIC_VERSION, rubric_text=RUBRIC_KO_V1,
-        judge_model=get_current_settings().meta_model, seed=0, strata="shadow-ab-pair",
+        judge_model=judge_model or get_current_settings().meta_model, seed=0, strata="shadow-ab-pair",
         created_at=datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
         sample_edge_ids=tuple(r["edge_id"] for r in rows), verdicts=tuple(results))
     return vs, {arm: set(pairs) for arm, pairs in per_arm.items()}
@@ -262,6 +292,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--arm", action="append", metavar="이름=경로", required=True,
                     help="비교할 팔(예: --arm A=/tmp/snap_A.json --arm B=/tmp/snap_B.json)")
     ap.add_argument("--out", required=True, help="판정 결과 저장 경로")
+    ap.add_argument("--measure-id", dest="measure_id", default=None,
+                    help="측정 식별자(YYYYMMDD-<축>). 미지정 시 --out 파일명(확장자 제외)을 쓴다")
+    ap.add_argument("--method", default=None,
+                    help="이 측정이 무엇을 비교·반증하려 하는지 한 문단. 미지정 시 팔 이름으로 생성")
+    ap.add_argument("--reuse", action="append", default=None, metavar="판정JSON",
+                    help="이미 판정된 라벨 파일(여러 번 지정 가능). 같은 쌍은 재판정하지 않는다")
+    ap.add_argument("--allow-candidate-diff", action="store_true",
+                    help="후보 집합이 팔마다 달라도 계속한다(기본은 중단 — 프롬프트 효과가 아니라 "
+                         "후보 차이를 재게 되므로 비교가 무효다)")
     args = ap.parse_args(argv)
 
     dotenv_path = Path(__file__).resolve().parents[1] / f".env.{args.env}"
@@ -279,9 +318,33 @@ def main(argv: list[str] | None = None) -> int:
         # measure_relation_quality 는 {snapshot, key_to_id, missing_keys} 로 감싸 저장한다.
         snaps[name] = load_snapshot(payload.get("snapshot", payload))
 
+    # 후보 집합 동일성을 **자동으로** 검사한다 — 사람이 잊으면 오염된 A/B 를 그대로 판정하고
+    # "프롬프트 때문에 좋아졌다"는 잘못된 결론이 나온다(폐기 기준 ④′ · ADR 2026-07-29).
+    names = list(snaps)
+    if len(names) >= 2 and not args.allow_candidate_diff:
+        base = names[0]
+        for other in names[1:]:
+            try:
+                assert_same_candidates(snaps[base], snaps[other])
+            except AssertionError as exc:
+                ap.error(f"후보 집합이 팔 {base!r}↔{other!r} 에서 다르다 — 비교 무효. "
+                         f"의도한 것이면 --allow-candidate-diff 를 준다.\n  {exc}")
+        print(f"✅ 후보 집합 동일({' == '.join(names)}) — 프롬프트 효과만 비교된다")
+
+    reuse: dict[str, str] = {}
+    for path in args.reuse or []:
+        prev = json.loads(Path(path).read_text(encoding="utf-8"))
+        reuse.update({r["edge_id"]: r["verdict"] for r in prev["verdicts"]})
+
+    measure_id = args.measure_id or Path(args.out).stem
+    method = args.method or (
+        f"스냅샷 팔 비교({' vs '.join(names)}) — 두 팔의 제안 쌍을 합집합으로 한 번씩 맹검 "
+        "판정한다(판정자에게 kind·confidence 는 물론 어느 팔인지도 숨긴다).")
+
     db = PostgresUtil()
     with db:
-        vs, arm_pairs = judge_snapshots(db, snaps)
+        vs, arm_pairs = judge_snapshots(
+            db, snaps, measure_id=measure_id, method=method, reuse=reuse or None)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(dump_verdicts(vs), ensure_ascii=False, indent=1),
                               encoding="utf-8")

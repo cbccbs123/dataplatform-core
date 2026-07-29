@@ -5,7 +5,7 @@
 읽는다(LLM 재호출 0).
 
 **설계 판단 — 왜 골든이 아닌가**: 골든(``tests/golden/relations/``)은 사람이 검증한 *정답*이고
-실 코퍼스 ``asset_id`` 종속이라 로컬 유지다(``.gitignore:98``·051 C4). 판정은 성격이 반대다 —
+실 코퍼스 ``asset_id`` 종속이라 로컬 유지다(``.gitignore:98``·`specs/051-relation-golden-coverage/spec.md` C4). 판정은 성격이 반대다 —
 작고, 코퍼스가 아니라 *측정*의 기록이며, **커밋되지 않으면 존재 이유(재현 가능성)가 사라진다**.
 그래서 추적되는 ``tests/fixtures/search/golden_os.judgments.json`` 선례를 따른다. 경로가 다른 것이
 "판정을 골든으로 자동 승격하지 않는다"는 규율을 물리적으로 강제한다.
