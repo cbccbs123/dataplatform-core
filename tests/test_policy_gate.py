@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import re
 import unittest
+from pathlib import Path
 
 import scripts.policy_gate as pg
+
+_ROOT = Path(pg.ROOT)
 
 
 def _line1(src: str) -> str:
@@ -60,6 +63,37 @@ class TestGateBehaviorWithMasking(unittest.TestCase):
     def test_temperature_in_code_flagged(self) -> None:
         m = pg.TEMP_RX.search(_line1("call(temperature=0.7)\n"))
         self.assertTrue(m and float(m.group(1)) != 0)
+
+
+class TestScanScope(unittest.TestCase):
+    """스캔 범위 봉인 — `scripts/` 가 빠지면 LLM 호출 도구가 헌법 게이트 밖에 남는다.
+
+    2026-07-30 정책 감사가 이 구멍을 지적했다: `judge_relations`·`judge_snapshot` 은
+    `src/llm/client.py` seam 을 경유해 실제로 LLM 을 호출하는데 게이트는 `src/` 만 훑었다.
+    """
+
+    def test_스캔_루트에_src와_scripts가_모두_있다(self) -> None:
+        tails = {Path(r).name for r in pg.SCAN_ROOTS}
+        self.assertEqual(tails, {"src", "scripts"})
+
+    def test_없는_루트는_예외없이_건너뛴다(self) -> None:
+        # 레포 구성에 따라 scripts/ 가 없을 수 있다 — 그때 게이트가 죽으면 CI 가 통째로 막힌다.
+        got = list(pg.iter_py("/nonexistent/path/aaa", "/nonexistent/path/bbb"))
+        self.assertEqual(got, [])
+
+    def test_실제_두_루트를_훑어_파일을_찾는다(self) -> None:
+        paths = list(pg.iter_py(*pg.SCAN_ROOTS))
+        parents = {Path(p).relative_to(_ROOT).parts[0] for p in paths}
+        self.assertIn("src", parents)
+        self.assertIn("scripts", parents, "scripts/ 파일이 스캔되지 않았다 — 게이트 구멍")
+        self.assertTrue(all(p.endswith(".py") for p in paths))
+
+    def test_열거_순서가_결정적이다(self) -> None:
+        # 순서가 흔들리면 위반 목록 순서가 실행마다 바뀌어 diff·재현이 어려워진다.
+        self.assertEqual(list(pg.iter_py(*pg.SCAN_ROOTS)), list(pg.iter_py(*pg.SCAN_ROOTS)))
+
+    def test_pycache는_제외한다(self) -> None:
+        self.assertFalse(any("__pycache__" in p for p in pg.iter_py(*pg.SCAN_ROOTS)))
 
 
 if __name__ == "__main__":
