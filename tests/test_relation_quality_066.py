@@ -40,6 +40,11 @@ _FAKE_CFG = types.SimpleNamespace(relations=types.SimpleNamespace(
     path_top_k=10,
     auto_approve_min=0.75,
     auto_approve_emb_min=0.0,
+    # 081 게이트. 이 파일이 검증하는 것은 066(후보·진입·프롬프트)이므로 **게이트는 끈 값**을 준다 —
+    # 켜면 이 테스트들이 081 동작까지 함께 재게 되어 실패 원인이 흐려진다.
+    persist_min_conf_similarity=0.0,
+    auto_approve_exclude_kinds="",
+    review_exempt_kinds="",
 ))
 
 

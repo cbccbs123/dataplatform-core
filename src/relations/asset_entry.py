@@ -24,6 +24,7 @@ from psycopg.rows import dict_row
 from src.config.settings import get_current_settings
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
+from src.relations.approval_policy import parse_kind_set
 from src.relations.asset_candidates import (
     EmbeddingCandidate,
     EmbeddingKindFilter,
@@ -204,11 +205,18 @@ def propose_relations_for_asset(
         # collect 리스트는 저장된 관계 쌍을 모아 계보에 남기려는 것이다(반환값만으론 무엇과
         # 무엇이 이어졌는지 알 수 없다).
         upserted_pairs: list[dict[str, Any]] = []
+        # 081 게이트는 설정에서 읽어 **여기서 명시적으로** 넘긴다 — sync_graph_edges 의 기본값은
+        # 게이트 끔이라 라이브러리를 직접 쓰는 다른 호출부(샘플 전략·측정)가 조용히 영향받지 않는다.
+        gate_stats: dict[str, int] = {}
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
             allowed_target_ids=candidate_ids, auto_approve_min=cfg.relations.auto_approve_min,
             target_emb_scores=target_emb_score_map(candidates),
             auto_approve_emb_min=cfg.relations.auto_approve_emb_min,
+            persist_min_conf_similarity=cfg.relations.persist_min_conf_similarity,
+            auto_approve_exclude_kinds=parse_kind_set(
+                cfg.relations.auto_approve_exclude_kinds, default=frozenset()),
+            stats=gate_stats,
             collect=upserted_pairs)
         # 계보 기록도 **같은 트랜잭션 안**이다 — 엣지는 저장됐는데 기록이 없거나 그 반대인
         # 반쪽 상태를 만들지 않기 위해서다(실패하면 둘 다 롤백된다).
@@ -219,6 +227,7 @@ def propose_relations_for_asset(
             activity="relations.proposed.v1",
             agent="llm_propose",
             generated={"edges_upserted": edges_upserted, "edges_skipped": edges_skipped,
+                       "edges_gated_low_conf": gate_stats.get("gated_low_conf", 0),
                        "kinds_registered": kinds_registered,
                        "edges": sorted(upserted_pairs,
                                        key=lambda e: (e["target_asset_id"], e["kind_code"]))},

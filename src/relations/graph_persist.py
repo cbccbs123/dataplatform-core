@@ -13,6 +13,7 @@ from typing import Any
 from psycopg import Connection
 
 from src.database.ids import uuid7_str
+from src.relations.approval_policy import is_auto_approvable, should_persist
 from src.relations.relation_type_catalog import fetch_relation_kind
 from src.relations.schema import coerce_topic_fields_mvp
 from src.relations.topic_canonicalize import canonicalize_subtopic, canonicalize_topic
@@ -79,10 +80,17 @@ def _decide_status(
     emb_score: float | None,
     auto_approve_min: float,
     auto_approve_emb_min: float,
+    *,
+    kind_code: str = "",
+    auto_approve_exclude_kinds: frozenset[str] = frozenset(),
 ) -> str:
-    """신규 엣지의 status 를 정한다 — LLM 신뢰도 **와** 임베딩 유사도 두 관문.
+    """신규 엣지의 status 를 정한다 — **종류 자격** · LLM 신뢰도 · 임베딩 유사도 세 관문.
 
-    둘 다 통과해야 ``active``(자동 승인), 하나라도 못 넘으면 ``proposed``(사람 검토 대기)다.
+    셋 다 통과해야 ``active``(자동 승인), 하나라도 못 넘으면 ``proposed``(사람 검토 대기)다.
+
+    종류 자격을 **가장 먼저** 보는 이유: ``same_domain`` 처럼 정의상 "대상이 다르고 분야만 같은"
+    종류는 신뢰도가 높아도 강한 관계가 아니다(자동승인 정밀도 58.8→74.8% · 근거는
+    `docs/관계_품질_측정_20260728.md` §6.1). 신뢰도 관문 뒤에 두면 "고신뢰 약관계"가 통과한다.
 
     Args:
         conf_f: LLM이 매긴 신뢰도(0~1). ``None`` 이면 판정 불가로 보고 무조건 ``proposed``.
@@ -91,10 +99,15 @@ def _decide_status(
             **사실상 자동 승인을 끈 값**이다(전건 사람 검토).
         auto_approve_emb_min: 자동 승인 임베딩 유사도 하한. **``0.0`` 이하면 이 게이트 자체를 끄고**
             신뢰도 단독으로 결정한다.
+        kind_code: 관계 종류 코드. 기본 ``""`` 은 어떤 제외 목록에도 걸리지 않는다.
+        auto_approve_exclude_kinds: 자동승인에서 제외할 종류 집합. **기본 빈 집합 = 기존 동작**
+            (라이브러리 기본값이 동작을 바꾸지 않게 — 설정은 호출부가 명시적으로 넘긴다).
 
     Returns:
         ``"active"`` 또는 ``"proposed"``.
     """
+    if not is_auto_approvable(kind_code, exclude_kinds=auto_approve_exclude_kinds):
+        return "proposed"
     if conf_f is None or conf_f < auto_approve_min:
         return "proposed"
     if auto_approve_emb_min > 0.0 and (emb_score is None or emb_score < auto_approve_emb_min):
@@ -156,6 +169,9 @@ def sync_graph_edges(
     target_emb_scores: dict[str, float] | None = None,
     auto_approve_emb_min: float = 0.0,
     collect: list[dict[str, Any]] | None = None,
+    persist_min_conf_similarity: float = 0.0,
+    auto_approve_exclude_kinds: frozenset[str] = frozenset(),
+    stats: dict[str, int] | None = None,
 ) -> tuple[int, int]:
     """LLM이 제안한 엣지들을 검증해 ``graph_edge`` 에 upsert 한다.
 
@@ -179,9 +195,19 @@ def sync_graph_edges(
         collect: 주면 upsert 된 엣지마다 ``{target_asset_id, kind_code, confidence, status}`` 를
             append 한다(skip 은 제외). 계보(``asset_lineage``)에 관계 쌍을 남기려는 호출부가 쓴다.
             ``None`` 이면 수집하지 않는다 — 반환값 계약은 그대로다.
+        persist_min_conf_similarity: 유사도 계열(``duplicate_near``·``same_domain``) 제안을 **행으로
+            만들지 않는** 신뢰도 하한. **기본 ``0.0`` = 게이트 끔(기존 동작)** — 라이브러리 기본값이
+            운영 동작을 바꾸지 않게 하고, 설정은 호출부가 명시적으로 넘긴다.
+            숨기지 않고 만들지 않는 이유: 만들어 두면 조회 계층마다 필터가 산재하고 쓰레기가
+            영구히 남는다(검토 큐 4,137행이 그렇게 쌓였다).
+        auto_approve_exclude_kinds: 신뢰도와 무관하게 자동승인에서 제외할 종류. 기본 빈 집합=기존 동작.
+        stats: 주면 게이트 통계를 담는다 — 현재 ``{"gated_low_conf": n}``. **조용히 버리면 "커버리지가
+            왜 줄었나"를 추적할 수 없다.** ``collect`` 와 같은 out-파라미터 관례를 따른다(반환값
+            계약을 깨지 않으려고 — ``asset_entry`` 등 기존 호출부가 2-튜플을 언팩한다).
 
     Returns:
-        ``(upserted, skipped)`` 개수.
+        ``(upserted, skipped)`` 개수. 게이트로 버린 엣지는 ``skipped`` 에 포함된다(영속화되지
+        않았으므로) — 사유별 내역은 ``stats`` 로 본다.
 
     Raises:
         RuntimeError: upsert 가 행을 돌려주지 않을 때(현재 SQL로는 도달 불가한 방어적 가드).
@@ -190,6 +216,7 @@ def sync_graph_edges(
     allowed = frozenset(str(t) for t in allowed_target_ids)
     upserted = 0
     skipped = 0
+    gated_low_conf = 0
     # 토글은 **루프 밖에서 한 번만** 읽는다 — 엣지마다 읽으면 같은 배치 안에서 설정이 바뀔 경우
     # 앞뒤 엣지가 다른 규칙으로 저장된다.
     canonicalize_on = _topic_canonicalize_enabled()
@@ -216,6 +243,21 @@ def sync_graph_edges(
         kind_id = str(kind["relation_kind_id"])
         symmetric = bool(kind["is_symmetric"])
 
+        # 신뢰도 파싱을 게이트보다 **앞으로** 올려 둔다(순수 계산이라 위치 이동이 안전하다).
+        conf = edge.get("confidence")
+        try:
+            conf_f = float(conf) if conf is not None else None
+        except (TypeError, ValueError):
+            conf_f = None
+
+        # ⚠️ 영속화 게이트는 **`ensure_asset_node` 보다 먼저** 와야 한다 — 노드를 만든 뒤 걸러내면
+        #    엣지 없는 고아 노드가 남는다(테스트가 이 순서를 봉인한다).
+        if not should_persist(kind_code, conf_f,
+                              min_conf_similarity=persist_min_conf_similarity):
+            skipped += 1
+            gated_low_conf += 1
+            continue
+
         # 여기서 다루는 topic 은 **이 쌍(관계)의 맥락 라벨**이지 자산의 주제가 아니다 —
         # 자산 주제는 asset_topic 이 따로 정한다. 검토 화면 표시용으로만 남긴다.
         # 5번째 반환값(자동 보정 여부)을 버리는 것은 의도적이다 — 지금은 아무 동작도 걸려 있지
@@ -241,17 +283,14 @@ def sync_graph_edges(
              "topic_en": topic_en, "subtopic_en": subtopic_en},
             ensure_ascii=False,
         )
-        conf = edge.get("confidence")
-        try:
-            conf_f = float(conf) if conf is not None else None
-        except (TypeError, ValueError):
-            conf_f = None
         reason = str(edge.get("reason") or "").strip() or None
         # auto_approve_min 기본값 1.01 = 신뢰도가 1.0을 초과할 수 없으므로 사실상 자동승인 없음.
         # 운영에서 임계를 낮추면(예: 0.85) 해당 구간 이상 엣지는 HITL 없이 바로 'active'.
         # 유사도 하한이 켜져 있으면 신뢰도와 유사도를 **둘 다** 넘어야 자동 승인된다.
         emb_s = (target_emb_scores or {}).get(tid, 0.0)
-        status_val = _decide_status(conf_f, emb_s, auto_approve_min, auto_approve_emb_min)
+        status_val = _decide_status(
+            conf_f, emb_s, auto_approve_min, auto_approve_emb_min,
+            kind_code=kind_code, auto_approve_exclude_kinds=auto_approve_exclude_kinds)
 
         dst_node = ensure_asset_node(conn, tid)
         a_node, b_node = _canonical_pair(src_node, dst_node, symmetric=symmetric)
@@ -298,4 +337,6 @@ def sync_graph_edges(
         if collect is not None:  # 계보에 남길 관계 쌍 — 실제로 저장된 것만 모은다(건너뛴 것은 제외)
             collect.append({"target_asset_id": tid, "kind_code": kind_code,
                             "confidence": conf_f, "status": db_status})
+    if stats is not None:
+        stats["gated_low_conf"] = gated_low_conf
     return upserted, skipped
