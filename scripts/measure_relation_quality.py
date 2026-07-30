@@ -71,6 +71,17 @@ PROMPT_VARIANTS: dict[str, dict] = {
     # 대조군 — 현행 운영 프롬프트 그대로. 2026-07-29 채택으로 옛 "no-circular-hint" 변형이
     # 운영 기본값이 됐으므로 baseline 이 곧 그 문구다.
     "baseline": {},
+    # 081 `same_domain` 폐기 검증 — **카탈로그에서 종류를 빼면** 무슨 일이 생기나(X팔).
+    # ⚠️ 이 변형은 힌트를 바꾸는 것이 아니라 **선택지 자체를 제거**한다. 그래서 프롬프트가 3곳 바뀐다:
+    #   ① same_domain 선택지 사라짐(의도) ② 🔴 anti-dup 구분 문구도 함께 사라짐(부수 효과 —
+    #      `_build_relation_kind_guide` 가 duplicate_near ∧ same_domain 일 때만 붙인다)
+    #   ③ JSON 예시 종류가 same_domain → duplicate_near 로 대체
+    # ②가 079 에서 duplicate_near 과대적용을 막은 핵심 장치라, ①과 ② 가 **같은 방향으로 겹친다**
+    # (둘 다 duplicate_near 를 부풀린다). v2(힌트만 넓힘)보다 강한 개입이므로 결과를 예단하지 말 것.
+    # 실패하면 Y팔(제거 + anti_dup 강제 주입)로 ②의 영향을 분리한다.
+    "drop-same-domain": {
+        "catalog_exclude_kinds": ("same_domain",),
+    },
     # 🔴 **검증 후 폐기됨(2026-07-30)** — 재시도하지 말 것. 보고서 §9.1 에 전체 근거.
     # 착안: 채택본의 "거의 같은 형식" 조건이 DB 정의보다 좁아 매체만 다른 같은-대상 쌍을
     # same_domain 으로 밀어냄(골든 실증). 형식 조건을 제거하면 그 오분류가 실제로 고쳐진다
@@ -186,10 +197,17 @@ def _read_candidates_prompt(
     cands = union_candidates(emb, path)
     summary, modality = _source_summary_modality(conn, sid)
     kinds = fetch_active_relation_kinds(conn)
+    variant = dict(prompt_variant or {})
+    # `catalog_exclude_kinds` 는 override 인자가 아니라 **카탈로그 자체를 줄이는** 측정 전용 키다.
+    # 종류를 빼면 프롬프트가 3곳 바뀐다(선택지·anti-dup 구분 문구·JSON 예시) — 힌트 교체와 성격이
+    # 다르므로 build_relation_proposal_prompt 로 그대로 넘기지 않고 여기서 카탈로그를 걸러 낸다.
+    drop = {str(k).strip().lower() for k in variant.pop("catalog_exclude_kinds", ())}
+    if drop:
+        kinds = [k for k in kinds if str(k.get("type_code", "")).lower() not in drop]
     prompt = build_relation_proposal_prompt(
         source_summary=summary, source_media_type=modality,
         candidates=cands, relation_kinds_catalog=kinds,
-        **(prompt_variant or {}))
+        **variant)
     return cands, prompt
 
 
