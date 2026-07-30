@@ -507,6 +507,41 @@ class TestRelationAutoApproveEmbMin(unittest.TestCase):
         self.assertEqual(s.relations.auto_approve_emb_min, 0.5)
 
 
+class TestRelationApprovalSettings(unittest.TestCase):
+    """081 승인·노출 게이트 3키 — 기본값은 새 동작을 켜고, env 로 **끌 수 있어야** 한다.
+
+    끌 수 있어야 하는 이유: 롤백이 코드 revert 가 아니라 설정 변경이어야 한다. 관계 재생성은
+    전량 약 28시간이라 코드를 되돌려도 데이터가 즉시 복구되지 않는다.
+    """
+
+    def test_기본값은_새_동작을_켠다(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.persist_min_conf_similarity, 0.75)
+        self.assertEqual(s.relations.auto_approve_exclude_kinds, "same_domain")
+        self.assertEqual(s.relations.review_exempt_kinds, "same_domain")
+
+    def test_env_로_영속화_게이트를_끈다(self) -> None:
+        with _env(RELATION_PERSIST_MIN_CONF_SIMILARITY="0.0"):
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.persist_min_conf_similarity, 0.0)
+
+    def test_env_로_kind_게이트를_끈다(self) -> None:
+        # 빈 문자열이 기본값으로 되돌아가면 끌 방법이 없다(parse_kind_set 이 "" 를 빈 집합으로 본다).
+        with _env(RELATION_AUTO_APPROVE_EXCLUDE_KINDS="", RELATION_REVIEW_EXEMPT_KINDS=""):
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.auto_approve_exclude_kinds, "")
+        self.assertEqual(s.relations.review_exempt_kinds, "")
+
+    def test_여러_kind_를_지정할_수_있다(self) -> None:
+        with _env(RELATION_AUTO_APPROVE_EXCLUDE_KINDS="same_domain,duplicate_near"):
+            s = _build_settings("dev")
+        from src.relations.approval_policy import parse_kind_set
+        self.assertEqual(
+            parse_kind_set(s.relations.auto_approve_exclude_kinds, default=frozenset()),
+            frozenset({"same_domain", "duplicate_near"}))
+
+
 class TestSearchBackendWiring(unittest.TestCase):
     """T008 스모크(037 갱신): ``SEARCH_BACKEND`` 설정과 ``search_hybrid`` 경로 — OS 단일 백엔드.
 
