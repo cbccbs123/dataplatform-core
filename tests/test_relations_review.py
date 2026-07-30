@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from src.relations.review import _build_review_where
+
 
 class TestReview(unittest.TestCase):
     def _conn(self, rowcount=1):
@@ -475,3 +477,49 @@ class TestHumanLlmBoundary(unittest.TestCase):
         # status 가 없다"는 원 의도를 보존하려면 RETURNING 이전(=DO UPDATE SET 할당부)만 검사한다.
         set_clause = upsert_sql.split("DO UPDATE SET", 1)[1].split("RETURNING", 1)[0]
         self.assertNotIn("status", set_clause)  # ON CONFLICT 시 status 는 사람 결정 보존(미갱신)
+
+class TestReviewKindExemption(unittest.TestCase):
+    """081 조각④ — 검토 큐에서 종류를 면제한다(삭제 아닌 필터·즉시 가역).
+
+    `same_domain` 을 면제하는 근거: 자동승인도 안 되고 종착지가 약칸 노출이라 **승격이라는
+    개념 자체가 없다.** 검토해도 할 일이 없는 것이 큐를 채우면 볼 만한 것까지 묻힌다
+    (실측 4,137 → 1,127행).
+    """
+
+    _BASE = {"status": "proposed", "q": None, "asset_id": None, "modality": None,
+             "min_confidence": None, "max_confidence": None, "reviewed_by": None,
+             "since": None, "until": None, "date_col": "created_at"}
+
+    def test_면제_종류가_WHERE_에서_제외된다(self):
+        where, params = _build_review_where(
+            **self._BASE, kind_code=None, exempt_kinds=frozenset({"same_domain"}))
+        self.assertIn("rk.kind_code <> ALL(%s)", where)
+        self.assertIn(["same_domain"], params)
+
+    def test_면제가_비면_조건이_붙지_않는다(self):
+        where, params = _build_review_where(
+            **self._BASE, kind_code=None, exempt_kinds=frozenset())
+        self.assertNotIn("<> ALL", where)
+        self.assertNotIn(["same_domain"], params)
+
+    def test_기본값은_면제_없음이다(self):
+        # 하위호환 — exempt_kinds 를 주지 않는 기존 호출부의 동작이 바뀌면 안 된다.
+        where, _ = _build_review_where(**self._BASE, kind_code=None)
+        self.assertNotIn("<> ALL", where)
+
+    def test_종류를_명시_조회하면_면제를_이긴다(self):
+        # 관리자가 same_domain 을 일부러 보려 할 때 빈 화면이 나오면 버그로 보인다.
+        where, params = _build_review_where(
+            **self._BASE, kind_code="same_domain",
+            exempt_kinds=frozenset({"same_domain"}))
+        self.assertNotIn("<> ALL", where)
+        self.assertIn("rk.kind_code = %s", where)
+        self.assertIn("same_domain", params)
+
+    def test_여러_종류_면제는_정렬돼_바인딩된다(self):
+        # 순서가 흔들리면 같은 질의가 실행마다 다른 파라미터를 갖는다(결정성).
+        where, params = _build_review_where(
+            **self._BASE, kind_code=None,
+            exempt_kinds=frozenset({"same_domain", "duplicate_near"}))
+        self.assertIn(["duplicate_near", "same_domain"], params)
+
