@@ -157,10 +157,15 @@ def _build_relation_kind_guide(
             desc = str(next((r.get("description") for r in catalog if str(r.get("type_code")) == code), "") or "")
             lines.append(f"- ``{code}``: (DB 설명) {desc[:200]}")
     body = "\n".join(lines)
+    # ⚠️ **명시 주입은 조건을 이긴다.** `anti_dup_override` 를 준 것은 "이 문구를 붙여라"는
+    # 의사 표현이므로 카탈로그 구성과 무관하게 적용한다. 조건에 종속시키면 **종류를 뺀 프롬프트에
+    # 억제 문구를 살리는 실험이 불가능**해진다(081 Y팔 측정에서 실제로 막혔다 — 2026-07-30).
+    # 운영은 override 를 주지 않으므로 아래 elif 만 타고, 출력은 바이트 불변이다.
     anti_dup = ""
-    if "duplicate_near" in codes and "same_domain" in codes:
-        anti_dup = (RELATION_ANTI_DUP_HINT_KO if anti_dup_override is None
-                    else anti_dup_override)
+    if anti_dup_override is not None:
+        anti_dup = anti_dup_override
+    elif "duplicate_near" in codes and "same_domain" in codes:
+        anti_dup = RELATION_ANTI_DUP_HINT_KO
     return f"""### relation_kind (= ``type_code``) 선택 가이드
 아래는 **왜 두 미디어가 연결되는지**에 대한 거친 분류다. **업종·소재(의료·게임 등)** 는 여기서 고르지 말고 ``topic_ko`` / ``topic_en`` 에 넣는다.
 

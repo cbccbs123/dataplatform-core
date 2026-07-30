@@ -60,5 +60,34 @@ class TestPromptVariantInjection(unittest.TestCase):
         self.assertIn("대상은 다르지만 같은 분야", p)   # same_domain 은 그대로
 
 
+class TestAntiDupOverrideBeatsCatalog(unittest.TestCase):
+    """**명시 주입은 카탈로그 조건을 이긴다** — 081 Y팔 측정이 요구한 성질(2026-07-30).
+
+    자동 부착은 ``duplicate_near`` ∧ ``same_domain`` 동시 활성일 때만 일어난다. 그 조건에
+    override 까지 종속시켰던 탓에 **"종류를 빼고 억제 문구는 살린다"는 실험 자체가 불가능**했다
+    (X팔에서 종류 제거와 문구 소실이 겹쳐 dup 이 24.2%→72.2% 로 튀었고, 원인을 분리할 수 없었다).
+    """
+
+    _DUP_ONLY = [{"type_code": "duplicate_near", "description": "d"}]
+    _KW_DUP_ONLY = {**_KW, "relation_kinds_catalog": _DUP_ONLY}
+
+    def test_same_domain_없는_카탈로그에도_주입한_문구는_붙는다(self):
+        p = build_relation_proposal_prompt(
+            **self._KW_DUP_ONLY, anti_dup_override="\n\n**구분:** 주입된-구분-마커.")
+        self.assertIn("주입된-구분-마커", p)
+
+    def test_override_없으면_한쪽만_있는_카탈로그엔_붙지_않는다(self):
+        # 운영 동작 봉인 — 자동 부착 조건은 그대로다(override 를 줄 때만 조건을 넘는다).
+        p = build_relation_proposal_prompt(**self._KW_DUP_ONLY)
+        self.assertNotIn("다루는 대상이 다르면", p)
+
+    def test_빈문자열_override는_문구를_제거한다(self):
+        # ``""`` 는 "미지정"이 아니라 **"문구를 넣지 말라"는 명시**다. truthy 검사로 바꾸면
+        # 빈 문자열이 조용히 무시되고 기본 문구가 되살아난다 — 문구 소실만 재현하는 실험이 깨진다.
+        p = build_relation_proposal_prompt(**_KW, anti_dup_override="")
+        self.assertNotIn("다루는 대상이 다르면", p)
+        self.assertIn("``duplicate_near``:", p)   # 가이드 본문은 남는다
+
+
 if __name__ == "__main__":
     unittest.main()
