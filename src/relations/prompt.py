@@ -113,6 +113,57 @@ RELATION_ANTI_DUP_HINT_KO = (
     "``duplicate_near`` 가 아니다. 대상이 다르고 분야만 같으면 ``same_domain`` 이다."
 )
 
+# ``confidence`` 채점 기준 — **"선택한 종류의 정의 안에서, 이 관계가 얼마나 뚜렷한가"**
+# (종류 조건부 척도 · 2026-07-31 채택 · shadow A/B 3회 측정 끝의 v3).
+#
+# 왜 이 축인가 — 세 번의 실측이 좁혀 온 결론이다:
+#   v1 "근거 정보가 충분했나"(자기평가) → 93% 가 최고값으로 붕괴. LLM 은 자기 판단의 정보
+#      부족을 인정하지 않는다.
+#   v2 "두 요약이 같은 대상인가"(쌍 단위) → same_domain 에서는 완벽 단조였으나
+#      duplicate_near 에서 97% 붕괴 — 그 질문이 dup 을 **고른 이유 그 자체**라 동어반복.
+#   v3 종류마다 척도를 달리해 선택과 분리 → dup 값별 실제 strong 비율 46→72→84%(단조) ·
+#      전체 이름표 정확도 79.6→83.5% · 채택. (측정 기록: scripts/measure_relation_quality.py
+#      PROMPT_VARIANTS 주석 · specs/081 §2026-07-31)
+#
+# 설계 장치: ①판단 절차 4단계 — "망설이면 낮은 값" 하향 규칙은 v1 실측 상향 편향의 상쇄
+# ②예시/기준 분리 + "예시일 뿐" 전역 가드 — same_series "라인업" 오독 사고의 재발 방지
+# ③dup 0.9 두-조건 성립제 ④경계 강등 문구.
+# ⚠️ 문구를 고치면 운영 관계 생성 출력·점수 분포가 함께 바뀐다 — 변형은 측정 스크립트의
+#    confidence_guide_override 로만 실험하고, 검증된 뒤에야 여기를 바꾼다.
+RELATION_CONFIDENCE_GUIDE_KO = (
+    "\n- ``confidence``: 선택한 ``relation_type_code`` 의 관계가 이 쌍에서 **얼마나 뚜렷하게 "
+    "성립하는지**다. 자기 확신이 아니라 요약에서 관찰한 사실로 판단한다. "
+    "네 값(0.9/0.7/0.5/0.3)만 쓴다.\n"
+    "  판단 절차: 1) 두 요약에서 연결 근거를 찾아 ``reason`` 에 먼저 쓴다. "
+    "2) 선택한 종류의 기준표에서 그 근거가 만족하는 값을 고른다. "
+    "3) 두 값 사이에서 망설여지면 **낮은 값**을 쓴다. "
+    "4) 요약·키워드·파일명 밖의 배경지식은 근거로 치지 않는다.\n"
+    "  기준은 각 줄의 문장이다. \"예:\"는 이해를 돕는 예시일 뿐이다 — 예시와 다른 소재라도 "
+    "기준 문장에 맞으면 그 값을 쓴다.\n"
+    "  [duplicate_near 를 골랐을 때 — 내용 겹침의 정도]\n"
+    "  - ``0.9`` 같은 대상 **그리고** 같은 측면, 두 조건을 모두 만족할 때만 — 핵심 내용까지 "
+    "사실상 같다. 하나라도 아니면 0.7 이하로 내린다. 예: 같은 폭포를 소개하는 문서와 영상.\n"
+    "  - ``0.7`` 같은 대상이지만 다루는 측면이 다르다. "
+    "예: 같은 궁궐을 다룬 역사 문서와 관광 안내 영상.\n"
+    "  - ``0.5`` 같은 대상이 등장하지만 한쪽에서는 중심 소재가 아니다. "
+    "경계: 그 대상이 양쪽 모두의 중심이면 0.7, 한쪽에서 스쳐 가면 0.5. "
+    "예: 김치 문서 ↔ 한식 전반을 다루며 김치를 한 단락만 언급하는 영상.\n"
+    "  - ``0.3`` 같은 대상이라는 근거가 요약 안에 없다 — 파일명 등 간접 단서뿐이다.\n"
+    "  [same_domain 을 골랐을 때 — 분야 공유의 좁기]\n"
+    "  - ``0.9`` 같은 세부 활동·목적까지 공유한다. 예: 둘 다 김장 방법을 가르친다.\n"
+    "  - ``0.7`` 같은 세부 분야를 다룬다. "
+    "예: 김치 담그기 ↔ 된장 만들기 (발효식품 요리라는 세부 분야).\n"
+    "  - ``0.5`` 같은 대분야 안에서 소재만 다르다. "
+    "예: 김치 레시피 ↔ 커피 내리는 법 (음식·요리라는 틀만 공유).\n"
+    "  - ``0.3`` 분야 명칭 외에 공통점이 없다.\n"
+    "  [references·derived_from·same_series 를 골랐을 때 — 근거의 명시성]\n"
+    "  - ``0.9`` 관계의 직접 증거가 요약이나 파일명에 있다. "
+    "예: 제목을 그대로 인용 / \"~을 요약한 문서\" 문구 / 같은 어간 + 1부·2부 순번.\n"
+    "  - ``0.7`` 직접 증거는 없으나 내용상 강하게 시사된다.\n"
+    "  - ``0.5`` 정황뿐이다.\n"
+    "  - ``0.3`` 추측에 가깝다."
+)
+
 
 def _build_relation_kind_guide(
     catalog: Sequence[Mapping[str, Any]],
@@ -211,8 +262,10 @@ def build_relation_proposal_prompt(
     candidates: Sequence[Mapping[str, Any]],
     relation_kinds_catalog: Sequence[Mapping[str, Any]],
     source_topic: Mapping[str, Any] | None = None,
+    source_keywords: str | None = None,
     kind_hints_override: Mapping[str, str] | None = None,
     anti_dup_override: str | None = None,
+    confidence_guide_override: str | None = None,
 ) -> str:
     """관계 제안 프롬프트 전체를 하나의 문자열로 조립한다.
 
@@ -233,6 +286,14 @@ def build_relation_proposal_prompt(
             조립은 한 곳에 두고 문구만 주입한다.
         anti_dup_override: ``duplicate_near``/``same_domain`` 구분 문구를 통째로 교체한다.
             ``None``(기본)이면 ``RELATION_ANTI_DUP_HINT_KO``.
+        source_keywords: 소스 자산 키워드(원시 JSON 문자열 · 2026-07-31 채택 — 운영 호출부
+            ``asset_entry`` 가 공급). ``None`` 이면 소스 키워드 줄을 통째로 생략한다(키워드 이전
+            호출부·측정 대조군과의 하위호환). 후보 ``keywords`` 와 짝 — 한쪽만 주면 비대칭이다.
+        confidence_guide_override: ``confidence`` 채점 기준 문구를 교체한다.
+            ``None``(기본)이면 운영 채택본 ``RELATION_CONFIDENCE_GUIDE_KO``(2026-07-31 v3).
+            ``""`` 를 주면 기준 문구를 **제거**한다 — 채택 이전 프롬프트의 재현(측정 대조군)용.
+            문자열을 주면 통째로 교체(shadow A/B). 주입 문구는 **줄바꿈으로 시작**해야 한다
+            (직전 줄 끝에 이어 붙는다).
 
     Returns:
         LLM에 그대로 넘길 단일 프롬프트 문자열.
@@ -249,21 +310,28 @@ def build_relation_proposal_prompt(
         # 후보의 주제를 함께 보여줘 주제 정합을 참고하게 한다(하드 조건은 아니다).
         cand_topic_ko = c.get("topic_ko")
         cand_subtopic_ko = c.get("subtopic_ko")
-        cand_lines.append(
-            json.dumps(
-                {
-                    "target_media_item_id": c["id"],
-                    "filename": filename,
-                    "media_type": c["media_type"],
-                    "summary": (c["summary"] or "")[:500],
-                    "embedding_similarity": emb_score,
-                    "signal": signal,
-                    "topic_ko": cand_topic_ko,
-                    "subtopic_ko": cand_subtopic_ko,
-                },
-                ensure_ascii=False,
-            )
+        cand_obj: dict[str, Any] = {
+            "target_media_item_id": c["id"],
+            "filename": filename,
+            "media_type": c["media_type"],
+            "summary": (c["summary"] or "")[:500],
+        }
+        # 후보 dict 에 ``keywords`` 가 실려 온 경우에만 싣는다(2026-07-31 채택 — 운영 후보 경로
+        # `asset_candidates` 가 공급). 요약이 짧은 자산(전체의 1/3 이 80자 이하)에서 판단 재료를
+        # 보강한다 — A/B 실측: 요약 80자 이하 쌍 정확도 76.3→83.4%. 키가 없으면 필드 생략
+        # (keywords 이전 호출부·측정 대조군과의 하위호환).
+        # 길이 상한 150자는 판정 프롬프트(`judge_relations.build_judge_prompt`)와 같은 값.
+        if c.get("keywords"):
+            cand_obj["keywords"] = str(c["keywords"])[:150]
+        cand_obj.update(
+            {
+                "embedding_similarity": emb_score,
+                "signal": signal,
+                "topic_ko": cand_topic_ko,
+                "subtopic_ko": cand_subtopic_ko,
+            }
         )
+        cand_lines.append(json.dumps(cand_obj, ensure_ascii=False))
     candidates_block = "\n".join(cand_lines) if cand_lines else "(후보 없음)"
 
     if relation_kinds_catalog:
@@ -311,6 +379,19 @@ def build_relation_proposal_prompt(
     # 소스 주제를 한 줄로 표기한다. 미부여면 '(주제 없음)'.
     source_topic_line = _fmt_topic(source_topic)
 
+    # confidence 채점 기준 — 기본은 운영 채택본(v3 · 2026-07-31). None/""/문자열 구분에 주의:
+    # "" 는 falsy 지만 "기준 제거"라는 명시적 의사이므로 `or` 로 합치면 안 된다(대조군 재현 불가).
+    confidence_guide_block = (
+        confidence_guide_override
+        if confidence_guide_override is not None
+        else RELATION_CONFIDENCE_GUIDE_KO
+    )
+
+    # 소스 키워드 줄(측정 전용 주입) — None 이면 줄 자체를 생략해 기본 출력 바이트 불변.
+    source_keywords_line = (
+        f"\n소스 키워드: {str(source_keywords)[:150]}" if source_keywords else ""
+    )
+
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.
 
 규칙:
@@ -325,11 +406,11 @@ def build_relation_proposal_prompt(
 
 - **서브토픽(세부 주제, 자유):** ``subtopic_ko`` 는 고른 범주 **밑의 구체 주제어**를 자유롭게 적는다(한국어는 **한 어절**·공백 금지 권장, 예: 범주 ``음식·요리`` 밑 ``김밥`` / ``라면``). ``subtopic_en`` 은 같은 뜻의 짧은 영어(한 토큰·소문자 권장). 맥락이 있으면 **비우지 말고** 채우는 것을 권장한다.
   - **문서·파일·상품·인물 등 고유명**은 subtopic 에 넣지 말고 ``reason`` 등에 적는다.
-- ``reason``: 연결 근거 한 줄(한국어 권장). 고유명·세부 맥락은 여기에 둬도 된다.
+- ``reason``: 연결 근거 한 줄(한국어 권장). 고유명·세부 맥락은 여기에 둬도 된다.{confidence_guide_block}
 
 소스 요약: {source_summary[:1200]}
 소스 매체 타입: {source_media_type}
-소스 주제(topic): {source_topic_line}
+소스 주제(topic): {source_topic_line}{source_keywords_line}
 
 후보 목록(embedding_similarity 는 1에 가까울수록 유사. ``signal`` 이 ``경로 신호`` 면 파일명·폴더로 추가된 후보. ``topic_ko`` / ``subtopic_ko`` 는 후보의 자기주제):
 {candidates_block}

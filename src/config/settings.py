@@ -708,15 +708,21 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     # ── relations ──
     _Spec("relations", "top_k", "RELATION_TOP_K", _opt_int(10)),
     _Spec("relations", "min_sim", "RELATION_MIN_SIM", _opt_float(0.2)),
-    _Spec("relations", "auto_approve_min", "RELATION_AUTO_APPROVE_MIN", _opt_float(0.9)),
+    # 자동승인 기본 OFF(1.01 = 신뢰도가 1을 넘을 수 없어 사실상 끔 · 2026-07-31 구조 전환).
+    # active("확인됨")는 **사람만** 만든다 — 근거: 자동승인분 이름표 정확도 67% 실측 +
+    # conf 0.95 오분류가 강칸에 노출된 사고(same_series). 재개 조건은 specs/081 에 고정:
+    # 사람이 dup 0.9 구간 150건 이상 검토 후 승인율 ≥95% 면 dup 0.9 한정 재검토.
+    _Spec("relations", "auto_approve_min", "RELATION_AUTO_APPROVE_MIN", _opt_float(1.01)),
     _Spec("relations", "auto_approve_emb_min", "RELATION_AUTO_APPROVE_EMB_MIN", _opt_float(0.0)),
     # 081 승인·노출 게이트. 기본값이 새 동작을 켜지만 **전부 env 로 끌 수 있다** —
     # 관계 재생성이 전량 약 28시간이라 코드 revert 로는 즉시 되돌아오지 않는다.
     # 종류 목록은 쉼표 구분 원시 문자열로 보관하고 집합 변환은 소비처의
     # `src/relations/approval_policy.py:parse_kind_set` 이 한다(설정이 관계 어휘를 몰라도 되게).
     # 유사도 계열(duplicate_near·same_domain) 저신뢰 제안을 **행으로 만들지 않는** 하한. 0=끔.
+    # 0.70 = P2 게이트(2026-07-31): 점수 어휘가 {0.9,0.7,0.5,0.3} 4값으로 바뀌어(v3 채택)
+    # 0.5 이하( dup 41~46%·sd "대분야만" )를 적재에서 끊는 값. 옛 0.75 는 옛 점수 분포 기준.
     _Spec("relations", "persist_min_conf_similarity",
-          "RELATION_PERSIST_MIN_CONF_SIMILARITY", _opt_float(0.75)),
+          "RELATION_PERSIST_MIN_CONF_SIMILARITY", _opt_float(0.70)),
     # 신뢰도와 무관하게 자동승인에서 제외할 종류. ""=제외 없음(기존 동작).
     _Spec("relations", "auto_approve_exclude_kinds",
           "RELATION_AUTO_APPROVE_EXCLUDE_KINDS", _opt_str_allow_empty("same_domain")),

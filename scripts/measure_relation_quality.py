@@ -28,6 +28,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from src.database.postgres_util import PostgresUtil
+from src.relations.prompt import RELATION_CONFIDENCE_GUIDE_KO
 from src.relations.quality.golden import Golden, parse_golden, resolve_asset_keys
 from src.relations.quality.metrics import isolated_candidates
 from src.relations.quality.report import build_report
@@ -65,6 +66,22 @@ LlmFn = Callable[[str], dict[str, Any]]
 # 값을 바꾸면 `tests/test_measure_relation_quality.py` 의 봉인 테스트가 실패한다(의도적 장치).
 _SNAPSHOT_CONCURRENCY = 1
 
+# 점수 축 v3 — **"선택한 종류의 정의 안에서, 이 관계가 얼마나 뚜렷한가"** (종류 조건부 척도).
+# ✅ **2026-07-31 채택** — 운영 상수 `src/relations/prompt.py:RELATION_CONFIDENCE_GUIDE_KO` 로
+# 승격(단일 정본). 아래 변형들은 그 상수를 참조한다 — 채택 후 "baseline" 이 곧 이 문구다.
+# 측정 요약(같은 200자산·후보 100% 동일·대조군=채택 전 프롬프트):
+#   (a) 정의만        : dup 값별 strong 41→73→89% 단조 ✅ · 전체 정확도 79.6→83.2%
+#   (b) 정의+keywords : dup 46→72→84% 단조 ✅ · 전체 83.5% · 요약 80자 이하 쌍 76.3→83.4%
+#   형식 판정은 둘 다 미달(② same_domain 중간 역전 — 1σ 노이즈 범위 · ③′ 쌍 소실 5.7/6.3%
+#   — 92% 이상이 약한 same_domain 꼬리) → 실질 근거로 (b) 채택(사용자 결정).
+# v2("confidence-reading")의 실측이 설계 근거다:
+#   · same_domain 안에서 완벽 단조(0.3→2.4% / 0.5→10.1% / 0.7→30.6% / 0.9→63.0% strong) — 작동
+#   · 🔴 duplicate_near 는 97% 가 0.9 로 붕괴 — v2 의 축("같은 구체적 대상인가")이 dup 을
+#     **고른 이유 그 자체**라 선택과 동어반복이 됐다(사용자가 사전에 예측한 결합).
+# v3 는 종류마다 척도를 달리해 선택과 분리한다: dup 은 "겹침의 정도"(같은 측면인가),
+# same_domain 은 "분야 공유의 좁기", 명시적 3종은 "근거의 명시성".
+_CONFIDENCE_GUIDE_PERKIND_KO = RELATION_CONFIDENCE_GUIDE_KO
+
 # shadow A/B 변형 — **운영 프롬프트는 바꾸지 않는다.** 여기 테이블만 갈아끼워 비교하고,
 # 통과한 변형만 나중에 운영 상수로 옮긴다(spec 폐기 기준 4항).
 PROMPT_VARIANTS: dict[str, dict] = {
@@ -98,6 +115,93 @@ PROMPT_VARIANTS: dict[str, dict] = {
             "\n\n**구분:** 주제·세부주제가 같아도 **다루는 대상이 다르면** "
             "``duplicate_near`` 가 아니다. 대상이 다르고 분야만 같을 뿐이면 "
             "**어떤 관계도 만들지 말고 그 후보를 건너뛴다.**"
+        ),
+    },
+    # ── 2026-07-31 · `confidence` 에 **기준을 정의**한다 ────────────────────────────────
+    # 왜: 현행 프롬프트에는 confidence 지시가 **한 줄도 없다**(출력 예시의 ``0.75`` 가 유일한
+    # 단서). 그 결과 값이 자기보고 감각치가 됐다 — 실측(라벨 2,092건):
+    #   · 서로 다른 값 15개뿐 · 0.85/0.80/0.90/0.95 에 82% 집중 · 최저 0.6(3건)
+    #   · 이름표 정확도와의 분리력 **−9.9pp**(높은 점수가 오히려 덜 정확)
+    #   · 대안으로 시험한 임베딩 유사도도 −6.7pp — **계산값으로 바꿔도 안 된다**
+    # 그래서 임계·노출·큐 정책을 이 값 위에 세울 수 없다(그 위에 쌓았던 설계는 전부 잠정 철회).
+    #
+    # 설계 원리: 점수를 **"근거 정보가 얼마나 충분했나"** 로 정의한다 — 관계의 강약이 아니다.
+    #   ⚠️ 강약을 점수로 옮기면 ``relation_type_code`` 의 복사본이 되어 **새 정보가 0**이다
+    #      (1차 초안이 그 함정에 빠졌다). 그래서 "약한 관계라도 근거가 확실하면 높은 값" 을
+    #      문구에 못 박고, ``same_domain`` + ``0.9`` 예시를 함께 준다.
+    #   LLM 이 실제로 보는 재료가 양쪽 요약(소스 1200자·후보 500자)·파일명·매체타입·주제뿐이므로,
+    #   구간 조건도 그 재료의 상태로만 서술한다(사람이 요약을 열어 **검증 가능**해야 한다).
+    #
+    # 값을 4개로 이산화하는 이유: LLM 이 이미 4~6개 값만 쓰고 있어 잃는 정밀도가 없고, 대신
+    # 각 값의 뜻이 정해져 사후 검증과 정책 수립이 가능해진다.
+    #
+    # ⚠️ `same_series` 문구 통일(발견 5)은 **이 변형에 섞지 않는다** — 어제 X팔이 두 변경을 함께
+    # 넣어 원인 분리에 실패했다(dup 24.2%→72.2%). 성질이 다른 변경은 따로 잰다.
+    # ✅ v3 (a)팔 — **측정 후 채택(2026-07-31)**. 이제 운영 기본과 동일하므로 no-op 변형이다.
+    # 채택 전(무기준) 프롬프트를 재현하려면 {"confidence_guide_override": ""} 를 쓴다.
+    "confidence-perkind": {
+        "confidence_guide_override": _CONFIDENCE_GUIDE_PERKIND_KO,
+    },
+    # ✅ v3 (b)팔 — (a) + **keywords 보강** · **측정 후 채택(2026-07-31)** — 운영은 후보 경로
+    # (`asset_candidates`·`path_signal`)가 keywords 를 직접 싣게 배선돼 이 키도 이제 no-op 다.
+    # keywords 채택 근거: 요약 80자 이하 쌍 정확도 76.3→83.4%(+7.1pp). about 은 keywords
+    # 부분집합이라 제외, labels 는 저점수 일반명사(노이즈)라 제외 — 실물 확인.
+    "confidence-perkind-kw": {
+        "confidence_guide_override": _CONFIDENCE_GUIDE_PERKIND_KO,
+        "include_keywords": True,
+    },
+    # ── 2026-07-31 · 점수 축 v2 — **"두 요약을 읽고 판단한 내용 연결의 정도"** ──────────────
+    # 🟡 **측정 완료(2026-07-31) — 부분 성공·미달.** 값 분포는 처음으로 퍼졌고(29/26/28/17%)
+    # same_domain 안에서 완벽 단조(strong 비율 2.4→10.1→30.6→63.0%)를 얻었으나,
+    # duplicate_near 가 97% 0.9 로 붕괴 — 이 축("같은 구체적 대상인가")이 dup 선택 기준과
+    # 동어반복이기 때문(기준 ② 미달). dup −21.9% 는 손상이 아니라 자기 교정이었다(쌍 소실 0 ·
+    # 약한 dup 53건을 same_domain 으로 강등 · dup 정확도 73.0→80.4%). v3(종류 조건부 척도)가 후속.
+    # v1("confidence-defined" · 근거 정보 충분성)은 자기평가라 실패했다 — 값이 0.9(93%)/0.7 로
+    # 붕괴하고, 값별 정확도도 역방향(0.7 이 83.3% > 0.9 의 79.8%). 기준 ①(단일값 <70%) 미달.
+    # v2 는 자기 상태가 아니라 **쌍의 내용**을 판단시킨다: 읽어야만 답할 수 있는 질문
+    # ("두 요약이 같은 구체적 대상을 다루나")이라 코드로 대체 불가·자기평가 아님.
+    # 판정 루브릭(RUBRIC_KO_V1)과 같은 축이므로 기존 라벨 2,092건으로 **추가 판정 없이** 검증된다.
+    "confidence-reading": {
+        "confidence_guide_override": (
+            "\n- ``confidence``: 자기 확신이 아니다. **두 요약을 실제로 읽고, 내용이 얼마나 "
+            "맞물리는지**를 판단해 적는다. 먼저 ``reason`` 에 연결 근거를 요약 속 내용으로 쓰고, "
+            "그 근거에 맞는 값을 고른다 — 근거가 먼저, 점수가 나중이다. "
+            "아래 네 값 중 하나만 쓴다(중간값 금지).\n"
+            "  - ``0.9`` 두 요약이 **같은 구체적 대상**(같은 장소·인물·사건·작품·제품·요리)을 "
+            "중심으로 다룬다. 표기가 달라도 읽으면 같은 대상임을 알 수 있으면 포함한다. "
+            "예: \"그랜드캐니언 스카이워크 전망대\" ↔ \"콜로라도강 협곡의 관광 명소\".\n"
+            "  - ``0.7`` 중심 대상은 다르지만, **한쪽 내용의 상당 부분이 다른 쪽에서도 실제로 "
+            "다뤄진다**. 같은 사건의 배경, 인물과 그 업적, 원본과 해설. "
+            "예: 세종대왕의 애민 정책 오디오 ↔ 한글 창제 과정 문서. "
+            "(반례: 같은 \"조선 시대\"라는 배경만 공유하면 0.7 이 아니라 0.3 이다.)\n"
+            "  - ``0.5`` 내용 겹침은 없지만 **같은 활동·같은 목적**을 다룬다. "
+            "예: 김치 담그는 법 영상 ↔ 배추 절이는 법 문서 (둘 다 김장이라는 활동).\n"
+            "  - ``0.3`` 읽어 보면 **분야 표딱지 외에 공통점이 없다**. "
+            "예: 김치 영상 ↔ 인삼 영상 (발효식품이라는 범주만 공유).\n"
+            "  ⚠️ 관계 종류와 **별개로** 판단한다 — ``same_domain`` 을 골랐어도 읽어 보니 같은 "
+            "대상이면 0.9 다. 종류에 점수를 맞추지 말 것.\n"
+            "  ⚠️ 근거는 **요약에 실제로 있는 내용**이어야 한다. 요약에 없는 배경지식으로 점수를 "
+            "올리지 말 것."
+        ),
+    },
+    # 🔴 **검증 후 미달(2026-07-31)** — 점수 축 v1: "근거 정보가 얼마나 충분했나"(자기평가).
+    # 값 준수 100%·종류 독립은 달성했으나 0.9 에 93.4% 붕괴 + 값별 정확도 역방향으로 게이트 불능.
+    # 교훈: **기준을 정확히 줘도 자기보고는 못 쓴다** — LLM 은 자기 판단의 정보 부족을 인정하지
+    # 않는다(하위 2단계 사용 0건). 재시도하지 말 것. v2("confidence-reading")가 후속.
+    "confidence-defined": {
+        "confidence_guide_override": (
+            "\n- ``confidence``: **관계 종류를 무엇으로 골랐는지와 무관하게**, 그 판단을 내릴 "
+            "근거 정보가 얼마나 충분했는지를 나타낸다.\n"
+            "  ⚠️ 관계가 강한지 약한지는 ``relation_type_code`` 가 이미 표현한다 — 여기서 다시 "
+            "표현하지 말 것. **약한 관계라도 근거가 확실하면 높은 값을 쓴다.**\n"
+            "  아래 네 값 중 하나를 **그대로** 적는다(중간값·다른 값 금지).\n"
+            "  - ``0.9`` 양쪽 요약에 판단에 필요한 내용이 다 있었다. 추측하지 않았다.\n"
+            "  - ``0.7`` 한쪽 요약이 짧거나 일반적이어서, 판단의 일부를 주제·파일명으로 메웠다.\n"
+            "  - ``0.5`` 요약이 없거나 무내용(로고·검은 화면·자동 생성 문구 등)이어서 "
+            "파일명·주제·매체타입만으로 추정했다.\n"
+            "  - ``0.3`` 후보 정보가 거의 없어 판단 자체가 불확실하다.\n"
+            "  - 예: 양쪽 요약이 구체적이고 서로 **다른 대상**이면 → ``same_domain`` + ``0.9`` "
+            "(약한 관계지만 근거는 확실하다). 후보가 로고 이미지라 요약이 한 줄이면 → ``0.5``."
         ),
     },
     # 🔴 **검증 후 폐기됨(2026-07-30)** — 재시도하지 말 것. 보고서 §9.1 에 전체 근거.
@@ -222,6 +326,20 @@ def _read_candidates_prompt(
     drop = {str(k).strip().lower() for k in variant.pop("catalog_exclude_kinds", ())}
     if drop:
         kinds = [k for k in kinds if str(k.get("type_code", "")).lower() not in drop]
+    # `include_keywords` 도 측정 전용 키 — 소스·후보의 keywords 를 DB 에서 읽어 프롬프트에 싣는다.
+    # 운영 후보 경로는 keywords 를 만들지 않으므로 이 키가 없으면 프롬프트는 기존과 바이트 동일.
+    if variant.pop("include_keywords", False):
+        ids = [str(c["id"]) for c in cands] + [str(sid)]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT asset_id::text, COALESCE(ext_meta->>'keywords', '')"
+                " FROM asset_metadata WHERE asset_id = ANY(%s::uuid[])",
+                (ids,),
+            )
+            kw_map = dict(cur.fetchall())
+        for c in cands:
+            c["keywords"] = kw_map.get(str(c["id"]), "")
+        variant["source_keywords"] = kw_map.get(str(sid)) or None
     prompt = build_relation_proposal_prompt(
         source_summary=summary, source_media_type=modality,
         candidates=cands, relation_kinds_catalog=kinds,

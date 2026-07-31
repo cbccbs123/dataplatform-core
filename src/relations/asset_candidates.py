@@ -42,6 +42,9 @@ class EmbeddingCandidate(TypedDict):
     media_type: str
     emb_score: float
     summary: str
+    # 키워드 원시 JSON 문자열(2026-07-31) — 요약 80자 이하 자산(전체 1/3)의 판단 재료 보강.
+    # A/B 실측: 짧은 요약 쌍의 이름표 정확도 76.3→83.4%. 프롬프트 조립이 150자로 자른다.
+    keywords: str
     topic_ko: str | None
     subtopic_ko: str | None
 
@@ -145,6 +148,7 @@ def find_embedding_candidates(
                a.modality AS media_type,
                p.best_sim::float8 AS emb_score,
                COALESCE(m.ext_meta->>'summary', '') AS summary,
+               COALESCE(m.ext_meta->>'keywords', '') AS keywords,
                -- 066 FR-201: 후보의 자기주제(asset_topic) 정본을 동반 → 관계 LLM 이 주제 정합을
                --   맥락(soft)으로 보게 한다. asset_id PK 라 1:1(행 중복 없음).
                t.topic_ko    AS topic_ko,
@@ -183,6 +187,7 @@ def find_embedding_candidates(
                 "media_type": str(r["media_type"]),
                 "emb_score": float(r["emb_score"] or 0.0),
                 "summary": str(r["summary"] or ""),
+                "keywords": str(r["keywords"] or ""),
                 "topic_ko": str(topic_ko) if topic_ko is not None else None,
                 "subtopic_ko": str(subtopic_ko) if subtopic_ko is not None else None,
             }

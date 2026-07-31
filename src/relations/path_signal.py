@@ -168,6 +168,7 @@ def find_path_signal_candidates(
             """
             SELECT a.asset_id, a.fs_path, a.modality,
                    COALESCE(m.ext_meta->>'summary', '') AS summary,
+                   COALESCE(m.ext_meta->>'keywords', '') AS keywords,
                    -- 066 FR-201(2026-07-15 B4): 후보 자기주제 동반 — 임베딩 후보(asset_candidates)와
                    --   동일 계약. 종전 path 후보는 topic 없이 프롬프트에 null 로 실렸다.
                    t.topic_ko    AS topic_ko,
@@ -222,6 +223,7 @@ def find_path_signal_candidates(
                 # C-3: path-only 후보는 결정적 sentinel 0.0. union 시 임베딩 실측값 우선.
                 "emb_score": 0.0,
                 "summary": str(r["summary"] or ""),
+                "keywords": str(r["keywords"] or ""),
                 "topic_ko": str(topic_ko) if topic_ko is not None else None,
                 "subtopic_ko": str(subtopic_ko) if subtopic_ko is not None else None,
             }

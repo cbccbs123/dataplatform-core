@@ -517,9 +517,18 @@ class TestRelationApprovalSettings(unittest.TestCase):
     def test_기본값은_새_동작을_켠다(self) -> None:
         with _env():
             s = _build_settings("dev")
-        self.assertEqual(s.relations.persist_min_conf_similarity, 0.75)
+        # 0.70 = P2 게이트(2026-07-31 점수 축 v3 채택) — 새 점수 어휘 {0.9,0.7,0.5,0.3} 에서
+        # 0.5 이하(dup 정확도 41~46% · sd "대분야만")를 적재에서 끊는 값. 옛 0.75 는 옛 분포 기준.
+        self.assertEqual(s.relations.persist_min_conf_similarity, 0.70)
         self.assertEqual(s.relations.auto_approve_exclude_kinds, "same_domain")
         self.assertEqual(s.relations.review_exempt_kinds, "same_domain")
+
+    def test_자동승인은_기본_꺼져있다(self) -> None:
+        # 2026-07-31 구조 전환 — active("확인됨")는 사람만 만든다. 1.01 은 신뢰도가 1을 넘을 수
+        # 없어 사실상 끔. 재개 조건(사람 검토 150건·승인율 ≥95%)은 specs/081 에 고정.
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.auto_approve_min, 1.01)
 
     def test_env_로_영속화_게이트를_끈다(self) -> None:
         with _env(RELATION_PERSIST_MIN_CONF_SIMILARITY="0.0"):

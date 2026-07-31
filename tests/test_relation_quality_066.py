@@ -97,9 +97,9 @@ class TestCandidateCarriesTopic(unittest.TestCase):
     def test_returned_dict_has_topic_fields(self) -> None:
         rows = [
             {"id": uuid.UUID(_T1), "file_uri": "/d/a.png", "media_type": "image",
-             "emb_score": 0.91, "summary": "요약A", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"},
+             "emb_score": 0.91, "summary": "요약A", "keywords": "", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"},
             {"id": uuid.UUID(_T2), "file_uri": "/d/b.txt", "media_type": "txt",
-             "emb_score": 0.42, "summary": None, "topic_ko": None, "subtopic_ko": None},
+             "emb_score": 0.42, "summary": None, "keywords": None, "topic_ko": None, "subtopic_ko": None},
         ]
         conn, _ = _mock_conn(rows)
         out = find_embedding_candidates(conn, source_asset_id=_SRC, top_k=5)
@@ -141,7 +141,7 @@ class TestUnassignedSourceSkips(unittest.TestCase):
         from src.relations import asset_entry as ae
 
         emb_rows = [{"id": _T1, "file_uri": "/d/a.txt", "media_type": "txt",
-                     "emb_score": 0.83, "summary": "", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"}]
+                     "emb_score": 0.83, "summary": "", "keywords": "", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"}]
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
              mock.patch.object(ae, "_fetch_source_row",
                                return_value={"fs_path": "/d/a.txt", "modality": "txt", "summary": "요약"}), \
@@ -170,7 +170,7 @@ class TestSourceTopicWiredToPrompt(unittest.TestCase):
         captured: dict = {}
 
         def _fake_prompt(*, source_summary, source_media_type, candidates,
-                         relation_kinds_catalog, source_topic=None):
+                         relation_kinds_catalog, source_topic=None, source_keywords=None):
             captured["source_topic"] = source_topic
             return "PROMPT"
 

@@ -133,13 +133,13 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         dir_rows = [
             # 정확 stem 일치(raw) — report.pdf
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": "요약1"},
+             "modality": "pdf", "summary": "요약1", "keywords": ""},
             # 정규화 일치(파생 접미사) — report_summary.txt → 정규화 'report'
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report_summary.txt",
-             "modality": "txt", "summary": "요약2"},
+             "modality": "txt", "summary": "요약2", "keywords": ""},
             # 불일치 — invoice.xlsx (제외돼야 함)
             {"asset_id": uuid.UUID(_T3), "fs_path": "/data/docs/invoice.xlsx",
-             "modality": "excel", "summary": "요약3"},
+             "modality": "excel", "summary": "요약3", "keywords": ""},
         ]
         conn, cur = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -153,7 +153,7 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -165,9 +165,9 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         # _T2(정규화 일치, rank1) 가 행 순서상 먼저 와도, 정확 일치(rank2)인 _T1 이 앞서야 한다.
         dir_rows = [
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report_summary.txt",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -178,9 +178,9 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.txt",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -192,11 +192,11 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report.txt",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T3), "fs_path": "/data/docs/report.md",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=2)
@@ -210,9 +210,9 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         dir_rows = [
             # 소스 자신과 같은 asset_id 가 디렉터리 조회에 섞여 들어와도 제외돼야 한다.
             {"asset_id": uuid.UUID(_SRC), "fs_path": "/data/docs/report.docx",
-             "modality": "word", "summary": ""},
+             "modality": "word", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -231,7 +231,7 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/sub/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -419,7 +419,7 @@ class TestPathSignal066Contract(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": "요약", "topic_ko": "경제·산업", "subtopic_ko": "보고서"},
+             "modality": "pdf", "summary": "요약", "keywords": "", "topic_ko": "경제·산업", "subtopic_ko": "보고서"},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -431,7 +431,7 @@ class TestPathSignal066Contract(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)

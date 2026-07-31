@@ -49,7 +49,8 @@ def _fetch_source_row(conn: Connection[Any], asset_id: str) -> dict[str, Any] | 
             SELECT a.asset_id,
                    a.fs_path,
                    a.modality,
-                   COALESCE(m.ext_meta->>'summary', '') AS summary
+                   COALESCE(m.ext_meta->>'summary', '') AS summary,
+                   COALESCE(m.ext_meta->>'keywords', '') AS keywords
             FROM asset a
             LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
             WHERE a.asset_id = %s
@@ -188,6 +189,9 @@ def propose_relations_for_asset(
             candidates=candidates,
             relation_kinds_catalog=kinds,
             source_topic=source_topic,  # 소스 주제를 참고 신호로 전달(하드 배제 아님).
+            # 키워드는 요약이 짧은 자산(전체 1/3)의 판단 재료 보강(2026-07-31 채택 · A/B 실측
+            # 짧은 요약 쌍 정확도 +7.1pp). 후보 keywords 와 짝 — 소스만 빼면 비대칭이 된다.
+            source_keywords=str(src.get("keywords") or "") or None,
         )
         raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)
