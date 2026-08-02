@@ -15,17 +15,20 @@ _EXCLUDE = frozenset({"same_domain"})
 class TestCheckList(unittest.TestCase):
     def test_선언된_검사를_모두_만든다(self):
         names = [c["name"] for c in build_checks(min_conf_similarity=0.75,
-                                                 exclude_kinds=_EXCLUDE)]
+                                                 exclude_kinds=_EXCLUDE,
+                                                 auto_approve_min=1.01)]
         self.assertEqual(names, list(CHECK_NAMES))
 
     def test_검사_이름이_중복되지_않는다(self):
         names = [c["name"] for c in build_checks(min_conf_similarity=0.75,
-                                                 exclude_kinds=_EXCLUDE)]
+                                                 exclude_kinds=_EXCLUDE,
+                                                 auto_approve_min=1.01)]
         self.assertEqual(len(names), len(set(names)))
 
     def test_모든_검사가_읽기_전용이다(self):
         # 검증 도구가 DB 를 바꾸면 "검증했더니 통과"가 자기충족이 된다.
-        for c in build_checks(min_conf_similarity=0.75, exclude_kinds=_EXCLUDE):
+        for c in build_checks(min_conf_similarity=0.75, exclude_kinds=_EXCLUDE,
+                                 auto_approve_min=1.01):
             with self.subTest(c["name"]):
                 head = c["sql"].strip().upper()
                 self.assertTrue(head.startswith(("SELECT", "WITH")), head[:40])
@@ -34,13 +37,15 @@ class TestCheckList(unittest.TestCase):
 
     def test_모든_검사가_카운트_하나를_돌려준다(self):
         # run_verify 가 행 모양을 가정하므로 계약을 고정한다.
-        for c in build_checks(min_conf_similarity=0.75, exclude_kinds=_EXCLUDE):
+        for c in build_checks(min_conf_similarity=0.75, exclude_kinds=_EXCLUDE,
+                                 auto_approve_min=1.01):
             with self.subTest(c["name"]):
                 self.assertIn("AS n", c["sql"])
 
     def test_노드_조인에_asset_가드가_있다(self):
         # entity 노드는 asset_id 가 NULL 이라 가드 없이 조인하면 None 이 섞인다(레포 관례).
-        for c in build_checks(min_conf_similarity=0.75, exclude_kinds=_EXCLUDE):
+        for c in build_checks(min_conf_similarity=0.75, exclude_kinds=_EXCLUDE,
+                                 auto_approve_min=1.01):
             if "JOIN node" in c["sql"] or "node n" in c["sql"]:
                 with self.subTest(c["name"]):
                     self.assertIn("node_kind", c["sql"])

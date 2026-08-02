@@ -36,9 +36,10 @@ from src.domain.status_vocab import GraphEdgeStatus  # noqa: E402
 from src.relations.approval_policy import SIMILARITY_KINDS, parse_kind_set  # noqa: E402
 
 # 검사 이름의 정본 순서 — 테스트가 이 목록과 `build_checks` 결과의 일치를 봉인한다.
-# 조건부 검사(게이트를 끄면 빠지는 것)는 앞쪽 둘이다.
+# 조건부 검사(게이트를 끄면 빠지는 것)는 앞쪽 셋이다.
 CHECK_NAMES: tuple[str, ...] = (
     "유사도_계열_저신뢰_잔존",
+    "자동승인_꺼졌는데_기계승인_active",
     "자동승인_제외_kind가_active",
     "자기참조_엣지",
     "닫힌_status_어휘_위반",
@@ -53,6 +54,7 @@ def build_checks(
     *,
     min_conf_similarity: float,
     exclude_kinds: frozenset[str],
+    auto_approve_min: float = 0.0,
 ) -> list[dict[str, Any]]:
     """불변식 검사 목록을 만든다(순수 함수 · DB 접속 없음).
 
@@ -62,6 +64,9 @@ def build_checks(
     Args:
         min_conf_similarity: 유사도 계열 영속화 하한. ``0`` 이하면 그 검사를 만들지 않는다.
         exclude_kinds: 자동승인 제외 종류. 비면 그 검사를 만들지 않는다.
+        auto_approve_min: 자동승인 신뢰도 하한. **``1.0`` 초과면 자동승인이 꺼진 설정**이므로
+            "기계가 만든 ``active``(``reviewed_by IS NULL``)가 0인가" 검사를 추가한다.
+            기본 ``0.0`` 은 그 검사를 만들지 않는다(라이브러리 기본값이 동작을 바꾸지 않게).
 
     Returns:
         ``{name, sql, params}`` 리스트. ``sql`` 은 위반 행 수를 ``n`` 으로 돌려주는 SELECT 이고,
@@ -81,6 +86,22 @@ WHERE rk.kind_code = ANY(%s)
   AND (ge.confidence IS NULL OR ge.confidence < %s)
 -- check:유사도_계열_저신뢰_잔존""",
             "params": [sim, min_conf_similarity],
+        })
+
+    # 자동승인을 끈 설정(1.0 초과 = 신뢰도가 넘을 수 없는 값)에서는 **기계가 만든 active 가
+    # 0이어야 한다** — `reviewed_by IS NULL` 이 "사람이 승인하지 않았다"는 표식이다.
+    # 왜 이 검사가 필요한가: 2026-07-31 전량 재생성에서 자동승인이 꺼진 설정임에도 신규 INSERT
+    # 경로로 active 17건이 생겼다(계보 대조로 충돌 경로가 아님을 확인 · 같은 자산 재처리로는
+    # **재현되지 않음**). 원인 미확정이므로 재발을 즉시 잡는 감시를 남긴다
+    # (근거: `docs/관계_재생성_테스트결과_20260731.md` §5).
+    if auto_approve_min > 1.0:
+        checks.append({
+            "name": "자동승인_꺼졌는데_기계승인_active",
+            "sql": """SELECT count(*) AS n
+FROM graph_edge
+WHERE status = 'active' AND reviewed_by IS NULL
+-- check:자동승인_꺼졌는데_기계승인_active""",
+            "params": [],
         })
 
     if exclude_kinds:
@@ -232,9 +253,11 @@ def main(argv: list[str] | None = None) -> int:
 
     checks = build_checks(
         min_conf_similarity=rel.persist_min_conf_similarity,
-        exclude_kinds=parse_kind_set(rel.auto_approve_exclude_kinds, default=frozenset()))
+        exclude_kinds=parse_kind_set(rel.auto_approve_exclude_kinds, default=frozenset()),
+        auto_approve_min=rel.auto_approve_min)
     print(f"게이트 설정 — persist_min={rel.persist_min_conf_similarity} · "
-          f"exclude_kinds={rel.auto_approve_exclude_kinds!r}")
+          f"exclude_kinds={rel.auto_approve_exclude_kinds!r} · "
+          f"auto_approve_min={rel.auto_approve_min}")
 
     db = PostgresUtil()
     with db:
