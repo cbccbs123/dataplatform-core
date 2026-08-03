@@ -38,6 +38,20 @@ class TestNormalizeStem(unittest.TestCase):
     def test_strips_extension(self) -> None:
         self.assertEqual(normalize_stem("report.docx"), "report")
 
+    def test_strips_asset_id_prefix(self) -> None:
+        # 수집이 붙인 ``<asset_id>__`` 껍데기를 벗긴다. 안 벗기면 stem 이 자산마다 달라져
+        # 파일명 매칭이 원리상 성립하지 않는다(실측: 1,364자산 전부 경로 신호 후보 0건).
+        uid = "018f0000-0000-7000-8000-000000000272"
+        self.assertEqual(normalize_stem(f"{uid}__강의_1부.mp4"), "강의")
+        self.assertEqual(normalize_stem(f"{uid}__강의_1부.mp4"),
+                         normalize_stem("018f0000-0000-7000-8000-000000000275__강의_2부.mp4"))
+
+    def test_id_prefix_없는_파일명은_그대로(self) -> None:
+        # 실 운영처럼 접두어가 없는 환경에서 동작이 바뀌지 않아야 한다.
+        # 날짜 접두어(UUID 형태 아님)를 잘못 벗기지 않는지도 함께 본다.
+        self.assertEqual(normalize_stem("2026-07-31__회의록.txt"), "2026-07-31__회의록")
+        self.assertEqual(normalize_stem("notes.md"), "notes")
+
     def test_strips_version_suffix_vN(self) -> None:
         # manual_v1 / manual_v2 → 같은 정규화 stem 'manual'.
         self.assertEqual(normalize_stem("manual_v1.pdf"), normalize_stem("manual_v2.pdf"))

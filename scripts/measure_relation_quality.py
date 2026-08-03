@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import random
 from collections import Counter
 from collections.abc import Callable
@@ -137,6 +138,57 @@ PROMPT_VARIANTS: dict[str, dict] = {
     #
     # ⚠️ `same_series` 문구 통일(발견 5)은 **이 변형에 섞지 않는다** — 어제 X팔이 두 변경을 함께
     # 넣어 원인 분리에 실패했다(dup 24.2%→72.2%). 성질이 다른 변경은 따로 잰다.
+    # ── 2026-08-03 · 명시적 3종(references·derived_from·same_series) 정의 문구 통일 ──────────
+    # 왜: 전량 재생성 실측에서 이 3종의 이름표 정확도가 25~33% 로 무너졌다(합계 16건).
+    #   references 9건 33.3% · derived_from 4건 25.0% · same_series 3건 33.3%
+    #   실례: 창덕궁↔덕수궁을 "연작"(조선 궁궐 라인업) · 첼로↔바이올린을 "연작"(바이올린족 라인업)
+    #        · 스위스 고르너그라트↔울릉도를 "인용".
+    # 이 3종은 **점수 하한을 면제**받는 특혜(`approval_policy.SIMILARITY_KINDS` 분기)까지 갖는데,
+    # 근거가 "저신뢰여도 정보량이 있다"였다. 실측이 그 전제를 부정했으므로 정의를 좁힌다.
+    #
+    # 원인 진단: 종류 정의가 프롬프트 **세 곳**에 흩어져 있고 서로 어긋난다.
+    #   ① 엣지케이스 안내(`prompt.py` 모듈 docstring) — "같은 stem + 순번/버전" (엄격·정확)
+    #   ② 선택 힌트(`RELATION_KIND_HINTS_KO`) — "브랜드 **라인업** 등 연속·묶음" (느슨)
+    #   ③ DB `relation_kind.description` — "같은 시리즈·연작·**라인업** 연결" (느슨)
+    # "라인업"이 LLM 에게 *"같은 범주에 속하는 것들"* 로 읽혀 궁궐·현악기·기후지도를 묶었다.
+    # → ②③ 을 ① 에 맞춰 **파일명·명시 근거 요건**으로 좁힌다(①은 이미 옳아 손대지 않는다).
+    #
+    # ⚠️ 점수 기준(v3)과 **섞지 않는다** — 점수 기준은 "고른 뒤 얼마나 확실한가"이고 이건
+    #   "무엇을 고르는가"다. 축이 달라 함께 바꾸면 원인 분리가 안 된다(07-30 X팔의 실패).
+    # 2026-08-03 · 위 문구 통일 + **소스 파일명 공급**. 1차 측정(무작위 200자산)에서 명시적 3종이
+    # 4→1건으로 줄었으나 **표본이 작아 판정 불가**였고, 그 원인으로 소스 파일명 부재를 발견했다:
+    # 후보는 `filename` 을 받는데 소스는 못 받아 "같은 어간 + 순번" 비교가 원리상 불가능했다.
+    # 재료를 공급하는 것이라 문구 변경과 같은 변경의 일부로 본다(별 팔로 쪼개지 않는다).
+    # ⚠️ 이 팔은 **표적 표본**(경로 신호 후보를 가진 자산)으로 재야 한다 — 무작위 200자산은
+    # 명시적 3종 기대값이 2.3건뿐이라(전량 1,398자산에 16건) 애초에 판정력이 없는 설계였다.
+    "explicit-kinds-tightened-srcname": {
+        "include_source_filename": True,
+        # 문구는 아래 "explicit-kinds-tightened" 와 동일하게 유지한다 —
+        # 사후에 `_inherit_tightened()` 가 채운다(딕셔너리 리터럴에서 서로 참조할 수 없어서).
+    },
+    "explicit-kinds-tightened": {
+        "kind_hints_override": {
+            "same_series": (
+                "**파일명이 같은 어간 + 순번/버전**일 때만 "
+                "(``강의_1부``/``강의_2부`` · ``manual_v1``/``manual_v2``). "
+                "같은 범주·분야에 속한다는 이유로 고르지 말 것 — 그것은 ``same_domain`` 이다"
+            ),
+            "references": (
+                "한쪽이 다른쪽을 **명시적으로 가리킬 때만** — 제목·파일명·본문에 상대의 이름이 "
+                "실제로 등장해야 한다. 주제가 겹친다는 이유로 고르지 말 것"
+            ),
+            "derived_from": (
+                "한쪽이 다른쪽에서 **생성됐음이 드러날 때만** — 원문→요약/번역/전사, "
+                "``report``→``report_summary`` 처럼 파생 관계가 파일명이나 내용에 나타나야 한다. "
+                "같은 대상을 다룬다는 이유로 고르지 말 것 — 그것은 ``duplicate_near`` 다"
+            ),
+        },
+        "catalog_description_override": {
+            "same_series": "파일명이 같은 어간 + 순번/버전인 연작(범주 묶음이 아니다)",
+            "references": "한쪽이 다른쪽을 명시적으로 가리키는 인용·링크·제목 참조",
+            "derived_from": "한쪽이 다른쪽에서 생성된 파생(원문→요약·번역·전사)",
+        },
+    },
     # ✅ v3 (a)팔 — **측정 후 채택(2026-07-31)**. 이제 운영 기본과 동일하므로 no-op 변형이다.
     # 채택 전(무기준) 프롬프트를 재현하려면 {"confidence_guide_override": ""} 를 쓴다.
     "confidence-perkind": {
@@ -230,6 +282,13 @@ PROMPT_VARIANTS: dict[str, dict] = {
             "유사도·근접 후보라면 ``duplicate_near`` 를 우선 고려한다."
         ),
     },
+}
+
+# srcname 팔은 문구 통일분을 **그대로** 물려받아야 한다 — 문구가 갈라지면 "소스 파일명 공급"의
+# 효과가 아니라 "문구 차이"를 재게 된다. 딕셔너리 리터럴 안에서는 서로 참조할 수 없어 여기서 합친다.
+PROMPT_VARIANTS["explicit-kinds-tightened-srcname"] = {
+    **PROMPT_VARIANTS["explicit-kinds-tightened"],
+    **PROMPT_VARIANTS["explicit-kinds-tightened-srcname"],
 }
 
 
@@ -326,8 +385,24 @@ def _read_candidates_prompt(
     drop = {str(k).strip().lower() for k in variant.pop("catalog_exclude_kinds", ())}
     if drop:
         kinds = [k for k in kinds if str(k.get("type_code", "")).lower() not in drop]
+    # `catalog_description_override` — DB `relation_kind.description` 을 **측정용으로만** 갈아끼운다.
+    # 종류 정의 문구는 프롬프트 세 곳(엣지케이스 안내·선택 힌트·카탈로그 description)에 흩어져 있고
+    # 그중 description 은 DB 에서 온다. 문구 통일 효과를 재려면 세 곳을 함께 바꿔야 하므로
+    # 이 키가 필요하다(DB 를 건드리지 않고 프롬프트 입력만 교체).
+    desc = variant.pop("catalog_description_override", None) or {}
+    if desc:
+        kinds = [{**k, "description": desc.get(str(k.get("type_code", "")), k.get("description"))}
+                 for k in kinds]
     # `include_keywords` 도 측정 전용 키 — 소스·후보의 keywords 를 DB 에서 읽어 프롬프트에 싣는다.
     # 운영 후보 경로는 keywords 를 만들지 않으므로 이 키가 없으면 프롬프트는 기존과 바이트 동일.
+    # `include_source_filename` — 소스 파일명을 프롬프트에 싣는다(측정 전용).
+    # 후보는 `filename` 을 받는데 소스는 못 받아 **양쪽 파일명 비교가 불가능**했다 —
+    # same_series·references·derived_from 정의가 그 비교를 전제하므로 재료 공급이 필요하다.
+    if variant.pop("include_source_filename", False):
+        with conn.cursor() as cur:
+            cur.execute("SELECT fs_path FROM asset WHERE asset_id = %s", (sid,))
+            row = cur.fetchone()
+        variant["source_filename"] = posixpath.basename(str(row[0] or "")) if row else None
     if variant.pop("include_keywords", False):
         ids = [str(c["id"]) for c in cands] + [str(sid)]
         with conn.cursor() as cur:

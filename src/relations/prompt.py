@@ -263,6 +263,7 @@ def build_relation_proposal_prompt(
     relation_kinds_catalog: Sequence[Mapping[str, Any]],
     source_topic: Mapping[str, Any] | None = None,
     source_keywords: str | None = None,
+    source_filename: str | None = None,
     kind_hints_override: Mapping[str, str] | None = None,
     anti_dup_override: str | None = None,
     confidence_guide_override: str | None = None,
@@ -289,6 +290,13 @@ def build_relation_proposal_prompt(
         source_keywords: 소스 자산 키워드(원시 JSON 문자열 · 2026-07-31 채택 — 운영 호출부
             ``asset_entry`` 가 공급). ``None`` 이면 소스 키워드 줄을 통째로 생략한다(키워드 이전
             호출부·측정 대조군과의 하위호환). 후보 ``keywords`` 와 짝 — 한쪽만 주면 비대칭이다.
+        source_filename: 소스 자산 **파일명만**(디렉터리 경로 제외 — 후보 ``filename`` 과 같은 규칙).
+            ``None`` 이면 줄을 생략한다. **왜 필요한가**: 후보는 ``filename`` 을 받는데 소스는
+            받지 않아 **양쪽 파일명 비교가 원리상 불가능**했다. ``same_series``("같은 어간 +
+            순번/버전")·``references``("제목·파일명이 상대를 가리킴")·``derived_from``
+            (``report``→``report_summary``)은 그 비교를 전제하는 정의라, 재료 없이 판정을
+            요구하던 셈이다(2026-08-03 발견 · `docs/관계_재생성_테스트결과_20260731.md`).
+            ⚠️ 전체 경로를 넣지 말 것 — 개인정보 누출·환경 의존(헌법 3조·10조).
         confidence_guide_override: ``confidence`` 채점 기준 문구를 교체한다.
             ``None``(기본)이면 운영 채택본 ``RELATION_CONFIDENCE_GUIDE_KO``(2026-07-31 v3).
             ``""`` 를 주면 기준 문구를 **제거**한다 — 채택 이전 프롬프트의 재현(측정 대조군)용.
@@ -391,6 +399,12 @@ def build_relation_proposal_prompt(
     source_keywords_line = (
         f"\n소스 키워드: {str(source_keywords)[:150]}" if source_keywords else ""
     )
+    # 소스 파일명 줄 — 후보 ``filename`` 과 짝을 맞춘다(파일명 기반 종류 판정의 전제).
+    # basename 은 호출부 책임이다(여기서 다시 자르면 이미 파일명만 온 값에 무해하지만,
+    # 전체 경로가 흘러들어오는 것을 조용히 덮어 실수를 숨기게 된다).
+    source_filename_line = (
+        f"\n소스 파일명: {str(source_filename)[:120]}" if source_filename else ""
+    )
 
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.
 
@@ -410,7 +424,7 @@ def build_relation_proposal_prompt(
 
 소스 요약: {source_summary[:1200]}
 소스 매체 타입: {source_media_type}
-소스 주제(topic): {source_topic_line}{source_keywords_line}
+소스 주제(topic): {source_topic_line}{source_keywords_line}{source_filename_line}
 
 후보 목록(embedding_similarity 는 1에 가까울수록 유사. ``signal`` 이 ``경로 신호`` 면 파일명·폴더로 추가된 후보. ``topic_ko`` / ``subtopic_ko`` 는 후보의 자기주제):
 {candidates_block}

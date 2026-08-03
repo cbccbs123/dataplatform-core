@@ -48,6 +48,14 @@ _SUFFIX_PATTERN = re.compile(
 )
 
 
+# 수집이 붙이는 자산 id 접두어 — ``<UUID>__`` 형태. 파일명 비교에서 제외한다(`_raw_stem` 참조).
+# UUID 8-4-4-4-12 를 그대로 요구해 일반 파일명("2026-07-31__회의록" 등)을 잘못 벗기지 않는다.
+_ID_PREFIX_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__",
+    re.IGNORECASE,
+)
+
+
 def split_dir_and_name(fs_path: str) -> tuple[str, str]:
     """``fs_path`` 를 (디렉터리, basename) 으로 분리(POSIX 경로 규칙, 결정적).
 
@@ -65,16 +73,26 @@ def split_dir_and_name(fs_path: str) -> tuple[str, str]:
 
 
 def _raw_stem(filename: str) -> str:
-    """확장자만 제거한 stem(소문자 정규화). 접미사는 남긴다 — 정확 raw 일치 판정용.
+    """확장자 + **수집 단계가 붙인 자산 id 접두어**를 제거한 stem(소문자). 접미사는 남긴다.
+
+    id 접두어를 벗기는 이유(2026-08-03 실측): 수집이 파일명을 ``<asset_id>__<원본파일명>`` 으로
+    저장하는 환경에서는 stem 이 **자산마다 반드시 달라져** 파일명 매칭이 원리상 성립하지 않는다.
+    실제로 1,364자산 전부에서 경로 신호 후보가 **0건**이었고, 그 결과 연작·파생·참조가 파일명
+    근거를 못 쓰고 요약 추측에만 의존했다(명시적 3종 16건·정확도 25~33%).
+    id 는 **저장 규약이 붙인 껍데기**이므로 원본 파일명 비교에서 빼는 것이 맞다.
+
+    ⚠️ 접두어가 없는 파일명은 그대로 통과한다 — 실제 운영처럼 id 접두어가 없는 환경에서도
+    동작이 바뀌지 않는다(패턴이 안 맞으면 무변경).
 
     Args:
         filename: 디렉터리를 뺀 파일명.
 
     Returns:
-        소문자 stem. ``report_v1.pdf`` → ``report_v1``.
+        소문자 stem. ``report_v1.pdf`` → ``report_v1`` ·
+        ``018f0000-0000-7000-8000-000000000272__강의_1부.mp4`` → ``강의_1부``.
     """
     stem = posixpath.splitext(filename)[0]
-    return stem.lower()
+    return _ID_PREFIX_PATTERN.sub("", stem).lower()
 
 
 def normalize_stem(filename: str) -> str:
