@@ -28,6 +28,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.config.settings import get_current_settings
 from src.relations.asset_candidates import EmbeddingCandidate
 
 # C-1: 알려진 버전/파생 접미사. 정규식으로 stem 끝에서 **1회** 제거한다(확장 가능한 코드 상수).
@@ -48,12 +49,36 @@ _SUFFIX_PATTERN = re.compile(
 )
 
 
-# 수집이 붙이는 자산 id 접두어 — ``<UUID>__`` 형태. 파일명 비교에서 제외한다(`_raw_stem` 참조).
-# UUID 8-4-4-4-12 를 그대로 요구해 일반 파일명("2026-07-31__회의록" 등)을 잘못 벗기지 않는다.
+# 파일명 앞에 붙은 ``<UUID>__`` 접두어 패턴. UUID 8-4-4-4-12 를 그대로 요구해 일반 파일명
+# ("2026-07-31__회의록" 등)을 잘못 벗기지 않는다.
 _ID_PREFIX_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__",
     re.IGNORECASE,
 )
+
+
+def _strip_id_prefix_enabled() -> bool:
+    """파일명에서 자산 id 접두어를 벗길지 — **설정으로만 켠다(기본 꺼짐)**.
+
+    왜 기본이 꺼짐인가: ``<asset_id>__<원본명>`` 명명은 **특정 테스트 데이터셋의 규약**이고
+    실제 운영 파일명에는 그런 접두어가 없다. 운영에서 항상 켜 두면 "혹시 벗겨질 이름"을
+    조용히 훼손할 위험만 남고 얻는 것이 없다 — 그래서 데이터 규약을 아는 환경에서
+    ``RELATION_STRIP_ID_PREFIX=true`` 로 **명시적으로** 켠다.
+
+    켜야 하는 이유(실측 2026-08-03): 접두어를 남기면 stem 이 자산마다 반드시 달라져 파일명
+    매칭이 원리상 성립하지 않는다 — 그 데이터셋 1,364자산 전부에서 경로 신호 후보가 **0건**
+    이었고, 연작·파생·참조가 파일명 근거를 못 쓰고 요약 추측에만 의존했다.
+
+    설정이 초기화되지 않은 경로(단위 테스트 등)에서는 **꺼진 것으로 본다** — 라이브러리
+    기본값이 동작을 바꾸지 않게(운영 진입점은 항상 먼저 초기화한다).
+
+    Returns:
+        접두어를 벗겨야 하면 ``True``.
+    """
+    try:
+        return bool(get_current_settings().relations.strip_id_prefix)
+    except RuntimeError:
+        return False
 
 
 def split_dir_and_name(fs_path: str) -> tuple[str, str]:
@@ -73,26 +98,22 @@ def split_dir_and_name(fs_path: str) -> tuple[str, str]:
 
 
 def _raw_stem(filename: str) -> str:
-    """확장자 + **수집 단계가 붙인 자산 id 접두어**를 제거한 stem(소문자). 접미사는 남긴다.
+    """확장자를 제거한 stem(소문자). 접미사는 남긴다 — 정확 raw 일치 판정용.
 
-    id 접두어를 벗기는 이유(2026-08-03 실측): 수집이 파일명을 ``<asset_id>__<원본파일명>`` 으로
-    저장하는 환경에서는 stem 이 **자산마다 반드시 달라져** 파일명 매칭이 원리상 성립하지 않는다.
-    실제로 1,364자산 전부에서 경로 신호 후보가 **0건**이었고, 그 결과 연작·파생·참조가 파일명
-    근거를 못 쓰고 요약 추측에만 의존했다(명시적 3종 16건·정확도 25~33%).
-    id 는 **저장 규약이 붙인 껍데기**이므로 원본 파일명 비교에서 빼는 것이 맞다.
-
-    ⚠️ 접두어가 없는 파일명은 그대로 통과한다 — 실제 운영처럼 id 접두어가 없는 환경에서도
-    동작이 바뀌지 않는다(패턴이 안 맞으면 무변경).
+    ``RELATION_STRIP_ID_PREFIX`` 가 켜져 있으면 ``<asset_id>__`` 접두어도 함께 벗긴다
+    (근거·기본값은 `_strip_id_prefix_enabled` 참조 — **기본은 벗기지 않는다**).
 
     Args:
         filename: 디렉터리를 뺀 파일명.
 
     Returns:
-        소문자 stem. ``report_v1.pdf`` → ``report_v1`` ·
-        ``018f0000-0000-7000-8000-000000000272__강의_1부.mp4`` → ``강의_1부``.
+        소문자 stem. ``report_v1.pdf`` → ``report_v1``.
+        접두어 제거가 켜진 경우 ``019f490f-…__강의_1부.mp4`` → ``강의_1부``.
     """
     stem = posixpath.splitext(filename)[0]
-    return _ID_PREFIX_PATTERN.sub("", stem).lower()
+    if _strip_id_prefix_enabled():
+        stem = _ID_PREFIX_PATTERN.sub("", stem)
+    return stem.lower()
 
 
 def normalize_stem(filename: str) -> str:

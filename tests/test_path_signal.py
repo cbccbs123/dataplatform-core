@@ -38,19 +38,29 @@ class TestNormalizeStem(unittest.TestCase):
     def test_strips_extension(self) -> None:
         self.assertEqual(normalize_stem("report.docx"), "report")
 
-    def test_strips_asset_id_prefix(self) -> None:
-        # 수집이 붙인 ``<asset_id>__`` 껍데기를 벗긴다. 안 벗기면 stem 이 자산마다 달라져
-        # 파일명 매칭이 원리상 성립하지 않는다(실측: 1,364자산 전부 경로 신호 후보 0건).
+    def test_id_접두어는_기본으로_벗기지_않는다(self) -> None:
+        # 🔴 기본 False 가 **운영 안전값**이다 — ``<asset_id>__`` 명명은 특정 테스트 데이터셋의
+        # 규약이고 실제 운영 파일명에는 없다. 항상 벗기면 "혹시 벗겨질 이름"을 조용히 훼손한다.
         uid = "018f0000-0000-7000-8000-000000000272"
-        self.assertEqual(normalize_stem(f"{uid}__강의_1부.mp4"), "강의")
-        self.assertEqual(normalize_stem(f"{uid}__강의_1부.mp4"),
-                         normalize_stem("018f0000-0000-7000-8000-000000000275__강의_2부.mp4"))
+        self.assertEqual(normalize_stem(f"{uid}__강의_1부.mp4"), f"{uid}__강의")
 
-    def test_id_prefix_없는_파일명은_그대로(self) -> None:
-        # 실 운영처럼 접두어가 없는 환경에서 동작이 바뀌지 않아야 한다.
-        # 날짜 접두어(UUID 형태 아님)를 잘못 벗기지 않는지도 함께 본다.
-        self.assertEqual(normalize_stem("2026-07-31__회의록.txt"), "2026-07-31__회의록")
-        self.assertEqual(normalize_stem("notes.md"), "notes")
+    def test_설정을_켜면_id_접두어를_벗긴다(self) -> None:
+        # RELATION_STRIP_ID_PREFIX=true 인 환경(그 명명 규약을 쓰는 데이터셋)에서만 켠다.
+        # 켜면 stem 이 원본 파일명 기준이 되어 1부/2부 같은 연작 매칭이 성립한다.
+        uid_a = "018f0000-0000-7000-8000-000000000272"
+        uid_b = "018f0000-0000-7000-8000-000000000275"
+        with mock.patch("src.relations.path_signal._strip_id_prefix_enabled",
+                        return_value=True):
+            self.assertEqual(normalize_stem(f"{uid_a}__강의_1부.mp4"), "강의")
+            self.assertEqual(normalize_stem(f"{uid_a}__강의_1부.mp4"),
+                             normalize_stem(f"{uid_b}__강의_2부.mp4"))
+
+    def test_켜도_UUID_아닌_접두어는_안_벗긴다(self) -> None:
+        # 날짜 접두어처럼 UUID 형태가 아닌 것을 잘못 벗기면 멀쩡한 파일명이 훼손된다.
+        with mock.patch("src.relations.path_signal._strip_id_prefix_enabled",
+                        return_value=True):
+            self.assertEqual(normalize_stem("2026-07-31__회의록.txt"), "2026-07-31__회의록")
+            self.assertEqual(normalize_stem("notes.md"), "notes")
 
     def test_strips_version_suffix_vN(self) -> None:
         # manual_v1 / manual_v2 → 같은 정규화 stem 'manual'.

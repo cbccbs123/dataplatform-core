@@ -523,6 +523,19 @@ class TestRelationApprovalSettings(unittest.TestCase):
         self.assertEqual(s.relations.auto_approve_exclude_kinds, "same_domain")
         self.assertEqual(s.relations.review_exempt_kinds, "same_domain")
 
+    def test_id접두어_제거는_기본_꺼져있다(self) -> None:
+        # 🔴 **운영 안전값**이다. ``<asset_id>__`` 명명은 특정 테스트 데이터셋의 규약이고 실제
+        # 운영 파일명에는 없다 — 항상 켜 두면 "혹시 벗겨질 이름"을 조용히 훼손할 위험만 남는다.
+        # 그 규약을 쓰는 환경에서만 RELATION_STRIP_ID_PREFIX=true 로 명시적으로 켠다.
+        with _env():
+            s = _build_settings("dev")
+        self.assertFalse(s.relations.strip_id_prefix)
+
+    def test_env_로_id접두어_제거를_켠다(self) -> None:
+        with _env(RELATION_STRIP_ID_PREFIX="true"):
+            s = _build_settings("dev")
+        self.assertTrue(s.relations.strip_id_prefix)
+
     def test_자동승인은_기본_꺼져있다(self) -> None:
         # 2026-07-31 구조 전환 — active("확인됨")는 사람만 만든다. 1.01 은 신뢰도가 1을 넘을 수
         # 없어 사실상 끔. 재개 조건(사람 검토 150건·승인율 ≥95%)은 specs/081 에 고정.

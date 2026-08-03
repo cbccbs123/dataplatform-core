@@ -96,6 +96,9 @@ class RelationsConfig:
     auto_approve_emb_min: float
     # 008 C-2: 경로 신호(path_signal) 후보 별도 한도(동일 폴더 폭주 차단). union ≤ top_k + path_top_k.
     path_top_k: int
+    # 파일명 비교에서 ``<asset_id>__`` 접두어를 벗길지(기본 False). 특정 테스트 데이터셋 규약 전용 —
+    # 실제 운영 파일명에는 그 접두어가 없으므로 켜지 않는다(근거: path_signal._strip_id_prefix_enabled).
+    strip_id_prefix: bool
     # 009: 관계 재시도 큐 재시도 상한(attempts 도달 시 failed/DLQ 승격). 기본 3.
     retry_max_attempts: int
     # ── 081 승인·노출 게이트 (전부 끌 수 있다 · `src/relations/approval_policy.py` 가 해석) ──
@@ -730,6 +733,12 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     _Spec("relations", "review_exempt_kinds",
           "RELATION_REVIEW_EXEMPT_KINDS", _opt_str_allow_empty("same_domain")),
     _Spec("relations", "path_top_k", "RELATION_PATH_TOP_K", _opt_int(10)),
+    # 파일명 앞 ``<asset_id>__`` 접두어를 파일명 비교에서 벗길지. **기본 False = 벗기지 않음.**
+    # 이 명명은 특정 테스트 데이터셋의 규약이고 실제 운영 파일명에는 없다 — 운영에서 항상 켜 두면
+    # "혹시 벗겨질 이름"을 조용히 훼손할 위험만 남는다. 그런 규약을 쓰는 환경에서만 명시적으로 켠다.
+    # 켜야 하는 근거(실측): 접두어를 남기면 stem 이 자산마다 달라져 파일명 매칭이 원리상 불가능
+    # (그 데이터셋 1,364자산 전부에서 경로 신호 후보 0건).
+    _Spec("relations", "strip_id_prefix", "RELATION_STRIP_ID_PREFIX", _opt_bool(False)),
     _Spec("relations", "retry_max_attempts", "RELATION_RETRY_MAX_ATTEMPTS", _opt_int(3)),
     # ── video(키프레임·near-dup 7필드) ──
     _Spec("video", "max_keyframes", "VIDEO_MAX_KEYFRAMES", _video_max_keyframes),
