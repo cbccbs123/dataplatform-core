@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import posixpath
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -192,6 +193,12 @@ def propose_relations_for_asset(
             # 키워드는 요약이 짧은 자산(전체 1/3)의 판단 재료 보강(2026-07-31 채택 · A/B 실측
             # 짧은 요약 쌍 정확도 +7.1pp). 후보 keywords 와 짝 — 소스만 빼면 비대칭이 된다.
             source_keywords=str(src.get("keywords") or "") or None,
+            # 소스 파일명도 함께 넘긴다(2026-08-03 채택) — 후보는 ``filename`` 을 받는데 소스는
+            # 못 받아 **양쪽 파일명 비교가 원리상 불가능**했다. same_series("같은 어간+순번")·
+            # references("제목·파일명이 상대를 가리킴")·derived_from(``report``→``report_summary``)
+            # 은 그 비교를 전제하는 정의라, 재료 없이 판정을 요구하던 셈이다.
+            # ⚠️ **basename 만** 넘긴다 — 디렉터리 전체 경로는 LLM 입력에 넣지 않는다(헌법 3조·10조).
+            source_filename=posixpath.basename(str(src.get("fs_path") or "")) or None,
         )
         raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)

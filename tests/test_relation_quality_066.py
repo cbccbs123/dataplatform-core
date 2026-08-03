@@ -170,8 +170,10 @@ class TestSourceTopicWiredToPrompt(unittest.TestCase):
         captured: dict = {}
 
         def _fake_prompt(*, source_summary, source_media_type, candidates,
-                         relation_kinds_catalog, source_topic=None, source_keywords=None):
+                         relation_kinds_catalog, source_topic=None, source_keywords=None,
+                         source_filename=None):
             captured["source_topic"] = source_topic
+            captured["source_filename"] = source_filename
             return "PROMPT"
 
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
@@ -191,6 +193,9 @@ class TestSourceTopicWiredToPrompt(unittest.TestCase):
 
         self.assertEqual(captured["source_topic"],
                          {"topic_ko": "음식·요리", "subtopic_ko": "라면"})
+        # 소스 파일명도 함께 전달된다(2026-08-03 채택) — **basename 만**이어야 한다.
+        # 디렉터리 경로가 새면 LLM 입력에 환경 의존·개인정보가 들어간다(헌법 3조·10조).
+        self.assertEqual(captured["source_filename"], "a.txt")
 
 
 # ── T202 [FR-202/203] 프롬프트 주제 표기 + soft 지시 ────────────────────────────
