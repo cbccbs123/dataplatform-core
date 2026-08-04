@@ -96,8 +96,18 @@ class RelationsConfig:
     auto_approve_emb_min: float
     # 008 C-2: 경로 신호(path_signal) 후보 별도 한도(동일 폴더 폭주 차단). union ≤ top_k + path_top_k.
     path_top_k: int
+    # 파일명 비교에서 ``<asset_id>__`` 접두어를 벗길지(기본 False). 특정 테스트 데이터셋 규약 전용 —
+    # 실제 운영 파일명에는 그 접두어가 없으므로 켜지 않는다(근거: path_signal._strip_id_prefix_enabled).
+    strip_id_prefix: bool
     # 009: 관계 재시도 큐 재시도 상한(attempts 도달 시 failed/DLQ 승격). 기본 3.
     retry_max_attempts: int
+    # ── 081 승인·노출 게이트 (전부 끌 수 있다 · `src/relations/approval_policy.py` 가 해석) ──
+    # 유사도 계열(duplicate_near·same_domain) 저신뢰 제안을 **행으로 만들지 않는** 하한. 0=끔.
+    persist_min_conf_similarity: float
+    # 신뢰도와 무관하게 자동승인에서 제외할 종류(쉼표 구분). ""=제외 없음(기존 동작).
+    auto_approve_exclude_kinds: str
+    # 사람 검토 큐에서 뺄 종류(쉼표 구분 · 삭제 아닌 필터). ""=전건 검토(기존 동작).
+    review_exempt_kinds: str
 
 
 @dataclass(frozen=True)
@@ -557,6 +567,41 @@ def _opt_str(default: str) -> Callable[[str], str]:
     return lambda key: _env_str_default(key, default)
 
 
+def _env_str_allow_empty(name: str, default: str) -> str:
+    """선택 환경변수를 문자열로 읽되 **빈 값을 "명시적 빈 값"으로 존중**한다.
+
+    ``_env_str_default`` 는 ``""`` 을 미설정으로 보고 기본값으로 되돌린다 — 인덱스명·모델명처럼
+    "빈 값이 무의미한" 설정에는 그게 맞다. 그러나 **목록형 게이트**에서는 정반대다: ``""`` 은
+    *"이 게이트를 끈다"* 는 유일한 표현 수단인데 기본값으로 되돌리면 **끌 방법이 사라진다.**
+    081 게이트는 롤백이 코드 revert 가 아니라 설정 변경이어야 하므로(관계 전량 재생성이 약
+    28시간) 이 구분이 필요하다. 전역 헬퍼를 바꾸지 않고 별 함수를 두는 이유는 기존 문자열
+    설정들의 동작을 건드리지 않기 위해서다.
+
+    Args:
+        name: 환경변수 이름.
+        default: **미설정일 때만** 쓸 값(빈 문자열이 설정된 경우에는 쓰지 않는다).
+
+    Returns:
+        미설정이면 ``default``, 설정됐으면 앞뒤 공백을 자른 값(빈 문자열 가능).
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip()
+
+
+def _opt_str_allow_empty(default: str) -> Callable[[str], str]:
+    """``_env_str_allow_empty`` 를 기본값과 묶어 필드 표에 한 줄로 쓸 수 있게 한다.
+
+    Args:
+        default: 환경변수 미설정 시 쓸 값.
+
+    Returns:
+        "키 → 문자열" 읽기 함수.
+    """
+    return lambda key: _env_str_allow_empty(key, default)
+
+
 def _opt_float(default: float) -> Callable[[str], float]:
     """기본값을 묶어 "키 → 실수" 읽기 함수를 만든다."""
     return lambda key: _env_float_default(key, default)
@@ -666,9 +711,34 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     # ── relations ──
     _Spec("relations", "top_k", "RELATION_TOP_K", _opt_int(10)),
     _Spec("relations", "min_sim", "RELATION_MIN_SIM", _opt_float(0.2)),
-    _Spec("relations", "auto_approve_min", "RELATION_AUTO_APPROVE_MIN", _opt_float(0.9)),
+    # 자동승인 기본 OFF(1.01 = 신뢰도가 1을 넘을 수 없어 사실상 끔 · 2026-07-31 구조 전환).
+    # active("확인됨")는 **사람만** 만든다 — 근거: 자동승인분 이름표 정확도 67% 실측 +
+    # conf 0.95 오분류가 강칸에 노출된 사고(same_series). 재개 조건은 specs/081 에 고정:
+    # 사람이 dup 0.9 구간 150건 이상 검토 후 승인율 ≥95% 면 dup 0.9 한정 재검토.
+    _Spec("relations", "auto_approve_min", "RELATION_AUTO_APPROVE_MIN", _opt_float(1.01)),
     _Spec("relations", "auto_approve_emb_min", "RELATION_AUTO_APPROVE_EMB_MIN", _opt_float(0.0)),
+    # 081 승인·노출 게이트. 기본값이 새 동작을 켜지만 **전부 env 로 끌 수 있다** —
+    # 관계 재생성이 전량 약 28시간이라 코드 revert 로는 즉시 되돌아오지 않는다.
+    # 종류 목록은 쉼표 구분 원시 문자열로 보관하고 집합 변환은 소비처의
+    # `src/relations/approval_policy.py:parse_kind_set` 이 한다(설정이 관계 어휘를 몰라도 되게).
+    # 유사도 계열(duplicate_near·same_domain) 저신뢰 제안을 **행으로 만들지 않는** 하한. 0=끔.
+    # 0.70 = P2 게이트(2026-07-31): 점수 어휘가 {0.9,0.7,0.5,0.3} 4값으로 바뀌어(v3 채택)
+    # 0.5 이하( dup 41~46%·sd "대분야만" )를 적재에서 끊는 값. 옛 0.75 는 옛 점수 분포 기준.
+    _Spec("relations", "persist_min_conf_similarity",
+          "RELATION_PERSIST_MIN_CONF_SIMILARITY", _opt_float(0.70)),
+    # 신뢰도와 무관하게 자동승인에서 제외할 종류. ""=제외 없음(기존 동작).
+    _Spec("relations", "auto_approve_exclude_kinds",
+          "RELATION_AUTO_APPROVE_EXCLUDE_KINDS", _opt_str_allow_empty("same_domain")),
+    # 사람 검토 큐에서 뺄 종류(삭제 아님·필터). ""=전건 검토(기존 동작).
+    _Spec("relations", "review_exempt_kinds",
+          "RELATION_REVIEW_EXEMPT_KINDS", _opt_str_allow_empty("same_domain")),
     _Spec("relations", "path_top_k", "RELATION_PATH_TOP_K", _opt_int(10)),
+    # 파일명 앞 ``<asset_id>__`` 접두어를 파일명 비교에서 벗길지. **기본 False = 벗기지 않음.**
+    # 이 명명은 특정 테스트 데이터셋의 규약이고 실제 운영 파일명에는 없다 — 운영에서 항상 켜 두면
+    # "혹시 벗겨질 이름"을 조용히 훼손할 위험만 남는다. 그런 규약을 쓰는 환경에서만 명시적으로 켠다.
+    # 켜야 하는 근거(실측): 접두어를 남기면 stem 이 자산마다 달라져 파일명 매칭이 원리상 불가능
+    # (그 데이터셋 1,364자산 전부에서 경로 신호 후보 0건).
+    _Spec("relations", "strip_id_prefix", "RELATION_STRIP_ID_PREFIX", _opt_bool(False)),
     _Spec("relations", "retry_max_attempts", "RELATION_RETRY_MAX_ATTEMPTS", _opt_int(3)),
     # ── video(키프레임·near-dup 7필드) ──
     _Spec("video", "max_keyframes", "VIDEO_MAX_KEYFRAMES", _video_max_keyframes),

@@ -92,22 +92,133 @@ _PATH_SIGNAL_GUIDE_KO = """### 파일명·폴더 경로 신호 가이드 (보조
 """
 
 # relation_type_code(= kind_code) 선택 힌트: DB에 없을 때 프롬프트에 보조 설명으로 쓴다.
+# ⚠️ duplicate_near 힌트에 "임베딩 유사도로 가져온 후보처럼" 류의 표현을 쓰지 말 것 —
+#    후보는 정의상 전부 임베딩 유사도로 온 것이라 "모든 후보=duplicate_near" 순환 지시가 된다
+#    (shadow A/B 로 검증된 오분류 원인 · docs/관계_품질_측정_20260728.md §4).
+# 명시적 3종(`same_series`·`references`·`derived_from`) 문구는 2026-08-03 에 **좁혔다**.
+#
+# 왜: 전량 재생성 실측에서 이 3종의 이름표 정확도가 25~33% 로 무너졌다(합계 16건) —
+#   창덕궁↔덕수궁을 "연작"(조선 궁궐 라인업) · 첼로↔바이올린을 "연작"(바이올린족 라인업) ·
+#   스위스 고르너그라트↔울릉도를 "인용". 정의가 프롬프트 **세 곳**에 흩어져 어긋나 있었고,
+#   그중 "**라인업**·묶음"이라는 느슨한 표현이 LLM 에게 *"같은 범주에 속하는 것들"* 로 읽혔다.
+#   엣지케이스 안내(모듈 docstring)의 "같은 stem + 순번/버전"이 옳은 정의였으므로 여기와
+#   DB `relation_kind.description` 을 그쪽에 맞췄다(세 곳 통일).
+#
+# 장치 2개: ①"~일 때만" + **관찰 가능한 요건**(파일명 순번·상대 이름 등장·파생 표기)
+#   ②**오분류가 갈 곳을 명시**("그건 same_domain 이다") — 갈 곳을 안 주면 억지로 다른 종류를
+#   고르거나 기권한다(07-30 X팔 실측: 선택지를 없애자 duplicate_near 오분류가 24%→72% 폭증).
+#
+# 측정(330자산 3층 표본 · 사전 고정 5기준 중 4 통과):
+#   · A층(오분류 전수 30자산): 개선 2 · 악화 0 — "연작" 오분류가 same_domain 으로 제자리
+#   · B층 회귀: dup +1.3pp · same_domain +4.7pp (나빠진 것 없음)
+#   · 전체 이름표 정확도 83.0→85.0% · 명시적 3종 15→9건
+#   · 미달 1항(쌍 소실 5.5% vs 기준 5%) — 소실 53건 전수 판정 결과 **96.2%가 weak**(약한 꼬리
+#     정리이고 잃은 알짜는 1건)이라 실질 손실이 아니다.
+#   ⚠️ **한계**: 이 측정은 소스 파일명 공급(`source_filename`)과 **함께** 재서 두 변경의 공로를
+#     분리하지 못했다. 정확도 +2.0pp 의 상당 부분은 신규 제안 201건(정확도 92.0%)에서 왔고
+#     그것은 파일명 공급 쪽 효과로 보인다 — **"문구 통일이 정확도를 2pp 올렸다"고 읽으면 안 된다.**
+#   ⚠️ **남은 문제**: 오분류는 줄었으나(15→9건) 남은 9건의 정확도는 개선되지 않았다
+#     (`references` 25.0% · `same_series` 20.0% · `derived_from` 0건). 화면에서 이 3종은
+#     **종류 이름을 감춰야 한다**(거짓 정보 노출 방지).
 RELATION_KIND_HINTS_KO: dict[str, str] = {
-    "same_domain": "같은 주제·분야·도메인으로 묶일 때(예: 둘 다 게임, 둘 다 교통)",
-    "same_series": "같은 시리즈·연작·브랜드 라인업 등 **연속·묶음**일 때",
-    "duplicate_near": "임베딩 유사도로 가져온 후보처럼 **내용·장면·주제 근접**할 때",
-    "references": "명시적 인용·링크·제목 참조 등 **참조** 관계일 때",
-    "derived_from": "한쪽이 다른쪽에서 **파생·생성**된 관계일 때",
+    "same_domain": "대상은 다르지만 같은 분야로 묶일 때",
+    "same_series": (
+        "**파일명이 같은 어간 + 순번/버전**일 때만 "
+        "(``강의_1부``/``강의_2부`` · ``manual_v1``/``manual_v2``). "
+        "같은 범주·분야에 속한다는 이유로 고르지 말 것 — 그것은 ``same_domain`` 이다"
+    ),
+    "duplicate_near": "**같은 구체적 대상**을 거의 같은 형식으로 담은 사실상 중복본일 때",
+    "references": (
+        "한쪽이 다른쪽을 **명시적으로 가리킬 때만** — 제목·파일명·본문에 상대의 이름이 "
+        "실제로 등장해야 한다. 주제가 겹친다는 이유로 고르지 말 것"
+    ),
+    "derived_from": (
+        "한쪽이 다른쪽에서 **생성됐음이 드러날 때만** — 원문→요약/번역/전사, "
+        "``report``→``report_summary`` 처럼 파생 관계가 파일명이나 내용에 나타나야 한다. "
+        "같은 대상을 다룬다는 이유로 고르지 말 것 — 그것은 ``duplicate_near`` 다"
+    ),
 }
 
+# ``duplicate_near`` 와 ``same_domain`` 이 함께 활성일 때만 덧붙는 혼동 방지 문구.
+# 인라인 문자열이 아니라 모듈 상수인 이유: shadow A/B 측정이 **이 문구만** 갈아끼워 비교할 수 있어야
+# 한다(조립을 복제하면 "운영 프롬프트 vs 재구현" 비교가 돼 실험이 무효가 된다).
+# ⚠️ 문구를 고치면 운영 관계 생성 출력이 바뀐다 — 변형은 측정 스크립트의 override 로만 주고,
+#    검증된 뒤에야 여기를 바꾼다.
+RELATION_ANTI_DUP_HINT_KO = (
+    "\n\n**구분:** 주제·세부주제가 같아도 **다루는 대상이 다르면** "
+    "``duplicate_near`` 가 아니다. 대상이 다르고 분야만 같으면 ``same_domain`` 이다."
+)
 
-def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
+# ``confidence`` 채점 기준 — **"선택한 종류의 정의 안에서, 이 관계가 얼마나 뚜렷한가"**
+# (종류 조건부 척도 · 2026-07-31 채택 · shadow A/B 3회 측정 끝의 v3).
+#
+# 왜 이 축인가 — 세 번의 실측이 좁혀 온 결론이다:
+#   v1 "근거 정보가 충분했나"(자기평가) → 93% 가 최고값으로 붕괴. LLM 은 자기 판단의 정보
+#      부족을 인정하지 않는다.
+#   v2 "두 요약이 같은 대상인가"(쌍 단위) → same_domain 에서는 완벽 단조였으나
+#      duplicate_near 에서 97% 붕괴 — 그 질문이 dup 을 **고른 이유 그 자체**라 동어반복.
+#   v3 종류마다 척도를 달리해 선택과 분리 → dup 값별 실제 strong 비율 46→72→84%(단조) ·
+#      전체 이름표 정확도 79.6→83.5% · 채택. (측정 기록: scripts/measure_relation_quality.py
+#      PROMPT_VARIANTS 주석 · specs/081 §2026-07-31)
+#
+# 설계 장치: ①판단 절차 4단계 — "망설이면 낮은 값" 하향 규칙은 v1 실측 상향 편향의 상쇄
+# ②예시/기준 분리 + "예시일 뿐" 전역 가드 — same_series "라인업" 오독 사고의 재발 방지
+# ③dup 0.9 두-조건 성립제 ④경계 강등 문구.
+# ⚠️ 문구를 고치면 운영 관계 생성 출력·점수 분포가 함께 바뀐다 — 변형은 측정 스크립트의
+#    confidence_guide_override 로만 실험하고, 검증된 뒤에야 여기를 바꾼다.
+RELATION_CONFIDENCE_GUIDE_KO = (
+    "\n- ``confidence``: 선택한 ``relation_type_code`` 의 관계가 이 쌍에서 **얼마나 뚜렷하게 "
+    "성립하는지**다. 자기 확신이 아니라 요약에서 관찰한 사실로 판단한다. "
+    "네 값(0.9/0.7/0.5/0.3)만 쓴다.\n"
+    "  판단 절차: 1) 두 요약에서 연결 근거를 찾아 ``reason`` 에 먼저 쓴다. "
+    "2) 선택한 종류의 기준표에서 그 근거가 만족하는 값을 고른다. "
+    "3) 두 값 사이에서 망설여지면 **낮은 값**을 쓴다. "
+    "4) 요약·키워드·파일명 밖의 배경지식은 근거로 치지 않는다.\n"
+    "  기준은 각 줄의 문장이다. \"예:\"는 이해를 돕는 예시일 뿐이다 — 예시와 다른 소재라도 "
+    "기준 문장에 맞으면 그 값을 쓴다.\n"
+    "  [duplicate_near 를 골랐을 때 — 내용 겹침의 정도]\n"
+    "  - ``0.9`` 같은 대상 **그리고** 같은 측면, 두 조건을 모두 만족할 때만 — 핵심 내용까지 "
+    "사실상 같다. 하나라도 아니면 0.7 이하로 내린다. 예: 같은 폭포를 소개하는 문서와 영상.\n"
+    "  - ``0.7`` 같은 대상이지만 다루는 측면이 다르다. "
+    "예: 같은 궁궐을 다룬 역사 문서와 관광 안내 영상.\n"
+    "  - ``0.5`` 같은 대상이 등장하지만 한쪽에서는 중심 소재가 아니다. "
+    "경계: 그 대상이 양쪽 모두의 중심이면 0.7, 한쪽에서 스쳐 가면 0.5. "
+    "예: 김치 문서 ↔ 한식 전반을 다루며 김치를 한 단락만 언급하는 영상.\n"
+    "  - ``0.3`` 같은 대상이라는 근거가 요약 안에 없다 — 파일명 등 간접 단서뿐이다.\n"
+    "  [same_domain 을 골랐을 때 — 분야 공유의 좁기]\n"
+    "  - ``0.9`` 같은 세부 활동·목적까지 공유한다. 예: 둘 다 김장 방법을 가르친다.\n"
+    "  - ``0.7`` 같은 세부 분야를 다룬다. "
+    "예: 김치 담그기 ↔ 된장 만들기 (발효식품 요리라는 세부 분야).\n"
+    "  - ``0.5`` 같은 대분야 안에서 소재만 다르다. "
+    "예: 김치 레시피 ↔ 커피 내리는 법 (음식·요리라는 틀만 공유).\n"
+    "  - ``0.3`` 분야 명칭 외에 공통점이 없다.\n"
+    "  [references·derived_from·same_series 를 골랐을 때 — 근거의 명시성]\n"
+    "  - ``0.9`` 관계의 직접 증거가 요약이나 파일명에 있다. "
+    "예: 제목을 그대로 인용 / \"~을 요약한 문서\" 문구 / 같은 어간 + 1부·2부 순번.\n"
+    "  - ``0.7`` 직접 증거는 없으나 내용상 강하게 시사된다.\n"
+    "  - ``0.5`` 정황뿐이다.\n"
+    "  - ``0.3`` 추측에 가깝다."
+)
+
+
+def _build_relation_kind_guide(
+    catalog: Sequence[Mapping[str, Any]],
+    *,
+    kind_hints_override: Mapping[str, str] | None = None,
+    anti_dup_override: str | None = None,
+) -> str:
     """카탈로그의 ``type_code`` 마다 한 줄 힌트를 붙인 선택 가이드 블록을 만든다.
 
     ``duplicate_near`` 와 ``same_domain`` 이 동시에 있으면 혼동 방지 문구를 덧붙인다.
 
     Args:
         catalog: 활성 relation_kind 목록(``fetch_active_relation_kinds`` 결과).
+        kind_hints_override: kind 별 힌트를 **부분 교체**한다(주지 않은 kind 는 원래 힌트 유지).
+            ``None``(기본)이면 운영 힌트를 그대로 쓴다. **측정 전용 seam** — A/B 에서 프롬프트
+            조립을 복제하면 "운영 프롬프트 vs 재구현" 비교가 돼 실험이 무효가 되므로, 조립은
+            한 곳에 두고 문구만 주입한다.
+        anti_dup_override: ``duplicate_near``/``same_domain`` 구분 문구를 통째로 교체한다.
+            ``None``(기본)이면 ``RELATION_ANTI_DUP_HINT_KO``.
 
     Returns:
         Markdown 블록 문자열. 카탈로그가 비면 **빈 문자열**(프롬프트에서 이 절이 통째로 빠진다).
@@ -117,23 +228,31 @@ def _build_relation_kind_guide(catalog: Sequence[Mapping[str, Any]]) -> str:
         그 외 DB 에 직접 추가된 kind 는 description 첫 200자를 보조 설명으로 표시한다.
         따라서 새 통제어휘를 추가할 때 ``RELATION_KIND_HINTS_KO`` 에도 등록하면 프롬프트 품질이 올라간다.
     """
+    # 힌트 출처를 지역 변수로 뽑는다 — override 가 오면 그 kind 만 덮어쓴 사본을 쓴다
+    # (기본 ``None`` 이면 운영 dict 그대로라 출력이 바이트 단위로 동일하다).
+    hints = (RELATION_KIND_HINTS_KO if kind_hints_override is None
+             else {**RELATION_KIND_HINTS_KO, **kind_hints_override})
     codes = sorted({str(r.get("type_code", "")).strip() for r in catalog if str(r.get("type_code", "")).strip()})
     if not codes:
         return ""
     lines: list[str] = []
     for code in codes:
-        hint = RELATION_KIND_HINTS_KO.get(code)
+        hint = hints.get(code)
         if hint:
             lines.append(f"- ``{code}``: {hint}")
         else:
             desc = str(next((r.get("description") for r in catalog if str(r.get("type_code")) == code), "") or "")
             lines.append(f"- ``{code}``: (DB 설명) {desc[:200]}")
     body = "\n".join(lines)
+    # ⚠️ **명시 주입은 조건을 이긴다.** `anti_dup_override` 를 준 것은 "이 문구를 붙여라"는
+    # 의사 표현이므로 카탈로그 구성과 무관하게 적용한다. 조건에 종속시키면 **종류를 뺀 프롬프트에
+    # 억제 문구를 살리는 실험이 불가능**해진다(081 Y팔 측정에서 실제로 막혔다 — 2026-07-30).
+    # 운영은 override 를 주지 않으므로 아래 elif 만 타고, 출력은 바이트 불변이다.
     anti_dup = ""
-    if "duplicate_near" in codes and "same_domain" in codes:
-        anti_dup = (
-            "\n\n**구분:** 단순히 주제가 같으면 ``same_domain`` , 유사도·근접 후보라면 ``duplicate_near`` 를 우선 고려한다."
-        )
+    if anti_dup_override is not None:
+        anti_dup = anti_dup_override
+    elif "duplicate_near" in codes and "same_domain" in codes:
+        anti_dup = RELATION_ANTI_DUP_HINT_KO
     return f"""### relation_kind (= ``type_code``) 선택 가이드
 아래는 **왜 두 미디어가 연결되는지**에 대한 거친 분류다. **업종·소재(의료·게임 등)** 는 여기서 고르지 말고 ``topic_ko`` / ``topic_en`` 에 넣는다.
 
@@ -179,6 +298,11 @@ def build_relation_proposal_prompt(
     candidates: Sequence[Mapping[str, Any]],
     relation_kinds_catalog: Sequence[Mapping[str, Any]],
     source_topic: Mapping[str, Any] | None = None,
+    source_keywords: str | None = None,
+    source_filename: str | None = None,
+    kind_hints_override: Mapping[str, str] | None = None,
+    anti_dup_override: str | None = None,
+    confidence_guide_override: str | None = None,
 ) -> str:
     """관계 제안 프롬프트 전체를 하나의 문자열로 조립한다.
 
@@ -193,6 +317,27 @@ def build_relation_proposal_prompt(
         source_topic: 소스 자산의 자기주제 ``{"topic_ko","subtopic_ko"}``. 주제가 달라도 내용이
             맞으면 연결하라는 **soft 신호**로만 쓰인다(하드 배제 금지). ``None`` 이면 주제 표기를
             통째로 생략한다 — 주제 미부여 자산·구 호출부 경로.
+        kind_hints_override: kind 별 선택 힌트를 **부분 교체**한다(주지 않은 kind 는 원래 힌트
+            유지). ``None``(기본)이면 운영 힌트를 그대로 쓴다. **측정 전용 seam** — A/B 에서
+            프롬프트 조립을 복제하면 "운영 프롬프트 vs 재구현" 비교가 돼 실험이 무효가 되므로,
+            조립은 한 곳에 두고 문구만 주입한다.
+        anti_dup_override: ``duplicate_near``/``same_domain`` 구분 문구를 통째로 교체한다.
+            ``None``(기본)이면 ``RELATION_ANTI_DUP_HINT_KO``.
+        source_keywords: 소스 자산 키워드(원시 JSON 문자열 · 2026-07-31 채택 — 운영 호출부
+            ``asset_entry`` 가 공급). ``None`` 이면 소스 키워드 줄을 통째로 생략한다(키워드 이전
+            호출부·측정 대조군과의 하위호환). 후보 ``keywords`` 와 짝 — 한쪽만 주면 비대칭이다.
+        source_filename: 소스 자산 **파일명만**(디렉터리 경로 제외 — 후보 ``filename`` 과 같은 규칙).
+            ``None`` 이면 줄을 생략한다. **왜 필요한가**: 후보는 ``filename`` 을 받는데 소스는
+            받지 않아 **양쪽 파일명 비교가 원리상 불가능**했다. ``same_series``("같은 어간 +
+            순번/버전")·``references``("제목·파일명이 상대를 가리킴")·``derived_from``
+            (``report``→``report_summary``)은 그 비교를 전제하는 정의라, 재료 없이 판정을
+            요구하던 셈이다(2026-08-03 발견 · `docs/관계_재생성_테스트결과_20260731.md`).
+            ⚠️ 전체 경로를 넣지 말 것 — 개인정보 누출·환경 의존(헌법 3조·10조).
+        confidence_guide_override: ``confidence`` 채점 기준 문구를 교체한다.
+            ``None``(기본)이면 운영 채택본 ``RELATION_CONFIDENCE_GUIDE_KO``(2026-07-31 v3).
+            ``""`` 를 주면 기준 문구를 **제거**한다 — 채택 이전 프롬프트의 재현(측정 대조군)용.
+            문자열을 주면 통째로 교체(shadow A/B). 주입 문구는 **줄바꿈으로 시작**해야 한다
+            (직전 줄 끝에 이어 붙는다).
 
     Returns:
         LLM에 그대로 넘길 단일 프롬프트 문자열.
@@ -209,21 +354,28 @@ def build_relation_proposal_prompt(
         # 후보의 주제를 함께 보여줘 주제 정합을 참고하게 한다(하드 조건은 아니다).
         cand_topic_ko = c.get("topic_ko")
         cand_subtopic_ko = c.get("subtopic_ko")
-        cand_lines.append(
-            json.dumps(
-                {
-                    "target_media_item_id": c["id"],
-                    "filename": filename,
-                    "media_type": c["media_type"],
-                    "summary": (c["summary"] or "")[:500],
-                    "embedding_similarity": emb_score,
-                    "signal": signal,
-                    "topic_ko": cand_topic_ko,
-                    "subtopic_ko": cand_subtopic_ko,
-                },
-                ensure_ascii=False,
-            )
+        cand_obj: dict[str, Any] = {
+            "target_media_item_id": c["id"],
+            "filename": filename,
+            "media_type": c["media_type"],
+            "summary": (c["summary"] or "")[:500],
+        }
+        # 후보 dict 에 ``keywords`` 가 실려 온 경우에만 싣는다(2026-07-31 채택 — 운영 후보 경로
+        # `asset_candidates` 가 공급). 요약이 짧은 자산(전체의 1/3 이 80자 이하)에서 판단 재료를
+        # 보강한다 — A/B 실측: 요약 80자 이하 쌍 정확도 76.3→83.4%. 키가 없으면 필드 생략
+        # (keywords 이전 호출부·측정 대조군과의 하위호환).
+        # 길이 상한 150자는 판정 프롬프트(`judge_relations.build_judge_prompt`)와 같은 값.
+        if c.get("keywords"):
+            cand_obj["keywords"] = str(c["keywords"])[:150]
+        cand_obj.update(
+            {
+                "embedding_similarity": emb_score,
+                "signal": signal,
+                "topic_ko": cand_topic_ko,
+                "subtopic_ko": cand_subtopic_ko,
+            }
         )
+        cand_lines.append(json.dumps(cand_obj, ensure_ascii=False))
     candidates_block = "\n".join(cand_lines) if cand_lines else "(후보 없음)"
 
     if relation_kinds_catalog:
@@ -239,7 +391,10 @@ def build_relation_proposal_prompt(
             ensure_ascii=False,
             indent=2,
         )
-        selection_guide = _build_relation_kind_guide(relation_kinds_catalog)
+        selection_guide = _build_relation_kind_guide(
+            relation_kinds_catalog,
+            kind_hints_override=kind_hints_override,
+            anti_dup_override=anti_dup_override)
         catalog_rules = f"""아래는 현재 DB의 **활성 relation_kind** 목록(JSON). 각 엣지의 ``relation_type_code`` 는 **반드시** 아래 ``type_code``(= 관계 종류 코드) 중 하나와 **완전히 동일**해야 한다(소문자).
 
 {catalog_block}
@@ -268,6 +423,25 @@ def build_relation_proposal_prompt(
     # 소스 주제를 한 줄로 표기한다. 미부여면 '(주제 없음)'.
     source_topic_line = _fmt_topic(source_topic)
 
+    # confidence 채점 기준 — 기본은 운영 채택본(v3 · 2026-07-31). None/""/문자열 구분에 주의:
+    # "" 는 falsy 지만 "기준 제거"라는 명시적 의사이므로 `or` 로 합치면 안 된다(대조군 재현 불가).
+    confidence_guide_block = (
+        confidence_guide_override
+        if confidence_guide_override is not None
+        else RELATION_CONFIDENCE_GUIDE_KO
+    )
+
+    # 소스 키워드 줄(측정 전용 주입) — None 이면 줄 자체를 생략해 기본 출력 바이트 불변.
+    source_keywords_line = (
+        f"\n소스 키워드: {str(source_keywords)[:150]}" if source_keywords else ""
+    )
+    # 소스 파일명 줄 — 후보 ``filename`` 과 짝을 맞춘다(파일명 기반 종류 판정의 전제).
+    # basename 은 호출부 책임이다(여기서 다시 자르면 이미 파일명만 온 값에 무해하지만,
+    # 전체 경로가 흘러들어오는 것을 조용히 덮어 실수를 숨기게 된다).
+    source_filename_line = (
+        f"\n소스 파일명: {str(source_filename)[:120]}" if source_filename else ""
+    )
+
     return f"""너는 멀티모달 미디어 간 관계를 표현하는 JSON만 출력하는 도우미다.
 
 규칙:
@@ -282,11 +456,11 @@ def build_relation_proposal_prompt(
 
 - **서브토픽(세부 주제, 자유):** ``subtopic_ko`` 는 고른 범주 **밑의 구체 주제어**를 자유롭게 적는다(한국어는 **한 어절**·공백 금지 권장, 예: 범주 ``음식·요리`` 밑 ``김밥`` / ``라면``). ``subtopic_en`` 은 같은 뜻의 짧은 영어(한 토큰·소문자 권장). 맥락이 있으면 **비우지 말고** 채우는 것을 권장한다.
   - **문서·파일·상품·인물 등 고유명**은 subtopic 에 넣지 말고 ``reason`` 등에 적는다.
-- ``reason``: 연결 근거 한 줄(한국어 권장). 고유명·세부 맥락은 여기에 둬도 된다.
+- ``reason``: 연결 근거 한 줄(한국어 권장). 고유명·세부 맥락은 여기에 둬도 된다.{confidence_guide_block}
 
 소스 요약: {source_summary[:1200]}
 소스 매체 타입: {source_media_type}
-소스 주제(topic): {source_topic_line}
+소스 주제(topic): {source_topic_line}{source_keywords_line}{source_filename_line}
 
 후보 목록(embedding_similarity 는 1에 가까울수록 유사. ``signal`` 이 ``경로 신호`` 면 파일명·폴더로 추가된 후보. ``topic_ko`` / ``subtopic_ko`` 는 후보의 자기주제):
 {candidates_block}

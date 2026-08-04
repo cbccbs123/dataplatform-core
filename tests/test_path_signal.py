@@ -38,6 +38,30 @@ class TestNormalizeStem(unittest.TestCase):
     def test_strips_extension(self) -> None:
         self.assertEqual(normalize_stem("report.docx"), "report")
 
+    def test_id_접두어는_기본으로_벗기지_않는다(self) -> None:
+        # 🔴 기본 False 가 **운영 안전값**이다 — ``<asset_id>__`` 명명은 특정 테스트 데이터셋의
+        # 규약이고 실제 운영 파일명에는 없다. 항상 벗기면 "혹시 벗겨질 이름"을 조용히 훼손한다.
+        uid = "018f0000-0000-7000-8000-000000000272"
+        self.assertEqual(normalize_stem(f"{uid}__강의_1부.mp4"), f"{uid}__강의")
+
+    def test_설정을_켜면_id_접두어를_벗긴다(self) -> None:
+        # RELATION_STRIP_ID_PREFIX=true 인 환경(그 명명 규약을 쓰는 데이터셋)에서만 켠다.
+        # 켜면 stem 이 원본 파일명 기준이 되어 1부/2부 같은 연작 매칭이 성립한다.
+        uid_a = "018f0000-0000-7000-8000-000000000272"
+        uid_b = "018f0000-0000-7000-8000-000000000275"
+        with mock.patch("src.relations.path_signal._strip_id_prefix_enabled",
+                        return_value=True):
+            self.assertEqual(normalize_stem(f"{uid_a}__강의_1부.mp4"), "강의")
+            self.assertEqual(normalize_stem(f"{uid_a}__강의_1부.mp4"),
+                             normalize_stem(f"{uid_b}__강의_2부.mp4"))
+
+    def test_켜도_UUID_아닌_접두어는_안_벗긴다(self) -> None:
+        # 날짜 접두어처럼 UUID 형태가 아닌 것을 잘못 벗기면 멀쩡한 파일명이 훼손된다.
+        with mock.patch("src.relations.path_signal._strip_id_prefix_enabled",
+                        return_value=True):
+            self.assertEqual(normalize_stem("2026-07-31__회의록.txt"), "2026-07-31__회의록")
+            self.assertEqual(normalize_stem("notes.md"), "notes")
+
     def test_strips_version_suffix_vN(self) -> None:
         # manual_v1 / manual_v2 → 같은 정규화 stem 'manual'.
         self.assertEqual(normalize_stem("manual_v1.pdf"), normalize_stem("manual_v2.pdf"))
@@ -133,13 +157,13 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         dir_rows = [
             # 정확 stem 일치(raw) — report.pdf
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": "요약1"},
+             "modality": "pdf", "summary": "요약1", "keywords": ""},
             # 정규화 일치(파생 접미사) — report_summary.txt → 정규화 'report'
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report_summary.txt",
-             "modality": "txt", "summary": "요약2"},
+             "modality": "txt", "summary": "요약2", "keywords": ""},
             # 불일치 — invoice.xlsx (제외돼야 함)
             {"asset_id": uuid.UUID(_T3), "fs_path": "/data/docs/invoice.xlsx",
-             "modality": "excel", "summary": "요약3"},
+             "modality": "excel", "summary": "요약3", "keywords": ""},
         ]
         conn, cur = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -153,7 +177,7 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -165,9 +189,9 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         # _T2(정규화 일치, rank1) 가 행 순서상 먼저 와도, 정확 일치(rank2)인 _T1 이 앞서야 한다.
         dir_rows = [
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report_summary.txt",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -178,9 +202,9 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.txt",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -192,11 +216,11 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T2), "fs_path": "/data/docs/report.txt",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T3), "fs_path": "/data/docs/report.md",
-             "modality": "txt", "summary": ""},
+             "modality": "txt", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=2)
@@ -210,9 +234,9 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         dir_rows = [
             # 소스 자신과 같은 asset_id 가 디렉터리 조회에 섞여 들어와도 제외돼야 한다.
             {"asset_id": uuid.UUID(_SRC), "fs_path": "/data/docs/report.docx",
-             "modality": "word", "summary": ""},
+             "modality": "word", "summary": "", "keywords": ""},
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -231,7 +255,7 @@ class TestFindPathSignalCandidates(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/sub/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -419,7 +443,7 @@ class TestPathSignal066Contract(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": "요약", "topic_ko": "경제·산업", "subtopic_ko": "보고서"},
+             "modality": "pdf", "summary": "요약", "keywords": "", "topic_ko": "경제·산업", "subtopic_ko": "보고서"},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)
@@ -431,7 +455,7 @@ class TestPathSignal066Contract(unittest.TestCase):
         src_row = {"fs_path": "/data/docs/report.docx"}
         dir_rows = [
             {"asset_id": uuid.UUID(_T1), "fs_path": "/data/docs/report.pdf",
-             "modality": "pdf", "summary": ""},
+             "modality": "pdf", "summary": "", "keywords": ""},
         ]
         conn, _ = _mock_conn_with_source_and_dir(src_row, dir_rows)
         out = find_path_signal_candidates(conn, source_asset_id=_SRC, limit=10)

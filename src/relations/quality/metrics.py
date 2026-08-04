@@ -5,8 +5,13 @@
 - `candidate_recall`: 후보 단계가 정답 상대를 회수했는가.
 - `relation_metrics`: 제안된 엣지의 정확도·회수율·종류 일치·고립 판정.
 - `threshold_sweep`: 임계를 훑어 그린 곡선(동결 스냅샷 위에서 재측정 — LLM 재호출 0).
+- `coverage_curve`: 임계별 커버리지(엣지·자산 수)와 strong 비율을 함께 — 품질만 보면 화면이
+  비는 트레이드오프를 놓친다.
+- `wilson_interval`·`cohen_kappa`: 소표본에서 점추정을 단정하지 않기 위한 구간·일치도.
 """
 from __future__ import annotations
+
+import math
 
 from src.relations.quality.snapshot import ProposedEdge
 
@@ -221,3 +226,99 @@ def threshold_sweep(
          **relation_metrics(triples=triples, isolated=isolated,
                             proposed=proposed, confidence_min=t)}
         for t in thresholds]
+
+
+def coverage_curve(
+    *,
+    edges: list[tuple[str, float, str, str]],
+    verdicts: dict[str, str],
+    thresholds: list[float],
+) -> list[dict]:
+    """자동승인 임계를 훑으며 **(엣지 수, strong 절대수, strong율, 관계 보유 자산 수)** 를 낸다.
+
+    **왜 자산 수까지 세는가**: ``strong율`` 은 엣지를 전부 지우면 100%가 되는 지표다. 실제로
+    자산의 31.7%가 이미 관계 0건이고 중앙값 차수가 1이라, 비율만 보고 임계를 올리면 "품질이
+    좋아졌는데 화면은 비는" 결과가 된다. 세 값을 함께 봐야 트레이드오프가 보인다.
+
+    Args:
+        edges: ``(edge_id, confidence, src_asset_id, dst_asset_id)`` 목록.
+        verdicts: ``{edge_id: 판정값}``. 없는 키는 미판정으로 보고 비율 분모에서 뺀다.
+        thresholds: 훑을 confidence 임계들. 순서와 무관하게 **오름차순으로 정렬해** 반환한다.
+
+    Returns:
+        임계별 dict 목록. ``rated_count`` 는 실제로 판정된 건수(=비율 분모)로,
+        ``edge_count`` 와 크게 벌어지면 그 측정은 표본이 부족하다는 뜻이다.
+    """
+    out: list[dict] = []
+    for t in sorted(thresholds):
+        kept = [e for e in edges if e[1] >= t]
+        # ``error``(호출 실패)와 미판정은 분모에서 뺀다 — error 를 weak 로 세면 품질이
+        # 좋아 보이는 사고가 난다.
+        rated = [verdicts[e[0]] for e in kept
+                 if verdicts.get(e[0]) in ("strong", "weak", "none")]
+        strong = sum(1 for v in rated if v == "strong")
+        assets = {a for e in kept for a in (e[2], e[3])}
+        out.append({
+            "threshold": t,
+            "edge_count": len(kept),
+            "rated_count": len(rated),
+            "strong_count": strong,
+            "strong_rate": (strong / len(rated)) if rated else 0.0,
+            "assets_with_edge": len(assets),
+        })
+    return out
+
+
+def wilson_interval(successes: int, n: int, *, z: float = 1.96) -> tuple[float, float]:
+    """이항 비율의 Wilson 점수 신뢰구간.
+
+    **왜 필요한가**: 표본이 작을 때 "0건이니까 0%" 라고 단정하면 큰 손실을 0으로 장부에 올리게
+    된다. 예컨대 ``conf<0.75`` 1,913건에서 69건을 봐 strong 0건이었다면 상한은 5.3%이고,
+    모집단으로 환산하면 **최대 101건**이 걸려 있다. 정규근사(Wald)는 성공 0에서 폭이 0이 돼
+    쓸 수 없으므로 Wilson 을 쓴다.
+
+    Args:
+        successes: 성공 건수.
+        n: 표본 크기.
+        z: 표준정규 분위수. 기본 1.96 = 95% 양측.
+
+    Returns:
+        ``(하한, 상한)``. ``n<=0`` 이면 정보가 없다는 뜻으로 ``(0.0, 1.0)``.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    p = successes / n
+    d = 1.0 + z * z / n
+    center = (p + z * z / (2 * n)) / d
+    half = (z / d) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def cohen_kappa(pairs: list[tuple[str, str]]) -> float:
+    """두 판정자의 일치도(우연 일치를 보정한 값).
+
+    LLM 이 LLM 을 채점한 순환성의 상한을 재는 데 쓴다 — 사람 판정과 얼마나 맞는지가
+    "이 측정을 얼마나 믿을 수 있는가"의 답이다.
+
+    ⚠️ n=30·3범주에서 신뢰구간이 넓다. **점추정만 보고 단정하지 않는다** — 합격 게이트가
+    아니라 경보로 쓴다(spec 폐기 기준).
+
+    Args:
+        pairs: ``(판정자A 라벨, 판정자B 라벨)`` 목록.
+
+    Returns:
+        κ. 완전일치 1.0 · 우연 수준 0.0 · 우연보다 나쁘면 음수. 입력이 비면 0.0.
+        한쪽 라벨만 등장해 기대일치가 1이면 κ 가 정의되지 않으므로 관례대로 완전일치는 1.0,
+        아니면 0.0 을 준다.
+    """
+    n = len(pairs)
+    if n == 0:
+        return 0.0
+    labels = {a for a, _ in pairs} | {b for _, b in pairs}
+    po = sum(1 for a, b in pairs if a == b) / n
+    pe = sum((sum(1 for a, _ in pairs if a == c) / n)
+             * (sum(1 for _, b in pairs if b == c) / n)
+             for c in labels)
+    if pe >= 1.0:
+        return 1.0 if po >= 1.0 else 0.0
+    return (po - pe) / (1.0 - pe)

@@ -57,6 +57,7 @@ def _build_review_where(
     since: Any,
     until: Any,
     date_col: str,
+    exempt_kinds: frozenset[str] = frozenset(),
 ) -> tuple[str, list[Any]]:
     """주어진 필터만 골라 WHERE 절과 파라미터를 만든다.
 
@@ -113,6 +114,12 @@ def _build_review_where(
         # 없는 코드가 와도 검증하지 않는다 — 오류 대신 0건으로 응답한다.
         conditions.append("rk.kind_code = %s")
         params.append(kind_code)
+    elif exempt_kinds:
+        # 검토 큐 면제(081 조각④). **kind_code 를 명시한 조회는 면제를 이긴다** — 관리자가
+        # 면제 종류를 일부러 보려 할 때 빈 화면이 나오면 버그로 보인다.
+        # 삭제가 아니라 필터라서 면제를 해제하면 즉시 되돌아온다.
+        conditions.append("rk.kind_code <> ALL(%s)")
+        params.append(sorted(exempt_kinds))   # 정렬 = 같은 질의가 항상 같은 파라미터(결정성)
     if modality is not None:
         conditions.append("(sa.modality = %s OR da.modality = %s)")
         params.extend([modality, modality])
@@ -152,6 +159,7 @@ def list_edges_for_review(
     since: Any = None,
     until: Any = None,
     date_col: str = "created_at",
+    exempt_kinds: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """상태별 엣지를 페이징 조회한다 — 양 끝 자산 정보까지 담아 화면이 바로 그릴 수 있게.
 
@@ -169,6 +177,9 @@ def list_edges_for_review(
         q: 통합 검색어(엣지 id·양끝 자산 id·경로·사유·주제에 부분 일치).
         asset_id: 이 자산이 양끝 중 하나인 엣지만.
         kind_code: 관계 종류 필터.
+        exempt_kinds: 검토 큐에서 **면제**할 관계 종류(081 조각④). 기본 빈 집합=전건 검토(기존 동작).
+            ``kind_code`` 를 명시한 조회에는 적용하지 않는다 — 면제 종류를 일부러 보려는 요청이
+            빈 화면을 받으면 버그로 보인다. 삭제가 아니라 필터라 해제하면 즉시 되돌아온다.
         modality: 양끝 중 하나의 모달리티 필터.
         min_confidence: 신뢰도 하한(이상).
         max_confidence: 신뢰도 상한(이하).
@@ -188,6 +199,7 @@ def list_edges_for_review(
         status=status, q=q, asset_id=asset_id, kind_code=kind_code, modality=modality,
         min_confidence=min_confidence, max_confidence=max_confidence,
         reviewed_by=reviewed_by, since=since, until=until, date_col=date_col,
+        exempt_kinds=exempt_kinds,
     )
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS count\n" + _REVIEW_FROM + where, tuple(params))

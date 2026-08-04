@@ -40,6 +40,11 @@ _FAKE_CFG = types.SimpleNamespace(relations=types.SimpleNamespace(
     path_top_k=10,
     auto_approve_min=0.75,
     auto_approve_emb_min=0.0,
+    # 081 게이트. 이 파일이 검증하는 것은 066(후보·진입·프롬프트)이므로 **게이트는 끈 값**을 준다 —
+    # 켜면 이 테스트들이 081 동작까지 함께 재게 되어 실패 원인이 흐려진다.
+    persist_min_conf_similarity=0.0,
+    auto_approve_exclude_kinds="",
+    review_exempt_kinds="",
 ))
 
 
@@ -92,9 +97,9 @@ class TestCandidateCarriesTopic(unittest.TestCase):
     def test_returned_dict_has_topic_fields(self) -> None:
         rows = [
             {"id": uuid.UUID(_T1), "file_uri": "/d/a.png", "media_type": "image",
-             "emb_score": 0.91, "summary": "요약A", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"},
+             "emb_score": 0.91, "summary": "요약A", "keywords": "", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"},
             {"id": uuid.UUID(_T2), "file_uri": "/d/b.txt", "media_type": "txt",
-             "emb_score": 0.42, "summary": None, "topic_ko": None, "subtopic_ko": None},
+             "emb_score": 0.42, "summary": None, "keywords": None, "topic_ko": None, "subtopic_ko": None},
         ]
         conn, _ = _mock_conn(rows)
         out = find_embedding_candidates(conn, source_asset_id=_SRC, top_k=5)
@@ -136,7 +141,7 @@ class TestUnassignedSourceSkips(unittest.TestCase):
         from src.relations import asset_entry as ae
 
         emb_rows = [{"id": _T1, "file_uri": "/d/a.txt", "media_type": "txt",
-                     "emb_score": 0.83, "summary": "", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"}]
+                     "emb_score": 0.83, "summary": "", "keywords": "", "topic_ko": "여행·관광", "subtopic_ko": "타지마할"}]
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
              mock.patch.object(ae, "_fetch_source_row",
                                return_value={"fs_path": "/d/a.txt", "modality": "txt", "summary": "요약"}), \
@@ -165,8 +170,10 @@ class TestSourceTopicWiredToPrompt(unittest.TestCase):
         captured: dict = {}
 
         def _fake_prompt(*, source_summary, source_media_type, candidates,
-                         relation_kinds_catalog, source_topic=None):
+                         relation_kinds_catalog, source_topic=None, source_keywords=None,
+                         source_filename=None):
             captured["source_topic"] = source_topic
+            captured["source_filename"] = source_filename
             return "PROMPT"
 
         with mock.patch.object(ae, "get_current_settings", return_value=_FAKE_CFG), \
@@ -186,6 +193,9 @@ class TestSourceTopicWiredToPrompt(unittest.TestCase):
 
         self.assertEqual(captured["source_topic"],
                          {"topic_ko": "음식·요리", "subtopic_ko": "라면"})
+        # 소스 파일명도 함께 전달된다(2026-08-03 채택) — **basename 만**이어야 한다.
+        # 디렉터리 경로가 새면 LLM 입력에 환경 의존·개인정보가 들어간다(헌법 3조·10조).
+        self.assertEqual(captured["source_filename"], "a.txt")
 
 
 # ── T202 [FR-202/203] 프롬프트 주제 표기 + soft 지시 ────────────────────────────

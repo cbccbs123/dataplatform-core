@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import posixpath
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -24,6 +25,7 @@ from psycopg.rows import dict_row
 from src.config.settings import get_current_settings
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
+from src.relations.approval_policy import parse_kind_set
 from src.relations.asset_candidates import (
     EmbeddingCandidate,
     EmbeddingKindFilter,
@@ -48,7 +50,8 @@ def _fetch_source_row(conn: Connection[Any], asset_id: str) -> dict[str, Any] | 
             SELECT a.asset_id,
                    a.fs_path,
                    a.modality,
-                   COALESCE(m.ext_meta->>'summary', '') AS summary
+                   COALESCE(m.ext_meta->>'summary', '') AS summary,
+                   COALESCE(m.ext_meta->>'keywords', '') AS keywords
             FROM asset a
             LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
             WHERE a.asset_id = %s
@@ -187,6 +190,15 @@ def propose_relations_for_asset(
             candidates=candidates,
             relation_kinds_catalog=kinds,
             source_topic=source_topic,  # 소스 주제를 참고 신호로 전달(하드 배제 아님).
+            # 키워드는 요약이 짧은 자산(전체 1/3)의 판단 재료 보강(2026-07-31 채택 · A/B 실측
+            # 짧은 요약 쌍 정확도 +7.1pp). 후보 keywords 와 짝 — 소스만 빼면 비대칭이 된다.
+            source_keywords=str(src.get("keywords") or "") or None,
+            # 소스 파일명도 함께 넘긴다(2026-08-03 채택) — 후보는 ``filename`` 을 받는데 소스는
+            # 못 받아 **양쪽 파일명 비교가 원리상 불가능**했다. same_series("같은 어간+순번")·
+            # references("제목·파일명이 상대를 가리킴")·derived_from(``report``→``report_summary``)
+            # 은 그 비교를 전제하는 정의라, 재료 없이 판정을 요구하던 셈이다.
+            # ⚠️ **basename 만** 넘긴다 — 디렉터리 전체 경로는 LLM 입력에 넣지 않는다(헌법 3조·10조).
+            source_filename=posixpath.basename(str(src.get("fs_path") or "")) or None,
         )
         raw = llm_fn(prompt) if llm_fn is not None else propose_edges_json(prompt)
         edges = parse_and_normalize_edges(raw)
@@ -204,11 +216,18 @@ def propose_relations_for_asset(
         # collect 리스트는 저장된 관계 쌍을 모아 계보에 남기려는 것이다(반환값만으론 무엇과
         # 무엇이 이어졌는지 알 수 없다).
         upserted_pairs: list[dict[str, Any]] = []
+        # 081 게이트는 설정에서 읽어 **여기서 명시적으로** 넘긴다 — sync_graph_edges 의 기본값은
+        # 게이트 끔이라 라이브러리를 직접 쓰는 다른 호출부(샘플 전략·측정)가 조용히 영향받지 않는다.
+        gate_stats: dict[str, int] = {}
         edges_upserted, edges_skipped = sync_graph_edges(
             conn, source_asset_id=source_asset_id, edges=edges,
             allowed_target_ids=candidate_ids, auto_approve_min=cfg.relations.auto_approve_min,
             target_emb_scores=target_emb_score_map(candidates),
             auto_approve_emb_min=cfg.relations.auto_approve_emb_min,
+            persist_min_conf_similarity=cfg.relations.persist_min_conf_similarity,
+            auto_approve_exclude_kinds=parse_kind_set(
+                cfg.relations.auto_approve_exclude_kinds, default=frozenset()),
+            stats=gate_stats,
             collect=upserted_pairs)
         # 계보 기록도 **같은 트랜잭션 안**이다 — 엣지는 저장됐는데 기록이 없거나 그 반대인
         # 반쪽 상태를 만들지 않기 위해서다(실패하면 둘 다 롤백된다).
@@ -219,6 +238,7 @@ def propose_relations_for_asset(
             activity="relations.proposed.v1",
             agent="llm_propose",
             generated={"edges_upserted": edges_upserted, "edges_skipped": edges_skipped,
+                       "edges_gated_low_conf": gate_stats.get("gated_low_conf", 0),
                        "kinds_registered": kinds_registered,
                        "edges": sorted(upserted_pairs,
                                        key=lambda e: (e["target_asset_id"], e["kind_code"]))},

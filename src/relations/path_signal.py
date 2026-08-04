@@ -28,6 +28,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.config.settings import get_current_settings
 from src.relations.asset_candidates import EmbeddingCandidate
 
 # C-1: 알려진 버전/파생 접미사. 정규식으로 stem 끝에서 **1회** 제거한다(확장 가능한 코드 상수).
@@ -48,6 +49,38 @@ _SUFFIX_PATTERN = re.compile(
 )
 
 
+# 파일명 앞에 붙은 ``<UUID>__`` 접두어 패턴. UUID 8-4-4-4-12 를 그대로 요구해 일반 파일명
+# ("2026-07-31__회의록" 등)을 잘못 벗기지 않는다.
+_ID_PREFIX_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__",
+    re.IGNORECASE,
+)
+
+
+def _strip_id_prefix_enabled() -> bool:
+    """파일명에서 자산 id 접두어를 벗길지 — **설정으로만 켠다(기본 꺼짐)**.
+
+    왜 기본이 꺼짐인가: ``<asset_id>__<원본명>`` 명명은 **특정 테스트 데이터셋의 규약**이고
+    실제 운영 파일명에는 그런 접두어가 없다. 운영에서 항상 켜 두면 "혹시 벗겨질 이름"을
+    조용히 훼손할 위험만 남고 얻는 것이 없다 — 그래서 데이터 규약을 아는 환경에서
+    ``RELATION_STRIP_ID_PREFIX=true`` 로 **명시적으로** 켠다.
+
+    켜야 하는 이유(실측 2026-08-03): 접두어를 남기면 stem 이 자산마다 반드시 달라져 파일명
+    매칭이 원리상 성립하지 않는다 — 그 데이터셋 1,364자산 전부에서 경로 신호 후보가 **0건**
+    이었고, 연작·파생·참조가 파일명 근거를 못 쓰고 요약 추측에만 의존했다.
+
+    설정이 초기화되지 않은 경로(단위 테스트 등)에서는 **꺼진 것으로 본다** — 라이브러리
+    기본값이 동작을 바꾸지 않게(운영 진입점은 항상 먼저 초기화한다).
+
+    Returns:
+        접두어를 벗겨야 하면 ``True``.
+    """
+    try:
+        return bool(get_current_settings().relations.strip_id_prefix)
+    except RuntimeError:
+        return False
+
+
 def split_dir_and_name(fs_path: str) -> tuple[str, str]:
     """``fs_path`` 를 (디렉터리, basename) 으로 분리(POSIX 경로 규칙, 결정적).
 
@@ -65,15 +98,21 @@ def split_dir_and_name(fs_path: str) -> tuple[str, str]:
 
 
 def _raw_stem(filename: str) -> str:
-    """확장자만 제거한 stem(소문자 정규화). 접미사는 남긴다 — 정확 raw 일치 판정용.
+    """확장자를 제거한 stem(소문자). 접미사는 남긴다 — 정확 raw 일치 판정용.
+
+    ``RELATION_STRIP_ID_PREFIX`` 가 켜져 있으면 ``<asset_id>__`` 접두어도 함께 벗긴다
+    (근거·기본값은 `_strip_id_prefix_enabled` 참조 — **기본은 벗기지 않는다**).
 
     Args:
         filename: 디렉터리를 뺀 파일명.
 
     Returns:
         소문자 stem. ``report_v1.pdf`` → ``report_v1``.
+        접두어 제거가 켜진 경우 ``019f490f-…__강의_1부.mp4`` → ``강의_1부``.
     """
     stem = posixpath.splitext(filename)[0]
+    if _strip_id_prefix_enabled():
+        stem = _ID_PREFIX_PATTERN.sub("", stem)
     return stem.lower()
 
 
@@ -168,6 +207,7 @@ def find_path_signal_candidates(
             """
             SELECT a.asset_id, a.fs_path, a.modality,
                    COALESCE(m.ext_meta->>'summary', '') AS summary,
+                   COALESCE(m.ext_meta->>'keywords', '') AS keywords,
                    -- 066 FR-201(2026-07-15 B4): 후보 자기주제 동반 — 임베딩 후보(asset_candidates)와
                    --   동일 계약. 종전 path 후보는 topic 없이 프롬프트에 null 로 실렸다.
                    t.topic_ko    AS topic_ko,
@@ -222,6 +262,7 @@ def find_path_signal_candidates(
                 # C-3: path-only 후보는 결정적 sentinel 0.0. union 시 임베딩 실측값 우선.
                 "emb_score": 0.0,
                 "summary": str(r["summary"] or ""),
+                "keywords": str(r["keywords"] or ""),
                 "topic_ko": str(topic_ko) if topic_ko is not None else None,
                 "subtopic_ko": str(subtopic_ko) if subtopic_ko is not None else None,
             }

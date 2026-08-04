@@ -507,6 +507,63 @@ class TestRelationAutoApproveEmbMin(unittest.TestCase):
         self.assertEqual(s.relations.auto_approve_emb_min, 0.5)
 
 
+class TestRelationApprovalSettings(unittest.TestCase):
+    """081 승인·노출 게이트 3키 — 기본값은 새 동작을 켜고, env 로 **끌 수 있어야** 한다.
+
+    끌 수 있어야 하는 이유: 롤백이 코드 revert 가 아니라 설정 변경이어야 한다. 관계 재생성은
+    전량 약 28시간이라 코드를 되돌려도 데이터가 즉시 복구되지 않는다.
+    """
+
+    def test_기본값은_새_동작을_켠다(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        # 0.70 = P2 게이트(2026-07-31 점수 축 v3 채택) — 새 점수 어휘 {0.9,0.7,0.5,0.3} 에서
+        # 0.5 이하(dup 정확도 41~46% · sd "대분야만")를 적재에서 끊는 값. 옛 0.75 는 옛 분포 기준.
+        self.assertEqual(s.relations.persist_min_conf_similarity, 0.70)
+        self.assertEqual(s.relations.auto_approve_exclude_kinds, "same_domain")
+        self.assertEqual(s.relations.review_exempt_kinds, "same_domain")
+
+    def test_id접두어_제거는_기본_꺼져있다(self) -> None:
+        # 🔴 **운영 안전값**이다. ``<asset_id>__`` 명명은 특정 테스트 데이터셋의 규약이고 실제
+        # 운영 파일명에는 없다 — 항상 켜 두면 "혹시 벗겨질 이름"을 조용히 훼손할 위험만 남는다.
+        # 그 규약을 쓰는 환경에서만 RELATION_STRIP_ID_PREFIX=true 로 명시적으로 켠다.
+        with _env():
+            s = _build_settings("dev")
+        self.assertFalse(s.relations.strip_id_prefix)
+
+    def test_env_로_id접두어_제거를_켠다(self) -> None:
+        with _env(RELATION_STRIP_ID_PREFIX="true"):
+            s = _build_settings("dev")
+        self.assertTrue(s.relations.strip_id_prefix)
+
+    def test_자동승인은_기본_꺼져있다(self) -> None:
+        # 2026-07-31 구조 전환 — active("확인됨")는 사람만 만든다. 1.01 은 신뢰도가 1을 넘을 수
+        # 없어 사실상 끔. 재개 조건(사람 검토 150건·승인율 ≥95%)은 specs/081 에 고정.
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.auto_approve_min, 1.01)
+
+    def test_env_로_영속화_게이트를_끈다(self) -> None:
+        with _env(RELATION_PERSIST_MIN_CONF_SIMILARITY="0.0"):
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.persist_min_conf_similarity, 0.0)
+
+    def test_env_로_kind_게이트를_끈다(self) -> None:
+        # 빈 문자열이 기본값으로 되돌아가면 끌 방법이 없다(parse_kind_set 이 "" 를 빈 집합으로 본다).
+        with _env(RELATION_AUTO_APPROVE_EXCLUDE_KINDS="", RELATION_REVIEW_EXEMPT_KINDS=""):
+            s = _build_settings("dev")
+        self.assertEqual(s.relations.auto_approve_exclude_kinds, "")
+        self.assertEqual(s.relations.review_exempt_kinds, "")
+
+    def test_여러_kind_를_지정할_수_있다(self) -> None:
+        with _env(RELATION_AUTO_APPROVE_EXCLUDE_KINDS="same_domain,duplicate_near"):
+            s = _build_settings("dev")
+        from src.relations.approval_policy import parse_kind_set
+        self.assertEqual(
+            parse_kind_set(s.relations.auto_approve_exclude_kinds, default=frozenset()),
+            frozenset({"same_domain", "duplicate_near"}))
+
+
 class TestSearchBackendWiring(unittest.TestCase):
     """T008 스모크(037 갱신): ``SEARCH_BACKEND`` 설정과 ``search_hybrid`` 경로 — OS 단일 백엔드.
 

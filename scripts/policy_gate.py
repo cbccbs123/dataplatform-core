@@ -2,7 +2,12 @@
 """정책 게이트 — constitution 하드 불변식의 기계 검증(표준 라이브러리만).
 
 CI(`.github/workflows/ci.yml`)와 로컬(`python scripts/policy_gate.py`)이 공유한다.
-🔴 차단(block) 발견 시 exit 1, 🟡 경고(warn)는 출력만. src/ 만 스캔하며 주석은 제외(휴리스틱).
+🔴 차단(block) 발견 시 exit 1, 🟡 경고(warn)는 출력만. 주석·문자열 리터럴은 제외(휴리스틱).
+
+**스캔 범위는 `src/` + `scripts/`** 다. `scripts/` 를 넣은 이유: 측정·판정 도구가 `src/llm/client.py`
+seam 을 경유해 **실제로 LLM 을 호출**하는데(`judge_relations`·`judge_snapshot`), `src/` 만 훑던
+동안 이 파일들은 헌법 게이트 밖에 있었다 — 2026-07-30 정책 감사가 지적한 구멍이다.
+편입 시점에 `scripts/` 선존 위반은 0건이었다(측정 후 편입).
 """
 from __future__ import annotations
 
@@ -14,6 +19,9 @@ import tokenize
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
+# 스캔 루트 목록. `scripts/` 도 LLM seam 을 호출하므로 함께 훑는다(모듈 docstring 참조).
+# `SRC` 는 하위호환으로 남긴다 — 외부에서 참조하는 코드가 있을 수 있다.
+SCAN_ROOTS = (SRC, os.path.join(ROOT, "scripts"))
 SEAM = "src/llm/client.py"  # LLM 단일 seam(자기 자신은 검사 제외)
 
 TEMP_RX = re.compile(r"temperature\s*=\s*([0-9]+(?:\.[0-9]+)?)")
@@ -61,17 +69,24 @@ def _code_only_lines(source: str) -> list[str]:
     return ["", *("".join(r) for r in grid)]
 
 
-def iter_py(base: str):
-    """검사 대상 파이썬 파일을 훑는다(테스트·캐시 등 제외).
+def iter_py(*bases: str):
+    """검사 대상 파이썬 파일 **경로**를 훑는다(`__pycache__` 제외 · 없는 루트는 건너뜀).
+
+    Args:
+        *bases: 스캔할 디렉터리 경로들. 존재하지 않는 경로는 조용히 건너뛴다
+            (레포 구성에 따라 `scripts/` 가 없을 수 있다).
 
     Yields:
-        ``(경로, 내용)`` 쌍.
+        파이썬 파일의 절대 경로. 정렬해 내보내 출력 순서를 결정적으로 만든다.
     """
-    for dp, dns, fns in os.walk(base):
-        dns[:] = [d for d in dns if d != "__pycache__"]
-        for fn in fns:
-            if fn.endswith(".py"):
-                yield os.path.join(dp, fn)
+    for base in bases:
+        if not os.path.isdir(base):
+            continue
+        for dp, dns, fns in sorted(os.walk(base)):
+            dns[:] = sorted(d for d in dns if d != "__pycache__")
+            for fn in sorted(fns):
+                if fn.endswith(".py"):
+                    yield os.path.join(dp, fn)
 
 
 def main() -> int:
@@ -81,11 +96,13 @@ def main() -> int:
         0=차단 없음. 위반이 있으면 0이 아닌 값으로 CI 를 실패시킨다.
         경고(🟡)는 종료 코드에 영향을 주지 않는다 — 판단이 필요한 항목이라 사람이 본다.
     """
-    if not os.path.isdir(SRC):
-        print("src/ 없음 — 건너뜀")
+    roots = [r for r in SCAN_ROOTS if os.path.isdir(r)]
+    if not roots:
+        print("스캔할 디렉터리 없음(src/·scripts/ 부재) — 건너뜀")
         return 0
+    print("스캔 대상: " + ", ".join(os.path.relpath(r, ROOT) + "/" for r in roots))
     found: dict[str, list[str]] = {"block": [], "warn": []}
-    for path in iter_py(SRC):
+    for path in iter_py(*roots):
         rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
         with open(path, encoding="utf-8") as f:
             source = f.read()

@@ -58,9 +58,11 @@ class TestGraphQuerySQL(unittest.TestCase):
         params = cur.execute.call_args[0][1]
         compact = " ".join(sql.split())
         # ③ status 는 바인딩(%s) — 호출자가 active/proposed 등 선택 가능
-        self.assertIn("ge.status = %s", compact)
+        # 081: 상태 다중 조회(2단 노출)로 ANY 바인딩이 됐다 — 하드코딩이 아니라는 의도는 그대로.
+        self.assertIn("ge.status = ANY(%s)", compact)
         # 양방향 asset_id 2개 + status 1개 = (X, X, status) 순서
-        self.assertEqual(params, ("A", "A", "proposed"))
+        # 081: 상태를 목록으로 바인딩한다(2단 노출은 active+proposed 를 함께 읽는다).
+        self.assertEqual(params, ("A", "A", ["proposed"]))
 
     def test_order_by_has_edge_id_secondary_for_determinism(self) -> None:
         from src.relations.graph_query import fetch_active_relations_for_asset
@@ -91,6 +93,8 @@ class TestGraphQueryNormalize(unittest.TestCase):
         "confidence", "status", "topic", "reason", "edge_id",
         # 057 FR-102: 이웃 표시필드 하향(하위호환 필드 추가)
         "file_name", "modality",
+        # 081 조각③: 노출 등급(strong/weak) — 역시 하위호환 필드 추가다(기존 키 불변).
+        "tier",
     }
 
     def _row(self, **over):
@@ -217,3 +221,122 @@ class TestGraphQueryNormalize(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# ── 081 노출 2단 ────────────────────────────────────────────────────────────────
+def _row(*, status="active", kind="same_domain", conf=0.9, edge="e1",
+         src="a1", dst="a2"):
+    """노출 등급 테스트용 최소 행(기존 _conn_returning 이 그대로 먹는 모양)."""
+    return {"edge_id": edge, "kind_code": kind, "is_symmetric": True,
+            "confidence": conf, "reason": None, "topic": None, "status": status,
+            "src_asset": src, "dst_asset": dst,
+            "src_modality": "text", "src_fs_path": "/d/a1.txt",
+            "dst_modality": "text", "dst_fs_path": "/d/a2.txt"}
+
+
+class TestExposureTiers(unittest.TestCase):
+    """081 조각③ — 강칸(연관 자료)·약칸(비슷한 주제) 2단 노출.
+
+    약칸이 필요한 이유: 자동승인 게이트가 `same_domain` 을 강등하면 관계 보유 자산이 26% 줄어
+    화면이 빈다. 강등분을 약칸으로 살려 커버리지를 지키면서 강칸 정밀도만 올린다.
+    """
+
+    def test_active_행에_strong_등급이_붙는다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([_row(status="active")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1")
+        self.assertEqual([r["tier"] for r in rows], ["strong"])
+
+    def test_include_weak_이면_proposed_고신뢰도_함께_온다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([_row(status="proposed", conf=0.9)])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.75)
+        self.assertEqual([r["tier"] for r in rows], ["weak"])
+
+    def test_include_weak_이_아니면_proposed_를_조회하지_않는다(self):
+        # 상태 바인딩 자체가 active 뿐이어야 한다 — 읽어와서 버리면 쓸데없이 무겁다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, cur = _conn_returning([])
+        fetch_relations_for_asset(conn, asset_id="a1", include_weak=False)
+        params = cur.execute.call_args[0][1]
+        self.assertEqual(params[2], ["active"])
+
+    def test_include_weak_이면_두_상태를_바인딩한다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, cur = _conn_returning([])
+        fetch_relations_for_asset(conn, asset_id="a1", include_weak=True)
+        self.assertEqual(cur.execute.call_args[0][1][2], ["active", "proposed"])
+
+    def test_저신뢰_proposed_는_include_weak_에도_안_온다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([_row(status="proposed", conf=0.6)])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.75)
+        self.assertEqual(rows, [])
+
+    def test_명시적_계열_저신뢰_proposed_는_약칸으로_온다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([_row(status="proposed", kind="references", conf=0.2)])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.75)
+        self.assertEqual([r["tier"] for r in rows], ["weak"])
+
+    def test_강칸이_약칸보다_먼저_온다(self):
+        # 신뢰도만으로 정렬하면 고신뢰 약칸이 저신뢰 강칸을 밀어낸다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="proposed", conf=0.99, edge="e-weak", dst="a3"),
+            _row(status="active", conf=0.80, edge="e-strong", dst="a2")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.75)
+        self.assertEqual([r["tier"] for r in rows], ["strong", "weak"])
+
+    def test_같은_등급_안에서는_DB_정렬을_보존한다(self):
+        # 신뢰도·edge_id 정렬은 SQL 이 한다(mock 은 ORDER BY 를 적용하지 않으므로 여기서
+        # 검증할 수 없다 — SQL 쪽은 TestGraphQuerySQL 이 본다). 여기서 봉인하는 것은
+        # **등급 정렬이 안정 정렬이라 DB 순서를 흩뜨리지 않는다**는 점이다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="active", conf=0.9, edge="e-hi", dst="a2"),
+            _row(status="active", conf=0.7, edge="e-lo", dst="a3")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1")
+        self.assertEqual([r["edge_id"] for r in rows], ["e-hi", "e-lo"])
+
+    def test_등급_정렬이_섞인_입력에서도_안정적이다(self):
+        # 약칸이 앞에 와도 강칸이 올라오되, 같은 등급 내부 순서는 입력(=DB) 순서를 지킨다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="proposed", conf=0.99, edge="w1", dst="a3"),
+            _row(status="active", conf=0.90, edge="s1", dst="a2"),
+            _row(status="proposed", conf=0.80, edge="w2", dst="a4"),
+            _row(status="active", conf=0.75, edge="s2", dst="a5")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.75)
+        self.assertEqual([r["edge_id"] for r in rows], ["s1", "s2", "w1", "w2"])
+
+    def test_질의_자산_관점_정규화가_유지된다(self):
+        # 기존 seam 의 핵심 계약 — 이웃은 늘 반대편이고 대칭이면 undirected.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([_row(status="active", src="a2", dst="a1")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1")
+        self.assertEqual(rows[0]["asset_id"], "a2")
+        self.assertEqual(rows[0]["direction"], "undirected")
+
+
+class TestBackwardCompatibleWrapper(unittest.TestCase):
+    """기존 함수의 계약 불변 — 포탈 상세·다운로드 번들이 이 키들을 쓴다."""
+
+    def test_기존_함수가_그대로_동작한다(self):
+        from src.relations.graph_query import fetch_active_relations_for_asset
+        conn, _ = _conn_returning([_row(status="active")])
+        rows = fetch_active_relations_for_asset(conn, asset_id="a1")
+        for key in ("asset_id", "kind_code", "is_symmetric", "direction", "confidence",
+                    "status", "topic", "reason", "edge_id", "file_name", "modality"):
+            self.assertIn(key, rows[0], f"기존 키 {key} 가 사라졌다")
+
+    def test_기존_함수는_status_인자를_그대로_받는다(self):
+        from src.relations.graph_query import fetch_active_relations_for_asset
+        conn, cur = _conn_returning([])
+        fetch_active_relations_for_asset(conn, asset_id="a1", status="rejected")
+        self.assertEqual(cur.execute.call_args[0][1][2], ["rejected"])
+

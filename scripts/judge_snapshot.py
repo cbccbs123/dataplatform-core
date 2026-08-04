@@ -1,0 +1,372 @@
+"""스냅샷 제안 엣지의 맹검 판정 — shadow A/B 의 strong 절대수 비교용 (spec 079 T505).
+
+**흐름에서의 위치**: `measure_relation_quality snapshot` 이 얼린 두 스냅샷(대조군/실험군)을 받아,
+제안된 (소스, 타깃) 자산 쌍을 **한 배치에서** 판정하고 `verdicts` 파일로 남긴다. DB 는 읽기만 한다.
+
+**왜 `judge_relations.py` 로 안 되는가**: 그쪽은 `graph_edge` 에 실재하는 엣지를 `edge_id` 로
+판정한다. 스냅샷의 제안 엣지는 **DB 에 없다**(shadow 실험이라 기록하지 않으므로). 그래서 자산 쌍을
+직접 먹이는 경로가 따로 필요하다.
+
+**같은 것을 재사용한다** — 루브릭(`RUBRIC_KO_V1`), 프롬프트 조립(`build_judge_prompt`), 판정
+호출과 실패 흡수(`judge_one`)를 `judge_relations` 에서 그대로 가져온다. 판정 기준이 갈라지면
+A/B 결과를 기존 측정과 비교할 수 없다.
+
+**맹검 이중화**: 판정자에게 ① 시스템이 붙인 `kind`·`confidence` 를 숨기고(`build_judge_prompt` 가
+이미 그렇게 만든다) ② **어느 팔(A/B)인지도 숨긴다.** 두 스냅샷의 쌍을 섞어 한 배치로 돌리므로
+판정자는 자기가 대조군을 보는지 실험군을 보는지 알 수 없다.
+
+**깨지면 안 되는 것**
+- 같은 쌍이 A·B 양쪽에 나오면 **각각 따로 판정하지 않는다** — 같은 자산 쌍은 판정이 같아야 하므로
+  한 번만 판정하고 결과를 양쪽에 공유한다(LLM 호출 절감 + 판정 흔들림 제거).
+- `edge_id` 자리에 스냅샷 쌍 키(`<source>__<target>`)를 넣는다. DB 엣지가 아니므로 실제
+  `edge_id` 와 섞이지 않게 구분 가능한 형태를 쓴다.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+from psycopg.rows import dict_row
+from scripts.judge_relations import _CONCURRENCY, judge_one
+from scripts.measure_relation_quality import assert_same_candidates
+
+from src.config.settings import get_current_settings, init_settings
+from src.database.postgres_util import PostgresUtil
+from src.llm.client import complete_json
+from src.relations.quality.rubric import RUBRIC_KO_V1, RUBRIC_VERSION
+from src.relations.quality.snapshot import Snapshot, load_snapshot
+from src.relations.quality.verdicts import (
+    VerdictSet,
+    dump_verdicts,
+    error_rate,
+    verdict_counts,
+)
+
+# 판정에 필요한 자산 내용 — `judge_relations.DISPLAY_SQL` 과 같은 필드를 자산 단위로 읽는다.
+ASSET_SQL = """
+    SELECT a.asset_id::text AS asset_id, a.modality,
+           regexp_replace(a.fs_path,'^.*/','') AS name,
+           coalesce(t.topic_ko,'(없음)') AS topic,
+           left(coalesce(m.ext_meta->>'summary',''), 300) AS summary,
+           coalesce(m.ext_meta->>'keywords','[]') AS keywords
+    FROM asset a
+    LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
+    LEFT JOIN asset_topic t ON t.asset_id = a.asset_id
+    WHERE a.asset_id = ANY(%s)
+"""
+
+
+def pair_key(source: str, target: str) -> str:
+    """스냅샷 쌍의 판정 키 — 방향 무관하게 같은 쌍이 같은 키를 갖는다.
+
+    대칭 정렬을 하는 이유: A 팔에서 (x→y) 로, B 팔에서 (y→x) 로 제안돼도 **같은 자산 쌍**이라
+    판정이 같아야 한다. 정렬하지 않으면 같은 쌍을 두 번 판정해 결과가 흔들릴 수 있다.
+
+    Args:
+        source: 소스 자산 id.
+        target: 타깃 자산 id.
+
+    Returns:
+        ``"<작은id>__<큰id>"``. DB ``edge_id``(UUID 단일)와 형태가 달라 섞이지 않는다.
+    """
+    a, b = sorted((str(source), str(target)))
+    return f"{a}__{b}"
+
+
+def collect_pairs(snap: Snapshot, *, apply_production_gate: bool = True) -> dict[str, tuple[str, str]]:
+    """스냅샷의 제안 엣지를 판정 대상 자산 쌍으로 모은다(순수 함수).
+
+    **운영과 같은 게이트를 적용한다**(`graph_persist.sync_graph_edges` :199-201와 동일):
+    ① 후보 집합 밖 타깃 = LLM 환각 → 거부  ② 자기 자신 참조 → 거부.
+
+    이 게이트가 없으면 **실제로는 절대 관계가 되지 않을 엣지를 판정**하게 되고, A/B 비교가
+    "운영에 반영될 관계"가 아니라 "LLM 이 뱉은 문자열"을 비교하는 것이 된다. 실제로 A 스냅샷에
+    길이가 틀린 UUID(``…950a5734f1f`` — 마지막 자리 11자)가 섞여 DB 조회가 터졌다.
+
+    Args:
+        snap: 동결 스냅샷.
+        apply_production_gate: 운영 게이트 적용 여부. ``False`` 는 게이트가 실제로 무엇을
+            걸러내는지 **재는 용도**로만 쓴다(운영 비교에는 쓰지 말 것).
+
+    Returns:
+        ``{쌍 키: (소스 자산 id, 타깃 자산 id)}``. 같은 쌍이 여러 소스에서 나와도 하나로 접힌다.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for sid, ss in snap.sources.items():
+        allowed = {c for c, _ in ss.candidates}
+        for e in ss.proposed:
+            if apply_production_gate and (e.target not in allowed or e.target == sid):
+                continue
+            out.setdefault(pair_key(sid, e.target), (sid, e.target))
+    return out
+
+
+def gate_stats(snap: Snapshot) -> dict[str, int]:
+    """운영 게이트가 걸러내는 양 — 환각·자기참조를 따로 센다.
+
+    Args:
+        snap: 동결 스냅샷.
+
+    Returns:
+        ``{proposed, hallucinated, self_ref, kept}``. ``hallucinated`` 는 후보 밖 타깃이다.
+    """
+    proposed = hall = selfref = 0
+    for sid, ss in snap.sources.items():
+        allowed = {c for c, _ in ss.candidates}
+        for e in ss.proposed:
+            proposed += 1
+            if e.target == sid:
+                selfref += 1
+            elif e.target not in allowed:
+                hall += 1
+    return {"proposed": proposed, "hallucinated": hall, "self_ref": selfref,
+            "kept": proposed - hall - selfref}
+
+
+def fetch_assets(db: PostgresUtil, asset_ids: list[str]) -> dict[str, dict]:
+    """판정에 쓸 자산 내용을 읽는다(읽기 전용).
+
+    Args:
+        db: DB 핸들.
+        asset_ids: 읽을 자산 id 목록.
+
+    Returns:
+        ``{asset_id: 행}``. 못 찾은 자산은 키가 없다(호출부가 그 쌍을 건너뛴다).
+    """
+    with db.transaction() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(ASSET_SQL, (asset_ids,))
+        # ⚠️ dict_row 커서다 — dict(cur.fetchall()) 로 감싸면 키/값이 뒤집힌다.
+        return {r["asset_id"]: r for r in cur.fetchall()}
+
+
+def to_judge_row(key: str, a: dict, b: dict) -> dict:
+    """자산 두 건을 `judge_relations.build_judge_prompt` 가 먹는 행 모양으로 맞춘다.
+
+    Args:
+        key: 쌍 키(판정 결과의 ``edge_id`` 자리에 들어간다).
+        a: 소스 자산 행.
+        b: 타깃 자산 행.
+
+    Returns:
+        ``build_judge_prompt`` 가 요구하는 키를 갖춘 dict.
+    """
+    return {"edge_id": key,
+            "a_name": a["name"], "a_mod": a["modality"], "a_topic": a["topic"],
+            "a_sum": a["summary"], "a_kw": a["keywords"],
+            "b_name": b["name"], "b_mod": b["modality"], "b_topic": b["topic"],
+            "b_sum": b["summary"], "b_kw": b["keywords"]}
+
+
+def judge_snapshots(
+    db: PostgresUtil,
+    snaps: dict[str, Snapshot],
+    *,
+    measure_id: str,
+    method: str,
+    reuse: dict[str, str] | None = None,
+    llm: Callable[[str], dict[str, Any]] | None = None,
+    judge_model: str | None = None,
+) -> tuple[VerdictSet, dict]:
+    """여러 스냅샷의 제안 쌍을 **합집합으로 한 번씩** 판정한다.
+
+    같은 쌍이 두 팔에 모두 있으면 한 번만 판정해 양쪽이 같은 결과를 공유한다 — 판정을 두 번 하면
+    같은 쌍에 다른 라벨이 붙어 A/B 차이가 판정 잡음으로 오염된다.
+
+    ``measure_id``·``method`` 를 **인자로 받는다**: 이 함수는 여러 실험에 재사용되므로
+    (ADR 2026-07-29 가 이 방식을 프롬프트 개입 판정의 표준으로 정했다) 값을 본문에 박으면
+    나중에 저장된 파일이 **다른 실험의 이름표를 달게 된다** — 사후에 "무엇을 쟀나"를 판별할
+    수 없어지고, 그게 이 측정 인프라의 존재 이유를 무너뜨린다.
+
+    Args:
+        db: DB 핸들(읽기 전용).
+        snaps: ``{팔 이름: 스냅샷}``.
+        measure_id: 이 측정의 식별자(``YYYYMMDD-<축>`` · 저장 파일명과 같게 쓴다).
+        method: 이 측정이 무엇을 반증·비교하려 하는지 사람이 읽는 설명.
+        reuse: ``{쌍 키: 판정}`` — 이미 판정된 쌍의 라벨. 준 쌍은 **다시 판정하지 않는다**.
+            맹검 판정은 쌍의 내용만 보므로 팔이 달라도 같은 라벨을 공유하는 것이 원칙이고,
+            재사용하면 LLM 호출과 판정 잡음이 함께 줄어든다. ``None`` 이면 전부 새로 판정한다.
+        llm: 판정에 쓸 LLM 함수(주입 seam · 레포 관례). ``None`` 이면 온프레미스 seam
+            ``src.llm.client.complete_json`` 을 쓴다 — 테스트는 가짜 함수를 주입해 실 LLM 없이
+            계약만 검증한다(헌법 2조: 운영 호출은 항상 이 seam 경유).
+        judge_model: 판정 모델 표기(재현용 메타). ``None``(운영 기본)이면 활성 설정에서 읽는다 —
+            테스트처럼 설정 초기화 없이 부를 때만 명시한다.
+
+    Returns:
+        ``(판정 묶음, {팔 이름: 그 팔의 쌍 키 집합})``. 판정 묶음에는 **새로 판정한 쌍만**
+        담긴다(재사용분은 호출부가 이미 갖고 있다).
+    """
+    per_arm = {arm: collect_pairs(s) for arm, s in snaps.items()}
+    union: dict[str, tuple[str, str]] = {}
+    for pairs in per_arm.values():
+        union.update(pairs)
+
+    todo = {k: v for k, v in union.items() if not reuse or k not in reuse}
+    if reuse:
+        print(f"기존 판정 재사용 {len(union) - len(todo)}쌍 · 신규 판정 {len(todo)}쌍")
+
+    need = sorted({x for pair in todo.values() for x in pair})
+    assets = fetch_assets(db, need)
+    missing = [k for k, (s, t) in todo.items() if s not in assets or t not in assets]
+    if missing:
+        print(f"⚠️ 자산 내용을 못 읽은 쌍 {len(missing)}건 — 판정에서 제외한다(예: {missing[:2]}).")
+
+    rows = [to_judge_row(k, assets[s], assets[t]) for k, (s, t) in sorted(todo.items())
+            if s in assets and t in assets]
+    print(f"판정 대상 쌍 {len(rows)}건(합집합) — 시작(동시 {_CONCURRENCY})", flush=True)
+    with ThreadPoolExecutor(max_workers=_CONCURRENCY) as ex:
+        results = list(ex.map(
+            lambda r: judge_one(r, rubric=RUBRIC_KO_V1, llm=llm or complete_json), rows))
+
+    vs = VerdictSet(
+        measure_id=measure_id,
+        method=method,
+        rubric_version=RUBRIC_VERSION, rubric_text=RUBRIC_KO_V1,
+        judge_model=judge_model or get_current_settings().meta_model, seed=0, strata="shadow-ab-pair",
+        created_at=datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
+        sample_edge_ids=tuple(r["edge_id"] for r in rows), verdicts=tuple(results))
+    return vs, {arm: set(pairs) for arm, pairs in per_arm.items()}
+
+
+def compare_arms(snaps: dict[str, Snapshot], vs: VerdictSet, arm_pairs: dict[str, set]) -> dict:
+    """팔별 4개 지표를 낸다 — spec 폐기 기준 1·2·3 판정 근거.
+
+    Args:
+        snaps: ``{팔 이름: 스냅샷}``.
+        vs: 합집합 판정 결과.
+        arm_pairs: ``{팔 이름: 쌍 키 집합}``.
+
+    Returns:
+        ``{팔 이름: {edge_count, kind_dist, strong_count, weak_count, rated, assets_with_edge}}``.
+    """
+    verdict_of = {v.edge_id: v.verdict for v in vs.verdicts}
+    out: dict[str, dict] = {}
+    for arm, snap in snaps.items():
+        kinds: dict[str, int] = {}
+        assets: set[str] = set()
+        n_edges = 0
+        for sid, ss in snap.sources.items():
+            # 운영 게이트 통과분만 센다 — `collect_pairs` 와 모집단이 어긋나면 kind 분포와
+            # 판정 결과가 서로 다른 집합을 가리키게 된다.
+            allowed = {c for c, _ in ss.candidates}
+            for e in ss.proposed:
+                if e.target not in allowed or e.target == sid:
+                    continue
+                n_edges += 1
+                kinds[e.kind] = kinds.get(e.kind, 0) + 1
+                assets.add(sid)
+                assets.add(e.target)
+        judged = [verdict_of[k] for k in arm_pairs[arm]
+                  if verdict_of.get(k) in ("strong", "weak", "none")]
+        out[arm] = {
+            "edge_count": n_edges,
+            "pair_count": len(arm_pairs[arm]),
+            "kind_dist": dict(sorted(kinds.items(), key=lambda kv: -kv[1])),
+            "rated": len(judged),
+            "strong_count": judged.count("strong"),
+            "weak_count": judged.count("weak"),
+            "none_count": judged.count("none"),
+            "assets_with_edge": len(assets),
+        }
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    """두 스냅샷을 맹검 판정하고 팔별 지표를 출력한다.
+
+    Args:
+        argv: 명령행 인자. ``None`` 이면 실제 인자를 읽는다(테스트 주입용).
+
+    Returns:
+        0=정상, 2=판정 실패율이 임계를 넘어 측정 무효.
+    """
+    ap = argparse.ArgumentParser(description="스냅샷 제안 엣지 맹검 판정(spec 079 T505)")
+    ap.add_argument("--env", choices=["dev", "prod"], default="dev",
+                    help="설정 프로파일(기본: dev). .env.<env> 를 읽어 초기화한다")
+    ap.add_argument("--arm", action="append", metavar="이름=경로", required=True,
+                    help="비교할 팔(예: --arm A=/tmp/snap_A.json --arm B=/tmp/snap_B.json)")
+    ap.add_argument("--out", required=True, help="판정 결과 저장 경로")
+    ap.add_argument("--measure-id", dest="measure_id", default=None,
+                    help="측정 식별자(YYYYMMDD-<축>). 미지정 시 --out 파일명(확장자 제외)을 쓴다")
+    ap.add_argument("--method", default=None,
+                    help="이 측정이 무엇을 비교·반증하려 하는지 한 문단. 미지정 시 팔 이름으로 생성")
+    ap.add_argument("--reuse", action="append", default=None, metavar="판정JSON",
+                    help="이미 판정된 라벨 파일(여러 번 지정 가능). 같은 쌍은 재판정하지 않는다")
+    ap.add_argument("--allow-candidate-diff", action="store_true",
+                    help="후보 집합이 팔마다 달라도 계속한다(기본은 중단 — 프롬프트 효과가 아니라 "
+                         "후보 차이를 재게 되므로 비교가 무효다)")
+    args = ap.parse_args(argv)
+
+    dotenv_path = Path(__file__).resolve().parents[1] / f".env.{args.env}"
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+    # ⚠️ LLM seam 은 활성 설정에서 클라이언트를 만든다 — 이걸 빠뜨리면 호출마다 RuntimeError 다.
+    init_settings(args.env)
+
+    snaps: dict[str, Snapshot] = {}
+    for spec in args.arm:
+        if "=" not in spec:
+            ap.error(f"--arm 은 이름=경로 형식이다: {spec!r}")
+        name, path = spec.split("=", 1)
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        # measure_relation_quality 는 {snapshot, key_to_id, missing_keys} 로 감싸 저장한다.
+        snaps[name] = load_snapshot(payload.get("snapshot", payload))
+
+    # 후보 집합 동일성을 **자동으로** 검사한다 — 사람이 잊으면 오염된 A/B 를 그대로 판정하고
+    # "프롬프트 때문에 좋아졌다"는 잘못된 결론이 나온다(폐기 기준 ④′ · ADR 2026-07-29).
+    names = list(snaps)
+    if len(names) >= 2 and not args.allow_candidate_diff:
+        base = names[0]
+        for other in names[1:]:
+            try:
+                assert_same_candidates(snaps[base], snaps[other])
+            except AssertionError as exc:
+                ap.error(f"후보 집합이 팔 {base!r}↔{other!r} 에서 다르다 — 비교 무효. "
+                         f"의도한 것이면 --allow-candidate-diff 를 준다.\n  {exc}")
+        print(f"✅ 후보 집합 동일({' == '.join(names)}) — 프롬프트 효과만 비교된다")
+
+    reuse: dict[str, str] = {}
+    for path in args.reuse or []:
+        prev = json.loads(Path(path).read_text(encoding="utf-8"))
+        reuse.update({r["edge_id"]: r["verdict"] for r in prev["verdicts"]})
+
+    measure_id = args.measure_id or Path(args.out).stem
+    method = args.method or (
+        f"스냅샷 팔 비교({' vs '.join(names)}) — 두 팔의 제안 쌍을 합집합으로 한 번씩 맹검 "
+        "판정한다(판정자에게 kind·confidence 는 물론 어느 팔인지도 숨긴다).")
+
+    db = PostgresUtil()
+    with db:
+        vs, arm_pairs = judge_snapshots(
+            db, snaps, measure_id=measure_id, method=method, reuse=reuse or None)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(json.dumps(dump_verdicts(vs), ensure_ascii=False, indent=1),
+                              encoding="utf-8")
+
+    err = error_rate(vs)
+    counts = verdict_counts(vs)
+    print(f"\n저장: {args.out}")
+    print(f"합집합 판정: {counts}  err율 {100*err:.1f}%")
+
+    stats = compare_arms(snaps, vs, arm_pairs)
+    print(f"\n{'팔':6} {'제안':>5} {'쌍':>5} {'판정':>5} {'strong':>7} {'weak':>5} "
+          f"{'none':>5} {'자산':>5}  kind 분포")
+    for arm, s in stats.items():
+        print(f"{arm:6} {s['edge_count']:5} {s['pair_count']:5} {s['rated']:5} "
+              f"{s['strong_count']:7} {s['weak_count']:5} {s['none_count']:5} "
+              f"{s['assets_with_edge']:5}  {s['kind_dist']}")
+
+    if err > 0.05:
+        print(f"\n🔴 판정 실패율 {100*err:.1f}% > 5% — 이 측정은 무효다.")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
