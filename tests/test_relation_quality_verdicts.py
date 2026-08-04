@@ -86,7 +86,8 @@ class TestVerdictsPackageExport(unittest.TestCase):
         )
 
     def test_저장_경로는_골든이_아니라_fixtures다(self):
-        # tests/golden/* 는 .gitignore 대상이라 판정을 거기 두면 커밋되지 않는다.
+        # 판정(측정 기록)과 골든(사람이 검증한 정답)을 경로로 갈라 둔다 — 자동 승격 방지.
+        # 둘 다 버전관리 제외지만(2026-08-05) 경로 분리 규율은 유지한다.
         from src.relations.quality import VERDICTS_DIR
         self.assertEqual(VERDICTS_DIR, "tests/fixtures/relations/verdicts")
         self.assertNotIn("golden", VERDICTS_DIR)

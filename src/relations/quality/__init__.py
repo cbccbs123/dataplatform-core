@@ -39,9 +39,10 @@ from src.relations.quality.verdicts import (
 )
 
 # 판정 산출물 저장 위치(레포 루트 기준).
-# ⚠️ ``tests/golden/`` 이 아니다 — 그 경로는 ``.gitignore:98`` 로 통째로 무시되므로 판정을 거기
-#    두면 커밋되지 않아 재현 가능성이라는 존재 이유가 사라진다. 추적되는
-#    ``tests/fixtures/search/`` 선례를 따른다.
+# ⚠️ 이 경로도 **버전관리 제외**다(사용자 결정 2026-08-05 · 라벨이 1.6MB 로 커져 PR 을 덮었다).
+#    그래도 ``tests/golden/`` 과 경로를 갈라 두는 이유는 남는다 — 판정(측정 기록)과 골든(사람이
+#    검증한 정답)을 물리적으로 분리해 **"판정을 골든으로 자동 승격하지 않는다"는 규율을 강제**한다.
+#    로컬 파일이 유일본이므로 지우면 소급 재채점이 불가능하다(verdicts.py 모듈 docstring 참조).
 VERDICTS_DIR = "tests/fixtures/relations/verdicts"
 
 __all__ = [
