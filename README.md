@@ -43,6 +43,30 @@ pip install -e ".[migrate]" -c constraints.txt    # [migrate] = alembic (마이�
 
 레포 루트에 `.env.dev` 를 두면 마이그레이션·시드가 읽습니다. **필요한 변수 이름만** 적습니다(값은 환경에 맞게).
 
+### 🔴 필수 — 없으면 기동 시점에 실패합니다
+
+설정 로더가 다음 11개를 **필수로 요구**합니다(미설정 시 `ValueError: 필수 환경변수 누락: <이름>` 으로
+즉시 중단 — 잘못된 설정으로 조용히 도는 것을 막기 위한 fail-fast 입니다).
+
+```dotenv
+META_MODEL=              # 온프레미스 LLM 모델 이름
+ENCODING=utf-8
+CHUNK_SIZE=1000          # 텍스트 청킹
+OVERLAP_SIZE=100
+SUMMARY_MAX_CHARS=500
+TOP_K_KEYWORDS=10
+TEXT_EMBED_MODEL=        # 텍스트 임베딩 모델
+TEXT_EMBED_CHUNK_SIZE=512
+TEXT_EMBED_NORMALIZE=true
+OPENAI_BASE_URL=         # OpenAI 호환 엔드포인트(온프레미스 LLM 서버)
+OPENAI_API_KEY=          # 위 엔드포인트용 키(온프레미스면 임의값도 가능)
+```
+
+> `OPENAI_*` 라는 이름은 **OpenAI 호환 프로토콜**을 뜻합니다 — 외부 OpenAI 서비스가 아니라
+> 온프레미스 LLM 서버를 가리킵니다(설계 제약: 의료 데이터는 외부 LLM 호출 금지).
+
+### 그 외
+
 | 변수 | 용도 |
 |---|---|
 | `POSTGRES_HOST` · `POSTGRES_PORT` · `POSTGRES_DB` · `POSTGRES_USER` · `POSTGRES_PASSWORD` | PostgreSQL 접속 |
