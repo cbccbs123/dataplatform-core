@@ -1,0 +1,101 @@
+# dataplatform-core
+
+멀티모달(텍스트·이미지·영상·오디오) 데이터 통합 플랫폼의 **공유 코어 라이브러리**입니다.
+파일에서 추출한 메타데이터와 청크 임베딩을 PostgreSQL + pgvector 에 적재하고, 자산 간 관계(graph)와
+하이브리드 검색(BM25 + kNN)을 위한 규약·계약·순수 로직과 **DB 스키마 정본**을 소유합니다.
+
+> 국책과제 **RS-2025-02215256** 산출물.
+
+## 세 레포의 관계
+
+이 플랫폼은 세 레포로 나뉩니다. 이 레포는 그중 **코어(라이브러리)** 입니다.
+
+| 레포 | 파이썬 패키지 | 역할 |
+|---|---|---|
+| **dataplatform-core**(이 레포) | `src.*` | 규약·계약·순수 로직 + DB 스키마 정본(`migrations/`) |
+| dataplatform-pipeline | `processing.*` | 실행 오케스트레이션(수집·분류·추출·임베딩·적재·색인·관계 생성) |
+| dataplatform-service | `service.*` | HTTP API(검색·자산 상세·다운로드·관계 검토 serving) |
+
+**이 레포에는 실행 진입점이 없습니다.** 라이브러리이므로 CLI·Airflow·HTTP 계층은 위 두 레포에 있습니다.
+여기서 유효한 명령은 테스트·마이그레이션·시드입니다.
+
+## 요구사항
+
+| 항목 | 버전 |
+|---|---|
+| Python | **3.13 이상** |
+| PostgreSQL | **17** + `pgvector` 확장 |
+| OpenSearch | `analysis-nori`(한국어 형태소) 플러그인 · kNN 사용 시 k-NN 플러그인 |
+
+임베딩 차원은 **1536D 로 고정**돼 있습니다(`src/config/embedding_constants.py`).
+
+## 설치
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[migrate]" -c constraints.txt    # [migrate] = alembic (마이그레이션용)
+```
+
+`constraints.txt` 는 `pyproject.toml` 의 추상 선언(`>=`)으로부터 **해소된 정확 버전**을 고정합니다.
+재현성이 필요하면 위처럼 `-c constraints.txt` 를 함께 쓰십시오.
+
+## 환경변수
+
+레포 루트에 `.env.dev` 를 두면 마이그레이션·시드가 읽습니다. **필요한 변수 이름만** 적습니다(값은 환경에 맞게).
+
+| 변수 | 용도 |
+|---|---|
+| `POSTGRES_HOST` · `POSTGRES_PORT` · `POSTGRES_DB` · `POSTGRES_USER` · `POSTGRES_PASSWORD` | PostgreSQL 접속 |
+| `OPENSEARCH_HOST` · `OPENSEARCH_PORT` | OpenSearch 접속(색인·검색) |
+| `LLM_BASE_URL` · `LLM_MODEL` | 온프레미스 LLM 엔드포인트(zero-shot 보조) |
+| `EMBEDDING_API_URL` | 원격 임베딩 서버(선택 — 미설정 시 로컬 모델 로드) |
+
+## 스키마 생성과 시드
+
+```bash
+alembic -c alembic.ini upgrade head          # ① DB 스키마 생성
+python -m scripts.seed_topic_registry --env dev --apply   # ② 닫힌 주제 분류체계 시드
+```
+
+> ⚠️ **②를 생략하면 관계 생성 결과가 0건이 됩니다.** 관계 제안은 닫힌 주제 어휘(taxonomy)를
+> 전제로 동작하므로, 어휘가 비어 있으면 후보가 만들어지지 않습니다.
+> `--apply` 없이 실행하면 dry-run(DB 미접촉)으로 무엇이 적재될지만 보여줍니다.
+
+## 테스트
+
+```bash
+python -m unittest discover -s tests     # 순수 단위 테스트(실 DB·모델 불필요 — 해당 테스트는 자동 skip)
+```
+
+실 DB 통합 테스트는 환경변수 게이트로만 실행됩니다(`RUN_DB_E2E=1`, `RUN_OS_E2E=1`).
+
+## 구조
+
+```
+src/
+  config/       설정·상수(임베딩 차원 등)
+  database/     PostgreSQL 풀·트랜잭션·ID(UUIDv7)·lineage
+  domain/       닫힌 어휘(DB CHECK 와 동기)
+  embedders/    임베딩 어댑터(SentenceTransformer·CLIP·원격)
+  file/         파일 식별·해시
+  llm/          LLM 단일 seam + 요약기(text/image/video)
+  registry/     레지스트리
+  relations/    자산 간 관계 — 후보 생성·제안·저장·품질 + 주제 시드
+  search/       하이브리드 검색(BM25 + kNN 융합)·색인 동기
+  topic/        자산 자기주제 조회
+migrations/     DB 스키마 정본(alembic + 손작성 SQL)
+scripts/        시드·게이트·측정 도구
+tests/          단위 테스트
+```
+
+## 설계 제약
+
+- **학습 기반 방식을 쓰지 않습니다** — 학습·파인튜닝·지도학습·능동학습 없음. 사전학습 모델은 **추론 전용**으로만 사용합니다.
+- **LLM 호출은 단일 seam(`src/llm/client.py`)을 경유**하며 `temperature=0` 입니다. 결정 재현성이 요구사항입니다.
+- 임베딩 차원 **1536D 고정** · DB 는 **PostgreSQL + pgvector** 고정.
+- 코드·주석·로그는 한국어로 작성합니다.
+
+## 그래프 조회 주의
+
+관계 엣지는 **대칭 저장**됩니다. 조회는 반드시 `src/relations/graph_query.py` 를 경유하십시오 —
+`WHERE src_node = X` 같은 단방향 쿼리는 dst 쪽으로 접힌 대칭 엣지를 누락합니다.
