@@ -1,0 +1,475 @@
+{
+  "version": "v2",
+  "source": "taxonomy_draft.md §3 커버리지 매핑(raw 120 → 27+미분류·2026-07-07 검토 확정)",
+  "note": "백필 topic 분류 alias 선시드 정본. §3 검토표를 파싱해 raw_ko→canonical_topic 를 결정적으로 적재한다(scripts/seed_topic_registry.py·parent_topic=NULL·decided_by='seed'). 효과: canonicalize_topic 가 off-list raw 를 LLM 재분류 없이 alias 히트로 해소(예: 에너지→경제·산업). 자기참조(raw==canonical·음악/과학/동물)는 닫힌 집합 정확일치가 처리하므로 제외. subtopic 층은 열린 성장(LLM).",
+  "aliases": [
+    {
+      "raw_ko": "요리",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "음식",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "식품",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "커피",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "베이킹",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "음료",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "식음료",
+      "canonical_ko": "음식·요리"
+    },
+    {
+      "raw_ko": "스포츠",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "등산",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "낚시",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "자전거",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "수영",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "골프",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "캠핑",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "산악",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "레저",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "여가",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "태권도",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "요가",
+      "canonical_ko": "스포츠·레저"
+    },
+    {
+      "raw_ko": "환경",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "자연",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "지리",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "기상",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "식물",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "기후",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "생태계",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "생태",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "지형",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "해양",
+      "canonical_ko": "자연·환경"
+    },
+    {
+      "raw_ko": "예술",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "미술",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "공예",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "서예",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "전통예술",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "도예",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "캘리그라피",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "수공예",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "건축",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "문화",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "사진",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "전통공예",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "전시",
+      "canonical_ko": "예술·공예"
+    },
+    {
+      "raw_ko": "천문학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "우주",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "통계학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "생물",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "고생물학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "물리학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "심리학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "지질학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "천문",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "생물학",
+      "canonical_ko": "과학"
+    },
+    {
+      "raw_ko": "IT",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "반도체",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "인공지능",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "전자제품",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "드론",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "기술",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "사물인터넷",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "가전",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "로봇",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "가상현실",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "데이터",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "데이터셋",
+      "canonical_ko": "IT·기술"
+    },
+    {
+      "raw_ko": "사고",
+      "canonical_ko": "재난·안전"
+    },
+    {
+      "raw_ko": "구조",
+      "canonical_ko": "재난·안전"
+    },
+    {
+      "raw_ko": "안전",
+      "canonical_ko": "재난·안전"
+    },
+    {
+      "raw_ko": "재난",
+      "canonical_ko": "재난·안전"
+    },
+    {
+      "raw_ko": "자연재해",
+      "canonical_ko": "재난·안전"
+    },
+    {
+      "raw_ko": "사건",
+      "canonical_ko": "재난·안전"
+    },
+    {
+      "raw_ko": "여행",
+      "canonical_ko": "여행·지역"
+    },
+    {
+      "raw_ko": "랜드마크",
+      "canonical_ko": "여행·지역"
+    },
+    {
+      "raw_ko": "관광",
+      "canonical_ko": "여행·지역"
+    },
+    {
+      "raw_ko": "역사",
+      "canonical_ko": "역사·문화유산"
+    },
+    {
+      "raw_ko": "문화유산",
+      "canonical_ko": "역사·문화유산"
+    },
+    {
+      "raw_ko": "전통문화",
+      "canonical_ko": "역사·문화유산"
+    },
+    {
+      "raw_ko": "교통",
+      "canonical_ko": "교통·모빌리티"
+    },
+    {
+      "raw_ko": "전기차",
+      "canonical_ko": "교통·모빌리티"
+    },
+    {
+      "raw_ko": "항공",
+      "canonical_ko": "교통·모빌리티"
+    },
+    {
+      "raw_ko": "자동차",
+      "canonical_ko": "교통·모빌리티"
+    },
+    {
+      "raw_ko": "원예",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "목공",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "취미",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "보드게임",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "인테리어",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "농업",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "쇼핑",
+      "canonical_ko": "생활·취미"
+    },
+    {
+      "raw_ko": "에너지",
+      "canonical_ko": "경제·산업"
+    },
+    {
+      "raw_ko": "금융",
+      "canonical_ko": "경제·산업"
+    },
+    {
+      "raw_ko": "경제",
+      "canonical_ko": "경제·산업"
+    },
+    {
+      "raw_ko": "제조",
+      "canonical_ko": "경제·산업"
+    },
+    {
+      "raw_ko": "재테크",
+      "canonical_ko": "경제·산업"
+    },
+    {
+      "raw_ko": "정치",
+      "canonical_ko": "정치·사회"
+    },
+    {
+      "raw_ko": "사회",
+      "canonical_ko": "정치·사회"
+    },
+    {
+      "raw_ko": "범죄",
+      "canonical_ko": "법·범죄"
+    },
+    {
+      "raw_ko": "영화",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "게임",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "애니메이션",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "연예",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "미디어",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "드라마",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "영상",
+      "canonical_ko": "미디어·엔터테인먼트"
+    },
+    {
+      "raw_ko": "군사",
+      "canonical_ko": "군사·안보"
+    },
+    {
+      "raw_ko": "국방",
+      "canonical_ko": "군사·안보"
+    },
+    {
+      "raw_ko": "교육",
+      "canonical_ko": "교육·지식"
+    },
+    {
+      "raw_ko": "자격증",
+      "canonical_ko": "교육·지식"
+    },
+    {
+      "raw_ko": "가이드라인",
+      "canonical_ko": "교육·지식"
+    },
+    {
+      "raw_ko": "철학",
+      "canonical_ko": "교육·지식"
+    },
+    {
+      "raw_ko": "도서관",
+      "canonical_ko": "교육·지식"
+    },
+    {
+      "raw_ko": "연애",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "추억",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "인물",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "감정",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "표정",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "반응",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "배경",
+      "canonical_ko": "사람·일상"
+    },
+    {
+      "raw_ko": "예절",
+      "canonical_ko": "사람·일상"
+    }
+  ]
+}

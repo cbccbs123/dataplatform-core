@@ -46,12 +46,17 @@ from typing import Any
 
 # 시드 정본 경로. taxonomy 시드는 **src/relations 패키지 내부**가 단일 출처다(PR #81 이관·prompt.py
 # 와 동일 파일). src-only 패키징(pyproject include=["src*"]) 시에도 런타임 로드가 되도록 specs/ 가
-# 아닌 src/ 에 둔다. alias 선시드는 시드 전용(런타임 미참조)이라 specs/ 에 남는다.
+# 아닌 src/ 에 둔다.
+#
+# alias 선시드도 2026-08-05 로 **src/relations 로 이관**했다. 직전까지는 "시드 전용(런타임 미참조)"
+# 이라는 이유로 specs/ 에 뒀는데, 그 전제가 깨졌다 — 공개용 소스 레포(spec 080)는 `specs/` 를
+# 통째로 제외하므로 그 상태로는 **공개본에서 시드가 실패하고 관계 생성이 0건**이 된다.
+# "코드가 읽는 데이터는 코드 옆에 둔다"가 이미 확립된 규칙이고(PR #160 — wheel 에 시드 JSON 이
+# 안 담겨 설치본 import 가 터진 버그), alias 선시드만 예외로 둘 근거가 없다.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_SPEC_DIR = _REPO_ROOT / "specs" / "058-relation-topic-canonicalization"
 _DEFAULT_SEED_PATH = _REPO_ROOT / "src" / "relations" / "taxonomy_seed.json"
 # alias 선시드 정본(§3 커버리지 매핑·raw_ko→canonical). registry 시드 직후 topic 층 alias 로 적재.
-_DEFAULT_ALIAS_SEED_PATH = _SPEC_DIR / "taxonomy_alias_seed.json"
+_DEFAULT_ALIAS_SEED_PATH = _REPO_ROOT / "src" / "relations" / "taxonomy_alias_seed.json"
 # subtopic 시드 정본(spec 068 G2·G3). topic 시드와 동거(src/relations)해 src-only 패키징에서도
 # 런타임 로드된다. 각 subtopic 은 부모 topic 스코프(parent_topic=<topic_ko>)로 가산 적재된다.
 _DEFAULT_SUBTOPIC_SEED_PATH = _REPO_ROOT / "src" / "relations" / "subtopic_seed.json"
