@@ -41,7 +41,26 @@ pip install -e ".[migrate]" -c constraints.txt    # [migrate] = alembic (마이�
 
 ## 환경변수
 
-레포 루트에 `.env.dev` 를 두면 마이그레이션·시드가 읽습니다. **필요한 변수 이름만** 적습니다(값은 환경에 맞게).
+템플릿이 있습니다 — 복사해서 값만 채우면 됩니다:
+
+```bash
+cp .env.example .env.dev      # .env.dev 는 커밋되지 않습니다(.gitignore)
+```
+
+### 설정을 주는 두 가지 방법
+
+| 방법 | 어디에 | 우선순위 |
+|---|---|---|
+| **A. `.env.<환경>` 파일** | **실행하는 디렉터리** → 없으면 레포 루트 순으로 찾습니다 | 낮음 |
+| **B. 환경변수 직접 주입** | 배포·컨테이너·CI(`export` · `env_file:` · `env:`) | **높음**(A 를 덮어씁니다) |
+
+방법 B 로 파일 값을 그대로 올리려면:
+
+```bash
+set -a; . ./.env.dev; set +a
+```
+
+> `--env dev` 는 `.env.dev` 를, `--env prod` 는 `.env.prod` 를 찾습니다.
 
 ### 🔴 필수 — 없으면 기동 시점에 실패합니다
 
@@ -123,3 +142,28 @@ tests/          단위 테스트
 
 관계 엣지는 **대칭 저장**됩니다. 조회는 반드시 `src/relations/graph_query.py` 를 경유하십시오 —
 `WHERE src_node = X` 같은 단방향 쿼리는 dst 쪽으로 접힌 대칭 엣지를 누락합니다.
+
+## 트러블슈팅
+
+### `ValueError: 필수 환경변수 누락: META_MODEL`
+
+설정이 **하나도** 로드되지 않았다는 뜻입니다. 값이 틀린 게 아니라 대개 `.env` 파일을 못 찾은 것입니다.
+
+1. `.env.dev` 가 **실행하는 디렉터리** 또는 레포 루트에 있는지 확인하십시오(`cp .env.example .env.dev`).
+2. `--env dev` 로 실행했는지 확인하십시오 — `--env prod` 는 `.env.prod` 를 찾습니다.
+3. 그래도 안 되면 환경변수를 직접 주입하십시오: `set -a; . ./.env.dev; set +a`
+   (§환경변수 › 방법 B — 설치 방식과 무관하게 항상 동작합니다).
+
+### 관계 생성 결과가 0건입니다
+
+닫힌 주제 분류체계(taxonomy) 시드를 적재하지 않았을 때 나타납니다. 관계 제안은 그 어휘를
+전제로 후보를 만들기 때문에 어휘가 비어 있으면 후보가 0이 됩니다.
+
+```bash
+python -m scripts.seed_topic_registry --env dev --apply
+```
+
+### 검색 결과가 비어 있습니다
+
+적재는 됐어도 OpenSearch 색인이 없으면 검색은 빈 결과입니다. `OPENSEARCH_SYNC_ENABLED=true` 인지,
+`analysis-nori` 플러그인이 설치돼 있는지, 그리고 인덱스가 존재하는지 확인하십시오.
