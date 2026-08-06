@@ -36,6 +36,9 @@ tests/fixtures/search/search_test_topics.json
 tests/fixtures/search/golden_p29_manifest.md
 tests/fixtures/topics/same_topic_groups_contract.json
 tests/golden/
+# 예외: 주제 분류 스모크 앵커는 **실 asset_id 가 없고**(앵커 설명 텍스트만) 어디서도 읽지 않지만
+# 계통 붕괴 대조용으로 남긴다 — 위 `tests/golden/` 규칙에 걸리지 않게 명시적으로 되살린다.
+!tests/golden/topic_smoke.json
 
 # 측정 산출물·판정 라벨(재현 불가·로컬 유일본)
 tests/fixtures/relations/verdicts/
