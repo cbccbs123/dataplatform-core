@@ -16,6 +16,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FIXTURE_PATH = os.path.join(
     _REPO_ROOT, "tests", "fixtures", "topics", "same_topic_groups_contract.json"
 )
+# 이 계약 스냅샷은 **실 코퍼스 asset_id** 를 담고 있어 이 레포(공개)에 두지 않는다 — 비공개 문서
+# 레포가 소유하고, 측정할 때만 이 경로로 가져온다. 그래서 부재 시 실패가 아니라 **skip** 이다
+# (다른 골든 테스트들도 같은 규약: `RUN_OS_E2E` 게이트 또는 파일 존재 확인).
+_HAS_FIXTURE = os.path.isfile(_FIXTURE_PATH)
+_FIXTURE_REASON = f"계약 fixture 없음(비공개 문서 레포 소유): {_FIXTURE_PATH}"
 
 
 def _mock_conn_seq(fetchone_val=None, fetchall_val=None):
@@ -29,6 +34,7 @@ def _mock_conn_seq(fetchone_val=None, fetchall_val=None):
     return conn, cur
 
 
+@unittest.skipUnless(_HAS_FIXTURE, _FIXTURE_REASON)
 class TestFetchAssetTopic(unittest.TestCase):
     """T204 — 정본 읽기(구 project_asset_topics 형상)·부재 []."""
 
@@ -61,6 +67,7 @@ class TestFetchAssetTopic(unittest.TestCase):
         self.assertEqual(fetch_asset_topic(conn, "missing"), [])
 
 
+@unittest.skipUnless(_HAS_FIXTURE, _FIXTURE_REASON)
 class TestFindSameTopicGroups(unittest.TestCase):
     """T204 — 같은 (topic,subtopic) 자산 집계(구 find_topic_neighbor_groups 형상)."""
 

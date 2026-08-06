@@ -16,12 +16,18 @@ _FX = Path(__file__).resolve().parent / "fixtures" / "search"
 _RUN = os.getenv("RUN_OS_E2E") == "1"
 
 
+# golden_os.json 은 **실 코퍼스 asset_id 230개**를 담고 있어 이 레포(공개)에 두지 않는다 —
+# 비공개 문서 레포가 소유하고 측정 시에만 가져온다. 그래서 부재 시 skip 한다.
+_GOLDEN_OS = _FX / "golden_os.json"
+
+
+@unittest.skipUnless(_GOLDEN_OS.is_file(), f"golden_os.json 없음(비공개 문서 레포 소유): {_GOLDEN_OS}")
 class GoldenFixtureSchemaTest(unittest.TestCase):
-    """순수(항상 실행): golden_os.json 의 구조 불변식 — 측정 하니스가 기대하는 계약."""
+    """golden_os.json 의 구조 불변식 — 측정 하니스가 기대하는 계약(fixture 있을 때만)."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.golden = json.loads((_FX / "golden_os.json").read_text(encoding="utf-8"))
+        cls.golden = json.loads(_GOLDEN_OS.read_text(encoding="utf-8"))
 
     def test_query_categories_and_fields(self) -> None:
         qs = self.golden["queries"]
