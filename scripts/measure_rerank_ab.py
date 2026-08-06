@@ -24,6 +24,40 @@ if str(_REPO_ROOT) not in sys.path:
 _MODALITIES = ["text", "audio", "image", "video"]
 
 
+def _golden_path(fx, name: str = "golden_os.json"):
+    """골든셋 경로를 해소한다 — 없으면 **무엇을 해야 하는지** 알려주고 멈춘다.
+
+    골든셋은 실 코퍼스 자산 식별자를 담아 이 레포에 두지 않는다(별도 비공개 보관).
+    ``GOLDEN_OS_PATH`` 로 파일을 직접 지정하거나 ``GOLDEN_DIR`` 로 폴더를 지정한다.
+
+    Args:
+        fx: 기본 fixture 디렉터리(레포 내 경로).
+        name: 골든 파일 이름.
+
+    Returns:
+        존재하는 골든 파일 경로.
+
+    Raises:
+        SystemExit: 어느 후보에도 없을 때 — 안내 문구와 함께 종료한다.
+    """
+    import os
+    cands = []
+    if os.environ.get("GOLDEN_OS_PATH"):
+        cands.append(Path(os.environ["GOLDEN_OS_PATH"]))
+    if os.environ.get("GOLDEN_DIR"):
+        cands.append(Path(os.environ["GOLDEN_DIR"]) / name)
+    cands.append(Path(fx) / name)
+    for c in cands:
+        if c.is_file():
+            return c
+    raise SystemExit(
+        f"골든셋을 찾지 못했습니다: {name}\n"
+        f"  찾아본 곳: {', '.join(str(c) for c in cands)}\n"
+        f"  이 파일은 실 코퍼스 자산 식별자를 담아 이 레포에 포함하지 않습니다.\n"
+        f"  GOLDEN_OS_PATH=<파일> 또는 GOLDEN_DIR=<폴더> 로 지정하십시오."
+    )
+
+
 def _union_rank(buckets) -> list[str]:
     """모달리티별 버킷을 자산 단위 하나의 순위로 합친다.
 
@@ -96,7 +130,7 @@ def main() -> int:
     from src.search.search_tuning import SearchTuning
 
     client = get_client()
-    golden = json.loads((_REPO_ROOT / "tests/fixtures/search/golden_os.json").read_text(encoding="utf-8"))
+    golden = json.loads(_golden_path(_REPO_ROOT / "tests/fixtures/search").read_text(encoding="utf-8"))
     queries = golden["queries"]
     tau = args.tau if args.tau is not None else cfg.search.os_rerank_tau
     top_r = args.top_r if args.top_r is not None else cfg.search.os_rerank_top_r
