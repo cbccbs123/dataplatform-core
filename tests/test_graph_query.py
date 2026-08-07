@@ -95,6 +95,9 @@ class TestGraphQueryNormalize(unittest.TestCase):
         "file_name", "modality",
         # 081 조각③: 노출 등급(strong/weak) — 역시 하위호환 필드 추가다(기존 키 불변).
         "tier",
+        # 081 조각⑤: 동시보유 접기에서 **접힌 종류**(대개 빈 리스트). 접힌 쪽에만 실으면
+        # 소비처가 `.get()` 유무로 분기하므로 **모든 행에** 싣는다.
+        "folded_kind_codes",
     }
 
     def _row(self, **over):
@@ -234,7 +237,7 @@ def _row(*, status="active", kind="same_domain", conf=0.9, edge="e1",
 
 
 class TestExposureTiers(unittest.TestCase):
-    """081 조각③ — 강칸(연관 자료)·약칸(비슷한 주제) 2단 노출.
+    """081 조각③ — 강칸(연관 자료)·약칸(참고 자료) 2단 노출.
 
     약칸이 필요한 이유: 자동승인 게이트가 `same_domain` 을 강등하면 관계 보유 자산이 26% 줄어
     화면이 빈다. 강등분을 약칸으로 살려 커버리지를 지키면서 강칸 정밀도만 올린다.
@@ -339,4 +342,76 @@ class TestBackwardCompatibleWrapper(unittest.TestCase):
         conn, cur = _conn_returning([])
         fetch_active_relations_for_asset(conn, asset_id="a1", status="rejected")
         self.assertEqual(cur.execute.call_args[0][1][2], ["rejected"])
+
+
+class TestNeighborFolding(unittest.TestCase):
+    """081 조각⑤ — 같은 이웃에 붙은 이름표 여럿을 하나로 접는다(v4 실측 180쌍).
+
+    규칙·근거는 `approval_policy` 상단 "동시보유 접기" 주석이 정본이고, 규칙 자체의 검증은
+    `test_approval_policy.TestChooseFoldedEdge` 가 한다. 여기서 보는 것은 **조회 경로에
+    실제로 걸리는가**와 **기존 계약이 안 깨지는가** 둘이다.
+    """
+
+    def test_같은_이웃의_두_이름표가_한_건으로_접힌다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="proposed", kind="duplicate_near", conf=0.7, edge="e1", dst="a2"),
+            _row(status="proposed", kind="same_domain", conf=0.7, edge="e2", dst="a2")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.70)
+        self.assertEqual(len(rows), 1, "같은 이웃이 두 번 나오면 화면에 모순된 이름표가 붙는다")
+        self.assertEqual(rows[0]["kind_code"], "same_domain")
+        self.assertEqual(rows[0]["folded_kind_codes"], ["duplicate_near"])
+
+    def test_이웃이_다르면_접지_않는다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="active", kind="duplicate_near", edge="e1", dst="a2"),
+            _row(status="active", kind="same_domain", edge="e2", dst="a3")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1")
+        self.assertEqual(len(rows), 2)
+
+    def test_접힘이_없어도_folded_kind_codes_는_실린다(self):
+        # 접힌 쪽에만 넣으면 소비처가 `.get()` 유무로 분기하고, 그 분기가 "접힘을 모르는
+        # 코드"를 만든다. 항상 실어 두면 소비처는 리스트만 보면 된다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([_row(status="active")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1")
+        self.assertEqual(rows[0]["folded_kind_codes"], [])
+
+    def test_양방향_중복도_한_건으로_접힌다(self):
+        # 비대칭 kind 는 캐논 순서 봉인 대상이 아니라 A→B·B→A 두 행이 생길 수 있다
+        # (v4 에 `derived_from` 실사례 존재). 쌍 단위로 접으면 이웃이 두 번 나온다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="active", kind="derived_from", edge="e1", src="a1", dst="a2"),
+            _row(status="active", kind="derived_from", edge="e2", src="a2", dst="a1")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["asset_id"], "a2")
+
+    def test_기존_키가_하나도_사라지지_않는다(self):
+        # 하위호환 봉인 — 접기는 **추가**만 하고 기존 계약을 건드리지 않는다.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="proposed", kind="duplicate_near", conf=0.7, edge="e1", dst="a2"),
+            _row(status="proposed", kind="same_domain", conf=0.7, edge="e2", dst="a2")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.70)
+        for key in ("asset_id", "kind_code", "is_symmetric", "direction", "confidence",
+                    "status", "topic", "reason", "edge_id", "file_name", "modality", "tier"):
+            self.assertIn(key, rows[0], f"기존 키 {key} 가 사라졌다")
+
+    def test_접은_뒤에도_등급_정렬이_유지된다(self):
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            _row(status="proposed", kind="same_domain", conf=0.9, edge="w1", dst="a3"),
+            _row(status="active", kind="duplicate_near", conf=0.8, edge="s1", dst="a2"),
+            _row(status="proposed", kind="same_domain", conf=0.8, edge="w2", dst="a2")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.70)
+        # a2 는 강칸(active)이 조합 규칙을 이겨 duplicate_near 로 남고, 강칸이 먼저 온다.
+        self.assertEqual([(r["asset_id"], r["tier"]) for r in rows],
+                         [("a2", "strong"), ("a3", "weak")])
+        self.assertEqual(rows[0]["folded_kind_codes"], ["same_domain"])
 

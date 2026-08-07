@@ -21,7 +21,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from src.relations.approval_policy import exposure_tier
+from src.relations.approval_policy import choose_folded_edge, exposure_tier
 
 # 엣지 양 끝을 node → asset 으로 두 번 조인한다. 앞의 조인은 asset_id 를 얻기 위한 것이고,
 # 뒤의 조인은 화면에 보일 파일명·모달리티를 함께 가져오기 위한 것이다 — 이게 없으면 소비자가
@@ -61,8 +61,10 @@ def fetch_relations_for_asset(
 ) -> list[dict[str, Any]]:
     """``asset_id`` 의 관계 이웃을 **노출 등급과 함께** 조회한다(081 조각③ · 2단 노출).
 
-    등급은 ``tier`` 필드로 실린다 — ``"strong"``(연관 자료 · 승인됨) · ``"weak"``(비슷한 주제 ·
-    미승인 참고용). 약칸이 필요한 이유: 자동승인 게이트가 ``same_domain`` 을 강등하면 관계 보유
+    등급은 ``tier`` 필드로 실린다 — ``"strong"``(연관 자료 · 승인됨) · ``"weak"``(참고 자료 ·
+    미승인). 표시 문구는 사용자 결정 2026-08-07 — 종전의 *"비슷한 주제"* 는 쓰지 않는다(자산
+    자기주제 기반 주제 기능과 이름이 겹쳐 다른 두 기능이 같은 것으로 읽힌다 · `approval_policy`
+    참조). 약칸이 필요한 이유: 자동승인 게이트가 ``same_domain`` 을 강등하면 관계 보유
     자산이 26% 줄어 화면이 빈다. 강등된 관계를 약칸으로 살려 **커버리지를 지키면서** 강칸의
     정밀도만 올린다. 실측으로 미승인 제안 중 진짜 관계가 31.6%(strong 187건 중 59건)라
     이 칸이 없으면 그만큼이 사용자에게서 사라진다(`docs/관계_품질_측정_20260728.md` §9.1).
@@ -129,10 +131,45 @@ def fetch_relations_for_asset(
                 "tier": tier,
             }
         )
+    out = _fold_by_neighbor(out)
     # 등급 우선 정렬. SQL 은 신뢰도로만 정렬하므로 여기서 등급을 앞세운다 — 안정 정렬이라
     # 같은 등급 안에서는 SQL 이 정한 (신뢰도 desc, edge_id) 순서가 그대로 유지된다.
     out.sort(key=lambda e: _TIER_RANK.get(str(e["tier"]), len(_TIER_RANK)))
     return out
+
+
+def _fold_by_neighbor(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """이웃 자산당 엣지 하나만 남긴다 — **동시보유 접기**(081 조각⑤).
+
+    규칙·실측 근거·재측정 방법은 `approval_policy` 상단 **"동시보유 접기"** 주석이 정본이다.
+    여기서는 *그룹을 만들어 넘기고 결과를 조립*하기만 한다 — 판정을 여기 두면 소비처마다
+    복제될 것이고, 그러면 화면마다 결과가 갈린다(이 모듈이 존재하는 이유와 같다).
+
+    **왜 이웃 자산 단위인가**: 화면은 이웃 하나를 카드 하나로 그린다. DB 의 쌍
+    ``(src_node, dst_node)`` 단위로 접으면 A→B 와 B→A 가 각각 남아 **한 이웃이 두 번**
+    나온다(비대칭 kind 에서 실제로 발생 — v4 에 `derived_from` 양방향 2행이 있다).
+
+    ``folded_kind_codes`` 는 **모든 행에** 실린다(대개 빈 리스트). 접힌 쪽에만 넣으면 소비처가
+    ``.get()`` 유무로 분기하게 되고, 그 분기가 곧 "접힘을 모르는 코드"를 만든다.
+
+    Args:
+        rows: 등급이 매겨진 이웃 엣지 목록. ``asset_id`` 로 묶는다.
+
+    Returns:
+        이웃당 한 건으로 접힌 목록. **입력 순서를 보존**한다(첫 등장 순).
+        각 항목에 ``folded_kind_codes``(접힌 종류·정렬됨)가 추가된다.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(str(r["asset_id"]), []).append(r)
+
+    folded_out: list[dict[str, Any]] = []
+    for edges in groups.values():
+        keep_idx, folded_kinds = choose_folded_edge(edges)
+        kept = dict(edges[keep_idx])
+        kept["folded_kind_codes"] = folded_kinds
+        folded_out.append(kept)
+    return folded_out
 
 
 def fetch_active_relations_for_asset(

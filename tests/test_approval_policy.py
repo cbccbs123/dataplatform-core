@@ -7,7 +7,9 @@ import unittest
 
 from src.relations.approval_policy import (
     EXPLICIT_KINDS,
+    FOLD_PREFERRED_KIND,
     SIMILARITY_KINDS,
+    choose_folded_edge,
     exposure_tier,
     is_auto_approvable,
     is_review_exempt,
@@ -146,6 +148,99 @@ class TestReviewExempt(unittest.TestCase):
     def test_대소문자를_가리지_않는다(self):
         self.assertTrue(
             is_review_exempt("SAME_DOMAIN", exempt_kinds=frozenset({"same_domain"})))
+
+
+def _edge(kind: str, conf: float | None, tier: str = "weak") -> dict:
+    """접기 테스트용 최소 엣지 — 판정에 쓰는 세 키만 담는다."""
+    return {"kind_code": kind, "confidence": conf, "tier": tier}
+
+
+class TestChooseFoldedEdge(unittest.TestCase):
+    """동시보유 접기(081 조각⑤) — 규칙과 **그 근거**를 함께 봉인한다.
+
+    이 테스트가 지키려는 것은 동작만이 아니다. `same_domain` 우선은 직관에 반해 보여
+    (점수가 낮은데 이긴다) 되돌려지기 쉽다 — 실측 근거는 `approval_policy` 상단 주석에
+    있고, 여기서는 **그 결론이 코드에 살아 있는지**를 확인한다.
+    """
+
+    def test_엣지가_하나면_그대로_둔다(self):
+        self.assertEqual(choose_folded_edge([_edge("same_domain", 0.9)]), (0, []))
+
+    def test_빈_입력은_오류다(self):
+        # 조용히 넘기면 호출부의 그룹 구성 버그가 숨는다.
+        with self.assertRaises(ValueError):
+            choose_folded_edge([])
+
+    # ── 규칙 2: 조합 규칙이 점수를 이긴다 (실측 근거 — 위 클래스 docstring)
+
+    def test_동점이면_same_domain을_남긴다(self):
+        """v4 실측 77쌍의 경우. **spec 081 원안(동점이면 duplicate_near)을 뒤집은 지점**이다.
+
+        원안대로면 정확도 48.3% 인 `duplicate_near` 를 남기고 92.4% 인 `same_domain` 을 버린다.
+        """
+        keep, folded = choose_folded_edge([_edge("duplicate_near", 0.7), _edge("same_domain", 0.7)])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    def test_dup이_점수가_높아도_same_domain을_남긴다(self):
+        """v4 실측 15쌍(dup@0.9+sd@0.9)·2쌍(dup@0.9+sd@0.7)의 경우.
+
+        `duplicate_near` 0.9 는 **단독일 때만** 88.9% 다 — `same_domain` 과 같이 붙은
+        15쌍에서는 3/13 = 23% 였다. 이름표가 둘 달렸다는 사실 자체가 판정이 흔들렸다는
+        신호이므로 그 상황에서는 점수를 신호로 쓰지 않는다.
+        """
+        keep, folded = choose_folded_edge([_edge("duplicate_near", 0.9), _edge("same_domain", 0.7)])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    def test_입력_순서가_바뀌어도_같은_것을_남긴다(self):
+        keep, folded = choose_folded_edge([_edge("same_domain", 0.7), _edge("duplicate_near", 0.9)])
+        self.assertEqual(keep, 0)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    # ── 규칙 1: 사람의 결정이 조합 규칙보다 앞선다
+
+    def test_강칸이_조합규칙을_이긴다(self):
+        # 사람이 승인한 것(active→strong)을 기계 규칙으로 버리면 그 결정을 무시하는 것이다.
+        keep, folded = choose_folded_edge([
+            _edge("duplicate_near", 0.7, tier="strong"),
+            _edge("same_domain", 0.9, tier="weak"),
+        ])
+        self.assertEqual(keep, 0)
+        self.assertEqual(folded, ["same_domain"])
+
+    # ── 규칙 3~5: 조합 규칙이 없을 때
+
+    def test_규칙없는_조합은_점수가_높은_쪽을_남긴다(self):
+        # 표본 1뿐이라 근거가 없는 조합 — spec 081 원안(점수 우선)을 그대로 쓴다.
+        keep, folded = choose_folded_edge([_edge("duplicate_near", 0.7), _edge("same_series", 0.9)])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    def test_규칙도_점수도_같으면_사전순으로_결정한다(self):
+        # 근거가 있어서가 아니라 **같은 입력이면 같은 출력**이어야 하기 때문이다(헌법 3조).
+        keep, folded = choose_folded_edge([_edge("references", 0.9), _edge("duplicate_near", 0.9)])
+        self.assertEqual(keep, 1)   # duplicate_near < references (사전순)
+        self.assertEqual(folded, ["references"])
+
+    def test_신뢰도가_없어도_깨지지_않는다(self):
+        keep, _ = choose_folded_edge([_edge("references", None), _edge("derived_from", 0.9)])
+        self.assertEqual(keep, 1)
+
+    # ── 규칙표 자체의 불변식
+
+    def test_규칙표의_선호_종류는_그_조합에_속한다(self):
+        # 조합에 없는 종류를 선호로 적으면 그 규칙은 **영원히 발동하지 않는다**(조용한 죽은 규칙).
+        for kinds, preferred in FOLD_PREFERRED_KIND.items():
+            self.assertIn(preferred, kinds)
+
+    def test_규칙표는_조합_전체가_일치할_때만_적용된다(self):
+        # 부분 일치로 적용하면 세 종류가 붙은 미지의 경우까지 근거 없이 판정하게 된다.
+        keep, folded = choose_folded_edge([
+            _edge("duplicate_near", 0.7), _edge("same_domain", 0.7), _edge("references", 0.9),
+        ])
+        self.assertEqual(keep, 2)   # 조합 규칙 미적용 → 점수 우선
+        self.assertEqual(folded, ["duplicate_near", "same_domain"])
 
 
 if __name__ == "__main__":

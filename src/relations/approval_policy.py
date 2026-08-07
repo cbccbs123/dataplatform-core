@@ -24,6 +24,9 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 # 유사도 추론 계열 — 근거가 임베딩 유사도. 저신뢰 꼬리를 폐기·비노출 대상으로 본다.
 SIMILARITY_KINDS: frozenset[str] = frozenset({"duplicate_near", "same_domain"})
 
@@ -32,6 +35,68 @@ EXPLICIT_KINDS: frozenset[str] = frozenset({"references", "derived_from", "same_
 
 # 노출·검토에서 "끝난 것"으로 보는 상태 — 사람이 내린 결정을 되살리지 않는다.
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected", "expired"})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🔴 동시보유 접기 (081 조각⑤ · 2026-08-07 채택) — 관계 이슈 조사 시 **먼저 볼 곳**
+#
+# 같은 자산 쌍에 이름표가 둘 이상 붙는다. 저장 키가 `(src_node, dst_node, relation_kind_id)`
+# 라 **종류가 다르면 다른 행**이기 때문이고, 이는 결함이 아니라 스키마의 정상 동작이다.
+# v4 실측 **180쌍**. 화면은 이웃 하나를 카드 하나로 그리므로 그대로 두면 한 카드에
+# `["duplicate_near", "same_domain"]` 같은 **모순된 이름표 두 개**가 붙는다.
+#
+# DB 는 건드리지 않는다(두 행 유지) — **조회에서만** 하나를 고른다. 지우면 되돌릴 수 없고
+# 판정 근거가 사라진다. 접기는 필터라 언제든 끌 수 있다.
+#
+# ── 어느 쪽을 남기나: 실측으로 정했다(추측 아님)
+#
+# 079 가 영속화한 판정 라벨을 v4 에 붙여 쟀다(180쌍 중 **167쌍**에 판정 존재 · LLM 재호출 0).
+# 판정 루브릭이 이 질문을 그대로 묻고 있었다:
+#     strong = 같은 **구체적 대상** → `duplicate_near` 의 주장이 맞다
+#     weak   = 같은 **넓은 분야**일 뿐 → `same_domain` 의 주장이 맞다
+#
+#   조합                                 쌍    dup 맞음   same_domain 맞음
+#   duplicate_near@0.7 + same_domain@0.9  84      25          52
+#   duplicate_near@0.7 + same_domain@0.7  77      16          57
+#   duplicate_near@0.9 + same_domain@0.9  15       3           9
+#   duplicate_near@0.9 + same_domain@0.7   2       1           1
+#   ────────────────────────────────────────────────────────────────
+#   합계                                 178   45 (27.3%)  119 (72.1%)
+#
+# → **`same_domain` 을 남기면 72.1% 맞고 `duplicate_near` 를 남기면 27.3% 맞다(2.6배).**
+#
+# ⚠️ **스펙 원안을 실측으로 기각했다.** spec 081 은 *"점수 우선 → 동점이면 duplicate_near"*
+#    였는데, 그 규칙은 동점 77쌍에서 정확한 이름표(same_domain 92.4%)를 버리고 절반 틀린 것
+#    (dup 0.7 = 48.3%)을 남긴다. 원안 작성 시점엔 종류별 정확도가 아직 없었다.
+#
+# ⚠️ **`duplicate_near` 0.9 는 단독일 때만 믿을 수 있다.** 전체 정확도는 88.9% 인데
+#    `same_domain` 과 **같이 붙은 15쌍에서는 3/13 = 23%** 다. 이름표가 둘 달렸다는 사실
+#    자체가 "이 판정은 흔들렸다"는 신호다 — 그래서 점수가 아니라 조합으로 가른다.
+#
+# ── 🔎 관계 이슈가 생기면 여기를 의심하라
+#
+#   "관계가 화면에서 사라졌다"      → 접기가 삼켰을 수 있다. `folded_kind_codes` 를 보라
+#                                     (접힌 관계는 **사라지지 않는다** — 이름표만 접힌다).
+#   "DB 건수와 화면 건수가 다르다"  → 정상이다. 차이 = 동시보유 쌍 수(v4 기준 180).
+#   "이름표가 기대와 다르다"        → 이 표를 보라. `same_domain` 이 이겼을 것이다.
+#   "규칙을 바꿔야겠다"            → **재측정부터.** 아래 재측정 방법 참조.
+#
+# ── 재측정 방법 (LLM 재호출 0 · 079 SC-001 그대로)
+#
+#   문서 레포 `fixtures/relations/verdicts/*.json` 의 판정 중 키가 `<a>__<b>`(pair_key) 인
+#   것만 v4 에 조인된다(edge_id 키는 재생성으로 소멸). 자산 쌍은 재생성돼도 같으므로 유효하다.
+#   근거 문서: `docs/관계_품질_측정_20260728.md` · 설계이력 2026-08-07.
+#
+# ⚠️ 이 수치의 한계(079 §한계 그대로): 판정자가 LLM 이다. **절대 문턱으로 쓰지 말 것** —
+#    "A 와 B 중 어느 쪽이 나은가"의 **상대 비교로만** 유효하다. 지금 쓰임이 정확히 그것이다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 조합 → 남길 이름표. **조합 전체가 키로 일치할 때만** 적용한다(부분 일치 금지 — 세 종류가
+# 붙은 미지의 경우까지 이 규칙으로 처리하면 근거 없는 판정이 된다).
+# 표본이 있는 조합만 등재한다. 나머지(dup+references 1쌍·dup+same_series 1쌍)는 **표본 1이라
+# 근거가 없어 넣지 않는다** — 점수·결정적 순서 규칙으로 넘긴다.
+FOLD_PREFERRED_KIND: dict[frozenset[str], str] = {
+    frozenset({"duplicate_near", "same_domain"}): "same_domain",
+}
 
 
 def parse_kind_set(raw: str | None, *, default: frozenset[str]) -> frozenset[str]:
@@ -128,7 +193,12 @@ def exposure_tier(
     *,
     min_conf_similarity: float,
 ) -> str | None:
-    """화면 노출 등급 — ``"strong"``(연관 자료) · ``"weak"``(비슷한 주제) · ``None``(노출 안 함).
+    """화면 노출 등급 — ``"strong"``(연관 자료) · ``"weak"``(참고 자료) · ``None``(노출 안 함).
+
+    표시 문구는 **"연관 자료"(확인됨) / "참고 자료"(확인 전)** 로 확정했다(사용자 결정 2026-08-07).
+    ⚠️ 종전의 *"비슷한 주제"* 는 쓰지 않는다 — 자산 자기주제(`asset_topic`) 기반의 **주제 탭·주제
+    패싯·같은주제 묶음**이 이미 "주제"라는 이름을 쓰고 있어, 근거가 다른 두 기능이 같은 것으로
+    읽힌다. 두 칸의 실제 차이는 주제가 아니라 **사람이 확인했는가**다.
 
     2단으로 나누는 이유: 자동승인 게이트가 `same_domain` 을 강등하면 관계 보유 자산이 26%
     줄어 화면이 빈다. 강등된 관계를 **약칸으로 살려** 커버리지를 지키면서 강칸의 정밀도만
@@ -158,3 +228,69 @@ def exposure_tier(
     if should_persist(kind_code, conf, min_conf_similarity=min_conf_similarity):
         return "weak"
     return None
+
+
+def choose_folded_edge(edges: Sequence[Mapping[str, Any]]) -> tuple[int, list[str]]:
+    """같은 이웃에 붙은 엣지 여럿 중 **화면에 남길 하나**를 고른다(081 조각⑤).
+
+    근거·실측·재측정 방법은 이 모듈 상단 **"동시보유 접기"** 주석 블록이 정본이다.
+    관계 이슈 조사 시 그 표를 먼저 보라.
+
+    **판정 순서**(앞선 규칙이 이기면 뒤는 보지 않는다):
+
+    1. **``tier`` 우선**(``strong`` > ``weak``) — 사람이 승인한 것을 기계 규칙으로 버리면
+       그 결정을 무시하는 것이 된다. ``exposure_tier`` 가 ``active`` 를 무조건 강칸에 두는
+       것과 같은 이유다.
+    2. **조합 규칙**(``FOLD_PREFERRED_KIND``) — 종류 집합이 표의 키와 **정확히 일치**하면
+       그 이름표를 남긴다. 점수보다 앞선다: 실측상 ``duplicate_near`` 는 ``same_domain`` 과
+       같이 붙었을 때 점수가 높아도(0.9) 23%만 맞았다 — **이름표가 둘 달렸다는 사실 자체가
+       판정이 흔들렸다는 신호**라, 그 상황에서는 점수를 신호로 쓸 수 없다.
+    3. **신뢰도 내림차순** — 조합 규칙이 없는 경우의 기본. spec 081 원안이기도 하다.
+    4. **``kind_code`` 사전순 → 입력 순서** — 결정성을 위한 최종 tiebreak(헌법 3조).
+       근거가 있어서가 아니라 **같은 입력이면 같은 출력**이어야 하기 때문이다.
+
+    Args:
+        edges: 같은 이웃 자산에 붙은 엣지들. 각 항목에서 ``kind_code``·``confidence``·
+            ``tier`` 를 읽는다. **비어 있으면 안 된다**(호출자가 그룹을 만들어 넘긴다).
+
+    Returns:
+        ``(남길 엣지의 인덱스, 접힌 종류 코드 목록)``. 접힌 목록은 **정렬돼** 있고 남긴
+        종류는 빠진다. 엣지가 하나뿐이면 ``(0, [])``.
+
+    Raises:
+        ValueError: ``edges`` 가 비었을 때. 조용히 넘기면 호출부의 그룹 구성 버그가 숨는다.
+    """
+    if not edges:
+        raise ValueError("접을 엣지가 없다 — 호출부의 그룹 구성을 확인하라")
+    if len(edges) == 1:
+        return 0, []
+
+    kinds = frozenset(str(e.get("kind_code") or "").strip().lower() for e in edges)
+    preferred = FOLD_PREFERRED_KIND.get(kinds)
+
+    def rank(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int, float, str, int]:
+        """정렬키 — 위 판정 순서 1~5를 그대로 튜플로 편다.
+
+        Args:
+            item: ``enumerate(edges)`` 가 주는 ``(입력 인덱스, 엣지)``. 인덱스는 최종
+                tiebreak 로 쓰이므로 함께 받는다.
+
+        Returns:
+            오름차순 비교용 5튜플. **이기는 조건일수록 작은 값**이다.
+        """
+        idx, e = item
+        kind = str(e.get("kind_code") or "").strip().lower()
+        conf = e.get("confidence")
+        # 오름차순 정렬로 첫 항목을 고르므로, 이기는 조건일수록 **작은 값**을 준다.
+        return (
+            0 if str(e.get("tier") or "") == "strong" else 1,      # 1. 강칸 우선
+            0 if preferred is not None and kind == preferred else 1,  # 2. 조합 규칙
+            -(float(conf) if conf is not None else 0.0),           # 3. 신뢰도 내림차순
+            kind,                                                  # 4. 사전순
+            idx,                                                   # 5. 입력 순서
+        )
+
+    keep_idx, keep = min(enumerate(edges), key=rank)
+    keep_kind = str(keep.get("kind_code") or "").strip().lower()
+    folded = sorted(k for k in kinds if k and k != keep_kind)
+    return keep_idx, folded
