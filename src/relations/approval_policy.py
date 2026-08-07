@@ -1,4 +1,4 @@
-"""관계의 **자동승인 자격·영속화 여부·노출 등급·검토 대상**을 정하는 정책 — 순수 함수.
+"""관계의 **자동승인 자격·영속화 여부·노출 등급·표시 이름·검토 대상**을 정하는 정책 — 순수 함수.
 
 **왜 한 모듈에 모으는가**: 같은 임계가 세 곳에서 쓰인다 — ① 영속화(`graph_persist`: 행을
 만들 것인가) ② 노출(`graph_query`: 화면에 보일 것인가) ③ 검토 큐(`review`: 사람이 볼 것인가).
@@ -96,6 +96,62 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected", "expired"})
 # 근거가 없어 넣지 않는다** — 점수·결정적 순서 규칙으로 넘긴다.
 FOLD_PREFERRED_KIND: dict[frozenset[str], str] = {
     frozenset({"duplicate_near", "same_domain"}): "same_domain",
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🔴 화면 표시 이름 (2026-08-07 채택) — **LLM 프롬프트용 이름과 일부러 다르다**
+#
+# 같은 `kind_code` 에 이름이 두 벌 붙는다. 실수가 아니라 **역할이 달라서** 나눈 것이다.
+#
+#   프롬프트용 = DB `relation_kind.kind_name_ko`
+#       LLM 이 읽는다. `prompt.py` 의 카탈로그 블록에 `type_name` 으로 **그대로 실린다**
+#       (`relation_type_catalog.fetch_active_relation_kinds` → `build_relation_prompt`).
+#       ⚠️ **바꾸면 관계 생성 결과가 바뀐다.** v301 이 `description` 한 줄을 고쳐
+#       이름표 정확도가 83.0→85.0% 움직인 선례가 있다. 고치려면 **shadow A/B 검증**이
+#       선행돼야 한다(079 규율).
+#
+#   표시용 = 아래 표
+#       사람이 읽는다. 판정에 **전혀 개입하지 않으므로** 자유롭게 고칠 수 있다.
+#
+# 둘을 이어 주는 진짜 식별자는 `kind_code` 다. 두 이름은 그 코드에 붙은 서로 다른 설명일 뿐이다.
+#
+# ── 왜 지금 나눴나
+#
+# 프론트가 자체 하드코딩 라벨을 쓰고 있었고 **DB·프론트·실제 의미가 셋 다 달랐다**:
+#
+#   kind_code        DB kind_name_ko   프론트(화면)      실제 의미(루브릭)
+#   same_domain      동일 도메인        "동일 주제" 🔴    같은 넓은 **분야**일 뿐 대상은 다름
+#   duplicate_near   유사 근접          "유사 중복"       내용·주제·장면의 근접 유사
+#   derived_from     파생               "파생 자료"       원문→요약·번역·전사
+#   references       참조               (매핑 없음)       명시적 인용·링크·제목 참조
+#   same_series      동일 시리즈        (매핑 없음)       파일명 어간+순번 연작
+#
+# `same_domain` 의 "동일 주제"는 **뜻이 틀렸다** — 주제가 같은 게 아니라 분야만 같은 것이고,
+# `asset_topic` 기반 **주제 탭·주제 패싯**과 이름까지 겹쳐 다른 두 기능이 같은 것으로 읽힌다
+# (`exposure_tier` 의 칸 이름을 "비슷한 주제"→"참고 자료"로 바꾼 것과 같은 이유다).
+# 매핑이 없던 2종은 화면에서 **"기타 연관"으로 뭉개지고** 있었다.
+#
+# 접기 규칙(위 블록)이 `same_domain` 을 356건 남기므로 이 이름이 화면 대부분을 차지한다.
+#
+# ── 🔎 언제 다시 합치나 (사용자 지시 2026-08-07)
+#
+# **관계 전량 재생성 기회가 오면 두 이름을 다시 맞추는 것을 검토한다.** 재생성은 어차피
+# 프롬프트 변경의 효과를 재는 자리이므로, 그때 `kind_name_ko` 를 표시용에 맞추고 shadow A/B
+# 로 검증하면 이 분리를 없앨 수 있다. 함께 볼 것: `same_domain` 의 DB `description` 이
+# **"주제·분야가 같은 연결"** 로 되어 있어 루브릭("분야만 같다")과 어긋난다 — LLM 이
+# *"주제가 같으면 same_domain"* 으로 읽을 여지가 있다(백로그 등재 · `docs/과제_책무_KPI.md`).
+#
+# ⚠️ 그때까지는 **관리자 화면이 `kind_name_ko`("동일 도메인")를 그대로 보여준다**
+# (`review.list_relation_kinds` → `GET /admin/relation-kinds`). 포털과 어긋나는 것을 알고
+# 두는 것이다 — 관리자 화면까지 맞추려면 백엔드를 건드려야 해서 화면 배선 때 함께 한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+RELATION_KIND_DISPLAY_KO: dict[str, str] = {
+    "same_domain": "같은 분야",      # ← "동일 주제"(프론트 하드코딩)를 바로잡은 것
+    "duplicate_near": "유사 중복",
+    "derived_from": "파생 자료",
+    "references": "참조",            # ← 프론트에 매핑이 없어 "기타 연관"으로 뭉개지던 것
+    "same_series": "같은 연작",      # ← 위와 같음
 }
 
 
@@ -228,6 +284,34 @@ def exposure_tier(
     if should_persist(kind_code, conf, min_conf_similarity=min_conf_similarity):
         return "weak"
     return None
+
+
+def display_name_ko(kind_code: str, *, fallback: str | None = None) -> str:
+    """관계 종류를 **화면에 보여줄 이름**으로 바꾼다.
+
+    ⚠️ 이것은 **LLM 프롬프트에 실리는 이름이 아니다.** 그쪽은 DB ``relation_kind.kind_name_ko``
+    이고 바꾸면 관계 생성 결과가 바뀐다 — 이유와 재통합 시점은 위 **"화면 표시 이름"** 주석
+    블록이 정본이다.
+
+    **모르는 코드를 뭉개지 않는다.** 통제어휘는 ``promote_relation_kind`` 로 늘어날 수 있는데,
+    미등록 코드를 *"기타 연관"* 같은 말로 덮으면 새 종류가 화면에서 통째로 사라져 **늘어난
+    사실 자체가 안 보인다**(모듈 docstring의 "모르는 kind 는 보수적으로 유지한다"와 같은 규율).
+    그래서 호출자가 DB 값을 ``fallback`` 으로 넘기게 하고, 그것도 없으면 코드를 그대로 보인다.
+
+    Args:
+        kind_code: 관계 종류 코드(대소문자·공백 무관).
+        fallback: 표에 없을 때 쓸 이름. 보통 호출자가 DB ``kind_name_ko`` 를 넘긴다.
+            ``None``·빈 문자열이면 ``kind_code`` 를 그대로 돌려준다.
+
+    Returns:
+        표시용 이름. 코드가 비면 ``fallback`` → 그것도 없으면 빈 문자열.
+    """
+    code = (kind_code or "").strip().lower()
+    known = RELATION_KIND_DISPLAY_KO.get(code)
+    if known:
+        return known
+    fb = (fallback or "").strip()
+    return fb or code
 
 
 def choose_folded_edge(edges: Sequence[Mapping[str, Any]]) -> tuple[int, list[str]]:

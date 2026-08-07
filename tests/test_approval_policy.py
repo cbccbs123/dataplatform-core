@@ -8,8 +8,10 @@ import unittest
 from src.relations.approval_policy import (
     EXPLICIT_KINDS,
     FOLD_PREFERRED_KIND,
+    RELATION_KIND_DISPLAY_KO,
     SIMILARITY_KINDS,
     choose_folded_edge,
+    display_name_ko,
     exposure_tier,
     is_auto_approvable,
     is_review_exempt,
@@ -148,6 +150,49 @@ class TestReviewExempt(unittest.TestCase):
     def test_대소문자를_가리지_않는다(self):
         self.assertTrue(
             is_review_exempt("SAME_DOMAIN", exempt_kinds=frozenset({"same_domain"})))
+
+
+class TestDisplayNameKo(unittest.TestCase):
+    """화면 표시 이름 — **LLM 프롬프트용 이름과 다르다는 사실**을 봉인한다.
+
+    이 분리는 실수로 보이기 쉬워서 *"둘이 다르네, 맞춰야지"* 하고 DB 를 고치면 **프롬프트가
+    바뀌어 관계 생성 결과가 달라진다**. 근거·재통합 시점은 `approval_policy` 의
+    "화면 표시 이름" 주석 블록이 정본이다.
+    """
+
+    def test_same_domain은_같은_분야다(self):
+        # 🔴 프론트 하드코딩이 "동일 주제"였다 — 뜻이 틀렸다(주제가 아니라 분야만 같다) +
+        # asset_topic 기반 주제 기능과 이름이 겹친다.
+        self.assertEqual(display_name_ko("same_domain"), "같은 분야")
+
+    def test_매핑이_없던_2종도_이름을_갖는다(self):
+        # 프론트에 매핑이 없어 "기타 연관"으로 뭉개지던 것들.
+        self.assertEqual(display_name_ko("references"), "참조")
+        self.assertEqual(display_name_ko("same_series"), "같은 연작")
+
+    def test_대소문자_공백을_가리지_않는다(self):
+        self.assertEqual(display_name_ko(" Same_Domain "), "같은 분야")
+
+    def test_모르는_코드는_fallback을_쓴다(self):
+        # 통제어휘가 늘어나면(promote_relation_kind) 표에 없는 코드가 온다. 호출자가 DB
+        # kind_name_ko 를 넘기면 그것을 쓴다.
+        self.assertEqual(display_name_ko("brand_new", fallback="새 종류"), "새 종류")
+
+    def test_fallback도_없으면_코드를_그대로_보인다(self):
+        # "기타 연관" 같은 말로 덮으면 **새 종류가 늘어난 사실 자체가 화면에서 사라진다**.
+        self.assertEqual(display_name_ko("brand_new"), "brand_new")
+
+    def test_활성_5종이_모두_등재돼_있다(self):
+        # 하나라도 빠지면 그 종류만 조용히 코드(영문)로 노출된다.
+        self.assertEqual(set(RELATION_KIND_DISPLAY_KO), SIMILARITY_KINDS | EXPLICIT_KINDS)
+
+    def test_표시_이름에_주제라는_말을_쓰지_않는다(self):
+        """`asset_topic` 기반 주제 탭·패싯과 어휘가 겹치면 다른 두 기능이 같게 읽힌다.
+
+        `exposure_tier` 의 칸 이름을 "비슷한 주제"→"참고 자료"로 바꾼 것과 같은 규율이다.
+        """
+        for code, label in RELATION_KIND_DISPLAY_KO.items():
+            self.assertNotIn("주제", label, f"{code} 의 표시 이름에 '주제'가 들어 있다")
 
 
 def _edge(kind: str, conf: float | None, tier: str = "weak") -> dict:
