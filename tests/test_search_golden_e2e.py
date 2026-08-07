@@ -51,7 +51,11 @@ class GoldenFixtureSchemaTest(unittest.TestCase):
         self.assertGreaterEqual(len(prov["verdicts"]), 1392)
 
 
-@unittest.skipUnless(_RUN, "RUN_OS_E2E=1 + 실 DB 필요")
+# 게이트가 둘인 이유: 실 DB 뿐 아니라 **골든 파일도 있어야** 돈다. 파일 가드를 빼면
+# `RUN_OS_E2E=1` 만으로 실행돼 `FileNotFoundError` 로 죽는다 — 부재는 정상 상태이므로
+# 실패가 아니라 skip 이어야 한다. 위 클래스와 **같은 가드를 붙여 둔다**(한쪽만 붙이면 갈린다).
+@unittest.skipUnless(_RUN and _GOLDEN_OS.is_file(),
+                     f"RUN_OS_E2E=1 + 실 DB + 골든 파일 필요: {_GOLDEN_OS}")
 class GoldenCoverageGuardTest(unittest.TestCase):
     """FR-004(실DB): 코퍼스 토픽 ↔ 골든 커버리지 정합 — 미커버 토픽이 생기면 실패한다."""
 
