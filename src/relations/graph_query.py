@@ -21,7 +21,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from src.relations.approval_policy import exposure_tier
+from src.relations.approval_policy import choose_folded_edge, exposure_tier
 
 # 엣지 양 끝을 node → asset 으로 두 번 조인한다. 앞의 조인은 asset_id 를 얻기 위한 것이고,
 # 뒤의 조인은 화면에 보일 파일명·모달리티를 함께 가져오기 위한 것이다 — 이게 없으면 소비자가
@@ -59,16 +59,13 @@ def fetch_relations_for_asset(
     include_weak: bool = False,
     min_conf_similarity: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """``asset_id`` 의 관계 이웃을 **노출 등급과 함께** 조회한다(081 조각③ · 2단 노출).
+    """``asset_id`` 의 관계 이웃을 **노출 등급과 함께** 조회한다(2단 노출).
 
-    등급은 ``tier`` 필드로 실린다 — ``"strong"``(연관 자료 · 승인됨) · ``"weak"``(비슷한 주제 ·
-    미승인 참고용). 약칸이 필요한 이유: 자동승인 게이트가 ``same_domain`` 을 강등하면 관계 보유
-    자산이 26% 줄어 화면이 빈다. 강등된 관계를 약칸으로 살려 **커버리지를 지키면서** 강칸의
-    정밀도만 올린다. 실측으로 미승인 제안 중 진짜 관계가 31.6%(strong 187건 중 59건)라
-    이 칸이 없으면 그만큼이 사용자에게서 사라진다(`docs/관계_품질_측정_20260728.md` §9.1).
-
-    ``include_weak=False``(기본)면 **애초에 ``proposed`` 를 조회하지 않는다** — 읽어서 버리면
-    쓸데없이 무겁다.
+    등급은 ``tier`` 필드로 실린다 — ``"strong"``(연관 자료 · 승인됨) · ``"weak"``(참고 자료 ·
+    미승인). 약칸이 필요한 이유: 자동승인 게이트가 ``same_domain`` 을 강등하면 관계 보유
+    자산이 크게 줄어 화면이 빈다. 미승인 제안에도 진짜 관계가 상당수 섞여 있어, 이 칸이
+    없으면 그만큼이 사용자에게서 사라진다.
+    설계 배경: docs/관계_품질_측정_20260728.md
 
     Args:
         asset_id: 관점이 되는 자산. src/dst 어느 쪽에 있든 매칭한다.
@@ -79,10 +76,10 @@ def fetch_relations_for_asset(
             다르면 "행은 있는데 화면에 없는" 유령 구간이 생긴다(`approval_policy` 참조).
 
     Returns:
-        이웃 dict 리스트. 기존 키(``asset_id``·``kind_code``·``is_symmetric``·``direction``·
-        ``confidence``·``status``·``topic``·``reason``·``edge_id``·``file_name``·``modality``)에
-        ``tier`` 가 **추가**된다(하위호환). 정렬은 **등급 → 신뢰도 내림차순 → edge_id** 로
-        결정적이다.
+        **이웃 자산당 한 건**으로 접힌 리스트. 기존 키(``asset_id``·``kind_code``·
+        ``is_symmetric``·``direction``·``confidence``·``status``·``topic``·``reason``·
+        ``edge_id``·``file_name``·``modality``)에 ``tier``·``folded_kind_codes`` 가
+        **추가**된다(하위호환). 정렬은 등급 → 신뢰도 내림차순 → edge_id 로 결정적이다.
     """
     wanted = statuses if statuses is not None else (
         ["active", "proposed"] if include_weak else ["active"])
@@ -125,14 +122,45 @@ def fetch_relations_for_asset(
                 # 이웃의 표시 정보를 함께 내려 준다 — 없으면 소비자가 이웃마다 자산을 다시 조회해야 한다.
                 "file_name": os.path.basename(other_fs_path or ""),
                 "modality": other_modality,
-                # 081 조각③ — 강칸/약칸 구분. 기존 키는 그대로 두고 **추가**만 한다(하위호환).
+                # 강칸/약칸 구분. 기존 키는 그대로 두고 **추가**만 한다(하위호환).
                 "tier": tier,
             }
         )
+    out = _fold_by_neighbor(out)
     # 등급 우선 정렬. SQL 은 신뢰도로만 정렬하므로 여기서 등급을 앞세운다 — 안정 정렬이라
     # 같은 등급 안에서는 SQL 이 정한 (신뢰도 desc, edge_id) 순서가 그대로 유지된다.
     out.sort(key=lambda e: _TIER_RANK.get(str(e["tier"]), len(_TIER_RANK)))
     return out
+
+
+def _fold_by_neighbor(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """이웃 자산당 엣지 하나만 남긴다 — 동시보유 접기(규칙은 `approval_policy` 소관).
+
+    여기서는 그룹을 만들어 넘기고 결과를 조립하기만 한다. 판정을 여기 두면 소비처마다
+    복제되고 화면마다 결과가 갈린다 — 이 모듈이 존재하는 이유와 같다.
+
+    **DB 의 쌍이 아니라 이웃 자산 단위로 묶는다.** 쌍 ``(src_node, dst_node)`` 로 접으면
+    A→B 와 B→A 가 각각 남아 한 이웃이 두 번 나온다(비대칭 kind 에서 실제로 발생한다).
+
+    Args:
+        rows: 등급이 매겨진 이웃 엣지 목록. ``asset_id`` 로 묶는다.
+
+    Returns:
+        이웃당 한 건으로 접힌 목록(입력 순서 보존 · 첫 등장 순). 각 항목에
+        ``folded_kind_codes``(접힌 종류·정렬됨)가 추가된다 — 접힌 행에만 넣으면 소비처가
+        ``.get()`` 유무로 분기하게 되고 그 분기가 곧 "접힘을 모르는 코드"를 만든다.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(str(r["asset_id"]), []).append(r)
+
+    folded_out: list[dict[str, Any]] = []
+    for edges in groups.values():
+        keep_idx, folded_kinds = choose_folded_edge(edges)
+        kept = dict(edges[keep_idx])
+        kept["folded_kind_codes"] = folded_kinds
+        folded_out.append(kept)
+    return folded_out
 
 
 def fetch_active_relations_for_asset(
