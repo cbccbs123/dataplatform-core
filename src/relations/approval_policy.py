@@ -45,23 +45,24 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected", "expired"})
 # DB 는 건드리지 않는다(두 행 유지) — 조회에서만 고른다. 지우면 되돌릴 수 없고 판정 근거가
 # 사라진다. 접기는 필터라 언제든 끌 수 있다.
 #
-# 조합으로 가르고 점수로 가르지 않는 이유: 판정 라벨 대조에서 `duplicate_near` 는 `same_domain`
-# 과 **같이 붙었을 때** 점수가 높아도 맞는 비율이 크게 떨어졌다. 이름표가 둘 달렸다는 사실
-# 자체가 판정이 흔들렸다는 신호라, 그 상황에서는 점수를 신호로 쓸 수 없다.
+# 어느 이름표를 남기나 — **가장 약한 주장을 남긴다**(정의 기반 · 코퍼스 무관).
+# `same_domain` 은 정의 자체가 "분야만 같고 대상은 다르다"로 다섯 종류 중 가장 약한 주장이고,
+# 약한 주장은 틀려도 손해가 작다 — "거의 중복"이 틀리면 사용자가 멀쩡한 파일을 지울 수 있지만
+# "같은 분야"가 틀려도 대체로 무해하다. 이름표가 여럿 달렸다는 사실 자체가 판정이 흔들렸다는
+# 신호이므로 그 상황에서 점수는 신호가 아니다 — 확신 없는 강한 주장 대신 약한 주장을 남긴다.
+# 구체적 주장끼리(duplicate_near·references·derived_from·same_series)는 정의만으로 우열이
+# 없으므로 **순위를 매기지 않고** 점수·결정적 순서로 넘긴다(모르는 것은 주장하지 않는다).
 #
-# 지우면 재발하는 것: 이 규칙을 "점수 우선 → 동점이면 duplicate_near" 로 되돌리면 **정확한
-# 이름표를 버리고 절반 틀린 것을 남긴다**(원안이 그랬고 실측으로 기각했다). 테스트가 봉인한다.
+# 측정은 이 규칙의 출처가 아니라 확증이다 — 판정 라벨 대조로 실데이터와도 일치함을 확인했다.
+# 수치는 코드에 두지 않는다(재측정 때마다 낡는다 · 설계이력이 보관).
 #
 # 관계 이슈 진단: "관계가 사라졌다"→접힌 것은 사라지지 않는다(`folded_kind_codes` 확인) ·
-# "DB 와 화면 건수가 다르다"→차이가 곧 동시보유 쌍 수다 · "규칙을 바꾸겠다"→재측정 먼저.
-# 설계 배경: docs/설계_변경이력.md(2026-08-07) · docs/관계_품질_측정_20260728.md
+# "DB 와 화면 건수가 다르다"→차이가 곧 동시보유 쌍 수다.
+# 설계 배경: docs/설계_변경이력.md(2026-08-10 근거 전환 · 2026-08-07 채택 경위)
 
-# 조합 → 남길 이름표. 조합 **전체가 키로 일치할 때만** 적용한다 — 부분 일치로 넓히면 세 종류가
-# 붙은 미지의 경우까지 근거 없이 판정하게 된다. 표본이 있는 조합만 등재하고, 나머지는 점수·
-# 결정적 순서 규칙으로 넘긴다.
-FOLD_PREFERRED_KIND: dict[frozenset[str], str] = {
-    frozenset({"duplicate_near", "same_domain"}): "same_domain",
-}
+# 접기에서 남길 "가장 약한 주장". ⚠️ 이것이 가장 약하다는 판단은 **현행 닫힌 어휘 5종 안**에서의
+# 사실이다 — 더 약한 종류가 어휘에 추가되면(`promote_relation_kind`) 이 상수를 재검토하라.
+WEAKEST_CLAIM_KIND = "same_domain"
 
 # 화면 표시 이름 — **LLM 프롬프트용 이름과 일부러 다르다.** 실수가 아니다.
 #
@@ -244,8 +245,9 @@ def display_name_ko(kind_code: str, *, fallback: str | None = None) -> str:
 def choose_folded_edge(edges: Sequence[Mapping[str, Any]]) -> tuple[int, list[str]]:
     """같은 이웃에 붙은 엣지 여럿 중 화면에 남길 **하나**를 고른다(순수 판정).
 
-    판정 순서는 ``tier`` → 조합 규칙 → 신뢰도 → ``kind_code`` 사전순 → 입력 순서다.
-    앞의 것이 이기면 뒤는 보지 않는다. 왜 이 순서인지는 위 "동시보유 접기" 주석 참조.
+    판정 순서는 ``tier`` → 가장 약한 주장(``WEAKEST_CLAIM_KIND``) → 신뢰도 →
+    ``kind_code`` 사전순 → 입력 순서다. 앞의 것이 이기면 뒤는 보지 않는다.
+    왜 이 순서인지는 위 "동시보유 접기" 주석 참조.
 
     Args:
         edges: 같은 이웃 자산에 붙은 엣지들. 각 항목에서 ``kind_code``·``confidence``·
@@ -264,7 +266,9 @@ def choose_folded_edge(edges: Sequence[Mapping[str, Any]]) -> tuple[int, list[st
         return 0, []
 
     kinds = frozenset(str(e.get("kind_code") or "").strip().lower() for e in edges)
-    preferred = FOLD_PREFERRED_KIND.get(kinds)
+    # 가장 약한 주장이 섞여 있으면 그것을 남긴다 — 조합이 몇 종류든 같은 논리가 적용된다
+    # (강한 주장들 사이의 우열은 정의로 정할 수 없으므로 아래 점수·결정적 순서로 넘어간다).
+    preferred = WEAKEST_CLAIM_KIND if WEAKEST_CLAIM_KIND in kinds else None
 
     def rank(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int, float, str, int]:
         """정렬키 — 위 판정 순서 1~5를 그대로 튜플로 편다.
@@ -283,7 +287,7 @@ def choose_folded_edge(edges: Sequence[Mapping[str, Any]]) -> tuple[int, list[st
         return (
             # 사람이 승인한 것을 기계 규칙으로 버리면 그 결정을 무시하는 것이 된다.
             0 if str(e.get("tier") or "") == "strong" else 1,
-            # 점수보다 앞선다 — 이름표가 둘 달린 상황에서는 점수가 신호가 아니다(위 주석).
+            # 점수보다 앞선다 — 이름표가 여럿 달린 상황에서는 점수가 신호가 아니다(위 주석).
             0 if preferred is not None and kind == preferred else 1,
             -(float(conf) if conf is not None else 0.0),
             # 아래 둘은 근거가 있어서가 아니라 같은 입력이면 같은 출력이어야 하기 때문이다.

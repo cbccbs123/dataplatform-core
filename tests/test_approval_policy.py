@@ -7,9 +7,9 @@ import unittest
 
 from src.relations.approval_policy import (
     EXPLICIT_KINDS,
-    FOLD_PREFERRED_KIND,
     RELATION_KIND_DISPLAY_KO,
     SIMILARITY_KINDS,
+    WEAKEST_CLAIM_KIND,
     choose_folded_edge,
     display_name_ko,
     exposure_tier,
@@ -201,11 +201,12 @@ def _edge(kind: str, conf: float | None, tier: str = "weak") -> dict:
 
 
 class TestChooseFoldedEdge(unittest.TestCase):
-    """동시보유 접기(081 조각⑤) — 규칙과 **그 근거**를 함께 봉인한다.
+    """동시보유 접기 — 규칙과 **그 근거**를 함께 봉인한다.
 
-    이 테스트가 지키려는 것은 동작만이 아니다. `same_domain` 우선은 직관에 반해 보여
-    (점수가 낮은데 이긴다) 되돌려지기 쉽다 — 실측 근거는 `approval_policy` 상단 주석에
-    있고, 여기서는 **그 결론이 코드에 살아 있는지**를 확인한다.
+    이 테스트가 지키려는 것은 동작만이 아니다. 약한 주장 우선은 직관에 반해 보여
+    (점수가 낮은 쪽이 이길 수 있다) 되돌려지기 쉽다 — 근거는 측정이 아니라 **종류의
+    정의**다(`approval_policy` 상단 주석: 약한 주장은 틀려도 손해가 작다). 여기서는
+    그 결론이 코드에 살아 있는지를 확인한다.
     """
 
     def test_엣지가_하나면_그대로_둔다(self):
@@ -216,23 +217,23 @@ class TestChooseFoldedEdge(unittest.TestCase):
         with self.assertRaises(ValueError):
             choose_folded_edge([])
 
-    # ── 규칙 2: 조합 규칙이 점수를 이긴다 (실측 근거 — 위 클래스 docstring)
+    # ── 규칙 2: 약한 주장이 점수를 이긴다 (근거 — 위 클래스 docstring)
 
     def test_동점이면_same_domain을_남긴다(self):
-        """v4 실측 77쌍의 경우. **spec 081 원안(동점이면 duplicate_near)을 뒤집은 지점**이다.
+        """**spec 원안(동점이면 duplicate_near)을 뒤집은 지점**이다.
 
-        원안대로면 정확도 48.3% 인 `duplicate_near` 를 남기고 92.4% 인 `same_domain` 을 버린다.
+        원안은 더 강한 주장("거의 중복")을 남긴다 — 그게 틀리면 사용자가 멀쩡한 파일을
+        지울 수 있다. 약한 주장("같은 분야")은 틀려도 손해가 작으므로 그쪽을 남긴다.
         """
         keep, folded = choose_folded_edge([_edge("duplicate_near", 0.7), _edge("same_domain", 0.7)])
         self.assertEqual(keep, 1)
         self.assertEqual(folded, ["duplicate_near"])
 
     def test_dup이_점수가_높아도_same_domain을_남긴다(self):
-        """v4 실측 15쌍(dup@0.9+sd@0.9)·2쌍(dup@0.9+sd@0.7)의 경우.
+        """이름표가 여럿 달렸다는 사실 자체가 판정이 흔들렸다는 신호다.
 
-        `duplicate_near` 0.9 는 **단독일 때만** 88.9% 다 — `same_domain` 과 같이 붙은
-        15쌍에서는 3/13 = 23% 였다. 이름표가 둘 달렸다는 사실 자체가 판정이 흔들렸다는
-        신호이므로 그 상황에서는 점수를 신호로 쓰지 않는다.
+        그 상황에서 점수는 신호가 아니므로, 점수 대신 주장의 세기로 고른다
+        (실측으로도 확인됐다 — 수치는 설계이력).
         """
         keep, folded = choose_folded_edge([_edge("duplicate_near", 0.9), _edge("same_domain", 0.7)])
         self.assertEqual(keep, 1)
@@ -243,9 +244,9 @@ class TestChooseFoldedEdge(unittest.TestCase):
         self.assertEqual(keep, 0)
         self.assertEqual(folded, ["duplicate_near"])
 
-    # ── 규칙 1: 사람의 결정이 조합 규칙보다 앞선다
+    # ── 규칙 1: 사람의 결정이 약한-주장 규칙보다 앞선다
 
-    def test_강칸이_조합규칙을_이긴다(self):
+    def test_강칸이_약한주장_규칙을_이긴다(self):
         # 사람이 승인한 것(active→strong)을 기계 규칙으로 버리면 그 결정을 무시하는 것이다.
         keep, folded = choose_folded_edge([
             _edge("duplicate_near", 0.7, tier="strong"),
@@ -254,10 +255,10 @@ class TestChooseFoldedEdge(unittest.TestCase):
         self.assertEqual(keep, 0)
         self.assertEqual(folded, ["same_domain"])
 
-    # ── 규칙 3~5: 조합 규칙이 없을 때
+    # ── 규칙 3~5: 약한 주장이 섞여 있지 않을 때
 
-    def test_규칙없는_조합은_점수가_높은_쪽을_남긴다(self):
-        # 표본 1뿐이라 근거가 없는 조합 — spec 081 원안(점수 우선)을 그대로 쓴다.
+    def test_강한_주장끼리는_점수가_높은_쪽을_남긴다(self):
+        # 구체적 주장끼리는 정의만으로 우열이 없다 — 순위를 매기지 않고 점수로 넘긴다.
         keep, folded = choose_folded_edge([_edge("duplicate_near", 0.7), _edge("same_series", 0.9)])
         self.assertEqual(keep, 1)
         self.assertEqual(folded, ["duplicate_near"])
@@ -272,20 +273,21 @@ class TestChooseFoldedEdge(unittest.TestCase):
         keep, _ = choose_folded_edge([_edge("references", None), _edge("derived_from", 0.9)])
         self.assertEqual(keep, 1)
 
-    # ── 규칙표 자체의 불변식
+    # ── 상수 자체의 불변식
 
-    def test_규칙표의_선호_종류는_그_조합에_속한다(self):
-        # 조합에 없는 종류를 선호로 적으면 그 규칙은 **영원히 발동하지 않는다**(조용한 죽은 규칙).
-        for kinds, preferred in FOLD_PREFERRED_KIND.items():
-            self.assertIn(preferred, kinds)
+    def test_약한_주장_상수는_알려진_어휘에_속한다(self):
+        # 오타·어휘 개편으로 상수가 허공을 가리키면 규칙이 **영원히 발동하지 않는다**(조용한 죽음).
+        self.assertIn(WEAKEST_CLAIM_KIND, SIMILARITY_KINDS | EXPLICIT_KINDS)
 
-    def test_규칙표는_조합_전체가_일치할_때만_적용된다(self):
-        # 부분 일치로 적용하면 세 종류가 붙은 미지의 경우까지 근거 없이 판정하게 된다.
+    def test_세_종류가_붙어도_가장_약한_주장을_남긴다(self):
+        # 정의 규칙은 조합이 몇 종류든 같은 논리다 — 약한 주장이 섞여 있으면 그것을 남긴다.
+        # (조합표 시절에는 등재된 2종 조합만 적용되고 나머지는 점수로 넘어갔다 — 근거를
+        #  측정에서 정의로 옮기며 이 제약이 사라졌다. 실데이터에 3종 조합은 없다.)
         keep, folded = choose_folded_edge([
             _edge("duplicate_near", 0.7), _edge("same_domain", 0.7), _edge("references", 0.9),
         ])
-        self.assertEqual(keep, 2)   # 조합 규칙 미적용 → 점수 우선
-        self.assertEqual(folded, ["duplicate_near", "same_domain"])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near", "references"])
 
 
 if __name__ == "__main__":
