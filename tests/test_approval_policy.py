@@ -7,7 +7,11 @@ import unittest
 
 from src.relations.approval_policy import (
     EXPLICIT_KINDS,
+    RELATION_KIND_DISPLAY_KO,
     SIMILARITY_KINDS,
+    WEAKEST_CLAIM_KIND,
+    choose_folded_edge,
+    display_name_ko,
     exposure_tier,
     is_auto_approvable,
     is_review_exempt,
@@ -146,6 +150,154 @@ class TestReviewExempt(unittest.TestCase):
     def test_대소문자를_가리지_않는다(self):
         self.assertTrue(
             is_review_exempt("SAME_DOMAIN", exempt_kinds=frozenset({"same_domain"})))
+
+
+class TestDisplayNameKo(unittest.TestCase):
+    """화면 표시 이름 — **LLM 프롬프트용 이름과 다르다는 사실**을 봉인한다.
+
+    이 분리는 실수로 보이기 쉬워서 *"둘이 다르네, 맞춰야지"* 하고 DB 를 고치면 **프롬프트가
+    바뀌어 관계 생성 결과가 달라진다**. 근거·재통합 시점은 `approval_policy` 의
+    "화면 표시 이름" 주석 블록이 정본이다.
+    """
+
+    def test_same_domain은_같은_분야다(self):
+        # 🔴 프론트 하드코딩이 "동일 주제"였다 — 뜻이 틀렸다(주제가 아니라 분야만 같다) +
+        # asset_topic 기반 주제 기능과 이름이 겹친다.
+        self.assertEqual(display_name_ko("same_domain"), "같은 분야")
+
+    def test_매핑이_없던_2종도_이름을_갖는다(self):
+        # 프론트에 매핑이 없어 "기타 연관"으로 뭉개지던 것들.
+        self.assertEqual(display_name_ko("references"), "참조")
+        self.assertEqual(display_name_ko("same_series"), "같은 연작")
+
+    def test_대소문자_공백을_가리지_않는다(self):
+        self.assertEqual(display_name_ko(" Same_Domain "), "같은 분야")
+
+    def test_모르는_코드는_fallback을_쓴다(self):
+        # 통제어휘가 늘어나면(promote_relation_kind) 표에 없는 코드가 온다. 호출자가 DB
+        # kind_name_ko 를 넘기면 그것을 쓴다.
+        self.assertEqual(display_name_ko("brand_new", fallback="새 종류"), "새 종류")
+
+    def test_fallback도_없으면_코드를_그대로_보인다(self):
+        # "기타 연관" 같은 말로 덮으면 **새 종류가 늘어난 사실 자체가 화면에서 사라진다**.
+        self.assertEqual(display_name_ko("brand_new"), "brand_new")
+
+    def test_활성_5종이_모두_등재돼_있다(self):
+        # 하나라도 빠지면 그 종류만 조용히 코드(영문)로 노출된다.
+        self.assertEqual(set(RELATION_KIND_DISPLAY_KO), SIMILARITY_KINDS | EXPLICIT_KINDS)
+
+    def test_표시_이름에_주제라는_말을_쓰지_않는다(self):
+        """`asset_topic` 기반 주제 탭·패싯과 어휘가 겹치면 다른 두 기능이 같게 읽힌다.
+
+        `exposure_tier` 의 칸 이름을 "비슷한 주제"→"참고 자료"로 바꾼 것과 같은 규율이다.
+        """
+        for code, label in RELATION_KIND_DISPLAY_KO.items():
+            self.assertNotIn("주제", label, f"{code} 의 표시 이름에 '주제'가 들어 있다")
+
+
+def _edge(kind: str, conf: float | None, tier: str = "weak") -> dict:
+    """접기 테스트용 최소 엣지 — 판정에 쓰는 세 키만 담는다."""
+    return {"kind_code": kind, "confidence": conf, "tier": tier}
+
+
+class TestChooseFoldedEdge(unittest.TestCase):
+    """동시보유 접기 — 규칙과 **그 근거**를 함께 봉인한다.
+
+    이 테스트가 지키려는 것은 동작만이 아니다. 약한 주장 우선은 직관에 반해 보여
+    (점수가 낮은 쪽이 이길 수 있다) 되돌려지기 쉽다 — 근거는 측정이 아니라 **종류의
+    정의**다(`approval_policy` 상단 주석: 약한 주장은 틀려도 손해가 작다). 여기서는
+    그 결론이 코드에 살아 있는지를 확인한다.
+    """
+
+    def test_엣지가_하나면_그대로_둔다(self):
+        self.assertEqual(choose_folded_edge([_edge("same_domain", 0.9)]), (0, []))
+
+    def test_빈_입력은_오류다(self):
+        # 조용히 넘기면 호출부의 그룹 구성 버그가 숨는다.
+        with self.assertRaises(ValueError):
+            choose_folded_edge([])
+
+    # ── 규칙 2: 약한 주장이 점수를 이긴다 (근거 — 위 클래스 docstring)
+
+    def test_동점이면_same_domain을_남긴다(self):
+        """**spec 원안(동점이면 duplicate_near)을 뒤집은 지점**이다.
+
+        원안은 더 강한 주장("거의 중복")을 남긴다 — 그게 틀리면 사용자가 멀쩡한 파일을
+        지울 수 있다. 약한 주장("같은 분야")은 틀려도 손해가 작으므로 그쪽을 남긴다.
+        """
+        keep, folded = choose_folded_edge([_edge("duplicate_near", 0.7), _edge("same_domain", 0.7)])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    def test_dup이_점수가_높아도_same_domain을_남긴다(self):
+        """이름표가 여럿 달렸다는 사실 자체가 판정이 흔들렸다는 신호다.
+
+        그 상황에서 점수는 신호가 아니므로, 점수 대신 주장의 세기로 고른다
+        (실측으로도 확인됐다 — 수치는 설계이력).
+        """
+        keep, folded = choose_folded_edge([_edge("duplicate_near", 0.9), _edge("same_domain", 0.7)])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    def test_입력_순서가_바뀌어도_같은_것을_남긴다(self):
+        keep, folded = choose_folded_edge([_edge("same_domain", 0.7), _edge("duplicate_near", 0.9)])
+        self.assertEqual(keep, 0)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    # ── 규칙 1: 사람의 결정이 약한-주장 규칙보다 앞선다
+
+    def test_강칸이_약한주장_규칙을_이긴다(self):
+        # 사람이 승인한 것(active→strong)을 기계 규칙으로 버리면 그 결정을 무시하는 것이다.
+        keep, folded = choose_folded_edge([
+            _edge("duplicate_near", 0.7, tier="strong"),
+            _edge("same_domain", 0.9, tier="weak"),
+        ])
+        self.assertEqual(keep, 0)
+        self.assertEqual(folded, ["same_domain"])
+
+    def test_강칸이_둘이면_그_안에서_약한주장_규칙으로_가른다(self):
+        # 사람이 같은 이웃의 두 종류를 각각 승인하면 강칸 엣지가 둘일 수 있다.
+        # tier 로는 못 가르므로 다음 규칙(약한 주장)이 그대로 이어받아야 한다.
+        keep, folded = choose_folded_edge([
+            _edge("duplicate_near", 0.9, tier="strong"),
+            _edge("same_domain", 0.7, tier="strong"),
+        ])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    # ── 규칙 3~5: 약한 주장이 섞여 있지 않을 때
+
+    def test_강한_주장끼리는_점수가_높은_쪽을_남긴다(self):
+        # 구체적 주장끼리는 정의만으로 우열이 없다 — 순위를 매기지 않고 점수로 넘긴다.
+        keep, folded = choose_folded_edge([_edge("duplicate_near", 0.7), _edge("same_series", 0.9)])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
+    def test_규칙도_점수도_같으면_사전순으로_결정한다(self):
+        # 근거가 있어서가 아니라 **같은 입력이면 같은 출력**이어야 하기 때문이다(헌법 3조).
+        keep, folded = choose_folded_edge([_edge("references", 0.9), _edge("duplicate_near", 0.9)])
+        self.assertEqual(keep, 1)   # duplicate_near < references (사전순)
+        self.assertEqual(folded, ["references"])
+
+    def test_신뢰도가_없어도_깨지지_않는다(self):
+        keep, _ = choose_folded_edge([_edge("references", None), _edge("derived_from", 0.9)])
+        self.assertEqual(keep, 1)
+
+    # ── 상수 자체의 불변식
+
+    def test_약한_주장_상수는_알려진_어휘에_속한다(self):
+        # 오타·어휘 개편으로 상수가 허공을 가리키면 규칙이 **영원히 발동하지 않는다**(조용한 죽음).
+        self.assertIn(WEAKEST_CLAIM_KIND, SIMILARITY_KINDS | EXPLICIT_KINDS)
+
+    def test_세_종류가_붙어도_가장_약한_주장을_남긴다(self):
+        # 정의 규칙은 조합이 몇 종류든 같은 논리다 — 약한 주장이 섞여 있으면 그것을 남긴다.
+        # (조합표 시절에는 등재된 2종 조합만 적용되고 나머지는 점수로 넘어갔다 — 근거를
+        #  측정에서 정의로 옮기며 이 제약이 사라졌다. 실데이터에 3종 조합은 없다.)
+        keep, folded = choose_folded_edge([
+            _edge("duplicate_near", 0.7), _edge("same_domain", 0.7), _edge("references", 0.9),
+        ])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near", "references"])
 
 
 if __name__ == "__main__":
