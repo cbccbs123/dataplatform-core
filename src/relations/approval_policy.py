@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 # 유사도 추론 계열 — 근거가 임베딩 유사도. 저신뢰 꼬리를 폐기·비노출 대상으로 본다.
@@ -80,13 +81,15 @@ WEAKEST_CLAIM_KIND = "same_domain"
 # 바뀐다.** 이 분리는 최종 설계가 아니라 안전하게 가는 경로이며, 관계 재생성 기회에 A/B 로
 # 검증하고 합칠 수 있다. 그때까지 관리자 화면은 DB 이름을 그대로 보여준다(알고 두는 불일치).
 # 설계 배경: docs/설계_변경이력.md(2026-08-07) · docs/과제_책무_KPI.md(재정합 백로그)
-RELATION_KIND_DISPLAY_KO: dict[str, str] = {
+# MappingProxyType: 같은 성격의 상수(`SIMILARITY_KINDS` 등)가 frozenset 인 것과 같은 이유 —
+# 소비처가 실수로 항목을 덮어써도 조용히 지나가지 않게 읽기 전용으로 봉인한다.
+RELATION_KIND_DISPLAY_KO: Mapping[str, str] = MappingProxyType({
     "same_domain": "같은 분야",      # ← "동일 주제"(프론트 하드코딩)를 바로잡은 것
     "duplicate_near": "유사 중복",
     "derived_from": "파생 자료",
     "references": "참조",            # ← 프론트에 매핑이 없어 "기타 연관"으로 뭉개지던 것
     "same_series": "같은 연작",      # ← 위와 같음
-}
+})
 
 
 def parse_kind_set(raw: str | None, *, default: frozenset[str]) -> frozenset[str]:

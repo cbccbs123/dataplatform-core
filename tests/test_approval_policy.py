@@ -255,6 +255,16 @@ class TestChooseFoldedEdge(unittest.TestCase):
         self.assertEqual(keep, 0)
         self.assertEqual(folded, ["same_domain"])
 
+    def test_강칸이_둘이면_그_안에서_약한주장_규칙으로_가른다(self):
+        # 사람이 같은 이웃의 두 종류를 각각 승인하면 강칸 엣지가 둘일 수 있다.
+        # tier 로는 못 가르므로 다음 규칙(약한 주장)이 그대로 이어받아야 한다.
+        keep, folded = choose_folded_edge([
+            _edge("duplicate_near", 0.9, tier="strong"),
+            _edge("same_domain", 0.7, tier="strong"),
+        ])
+        self.assertEqual(keep, 1)
+        self.assertEqual(folded, ["duplicate_near"])
+
     # ── 규칙 3~5: 약한 주장이 섞여 있지 않을 때
 
     def test_강한_주장끼리는_점수가_높은_쪽을_남긴다(self):

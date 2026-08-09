@@ -127,9 +127,14 @@ def fetch_relations_for_asset(
             }
         )
     out = _fold_by_neighbor(out)
-    # 등급 우선 정렬. SQL 은 신뢰도로만 정렬하므로 여기서 등급을 앞세운다 — 안정 정렬이라
-    # 같은 등급 안에서는 SQL 이 정한 (신뢰도 desc, edge_id) 순서가 그대로 유지된다.
-    out.sort(key=lambda e: _TIER_RANK.get(str(e["tier"]), len(_TIER_RANK)))
+    # 등급 → 신뢰도 → edge_id 로 전부 다시 정렬한다. 접기가 남기는 행의 신뢰도는 그 이웃의
+    # 최댓값이 아닐 수 있어(약한 주장이 낮은 점수로 남는 경우), SQL 이 정한 순서에 기대면
+    # 같은 등급 안에서 신뢰도 역순이 생긴다 — 반환 계약(Returns)이 약속한 순서를 여기서 보장한다.
+    out.sort(key=lambda e: (
+        _TIER_RANK.get(str(e["tier"]), len(_TIER_RANK)),
+        -float(e["confidence"]) if e["confidence"] is not None else float("inf"),
+        str(e["edge_id"]),
+    ))
     return out
 
 
@@ -176,8 +181,10 @@ def fetch_active_relations_for_asset(
         status: 엣지 상태 필터(기본 ``active``). ``proposed``·``rejected`` 등도 조회 가능.
 
     Returns:
-        이웃 dict 리스트(``fetch_relations_for_asset`` 과 같은 키 + ``tier``).
-        ``status`` 를 명시했으므로 노출 하한은 적용하지 않는다 — 호출자가 원한 상태를
-        조용히 걸러내면 "왜 안 나오나"를 추적할 수 없다.
+        이웃 dict 리스트(``fetch_relations_for_asset`` 과 같은 키 — ``tier``·
+        ``folded_kind_codes`` 포함). ⚠️ **동시보유 접기도 그대로 적용된다** — 같은 이웃과
+        관계가 여럿이면 한 행으로 접혀 종전보다 행 수가 줄 수 있다(접힌 종류는
+        ``folded_kind_codes`` 로 관측 가능). ``status`` 를 명시했으므로 노출 하한은
+        적용하지 않는다 — 호출자가 원한 상태를 조용히 걸러내면 "왜 안 나오나"를 추적할 수 없다.
     """
     return fetch_relations_for_asset(conn, asset_id=asset_id, statuses=[status])

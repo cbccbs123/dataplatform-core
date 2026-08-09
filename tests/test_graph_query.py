@@ -237,9 +237,9 @@ def _row(*, status="active", kind="same_domain", conf=0.9, edge="e1",
 
 
 class TestExposureTiers(unittest.TestCase):
-    """081 조각③ — 강칸(연관 자료)·약칸(참고 자료) 2단 노출.
+    """강칸(연관 자료)·약칸(참고 자료) 2단 노출.
 
-    약칸이 필요한 이유: 자동승인 게이트가 `same_domain` 을 강등하면 관계 보유 자산이 26% 줄어
+    약칸이 필요한 이유: 자동승인 게이트가 `same_domain` 을 강등하면 관계 보유 자산이 크게 줄어
     화면이 빈다. 강등분을 약칸으로 살려 커버리지를 지키면서 강칸 정밀도만 올린다.
     """
 
@@ -345,7 +345,7 @@ class TestBackwardCompatibleWrapper(unittest.TestCase):
 
 
 class TestNeighborFolding(unittest.TestCase):
-    """081 조각⑤ — 같은 이웃에 붙은 이름표 여럿을 하나로 접는다(v4 실측 180쌍).
+    """같은 이웃에 붙은 이름표 여럿을 하나로 접는다 — 동시보유 접기.
 
     규칙·근거는 `approval_policy` 상단 "동시보유 접기" 주석이 정본이고, 규칙 자체의 검증은
     `test_approval_policy.TestChooseFoldedEdge` 가 한다. 여기서 보는 것은 **조회 경로에
@@ -401,6 +401,22 @@ class TestNeighborFolding(unittest.TestCase):
         for key in ("asset_id", "kind_code", "is_symmetric", "direction", "confidence",
                     "status", "topic", "reason", "edge_id", "file_name", "modality", "tier"):
             self.assertIn(key, rows[0], f"기존 키 {key} 가 사라졌다")
+
+    def test_접혀서_대표_신뢰도가_낮아져도_같은_등급_안은_신뢰도순이다(self):
+        # 접기가 남기는 행의 신뢰도는 그 이웃의 최댓값이 아닐 수 있다(약한 주장이 낮은
+        # 점수로 남는 경우). 마지막 정렬이 등급만 보면 SQL 이 정해 준 "첫 등장 순"이
+        # 남아 **같은 등급 안에서 신뢰도 역순**이 된다 — 반환 계약 위반.
+        from src.relations.graph_query import fetch_relations_for_asset
+        conn, _ = _conn_returning([
+            # SQL 은 confidence DESC 로 준다: a2 의 dup(0.95)가 먼저, a2 의 sd(0.72)는 마지막.
+            _row(status="proposed", kind="duplicate_near", conf=0.95, edge="e1", dst="a2"),
+            _row(status="proposed", kind="duplicate_near", conf=0.80, edge="e2", dst="a3"),
+            _row(status="proposed", kind="same_domain", conf=0.72, edge="e3", dst="a2")])
+        rows = fetch_relations_for_asset(conn, asset_id="a1",
+                                         include_weak=True, min_conf_similarity=0.70)
+        # a2 는 약한 주장(sd·0.72)으로 접힌다 → 0.80 인 a3 이 먼저 와야 한다.
+        self.assertEqual([(r["asset_id"], r["confidence"]) for r in rows],
+                         [("a3", 0.80), ("a2", 0.72)])
 
     def test_접은_뒤에도_등급_정렬이_유지된다(self):
         from src.relations.graph_query import fetch_relations_for_asset
