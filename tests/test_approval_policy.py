@@ -100,9 +100,10 @@ class TestExposureTier(unittest.TestCase):
         self.assertIsNone(
             exposure_tier("rejected", "duplicate_near", 0.99, min_conf_similarity=0.75))
 
-    def test_expired도_노출하지_않는다(self):
+    def test_어휘_밖_상태는_노출하지_않는다(self):
+        # 닫힌 어휘가 늘어나면 노출 여부는 여기서 다시 판단한다 — 모르는 값을 통과시키지 않는다.
         self.assertIsNone(
-            exposure_tier("expired", "duplicate_near", 0.99, min_conf_similarity=0.75))
+            exposure_tier("bogus", "duplicate_near", 0.99, min_conf_similarity=0.75))
 
     def test_노출_하한이_폐기_임계와_같다(self):
         # 🔴 어긋나면 "만들지만 안 보이는" 유령 구간이 생긴다(spec 엣지케이스 5).
