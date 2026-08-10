@@ -35,7 +35,9 @@ SIMILARITY_KINDS: frozenset[str] = frozenset({"duplicate_near", "same_domain"})
 EXPLICIT_KINDS: frozenset[str] = frozenset({"references", "derived_from", "same_series"})
 
 # 노출·검토에서 "끝난 것"으로 보는 상태 — 사람이 내린 결정을 되살리지 않는다.
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected", "expired"})
+# DB CHECK 가 허용하는 값만 담는다(`tests/test_status_vocab.py` 가 봉인). 여기에 어휘 밖 값을
+# 적어두면 그 값으로 UPDATE 하는 순간 CHECK 위반이 나는데, 그때까지는 조용하다.
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected"})
 
 # 동시보유 접기 — 같은 자산 쌍에 이름표가 둘 이상 붙는 것을 조회에서 하나로 접는다.
 #
@@ -201,7 +203,7 @@ def exposure_tier(
     노출 하한으로 되돌려 숨기면 그 결정을 무시하는 것이 된다.
 
     Args:
-        status: 엣지 상태(``active``·``proposed``·``rejected``·``expired``).
+        status: 엣지 상태(``active``·``proposed``·``rejected``). 어휘 밖 값은 노출하지 않는다.
         kind_code: 관계 종류 코드(대소문자 무관).
         conf: LLM 신뢰도 0~1.
         min_conf_similarity: 약칸 노출 하한. **``should_persist`` 와 같은 값을 쓴다** —
